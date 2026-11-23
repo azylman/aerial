@@ -1,458 +1,197 @@
 package config
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
+
+	"github.com/azylman/aerial/pkg/hermetictest"
+	"github.com/azylman/aerial/pkg/k8sauth"
 )
 
+// TestMain points both file fallbacks at paths that never exist, so no test
+// reads the live /share/aerial-config/config.yaml or /config/synapse.yaml.
+// Tests that exercise a fallback write their own temp file and repoint it.
+func TestMain(m *testing.M) {
+	dir, err := os.MkdirTemp("", "synapse-config-test-")
+	if err != nil {
+		panic(err)
+	}
+	SynapseAerialConfigPath = filepath.Join(dir, "absent-aerial-config.yaml")
+	SynapseFallbackConfigPath = filepath.Join(dir, "absent-synapse.yaml")
+	hermetictest.Main(m, hermetictest.WithCleanup(func() { _ = os.RemoveAll(dir) }))
+}
+
+// synapseConfigKeysToClear lists every env key buildConfig reads (besides
+// CONFIG_PATH and per-bot token keys), so a poisoned pod env cannot leak in.
 var synapseConfigKeysToClear = []string{
-	"PORT", "KUBE_API_SERVER",
-	"KUBE_TOKEN", "KUBERNETES_SERVICE_HOST", "KUBERNETES_SERVICE_PORT",
-	"GITHUB_PAT", "GITHUB_API_URL", "GITHUB_WEBHOOK_SECRET",
-	"DATABASE_URL", "POSTGRES_URL", "POSTGRES_USER", "POSTGRES_PASSWORD",
-	"POSTGRES_HOST", "POSTGRES_PORT", "POSTGRES_DB",
-	"DISCORD_TOKEN", "BOT_ID", "AERIAL_BOT_ID", "BRAIN_URL", "ERI_URL",
-	"FLUX_RECEIVER_URL", "HARO_URL", "HANGAR_URL", "NATS_URL",
-	"SYSTEM_CHANNEL_ID", "AUTO_UPDATE_PR_AUTHORS",
-	"WEBHOOK_FORWARD_URLS", "SYNAPSE_DEFAULT_OWNER", "DEFAULT_OWNER", "AERIAL_DEFAULT_OWNER",
+	"PORT", "KUBE_API_SERVER", "KUBE_TOKEN", "KUBERNETES_SERVICE_HOST", "KUBERNETES_SERVICE_PORT",
+	"GITHUB_PAT", "GITHUB_API_URL", "GITHUB_WEBHOOK_SECRET", "DISCORD_TOKEN", "AERIAL_BOT_ID", "ERI_URL",
+	"NATS_URL", "SYSTEM_CHANNEL_ID", "DEFAULT_OWNER", "AERIAL_DEFAULT_OWNER", "K8S_AUTH_ENABLED", "AUTH_ENABLED",
 }
 
-func TestLoadConfig_EnvAndFallbacks(t *testing.T) {
-	tests := []struct {
-		name                string
-		env                 map[string]string
-		wantPort            string
-		wantKubeServer      string
-		wantKubeTok         string
-		wantGHTok           string
-		wantGHURL           string
-		wantGHWebhookSecret string
-		wantPGURL           string
-		wantFluxURL         string
-		wantBrainURL        string
-		wantEriURL          string
-		wantSysChan         string
-		wantDiscTok         string
-		wantNATSURL         string
-		wantEmptyURL        bool
-	}{
-		{
-			name:      "primary port env",
-			env:       map[string]string{"PORT": "9999"},
-			wantPort:  "9999",
-			wantGHURL: "https://api.github.com",
-			wantPGURL: "postgres://aerial:aerial_secure_pass@127.0.0.1:5432/aerial?sslmode=disable",
-		},
-		{
-			name:         "default fallback loading with empty envs",
-			env:          map[string]string{},
-			wantPort:     "4020",
-			wantGHURL:    "https://api.github.com",
-			wantPGURL:    "postgres://aerial:aerial_secure_pass@127.0.0.1:5432/aerial?sslmode=disable",
-			wantEmptyURL: true,
-		},
-		{
-			name:           "primary kube envs",
-			env:            map[string]string{"KUBE_API_SERVER": "https://kube.aerial:6443/", "KUBE_TOKEN": "secret-token"},
-			wantKubeServer: "https://kube.aerial:6443",
-			wantKubeTok:    "secret-token",
-		},
-		{
-			name:           "fallback kube host and port",
-			env:            map[string]string{"KUBERNETES_SERVICE_HOST": "10.43.0.1", "KUBERNETES_SERVICE_PORT": "443"},
-			wantKubeServer: "https://10.43.0.1:443",
-		},
-		{
-			name:      "github and postgres primary envs",
-			env:       map[string]string{"GITHUB_PAT": "pat123", "GITHUB_API_URL": "https://api.github.test/", "DATABASE_URL": "postgres://custom:pass@db:5432/customdb"},
-			wantGHTok: "pat123",
-			wantGHURL: "https://api.github.test",
-			wantPGURL: "postgres://custom:pass@db:5432/customdb",
-		},
-		{
-			name:                "github webhook secret primary env",
-			env:                 map[string]string{"GITHUB_WEBHOOK_SECRET": "secret-webhook-key"},
-			wantGHWebhookSecret: "secret-webhook-key",
-		},
-		{
-			name: "decomposed postgres envs",
-			env: map[string]string{
-				"POSTGRES_HOST": "custom-pg.aerial", "POSTGRES_PORT": "5432", "POSTGRES_USER": "aerial", "POSTGRES_PASSWORD": "custom_pass", "POSTGRES_DB": "aerial",
-			},
-			wantPGURL: "postgres://aerial:custom_pass@custom-pg.aerial:5432/aerial?sslmode=disable",
-		},
-		{
-			name:        "system channel id primary env",
-			env:         map[string]string{"SYSTEM_CHANNEL_ID": "123456789012345678"},
-			wantSysChan: "123456789012345678",
-		},
-		{
-			name:        "discord token primary env",
-			env:         map[string]string{"DISCORD_TOKEN": "bot-secret-token-123"},
-			wantDiscTok: "bot-secret-token-123",
-		},
-		{
-			name:         "eri url primary env",
-			env:          map[string]string{"ERI_URL": "http://eri-primary.aerial:8088"},
-			wantBrainURL: "http://eri-primary.aerial:8088",
-			wantEriURL:   "http://eri-primary.aerial:8088",
-		},
-		{
-			name:        "flux receiver url primary env",
-			env:         map[string]string{"FLUX_RECEIVER_URL": "http://flux-receiver.aerial/webhook/"},
-			wantFluxURL: "http://flux-receiver.aerial/webhook",
-		},
-		{
-			name:        "nats url primary env",
-			env:         map[string]string{"NATS_URL": "nats://custom-nats:4222"},
-			wantNATSURL: "nats://custom-nats:4222",
-		},
-	}
+const loadDefaultEriURL = "http://127.0.0.1:8088"
 
-	keysToClear := []string{
-		"PORT", "KUBE_API_SERVER",
-		"KUBE_TOKEN", "KUBERNETES_SERVICE_HOST", "KUBERNETES_SERVICE_PORT",
-		"GITHUB_PAT", "GITHUB_API_URL", "GITHUB_WEBHOOK_SECRET",
-		"DATABASE_URL", "POSTGRES_URL", "POSTGRES_HOST", "POSTGRES_PORT",
-		"POSTGRES_USER", "POSTGRES_PASSWORD", "POSTGRES_DB",
-		"HANGAR_URL", "FLUX_RECEIVER_URL", "ERI_URL", "HARO_URL", "NATS_URL",
-		"SYSTEM_CHANNEL_ID", "CONFIG_PATH", "DISCORD_TOKEN",
-	}
-
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			for _, k := range keysToClear {
-				t.Setenv(k, "")
-			}
-			for k, v := range tc.env {
-				t.Setenv(k, v)
-			}
-			cfg := LoadConfigFromEnv()
-			for _, check := range []struct{ got, want, field string }{
-				{cfg.Port, tc.wantPort, "Port"},
-				{cfg.KubeAPIServer, tc.wantKubeServer, "KubeAPIServer"},
-				{cfg.KubeToken, tc.wantKubeTok, "KubeToken"},
-				{cfg.GitHubToken, tc.wantGHTok, "GitHubToken"},
-				{cfg.GitHubAPIURL, tc.wantGHURL, "GitHubAPIURL"},
-				{cfg.GitHubWebhookSecret, tc.wantGHWebhookSecret, "GitHubWebhookSecret"},
-				{cfg.PostgresURL, tc.wantPGURL, "PostgresURL"},
-				{cfg.FluxReceiverURL, tc.wantFluxURL, "FluxReceiverURL"},
-				{cfg.BrainURL, tc.wantBrainURL, "BrainURL"},
-				{cfg.EriURL, tc.wantEriURL, "EriURL"},
-				{cfg.SystemChannelID, tc.wantSysChan, "SystemChannelID"},
-				{cfg.DiscordToken, tc.wantDiscTok, "DiscordToken"},
-				{cfg.NATSURL, tc.wantNATSURL, "NATSURL"},
-			} {
-				if check.want != "" && check.got != check.want {
-					t.Errorf("%s = %q, want %q", check.field, check.got, check.want)
-				}
-			}
-		})
-	}
-}
-
-type loadConfigCase struct {
-	name                   string
-	localYAML              string
-	fallbackYAML           string
-	aerialYAML             string
-	useEmptyPath           bool
-	missingFallback        bool
-	env                    map[string]string
-	wantPort               string
-	wantFluxURL            string
-	wantBrainURL           string
-	wantSysChan            string
-	wantAuthors            []string
-	wantBotID              string
-	wantDefaultOwner       bool
-	wantCollaboratorAlerts []CollaboratorCIAlertRule
-	wantStrictErr          bool
-}
-
-func setupSynapseTestConfigFiles(t *testing.T, tc loadConfigCase) string {
+// loadConfigFiles writes the row's synapse.yaml (always, zero bytes when
+// empty), fallback.yaml and aerial.yaml into a temp dir, repoints both
+// package fallbacks there, clears the env, sets CONFIG_PATH to synapse.yaml
+// and then applies env (which may blank CONFIG_PATH). It returns the dir.
+func loadConfigFiles(t *testing.T, local, fallback, aerial string, env map[string]string) string {
 	t.Helper()
-	tmpDir := t.TempDir()
-	var targetPath string
-	if !tc.useEmptyPath {
-		targetPath = filepath.Join(tmpDir, "local.yaml")
-		if err := os.WriteFile(targetPath, []byte(tc.localYAML), 0o644); err != nil {
-			t.Fatalf("failed to write local config: %v", err)
+	dir := t.TempDir()
+	for name, body := range map[string]string{"synapse.yaml": local, "fallback.yaml": fallback, "aerial.yaml": aerial} {
+		if body == "" && name != "synapse.yaml" {
+			continue
+		}
+		if err := os.WriteFile(filepath.Join(dir, name), []byte(body), 0o644); err != nil {
+			t.Fatalf("WriteFile(%s): %v", name, err)
 		}
 	}
-
-	oldAerial := SynapseAerialConfigPath
-	if tc.aerialYAML != "" {
-		aerialPath := filepath.Join(tmpDir, "config.yaml")
-		if err := os.WriteFile(aerialPath, []byte(tc.aerialYAML), 0o644); err != nil {
-			t.Fatalf("failed to write aerial config: %v", err)
-		}
-		SynapseAerialConfigPath = aerialPath
-	} else {
-		SynapseAerialConfigPath = filepath.Join(tmpDir, "nonexistent-config.yaml")
-	}
-	t.Cleanup(func() { SynapseAerialConfigPath = oldAerial })
-
-	oldFallback := SynapseFallbackConfigPath
-	switch {
-	case tc.missingFallback:
-		SynapseFallbackConfigPath = filepath.Join(tmpDir, "nonexistent.yaml")
-	case tc.fallbackYAML != "":
-		fbPath := filepath.Join(tmpDir, "fallback.yaml")
-		if err := os.WriteFile(fbPath, []byte(tc.fallbackYAML), 0o644); err != nil {
-			t.Fatalf("failed to write fallback config: %v", err)
-		}
-		SynapseFallbackConfigPath = fbPath
-	default:
-		SynapseFallbackConfigPath = filepath.Join(tmpDir, "nonexistent-synapse.yaml")
-	}
-	t.Cleanup(func() {
-		SynapseFallbackConfigPath = oldFallback
-	})
-
+	oldAerial, oldFallback := SynapseAerialConfigPath, SynapseFallbackConfigPath
+	SynapseAerialConfigPath = filepath.Join(dir, "aerial.yaml")
+	SynapseFallbackConfigPath = filepath.Join(dir, "fallback.yaml")
+	t.Cleanup(func() { SynapseAerialConfigPath, SynapseFallbackConfigPath = oldAerial, oldFallback })
 	for _, k := range synapseConfigKeysToClear {
 		t.Setenv(k, "")
 	}
-	for k, v := range tc.env {
+	t.Setenv("CONFIG_PATH", filepath.Join(dir, "synapse.yaml"))
+	for k, v := range env {
 		t.Setenv(k, v)
 	}
-	return targetPath
+	return dir
 }
 
-func assertLoadedConfigFields(t *testing.T, tc loadConfigCase, cfg Config) {
-	t.Helper()
-	for _, check := range []struct{ got, want, field string }{
-		{cfg.Port, tc.wantPort, "Port"},
-		{cfg.FluxReceiverURL, tc.wantFluxURL, "FluxReceiverURL"},
-		{cfg.BrainURL, tc.wantBrainURL, "BrainURL"},
-		{cfg.EriURL, tc.wantBrainURL, "EriURL"},
-		{cfg.SystemChannelID, tc.wantSysChan, "SystemChannelID"},
-		{cfg.BotID, tc.wantBotID, "BotID"},
-	} {
-		if check.want != "" && check.got != check.want {
-			t.Errorf("%s = %q, want %q", check.field, check.got, check.want)
-		}
-	}
-	if tc.wantDefaultOwner != cfg.DefaultOwner && (tc.wantDefaultOwner || tc.localYAML != "") {
-		t.Errorf("DefaultOwner = %v, want %v", cfg.DefaultOwner, tc.wantDefaultOwner)
-	}
-	if tc.wantAuthors != nil {
-		if len(cfg.AutoUpdatePRAuthors) != len(tc.wantAuthors) {
-			t.Errorf("AutoUpdatePRAuthors len = %d, want %d", len(cfg.AutoUpdatePRAuthors), len(tc.wantAuthors))
-		} else {
-			for i, a := range tc.wantAuthors {
-				if cfg.AutoUpdatePRAuthors[i] != a {
-					t.Errorf("AutoUpdatePRAuthors[%d] = %q, want %q", i, cfg.AutoUpdatePRAuthors[i], a)
-				}
-			}
-		}
-	}
-	if tc.wantCollaboratorAlerts != nil {
-		if !reflect.DeepEqual(cfg.CollaboratorCIAlerts, tc.wantCollaboratorAlerts) {
-			t.Errorf("CollaboratorCIAlerts = %+v, want %+v", cfg.CollaboratorCIAlerts, tc.wantCollaboratorAlerts)
-		}
-	}
+// loadWant overlays the non-zero fields of overlay onto the config an empty
+// file and empty env resolve to.
+func loadWant(overlay Config) Config {
+	return withField(Config{
+		Port: "4020", GitHubAPIURL: "https://api.github.com", GitHubCredential: "app",
+		BrainURL: loadDefaultEriURL, EriURL: loadDefaultEriURL, NATSURL: "nats://nats.aerial:4222",
+		RestatePRService: "PRObject", RestateRepoService: "RepoObject", BotID: "aerial",
+		Bots: loadBot("aerial", "DISCORD_TOKEN", "", loadDefaultEriURL, "", false),
+	}, overlay)
 }
 
-func runLoadConfigCase(t *testing.T, tc loadConfigCase) {
-	t.Helper()
-	targetPath := setupSynapseTestConfigFiles(t, tc)
-	cfg := LoadConfig(targetPath)
-	strictCfg, strictErr := LoadConfigStrict(targetPath)
-	if (strictErr != nil) != tc.wantStrictErr {
-		t.Errorf("LoadConfigStrict() err = %v, wantStrictErr %v", strictErr, tc.wantStrictErr)
-	}
-	if strictErr == nil && !reflect.DeepEqual(strictCfg, cfg) {
-		t.Errorf("LoadConfigStrict() = %+v, want LoadConfig result %+v", strictCfg, cfg)
-	}
-	assertLoadedConfigFields(t, tc, cfg)
+// loadBot builds a one-bot Bots map.
+func loadBot(id, tokenEnv, token, eriURL, sysChan string, owner bool) map[string]BotConfig {
+	return map[string]BotConfig{id: {TokenEnv: tokenEnv, DiscordToken: token, EriURL: eriURL, SystemChannelID: sysChan, DefaultOwner: owner}}
 }
 
-func loadConfigYAMLTestCases() []loadConfigCase {
-	return append(loadConfigYAMLBasicCases(), loadConfigYAMLAdvancedCases()...)
-}
-
-func loadConfigYAMLBasicCases() []loadConfigCase {
-	return []loadConfigCase{
+func TestLoadConfig(t *testing.T) {
+	const brainURL, restateURL = "http://brain.example:8088", "http://restate.example:8080"
+	alphaEri, betaEri := "http://eri-alpha.example:8088", "http://eri-beta.example:8088"
+	tests := []struct {
+		name     string
+		local    string
+		fallback string
+		aerial   string
+		env      map[string]string
+		want     Config
+	}{
+		// Environment.
+		{name: "empty file and env resolve to defaults", want: loadWant(Config{})},
+		{name: "port env", env: map[string]string{"PORT": "9999"}, want: loadWant(Config{Port: "9999"})},
+		{name: "kube api server env trimmed", env: map[string]string{"KUBE_API_SERVER": "https://kube.example:6443/", "KUBE_TOKEN": "secret-token"}, want: loadWant(Config{KubeAPIServer: "https://kube.example:6443", KubeToken: "secret-token", K8sAuthConfig: k8sauth.Config{APIServerURL: "https://kube.example:6443"}})},
+		{name: "in-cluster kube host and port", env: map[string]string{"KUBERNETES_SERVICE_HOST": "192.0.2.1", "KUBERNETES_SERVICE_PORT": "443"}, want: loadWant(Config{KubeAPIServer: "https://192.0.2.1:443", K8sAuthConfig: k8sauth.Config{APIServerURL: "https://192.0.2.1:443"}})},
+		{name: "github envs", env: map[string]string{"GITHUB_PAT": "pat123", "GITHUB_API_URL": "https://api.github.test/", "GITHUB_WEBHOOK_SECRET": " hook-key "}, want: loadWant(Config{GitHubToken: "pat123", GitHubAPIURL: "https://api.github.test", GitHubWebhookSecret: "hook-key"})},
+		{name: "system channel env", env: map[string]string{"SYSTEM_CHANNEL_ID": "123456789012345678"}, want: loadWant(Config{SystemChannelID: "123456789012345678"})},
+		{name: "discord token env", env: map[string]string{"DISCORD_TOKEN": "bot-token"}, want: loadWant(Config{DiscordToken: "bot-token", Bots: loadBot("aerial", "DISCORD_TOKEN", "bot-token", loadDefaultEriURL, "", false)})},
+		{name: "eri url env", env: map[string]string{"ERI_URL": alphaEri + "/"}, want: loadWant(Config{BrainURL: alphaEri, EriURL: alphaEri, Bots: loadBot("aerial", "DISCORD_TOKEN", "", alphaEri, "", false)})},
+		{name: "nats url env", env: map[string]string{"NATS_URL": "nats://nats.example:4222"}, want: loadWant(Config{NATSURL: "nats://nats.example:4222"})},
+		// File resolution.
+		{name: "yaml port and eri url", local: "port: \"4099\"\neri_url: \"" + brainURL + "\"\n", want: loadWant(Config{Port: "4099", BrainURL: brainURL, EriURL: brainURL, Bots: loadBot("aerial", "DISCORD_TOKEN", "", brainURL, "", false)})},
+		{name: "env overrides yaml", local: "port: \"4099\"\neri_url: \"" + brainURL + "\"\n", env: map[string]string{"PORT": "5000"}, want: loadWant(Config{Port: "5000", BrainURL: brainURL, EriURL: brainURL, Bots: loadBot("aerial", "DISCORD_TOKEN", "", brainURL, "", false)})},
+		{name: "stale flux_receiver_url key is ignored", local: "port: \"4099\"\nflux_receiver_url: \"http://flux.example:8080/hook/\"\n", want: loadWant(Config{Port: "4099"})},
+		{name: "zero-byte local file uses fallback", fallback: "port: \"4088\"\n", want: loadWant(Config{Port: "4088"})},
+		{name: "empty config path uses fallback", fallback: "port: \"4088\"\n", env: map[string]string{"CONFIG_PATH": ""}, want: loadWant(Config{Port: "4088"})},
+		{name: "local file wins over fallback", local: "port: \"4077\"\n", fallback: "port: \"4088\"\n", want: loadWant(Config{Port: "4077"})},
+		{name: "invalid yaml keeps defaults", local: "invalid: [yaml", want: loadWant(Config{})},
+		{name: "invalid fallback yaml keeps defaults", fallback: "port: [4088\n", env: map[string]string{"CONFIG_PATH": ""}, want: loadWant(Config{})},
+		{name: "type-mismatched yaml keeps decoded fields", local: "port: \"4099\"\nbots: [\"not-a-map\"]\n", want: loadWant(Config{Port: "4099"})},
+		// GitHub settings.
+		{name: "minimal yaml keeps app credential, aerial bot and empty app ids", local: "port: \"4020\"\n", want: loadWant(Config{})},
+		{name: "github_credential pat is trimmed and lowercased", local: "github_credential: \" PAT \"\n", want: loadWant(Config{GitHubCredential: "pat"})},
+		{name: "github_credential app", local: "github_credential: app\n", want: loadWant(Config{})},
+		{name: "invalid github_credential falls back to app", local: "github_credential: token\n", want: loadWant(Config{})},
+		{name: "github app ids from yaml", local: "github_app_id: 1111\ngithub_app_installation_id: \" 2222 \"\n", want: loadWant(Config{GitHubAppID: "1111", GitHubAppInstallationID: "2222"})},
+		{name: "non-integer github app id passes through", local: "github_app_id: not-a-number\n", want: loadWant(Config{GitHubAppID: "not-a-number"})},
+		// System channel, authors and collaborator alerts (local and aerial config fallback).
+		{name: "system_channel_id from yaml", local: "system_channel_id: \"112233445566778899\"\n", want: loadWant(Config{SystemChannelID: "112233445566778899", Bots: loadBot("aerial", "DISCORD_TOKEN", "", loadDefaultEriURL, "112233445566778899", false)})},
+		{name: "system_channel from yaml", local: "system_channel: \"ops-dev\"\n", want: loadWant(Config{SystemChannelID: "ops-dev", Bots: loadBot("aerial", "DISCORD_TOKEN", "", loadDefaultEriURL, "ops-dev", false)})},
+		{name: "system_channel from aerial config", local: "port: \"4020\"\n", aerial: "system_channel: \"ops-dev\"\n", want: loadWant(Config{SystemChannelID: "ops-dev", Bots: loadBot("aerial", "DISCORD_TOKEN", "", loadDefaultEriURL, "ops-dev", false)})},
+		{name: "system_channel_id from aerial config", local: "port: \"4020\"\n", aerial: "system_channel_id: \"998877665544332211\"\n", want: loadWant(Config{SystemChannelID: "998877665544332211", Bots: loadBot("aerial", "DISCORD_TOKEN", "", loadDefaultEriURL, "998877665544332211", false)})},
+		{name: "invalid aerial config is ignored", local: "port: \"4020\"\n", aerial: "system_channel: [x\n", want: loadWant(Config{})},
+		{name: "auto_update_pr_authors from yaml", local: "auto_update_pr_authors:\n  - \"author-a\"\n  - \" author-b \"\n  - \"author-a\"\n", want: loadWant(Config{AutoUpdatePRAuthors: []string{"author-a", "author-b"}})},
+		{name: "auto_update_pr_authors from aerial config", local: "port: \"4020\"\n", aerial: "auto_update_pr_authors:\n  - \"author-c\"\n", want: loadWant(Config{AutoUpdatePRAuthors: []string{"author-c"}})},
 		{
-			name: "yaml config without overrides",
-			localYAML: `port: "4099"
-eri_url: "http://brain.custom:8088"
-`,
-			wantPort:     "4099",
-			wantBrainURL: "http://brain.custom:8088",
+			name:  "collaborator_ci_alerts from yaml qualified by github_owner",
+			local: "github_owner: \" acme \"\ncollaborator_ci_alerts:\n  - repo: \"mirrormere\"\n    channel_id: \"123456789012345678\"\n    authors:\n      Collaborator-User: \"<@111222>\"\n",
+			want:  loadWant(Config{GitHubOwner: "acme", CollaboratorCIAlerts: []CollaboratorCIAlertRule{{Repo: "acme/mirrormere", ChannelID: "123456789012345678", Authors: map[string]string{"collaborator-user": "<@111222>"}}}}),
 		},
 		{
-			name: "yaml config with flux_receiver_url",
-			localYAML: `port: "4099"
-flux_receiver_url: "http://flux-receiver.custom:8080/hook/"
-`,
-			wantPort:    "4099",
-			wantFluxURL: "http://flux-receiver.custom:8080/hook",
+			name:   "collaborator_ci_alerts from aerial config",
+			local:  "port: \"4020\"\n",
+			aerial: "collaborator_ci_alerts:\n  - repo: \"acme/aerial\"\n    channel_id: \"987654321098765432\"\n    authors:\n      Collaborator: \"<@333444>\"\n",
+			want:   loadWant(Config{CollaboratorCIAlerts: []CollaboratorCIAlertRule{{Repo: "acme/aerial", ChannelID: "987654321098765432", Authors: map[string]string{"collaborator": "<@333444>"}}}}),
+		},
+		// Bot identity and default owner.
+		{name: "bot_id and default_owner from yaml", local: "bot_id: \"eri-sub\"\ndefault_owner: true\n", want: loadWant(Config{BotID: "eri-sub", DefaultOwner: true, Bots: loadBot("eri-sub", "DISCORD_TOKEN_ERI_SUB", "", loadDefaultEriURL, "", true)})},
+		{name: "bot_id from aerial config", local: "port: \"4020\"\n", aerial: "bot_id: \"aerial-fallback\"\n", want: loadWant(Config{BotID: "aerial-fallback", Bots: loadBot("aerial-fallback", "DISCORD_TOKEN_AERIAL_FALLBACK", "", loadDefaultEriURL, "", false)})},
+		{name: "env overrides bot_id and default_owner", local: "bot_id: \"yaml-bot\"\ndefault_owner: false\n", env: map[string]string{"AERIAL_BOT_ID": "env-bot", "DEFAULT_OWNER": "true"}, want: loadWant(Config{BotID: "env-bot", DefaultOwner: true, Bots: loadBot("env-bot", "DISCORD_TOKEN_ENV_BOT", "", loadDefaultEriURL, "", true)})},
+		{name: "AERIAL_DEFAULT_OWNER 1 wins over DEFAULT_OWNER", env: map[string]string{"AERIAL_DEFAULT_OWNER": "1", "DEFAULT_OWNER": "false"}, want: loadWant(Config{DefaultOwner: true, Bots: loadBot("aerial", "DISCORD_TOKEN", "", loadDefaultEriURL, "", true)})},
+		// Multi-bot parsing.
+		{
+			name:  "bots map with custom token env and per-bot eri url",
+			local: "bots:\n  aerial:\n    token_env: \"CUSTOM_DISCORD_TOKEN\"\n    eri_url: \"" + alphaEri + "/\"\n    system_channel_id: \"111222\"\n    default_owner: true\n  agent-alpha:\n    eri_url: \"" + betaEri + "\"\n",
+			env:   map[string]string{"CUSTOM_DISCORD_TOKEN": "tok-aerial", "DISCORD_TOKEN_AGENT_ALPHA": "tok-alpha"},
+			want: loadWant(Config{DiscordToken: "tok-aerial", Bots: map[string]BotConfig{
+				"aerial":      {TokenEnv: "CUSTOM_DISCORD_TOKEN", DiscordToken: "tok-aerial", EriURL: alphaEri, SystemChannelID: "111222", DefaultOwner: true},
+				"agent-alpha": {TokenEnv: "DISCORD_TOKEN_AGENT_ALPHA", DiscordToken: "tok-alpha", EriURL: betaEri},
+			}}),
 		},
 		{
-			name: "yaml config with eri_url",
-			localYAML: `port: "4099"
-eri_url: "http://eri.custom:8088"
-`,
-			wantPort:     "4099",
-			wantBrainURL: "http://eri.custom:8088",
+			name:  "bot synthesized from top-level keys when bots omitted",
+			local: "bot_id: \"agent-beta\"\ndefault_owner: true\neri_url: \"" + betaEri + "\"\nsystem_channel_id: \"333444\"\n",
+			env:   map[string]string{"DISCORD_TOKEN_AGENT_BETA": "tok-beta"},
+			want:  loadWant(Config{BotID: "agent-beta", DefaultOwner: true, DiscordToken: "tok-beta", BrainURL: betaEri, EriURL: betaEri, SystemChannelID: "333444", Bots: loadBot("agent-beta", "DISCORD_TOKEN_AGENT_BETA", "tok-beta", betaEri, "333444", true)}),
 		},
 		{
-			name: "env overrides yaml values",
-			localYAML: `port: "4099"
-eri_url: "http://brain.custom:8088"
-`,
-			env: map[string]string{
-				"PORT": "5000",
-			},
-			wantPort:     "5000",
-			wantBrainURL: "http://brain.custom:8088",
+			name:  "bots map with empty key and implicit aerial default owner",
+			local: "bot_id: \"nonexistent\"\ndefault_owner: true\nlegacy_build_workflows:\n  - repository: \"bad\"\nbots:\n  \"\":\n    eri_url: \"http://ignore.example\"\n  aerial:\n    system_channel_id: \"chan1\"\n",
+			env:   map[string]string{"DISCORD_TOKEN": "token-for-aerial"},
+			want:  loadWant(Config{BotID: "nonexistent", DefaultOwner: true, DiscordToken: "token-for-aerial", Bots: loadBot("aerial", "DISCORD_TOKEN", "token-for-aerial", loadDefaultEriURL, "chan1", true)}),
 		},
 		{
-			name:         "zero-byte local config with existing fallback",
-			localYAML:    "",
-			fallbackYAML: "port: \"4088\"\n",
-			wantPort:     "4088",
+			name:  "bots map with explicit bot_id gets implicit default owner",
+			local: "bot_id: \"agent-alpha\"\ndefault_owner: true\nbots:\n  agent-alpha: {}\n  aerial: {}\n",
+			env:   map[string]string{"DISCORD_TOKEN": "tok-aerial"},
+			want: loadWant(Config{BotID: "agent-alpha", DefaultOwner: true, DiscordToken: "tok-aerial", Bots: map[string]BotConfig{
+				"agent-alpha": {TokenEnv: "DISCORD_TOKEN_AGENT_ALPHA", EriURL: loadDefaultEriURL, DefaultOwner: true},
+				"aerial":      {TokenEnv: "DISCORD_TOKEN", DiscordToken: "tok-aerial", EriURL: loadDefaultEriURL},
+			}}),
 		},
-		{
-			name:            "zero-byte local config with missing fallback uses defaults",
-			localYAML:       "",
-			missingFallback: true,
-			wantPort:        "4020",
-		},
-		{
-			name:         "empty config path with valid fallback",
-			useEmptyPath: true,
-			fallbackYAML: "port: \"4088\"\n",
-			wantPort:     "4088",
-		},
-		{
-			name:         "non-empty local config takes precedence over fallback",
-			localYAML:    "port: \"4077\"\n",
-			fallbackYAML: "port: \"4088\"\n",
-			wantPort:     "4077",
-		},
-		{
-			name:        "system channel id loaded from yaml",
-			localYAML:   "system_channel_id: \"112233445566778899\"\n",
-			wantSysChan: "112233445566778899",
-		},
-		{
-			name:        "system_channel loaded from local yaml",
-			localYAML:   "system_channel: \"aerial-dev\"\n",
-			wantSysChan: "aerial-dev",
-		},
-		{
-			name:        "system_channel loaded from aerial config.yaml fallback",
-			localYAML:   "port: \"4020\"\n",
-			aerialYAML:  "system_channel: \"aerial-dev\"\n",
-			wantSysChan: "aerial-dev",
-		},
-		{
-			name:        "system_channel_id loaded from aerial config.yaml fallback",
-			localYAML:   "port: \"4020\"\n",
-			aerialYAML:  "system_channel_id: \"998877665544332211\"\n",
-			wantSysChan: "998877665544332211",
-		},
+		// Kubernetes auth.
+		{name: "K8S_AUTH_ENABLED 1 enables yaml k8s_auth", local: "default_owner: true\nk8s_auth:\n  api_server_url: \"https://k8s.example\"\n", env: map[string]string{"DISCORD_TOKEN": "tok", "K8S_AUTH_ENABLED": "1"}, want: loadWant(Config{DefaultOwner: true, DiscordToken: "tok", Bots: loadBot("aerial", "DISCORD_TOKEN", "tok", loadDefaultEriURL, "", true), K8sAuthEnabled: true, K8sAuthConfig: k8sauth.Config{Enabled: true, APIServerURL: "https://k8s.example"}})},
+		{name: "invalid K8S_AUTH_ENABLED keeps yaml value", local: "k8s_auth_enabled: true\nk8s_auth:\n  api_server_url: \"https://k8s.example\"\n", env: map[string]string{"K8S_AUTH_ENABLED": "yes"}, want: loadWant(Config{K8sAuthEnabled: true, K8sAuthConfig: k8sauth.Config{Enabled: true, APIServerURL: "https://k8s.example"}})},
+		{name: "K8S_AUTH_ENABLED false overrides yaml true", local: "k8s_auth_enabled: true\n", env: map[string]string{"K8S_AUTH_ENABLED": "false"}, want: loadWant(Config{})},
+		{name: "AUTH_ENABLED env is not read", local: "port: \"4020\"\n", env: map[string]string{"AUTH_ENABLED": "true"}, want: loadWant(Config{})},
+		// Restate ingress.
+		{name: "restate url and services from yaml", local: "restate_url: \"" + restateURL + "/\"\nrestate_pr_service: \"PRObject\"\nrestate_repo_service: \"RepoObject\"\n", want: loadWant(Config{RestateURL: restateURL})},
+		{name: "custom restate service names preserved", local: "restate_url: \"" + restateURL + "\"\nrestate_pr_service: \"PRObject-green\"\nrestate_repo_service: \"RepoObject-green\"\n", want: loadWant(Config{RestateURL: restateURL, RestatePRService: "PRObject-green", RestateRepoService: "RepoObject-green"})},
+		{name: "blank restate service names use defaults", local: "restate_url: \"" + restateURL + "\"\nrestate_pr_service: \"   \"\nrestate_repo_service: \"\"\n", want: loadWant(Config{RestateURL: restateURL})},
+		{name: "RESTATE_URL env never injects the endpoint", local: "port: \"4020\"\n", env: map[string]string{"RESTATE_URL": "http://evil.example:8080"}, want: loadWant(Config{})},
+		{name: "non-default bot_id still targets the single services", local: "restate_url: \"" + restateURL + "\"\nbot_id: \"agent-alpha\"\n", want: loadWant(Config{RestateURL: restateURL, BotID: "agent-alpha", Bots: loadBot("agent-alpha", "DISCORD_TOKEN_AGENT_ALPHA", "", loadDefaultEriURL, "", false)})},
+		{name: "explicit restate services win over a non-default bot_id", local: "restate_url: \"" + restateURL + "\"\nbot_id: \"agent-alpha\"\nrestate_pr_service: \"PRObject-green\"\nrestate_repo_service: \"RepoObject-green\"\n", want: loadWant(Config{RestateURL: restateURL, BotID: "agent-alpha", RestatePRService: "PRObject-green", RestateRepoService: "RepoObject-green", Bots: loadBot("agent-alpha", "DISCORD_TOKEN_AGENT_ALPHA", "", loadDefaultEriURL, "", false)})},
 	}
-}
-
-func loadConfigYAMLAdvancedCases() []loadConfigCase {
-	return []loadConfigCase{
-		{
-			name:        "auto_update_pr_authors loaded from yaml",
-			localYAML:   "auto_update_pr_authors:\n  - \"trusted-author\"\n  - \"peer-author\"\n",
-			wantAuthors: []string{"trusted-author", "peer-author"},
-		},
-		{
-			name:        "auto_update_pr_authors loaded from aerial config.yaml fallback",
-			localYAML:   "port: \"4020\"\n",
-			aerialYAML:  "auto_update_pr_authors:\n  - \"fallback-author\"\n",
-			wantAuthors: []string{"fallback-author"},
-		},
-		{
-			name:          "invalid yaml logs warning and uses defaults, strict load errors",
-			localYAML:     "invalid: [yaml",
-			wantPort:      "4020",
-			wantStrictErr: true,
-		},
-		{
-			name:          "type-mismatched yaml keeps decoded fields, strict load errors",
-			localYAML:     "port: \"4099\"\nbots: [\"not-a-map\"]\n",
-			wantPort:      "4099",
-			wantStrictErr: true,
-		},
-		{
-			name:          "invalid fallback yaml errors in strict load",
-			useEmptyPath:  true,
-			fallbackYAML:  "port: [4088\n",
-			wantPort:      "4020",
-			wantStrictErr: true,
-		},
-		{
-			name:             "bot_id and default_owner loaded from local yaml",
-			localYAML:        "bot_id: \"eri-sub\"\ndefault_owner: true\n",
-			wantBotID:        "eri-sub",
-			wantDefaultOwner: true,
-		},
-		{
-			name:             "bot_id loaded from aerial config fallback",
-			localYAML:        "port: \"4020\"\n",
-			aerialYAML:       "bot_id: \"aerial-fallback\"\n",
-			wantBotID:        "aerial-fallback",
-			wantDefaultOwner: false,
-		},
-		{
-			name:             "env overrides for bot_id and default_owner",
-			localYAML:        "bot_id: \"yaml-bot\"\ndefault_owner: false\n",
-			env:              map[string]string{"AERIAL_BOT_ID": "env-bot", "DEFAULT_OWNER": "true"},
-			wantBotID:        "env-bot",
-			wantDefaultOwner: true,
-		},
-		{
-			name:      "default bot_id is aerial when unset",
-			localYAML: "port: \"4020\"\n",
-			wantBotID: "aerial",
-		},
-		{
-			name:      "collaborator_ci_alerts loaded from local yaml",
-			localYAML: "collaborator_ci_alerts:\n  - repo: \"mirrormere\"\n    channel_id: \"123456789012345678\"\n    authors:\n      Collaborator-User: \"<@111222>\"\n",
-			wantCollaboratorAlerts: []CollaboratorCIAlertRule{
-				{
-					Repo:      "azylman/mirrormere",
-					ChannelID: "123456789012345678",
-					Authors: map[string]string{
-						"collaborator-user": "<@111222>",
-					},
-				},
-			},
-		},
-		{
-			name:       "collaborator_ci_alerts loaded from aerial config fallback",
-			localYAML:  "port: \"4020\"\n",
-			aerialYAML: "collaborator_ci_alerts:\n  - repo: \"azylman/aerial\"\n    channel_id: \"987654321098765432\"\n    authors:\n      Collaborator: \"<@333444>\"\n",
-			wantCollaboratorAlerts: []CollaboratorCIAlertRule{
-				{
-					Repo:      "azylman/aerial",
-					ChannelID: "987654321098765432",
-					Authors: map[string]string{
-						"collaborator": "<@333444>",
-					},
-				},
-			},
-		},
-	}
-}
-
-func TestLoadConfig_YAMLAndOverrides(t *testing.T) {
-	tests := loadConfigYAMLTestCases()
-
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			runLoadConfigCase(t, tc)
+			loadConfigFiles(t, tc.local, tc.fallback, tc.aerial, tc.env)
+			if got := LoadConfigFromEnv(); !reflect.DeepEqual(got, tc.want) {
+				t.Errorf("LoadConfigFromEnv() =\n%+v\nwant\n%+v", got, tc.want)
+			}
 		})
 	}
 }
@@ -468,223 +207,109 @@ func withField(base, overlay Config) Config {
 	return base
 }
 
+var restartBase = Config{
+	Port: "4020", DiscordToken: "tok", BotID: "aerial", BrainURL: "http://eri:8080", EriURL: "http://eri:8080",
+	KubeAPIServer: "https://192.0.2.1:443", KubeToken: "kube", SystemChannelID: "111", AutoUpdatePRAuthors: []string{"a"},
+	RestateURL: "http://restate.example:8080", RestatePRService: "PRObject", RestateRepoService: "RepoObject",
+	Bots: map[string]BotConfig{"aerial": {DiscordToken: "tok", EriURL: "http://eri:8080", SystemChannelID: "111", DefaultOwner: true}},
+}
+
+// restartNext returns restartBase with overlay's non-zero fields applied.
+func restartNext(overlay Config) *Config {
+	next := withField(restartBase, overlay)
+	return &next
+}
+
 func TestRestartRequired(t *testing.T) {
 	t.Parallel()
-	base := Config{
-		Port:                "4020",
-		PostgresURL:         "postgres://a@db/aerial",
-		DiscordToken:        "tok",
-		BotID:               "aerial",
-		BrainURL:            "http://eri:8080",
-		EriURL:              "http://eri:8080",
-		FluxReceiverURL:     "http://flux/hook",
-		KubeAPIServer:       "https://10.0.0.1:443",
-		KubeToken:           "kube",
-		SystemChannelID:     "111",
-		AutoUpdatePRAuthors: []string{"a"},
-		Bots: map[string]BotConfig{
-			"aerial": {DiscordToken: "tok", EriURL: "http://eri:8080", SystemChannelID: "111", DefaultOwner: true},
-		},
-	}
+	aerialBot := restartBase.Bots["aerial"]
+	alerts := []CollaboratorCIAlertRule{{Repo: "acme/aerial", ChannelID: "111", Authors: map[string]string{"dev": "<@1>"}}}
 	tests := []struct {
-		name string
-		next Config
-		want bool
+		name      string
+		old, next *Config
+		want      bool
 	}{
-		{name: "identical config", next: base, want: false},
-		{name: "system channel changes live", next: withField(base, Config{SystemChannelID: "222"}), want: false},
-		{name: "auto-update authors change live", next: withField(base, Config{AutoUpdatePRAuthors: []string{"b"}}), want: false},
-		{name: "default owner changes live", next: withField(base, Config{DefaultOwner: true}), want: false},
-		{name: "collaborator alerts change live", next: withField(base, Config{CollaboratorCIAlerts: []CollaboratorCIAlertRule{{Repo: "azylman/aerial", ChannelID: "111", Authors: map[string]string{"dev": "<@1>"}}}}), want: false},
-		{name: "port requires restart", next: withField(base, Config{Port: "4021"}), want: true},
-		{name: "postgres url requires restart", next: withField(base, Config{PostgresURL: "postgres://b@db/aerial"}), want: true},
-		{name: "discord token requires restart", next: withField(base, Config{DiscordToken: "tok2"}), want: true},
-		{name: "bot id requires restart", next: withField(base, Config{BotID: "marida"}), want: true},
-		{name: "eri url requires restart", next: withField(base, Config{BrainURL: "http://eri2:8080", EriURL: "http://eri2:8080"}), want: true},
-		{name: "flux receiver url requires restart", next: withField(base, Config{FluxReceiverURL: "http://flux2/hook"}), want: true},
-		{name: "kube api server requires restart", next: withField(base, Config{KubeAPIServer: "https://10.0.0.2:443"}), want: true},
-		{name: "kube token requires restart", next: withField(base, Config{KubeToken: "kube2"}), want: true},
-		{name: "nats url requires restart", next: withField(base, Config{NATSURL: "nats://nats2:4222"}), want: true},
-		{name: "k8s auth enabled requires restart", next: withField(base, Config{K8sAuthEnabled: true}), want: true},
-		{name: "bots count mismatch requires restart", next: withField(base, Config{Bots: map[string]BotConfig{"aerial": base.Bots["aerial"], "agent-alpha": {DefaultOwner: true}}}), want: true},
-		{name: "bots value mismatch requires restart", next: withField(base, Config{Bots: map[string]BotConfig{"aerial": {DiscordToken: "different"}}}), want: true},
-		{name: "bots key mismatch requires restart", next: withField(base, Config{Bots: map[string]BotConfig{"agent-alpha": base.Bots["aerial"]}}), want: true},
+		{"nil old config", nil, &restartBase, true},
+		{"nil next config", &restartBase, nil, true},
+		{"identical config", &restartBase, restartNext(Config{}), false},
+		{"system channel changes live", &restartBase, restartNext(Config{SystemChannelID: "222"}), false},
+		{"auto-update authors change live", &restartBase, restartNext(Config{AutoUpdatePRAuthors: []string{"b"}}), false},
+		{"default owner changes live", &restartBase, restartNext(Config{DefaultOwner: true}), false},
+		{"collaborator alerts change live", &restartBase, restartNext(Config{CollaboratorCIAlerts: alerts}), false},
+		{"port requires restart", &restartBase, restartNext(Config{Port: "4021"}), true},
+		{"discord token requires restart", &restartBase, restartNext(Config{DiscordToken: "tok2"}), true},
+		{"bot id requires restart", &restartBase, restartNext(Config{BotID: "agent-gamma"}), true},
+		{"eri url requires restart", &restartBase, restartNext(Config{BrainURL: "http://eri2:8080", EriURL: "http://eri2:8080"}), true},
+		{"kube api server requires restart", &restartBase, restartNext(Config{KubeAPIServer: "https://192.0.2.2:443"}), true},
+		{"kube token requires restart", &restartBase, restartNext(Config{KubeToken: "kube2"}), true},
+		{"nats url requires restart", &restartBase, restartNext(Config{NATSURL: "nats://nats2:4222"}), true},
+		{"restate url requires restart", &restartBase, restartNext(Config{RestateURL: "http://restate2.example:8080"}), true},
+		{"restate pr service requires restart", &restartBase, restartNext(Config{RestatePRService: "PRObject-green"}), true},
+		{"restate repo service requires restart", &restartBase, restartNext(Config{RestateRepoService: "RepoObject-green"}), true},
+		{"github owner requires restart", &restartBase, restartNext(Config{GitHubOwner: "acme"}), true},
+		{"github app id requires restart", &restartBase, restartNext(Config{GitHubAppID: "1111"}), true},
+		{"github app installation id requires restart", &restartBase, restartNext(Config{GitHubAppInstallationID: "2222"}), true},
+		{"k8s auth enabled requires restart", &restartBase, restartNext(Config{K8sAuthEnabled: true}), true},
+		{"bots count mismatch requires restart", &restartBase, restartNext(Config{Bots: map[string]BotConfig{"aerial": aerialBot, "agent-alpha": {DefaultOwner: true}}}), true},
+		{"bots value mismatch requires restart", &restartBase, restartNext(Config{Bots: map[string]BotConfig{"aerial": {DiscordToken: "different"}}}), true},
+		{"bots key mismatch requires restart", &restartBase, restartNext(Config{Bots: map[string]BotConfig{"agent-alpha": aerialBot}}), true},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			old := base
-			next := tc.next
-			if got := RestartRequired(&old, &next); got != tc.want {
+			if got := RestartRequired(tc.old, tc.next); got != tc.want {
 				t.Errorf("RestartRequired() = %v, want %v", got, tc.want)
 			}
 		})
 	}
-
-	if !RestartRequired(nil, &base) || !RestartRequired(&base, nil) {
-		t.Fatal("expected RestartRequired to return true for nil configs")
-	}
 }
 
-func TestLoadConfig_MultiBot(t *testing.T) {
+func TestLoadConfigFromEnvStrict(t *testing.T) {
+	const restateLine = "restate_url: \"http://restate.example:8080\"\n"
 	tests := []struct {
-		name               string
-		yaml               string
-		env                map[string]string
-		wantBots           map[string]BotConfig
-		wantDefaultOwner   string
-		wantK8sAuthEnabled bool
-		wantAPIServerURL   string
+		name           string
+		local          string
+		fallback       string
+		env            map[string]string
+		wantPort       string
+		wantURL        string
+		wantErr        string
+		wantRestateErr bool
 	}{
-		{
-			name: "multi-bot yaml parsing and token env resolution",
-			yaml: `bots:
-  aerial:
-    token_env: "CUSTOM_DISCORD_TOKEN"
-    eri_url: "http://eri-aerial:8088"
-    system_channel_id: "111222"
-    default_owner: true
-  agent-alpha:
-    eri_url: "http://eri-agent-alpha:8088"
-`,
-			env: map[string]string{
-				"CUSTOM_DISCORD_TOKEN":      "tok-aerial",
-				"DISCORD_TOKEN_AGENT-ALPHA": "tok-agent-alpha",
-			},
-			wantBots: map[string]BotConfig{
-				"aerial": {
-					TokenEnv:        "CUSTOM_DISCORD_TOKEN",
-					DiscordToken:    "tok-aerial",
-					EriURL:          "http://eri-aerial:8088",
-					SystemChannelID: "111222",
-					DefaultOwner:    true,
-				},
-				"agent-alpha": {
-					TokenEnv:        "DISCORD_TOKEN_AGENT-ALPHA",
-					DiscordToken:    "tok-agent-alpha",
-					EriURL:          "http://eri-agent-alpha:8088",
-					SystemChannelID: "",
-					DefaultOwner:    false,
-				},
-			},
-			wantDefaultOwner: "aerial",
-		},
-		{
-			name: "fallback synthesis when bots omitted",
-			yaml: `bot_id: "agent-beta"
-default_owner: true
-eri_url: "http://eri-agent-beta:8088"
-system_channel_id: "333444"
-`,
-			env: map[string]string{
-				"DISCORD_TOKEN_AGENT-BETA": "tok-agent-beta",
-			},
-			wantBots: map[string]BotConfig{
-				"agent-beta": {
-					TokenEnv:        "DISCORD_TOKEN_AGENT-BETA",
-					DiscordToken:    "tok-agent-beta",
-					EriURL:          "http://eri-agent-beta:8088",
-					SystemChannelID: "333444",
-					DefaultOwner:    true,
-				},
-			},
-			wantDefaultOwner: "agent-beta",
-		},
-		{
-			name: "fallback synthesis for aerial default and k8s auth enabled",
-			yaml: `default_owner: true
-k8s_auth:
-  api_server_url: "https://k8s.local"
-`,
-			env: map[string]string{
-				"DISCORD_TOKEN":    "aerial-token",
-				"K8S_AUTH_ENABLED": "1",
-			},
-			wantBots: map[string]BotConfig{
-				"aerial": {
-					TokenEnv:        "DISCORD_TOKEN",
-					DiscordToken:    "aerial-token",
-					EriURL:          "http://127.0.0.1:8088",
-					SystemChannelID: "",
-					DefaultOwner:    true,
-				},
-			},
-			wantDefaultOwner:   "aerial",
-			wantK8sAuthEnabled: true,
-			wantAPIServerURL:   "https://k8s.local",
-		},
-		{
-			name: "multi-bot with empty key and implicit aerial default owner",
-			yaml: `bot_id: "nonexistent"
-default_owner: true
-legacy_build_workflows:
-  - repository: "bad"
-bots:
-  "":
-    eri_url: "http://ignore"
-  aerial:
-    system_channel_id: "chan1"
-`,
-			env: map[string]string{
-				"DISCORD_TOKEN": "token-for-aerial",
-			},
-			wantBots: map[string]BotConfig{
-				"aerial": {
-					TokenEnv:        "DISCORD_TOKEN",
-					DiscordToken:    "token-for-aerial",
-					EriURL:          "http://127.0.0.1:8088",
-					SystemChannelID: "chan1",
-					DefaultOwner:    true,
-				},
-			},
-			wantDefaultOwner: "aerial",
-		},
+		{name: "valid yaml loads like LoadConfig", local: "port: \"5050\"\n" + restateLine, wantPort: "5050", wantURL: "http://restate.example:8080"},
+		{name: "valid fallback with empty config path", fallback: restateLine, env: map[string]string{"CONFIG_PATH": ""}, wantPort: "4020", wantURL: "http://restate.example:8080"},
+		{name: "pat credential accepted", local: restateLine + "github_credential: \" PAT \"\n", wantPort: "4020", wantURL: "http://restate.example:8080"},
+		{name: "missing restate url is rejected", local: "port: \"4020\"\n", wantErr: "restate_url is required", wantRestateErr: true},
+		{name: "blank restate url is rejected", local: "restate_url: \"   \"\n", wantErr: "restate_url is required", wantRestateErr: true},
+		{name: "RESTATE_URL env never injects the endpoint", local: "port: \"4020\"\n", env: map[string]string{"RESTATE_URL": "http://evil.example:8080"}, wantErr: "restate_url is required", wantRestateErr: true},
+		{name: "zero-byte local file without fallback requires restate url", wantErr: "restate_url is required", wantRestateErr: true},
+		{name: "invalid github_credential rejected", local: restateLine + "github_credential: token\n", wantErr: `github_credential "token" is not app or pat`},
+		{name: "invalid yaml rejected", local: "invalid: [yaml", wantErr: "failed to parse yaml config at DIR/synapse.yaml: yaml: line 1: did not find expected ',' or ']'"},
+		{name: "type-mismatched yaml rejected", local: restateLine + "bots: [\"not-a-map\"]\n", wantErr: "failed to parse yaml config at DIR/synapse.yaml: yaml: unmarshal errors:\n  line 2: cannot unmarshal !!seq into map[string]config.BotConfig"},
+		{name: "invalid fallback yaml rejected", fallback: "port: [4088\n", env: map[string]string{"CONFIG_PATH": ""}, wantErr: "failed to parse yaml config at DIR/fallback.yaml: yaml: line 1: did not find expected ',' or ']'"},
 	}
-
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			tmpDir := t.TempDir()
-			oldAerial := SynapseAerialConfigPath
-			SynapseAerialConfigPath = filepath.Join(tmpDir, "nonexistent-config.yaml")
-			t.Cleanup(func() { SynapseAerialConfigPath = oldAerial })
-
-			cfgPath := filepath.Join(tmpDir, "synapse.yaml")
-			if err := os.WriteFile(cfgPath, []byte(tc.yaml), 0o644); err != nil {
-				t.Fatalf("WriteFile failed: %v", err)
+			dir := loadConfigFiles(t, tc.local, tc.fallback, "", tc.env)
+			got, err := LoadConfigFromEnvStrict()
+			gotErr := ""
+			if err != nil {
+				gotErr = strings.ReplaceAll(err.Error(), dir, "DIR")
 			}
-			for _, k := range synapseConfigKeysToClear {
-				t.Setenv(k, "")
+			if gotErr != tc.wantErr || errors.Is(err, ErrRestateURLRequired) != tc.wantRestateErr {
+				t.Fatalf("LoadConfigFromEnvStrict() err = %q (restate sentinel %v), want %q (%v)", gotErr, errors.Is(err, ErrRestateURLRequired), tc.wantErr, tc.wantRestateErr)
 			}
-			for k, v := range tc.env {
-				t.Setenv(k, v)
+			var gotPort, gotURL string
+			if got != nil {
+				gotPort, gotURL = got.Port, got.RestateURL
+				if want := LoadConfigFromEnv(); !reflect.DeepEqual(*got, want) {
+					t.Errorf("LoadConfigFromEnvStrict() = %+v, want LoadConfigFromEnv result %+v", *got, want)
+				}
 			}
-			cfg := LoadConfig(cfgPath)
-			assertLoadedMultiBotConfig(t, cfg, tc.wantBots, tc.wantDefaultOwner, tc.wantK8sAuthEnabled, tc.wantAPIServerURL)
+			if gotPort != tc.wantPort || gotURL != tc.wantURL {
+				t.Errorf("Port, RestateURL = %q, %q, want %q, %q", gotPort, gotURL, tc.wantPort, tc.wantURL)
+			}
 		})
-	}
-}
-
-func assertLoadedMultiBotConfig(t *testing.T, cfg Config, wantBots map[string]BotConfig, wantOwner string, wantK8sAuth bool, wantAPIServerURL string) {
-	t.Helper()
-	if len(cfg.Bots) != len(wantBots) {
-		t.Fatalf("len(cfg.Bots) = %d, want %d: %+v", len(cfg.Bots), len(wantBots), cfg.Bots)
-	}
-	for botID, wantBot := range wantBots {
-		gotBot, ok := cfg.Bots[botID]
-		if !ok {
-			t.Errorf("missing bot %q in cfg.Bots", botID)
-			continue
-		}
-		assertBotConfig(t, botID, gotBot, wantBot)
-	}
-	if gotOwner := cfg.DefaultOwnerAgent(); gotOwner != wantOwner {
-		t.Errorf("DefaultOwnerAgent() = %q, want %q", gotOwner, wantOwner)
-	}
-	if wantK8sAuth != cfg.K8sAuthEnabled {
-		t.Errorf("K8sAuthEnabled = %v, want %v", cfg.K8sAuthEnabled, wantK8sAuth)
-	}
-	if wantAPIServerURL != "" && cfg.K8sAuthConfig.APIServerURL != wantAPIServerURL {
-		t.Errorf("APIServerURL = %q, want %q", cfg.K8sAuthConfig.APIServerURL, wantAPIServerURL)
 	}
 }
 
@@ -748,31 +373,6 @@ func TestDefaultOwnerAgent(t *testing.T) {
 	}
 }
 
-func TestLoadConfigFromEnvStrict(t *testing.T) {
-	tmpDir := t.TempDir()
-	validYAML := filepath.Join(tmpDir, "valid.yaml")
-	if err := os.WriteFile(validYAML, []byte("port: \"5050\"\n"), 0o644); err != nil {
-		t.Fatalf("WriteFile: %v", err)
-	}
-
-	t.Setenv("PORT", "")
-	t.Setenv("CONFIG_PATH", validYAML)
-	cfg, err := LoadConfigFromEnvStrict()
-	if err != nil {
-		t.Fatalf("LoadConfigFromEnvStrict() err = %v", err)
-	}
-	if cfg == nil || cfg.Port != "5050" {
-		t.Errorf("cfg.Port = %v, want 5050", cfg)
-	}
-
-	invalidYAML := filepath.Join(tmpDir, "invalid.yaml")
-	_ = os.WriteFile(invalidYAML, []byte("bad: [yaml"), 0o644)
-	t.Setenv("CONFIG_PATH", invalidYAML)
-	if _, err := LoadConfigFromEnvStrict(); err == nil {
-		t.Errorf("expected error from LoadConfigFromEnvStrict on bad yaml")
-	}
-}
-
 func TestNormalizeCollaboratorCIAlerts(t *testing.T) {
 	t.Parallel()
 
@@ -780,6 +380,7 @@ func TestNormalizeCollaboratorCIAlerts(t *testing.T) {
 
 	tests := []struct {
 		name  string
+		owner string
 		rules []CollaboratorCIAlertRule
 		want  []CollaboratorCIAlertRule
 	}{
@@ -803,7 +404,8 @@ func TestNormalizeCollaboratorCIAlerts(t *testing.T) {
 			want: nil,
 		},
 		{
-			name: "normalizes valid rules and lowercases author logins",
+			name:  "normalizes valid rules and lowercases author logins",
+			owner: "acme",
 			rules: []CollaboratorCIAlertRule{
 				{
 					Repo:      " mirrormere ",
@@ -816,7 +418,7 @@ func TestNormalizeCollaboratorCIAlerts(t *testing.T) {
 			},
 			want: []CollaboratorCIAlertRule{
 				{
-					Repo:      "azylman/mirrormere",
+					Repo:      "acme/mirrormere",
 					ChannelID: "123456789012345678",
 					Authors: map[string]string{
 						"collaborator-user": "<@111222>",
@@ -824,12 +426,23 @@ func TestNormalizeCollaboratorCIAlerts(t *testing.T) {
 				},
 			},
 		},
+		{
+			name:  "qualified rule repo keeps its owner",
+			owner: "acme",
+			rules: []CollaboratorCIAlertRule{{Repo: "x/y", ChannelID: "123456789012345678", Authors: map[string]string{"user": "<@1>"}}},
+			want:  []CollaboratorCIAlertRule{{Repo: "x/y", ChannelID: "123456789012345678", Authors: map[string]string{"user": "<@1>"}}},
+		},
+		{
+			name:  "empty owner keeps bare rule repo",
+			rules: []CollaboratorCIAlertRule{{Repo: "aerial", ChannelID: "123456789012345678", Authors: map[string]string{"user": "<@1>"}}},
+			want:  []CollaboratorCIAlertRule{{Repo: "aerial", ChannelID: "123456789012345678", Authors: map[string]string{"user": "<@1>"}}},
+		},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			got := NormalizeCollaboratorCIAlerts(tc.rules)
+			got := NormalizeCollaboratorCIAlerts(tc.owner, tc.rules)
 			if !reflect.DeepEqual(got, tc.want) {
 				t.Errorf("NormalizeCollaboratorCIAlerts() = %+v, want %+v", got, tc.want)
 			}
@@ -842,14 +455,14 @@ func TestLookupCollaboratorCIAlert(t *testing.T) {
 
 	rules := []CollaboratorCIAlertRule{
 		{
-			Repo:      "azylman/mirrormere",
+			Repo:      "acme/mirrormere",
 			ChannelID: "123456789012345678",
 			Authors: map[string]string{
 				"collaborator-user": "<@111222>",
 			},
 		},
 	}
-	cfg := Config{CollaboratorCIAlerts: rules}
+	cfg := Config{GitHubOwner: "acme", CollaboratorCIAlerts: rules}
 
 	tests := []struct {
 		name          string
@@ -938,42 +551,26 @@ func TestLookupCollaboratorCIAlert(t *testing.T) {
 	}
 }
 
-func assertBotConfig(t *testing.T, botID string, got, want BotConfig) {
-	t.Helper()
-	if got.TokenEnv != want.TokenEnv {
-		t.Errorf("bot %q TokenEnv = %q, want %q", botID, got.TokenEnv, want.TokenEnv)
-	}
-	if got.DiscordToken != want.DiscordToken {
-		t.Errorf("bot %q DiscordToken = %q, want %q", botID, got.DiscordToken, want.DiscordToken)
-	}
-	if got.EriURL != want.EriURL {
-		t.Errorf("bot %q EriURL = %q, want %q", botID, got.EriURL, want.EriURL)
-	}
-	if got.SystemChannelID != want.SystemChannelID {
-		t.Errorf("bot %q SystemChannelID = %q, want %q", botID, got.SystemChannelID, want.SystemChannelID)
-	}
-	if got.DefaultOwner != want.DefaultOwner {
-		t.Errorf("bot %q DefaultOwner = %v, want %v", botID, got.DefaultOwner, want.DefaultOwner)
-	}
-}
-
-func TestNormalizeLegacyBuildWorkflows(t *testing.T) {
+func TestNormalizeGitHubCredential(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
-		name, repo, path, sha string
-		valid                 bool
+		name   string
+		raw    string
+		want   string
+		wantOK bool
 	}{
-		{"valid", "owner/repo", ".github/workflows/ci.yml", "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", true},
-		{"bad repo", "repo", ".github/workflows/ci.yml", "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", false},
-		{"traversal", "owner/repo", ".github/workflows/../ci.yml", "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", false},
-		{"bad hash", "owner/repo", ".github/workflows/ci.yml", "main", false},
+		{name: "empty selects app", raw: "", want: "app", wantOK: true},
+		{name: "whitespace selects app", raw: "   ", want: "app", wantOK: true},
+		{name: "app", raw: "app", want: "app", wantOK: true},
+		{name: "upper pat", raw: " PAT ", want: "pat", wantOK: true},
+		{name: "unknown value", raw: "Token", want: "token", wantOK: false},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			_, err := NormalizeLegacyBuildWorkflows([]LegacyBuildWorkflow{{Repository: tc.repo, WorkflowPath: tc.path, BlobSHA: tc.sha}})
-			if (err == nil) != tc.valid {
-				t.Fatalf("err=%v", err)
+			got, ok := NormalizeGitHubCredential(tc.raw)
+			if got != tc.want || ok != tc.wantOK {
+				t.Errorf("NormalizeGitHubCredential(%q) = (%q, %v), want (%q, %v)", tc.raw, got, ok, tc.want, tc.wantOK)
 			}
 		})
 	}

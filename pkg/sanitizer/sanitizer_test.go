@@ -4,6 +4,7 @@ import (
 	"encoding/base64"
 	"os"
 	"path/filepath"
+	"regexp"
 	"slices"
 	"strings"
 	"testing"
@@ -17,6 +18,13 @@ func TestSanitizeString_Tokens_TableDriven(t *testing.T) {
 	b64Std := base64.StdEncoding.EncodeToString([]byte(rawSecret))
 	b64Raw := base64.RawStdEncoding.EncodeToString([]byte(rawSecret))
 	b64GitBasic := base64.StdEncoding.EncodeToString([]byte("x-access-token:" + rawPAT))
+	rawPlainKey := "plain_api_key_value_77"
+	b64GitBasicPlain := base64.StdEncoding.EncodeToString([]byte("x-access-token:" + rawPlainKey))
+	rawRefresh := "1//refresh_tok_abcdef_9876"
+	rawAccess := "ya29.access_tok_value_5555"
+	jsonCred := `{"client_id":"client-id-value-1234.apps","token_uri":"https://oauth2.example.test/token",` +
+		`"token_type":"Bearer","scopes":["scope-one-value"],"id_token_email":"someone@example.test",` +
+		`"refresh_token":"` + rawRefresh + `","nested":{"items":[{"access_token":"` + rawAccess + `"}]},"api_key":"short"}`
 
 	tests := []struct {
 		name     string
@@ -24,95 +32,91 @@ func TestSanitizeString_Tokens_TableDriven(t *testing.T) {
 		input    string
 		expected string
 	}{
+		{"empty string", []string{rawSecret}, "", ""},
 		{
-			name:     "empty string",
-			tokens:   []string{rawSecret},
-			input:    "",
-			expected: "",
+			"clean text and technical prose without registered secrets",
+			[]string{rawSecret},
+			"Where they stop at basic containers, foreign_key: user_id, and Bearer concepts.",
+			"Where they stop at basic containers, foreign_key: user_id, and Bearer concepts.",
 		},
 		{
-			name:     "clean text and technical prose without registered secrets",
-			tokens:   []string{rawSecret},
-			input:    "Where they stop at basic containers, foreign_key: user_id, and Bearer concepts.",
-			expected: "Where they stop at basic containers, foreign_key: user_id, and Bearer concepts.",
+			"exact registered secret redacted",
+			[]string{rawPAT, rawSecret},
+			"Error using token " + rawPAT + " and " + rawSecret + " to access repo",
+			"Error using token [REDACTED] and [REDACTED] to access repo",
 		},
 		{
-			name:     "exact registered secret redacted",
-			tokens:   []string{rawPAT, rawSecret},
-			input:    "Error using token " + rawPAT + " and " + rawSecret + " to access repo",
-			expected: "Error using token [REDACTED] and [REDACTED] to access repo",
+			"base64 std and raw encoded secret redacted",
+			[]string{rawSecret},
+			"Encoded std=" + b64Std + " and raw=" + b64Raw + " in payload",
+			"Encoded std=[REDACTED]== and raw=[REDACTED] in payload",
 		},
 		{
-			name:     "base64 std and raw encoded secret redacted",
-			tokens:   []string{rawSecret},
-			input:    "Encoded std=" + b64Std + " and raw=" + b64Raw + " in payload",
-			expected: "Encoded std=[REDACTED] and raw=[REDACTED] in payload",
+			"git http basic auth x-access-token base64 redacted for github token",
+			[]string{rawPAT},
+			"-c http.extraHeader=AUTHORIZATION: basic " + b64GitBasic,
+			"-c http.extraHeader=AUTHORIZATION: basic [REDACTED]=",
 		},
 		{
-			name:     "git http basic auth x-access-token base64 redacted",
-			tokens:   []string{rawPAT},
-			input:    "-c http.extraHeader=AUTHORIZATION: basic " + b64GitBasic,
-			expected: "-c http.extraHeader=AUTHORIZATION: basic [REDACTED]",
+			"non-github value has no git basic auth variant but its aligned base64 still masks",
+			[]string{rawPlainKey},
+			"basic " + b64GitBasicPlain,
+			"basic eC1hY2Nlc3MtdG9rZW46[REDACTED]==",
 		},
 		{
-			name:     "url-escaped secret password redacted",
-			tokens:   []string{rawSpecialPass},
-			input:    "Connecting to postgresql://aerial_user:super_secret_p%40ss%23word@db.internal.net:5432/aerial_db?sslmode=disable",
-			expected: "Connecting to postgresql://aerial_user:[REDACTED]@db.internal.net:5432/aerial_db?sslmode=disable",
+			"json object secret registers credential leaves only",
+			[]string{jsonCred},
+			"refresh " + rawRefresh + " access " + rawAccess + " uri https://oauth2.example.test/token client client-id-value-1234.apps",
+			"refresh [REDACTED] access [REDACTED] uri https://oauth2.example.test/token client client-id-value-1234.apps",
 		},
 		{
-			name:     "password extracted from registered database uri",
-			tokens:   []string{rawDBURI, "https://example.com/no-user", "postgresql://user_only@db.internal.net:5432/db", "://invalid-uri"},
-			input:    "Password leaked: uri_embedded_pass_9876 in trace",
-			expected: "Password leaked: [REDACTED] in trace",
+			"json object leaf gets encoded variants",
+			[]string{jsonCred},
+			"enc " + base64.StdEncoding.EncodeToString([]byte(rawRefresh)) + " esc " + strings.ReplaceAll(rawRefresh, "/", "%2F"),
+			"enc [REDACTED]= esc [REDACTED]",
 		},
 		{
-			name:     "password with space in database uri redacted using userinfo encoding",
-			tokens:   []string{"secret pass"},
-			input:    "Connecting to postgresql://aerial_user:secret%20pass@db.internal.net:5432/aerial_db?sslmode=disable",
-			expected: "Connecting to postgresql://aerial_user:[REDACTED]@db.internal.net:5432/aerial_db?sslmode=disable",
+			"url-escaped secret password redacted",
+			[]string{rawSpecialPass},
+			"Connecting to postgresql://aerial_user:super_secret_p%40ss%23word@db.internal.net:5432/aerial_db?sslmode=disable",
+			"Connecting to postgresql://aerial_user:[REDACTED]@db.internal.net:5432/aerial_db?sslmode=disable",
 		},
 		{
-			name:     "unregistered github token redacted via pattern",
-			tokens:   nil,
-			input:    "Found leak: ghp_1234567890abcdefghijklmnopqrstuvwxyz",
-			expected: "Found leak: [REDACTED]",
+			"password extracted from registered database uri",
+			[]string{rawDBURI, "https://example.com/no-user", "postgresql://user_only@db.internal.net:5432/db", "://invalid-uri"},
+			"Password leaked: uri_embedded_pass_9876 in trace", "Password leaked: [REDACTED] in trace",
 		},
 		{
-			name:     "unregistered x-access-token auth redacted via pattern",
-			tokens:   nil,
-			input:    "push failed: https://x-access-token:my_secret_token@github.com/repo",
-			expected: "push failed: https://[REDACTED]@github.com/repo",
+			"password with space in database uri redacted using userinfo encoding",
+			[]string{"secret pass"},
+			"Connecting to postgresql://aerial_user:secret%20pass@db.internal.net:5432/aerial_db?sslmode=disable",
+			"Connecting to postgresql://aerial_user:[REDACTED]@db.internal.net:5432/aerial_db?sslmode=disable",
+		},
+		{"unregistered github token redacted via pattern", nil, "Found leak: ghp_1234567890abcdefghijklmnopqrstuvwxyz", "Found leak: [REDACTED]"},
+		{
+			"unregistered x-access-token auth redacted via pattern", nil, "push failed: https://x-access-token:my_secret_token@github.com/repo",
+			"push failed: https://[REDACTED]@github.com/repo",
 		},
 		{
-			name:     "unregistered discord webhook url redacted via pattern",
-			tokens:   nil,
-			input:    "Webhook: https://discord.com/api/webhooks/123456789/abcdefghij-klmn alert",
-			expected: "Webhook: [REDACTED] alert",
+			"unregistered discord webhook url redacted via pattern", nil, "Webhook: https://discord.com/api/webhooks/123456789/abcdefghij-klmn alert",
+			"Webhook: [REDACTED] alert",
 		},
 		{
-			name:     "unregistered openai and anthropic key redacted via pattern",
-			tokens:   nil,
-			input:    "API key: sk-proj-abcdefghijklmnopqrstuvwxyz in environment",
-			expected: "API key: [REDACTED] in environment",
+			"unregistered openai and anthropic key redacted via pattern", nil, "API key: sk-proj-abcdefghijklmnopqrstuvwxyz in environment",
+			"API key: [REDACTED] in environment",
 		},
 		{
-			name:     "unregistered google api key redacted via pattern",
-			tokens:   nil,
-			input:    "Google key: AIzaSyD-1234567890abcdefghijklmnopqrstuv used",
-			expected: "Google key: [REDACTED] used",
+			"unregistered google api key redacted via pattern", nil, "Google key: AIzaSyD-1234567890abcdefghijklmnopqrstuv used",
+			"Google key: [REDACTED] used",
 		},
 		{
-			name:     "unregistered discord mfa token redacted via pattern",
-			tokens:   nil,
-			input:    "Session token: mfa.abcdefghijklmnopqrstuvwxyz0123456789 active",
-			expected: "Session token: [REDACTED] active",
+			"unregistered discord mfa token redacted via pattern", nil, "Session token: mfa.abcdefghijklmnopqrstuvwxyz0123456789 active",
+			"Session token: [REDACTED] active",
 		},
 		{
-			name:     "unregistered jwt token redacted via pattern",
-			tokens:   nil,
-			input:    "Auth token: eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.abcdefghijklmnopqrstuvwxyz0123456789",
-			expected: "Auth token: [REDACTED]",
+			"unregistered jwt token redacted via pattern", nil,
+			"Auth token: eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.abcdefghijklmnopqrstuvwxyz0123456789",
+			"Auth token: [REDACTED]",
 		},
 	}
 
@@ -130,93 +134,29 @@ func TestSanitizeString_Tokens_TableDriven(t *testing.T) {
 	}
 }
 
-func TestSanitizeLog_TableDriven(t *testing.T) {
-	rawPAT := "ghp_" + "abcdefghijklmnopqrstuvwxyz123456"
-	rawSecret := "my_special_pat_token"
-	b64Secret := base64.StdEncoding.EncodeToString([]byte(rawSecret))
-
-	tests := []struct {
-		name     string
-		tokens   []string
-		input    string
-		expected string
-	}{
-		{
-			name:     "empty log",
-			tokens:   []string{rawPAT},
-			input:    "",
-			expected: "",
-		},
-		{
-			name:     "registered pat in log",
-			tokens:   []string{rawPAT},
-			input:    "fatal: could not read from remote repo " + rawPAT,
-			expected: "fatal: could not read from remote repo [REDACTED_TOKEN]",
-		},
-		{
-			name:     "base64 encoded secret in log",
-			tokens:   []string{rawSecret},
-			input:    "failed command with encoded PAT: " + b64Secret,
-			expected: "failed command with encoded PAT: [REDACTED_TOKEN]",
-		},
-	}
-
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			ResetSensitiveTokensForTest()
-			defer ResetSensitiveTokensForTest()
-			RegisterSensitiveTokens(tc.tokens...)
-
-			got := SanitizeLog(tc.input)
-			if got != tc.expected {
-				t.Errorf("SanitizeLog(%q) = %q, want %q", tc.input, got, tc.expected)
-			}
-		})
-	}
-}
-
-func assertStringTransformTable(t *testing.T, tests []struct {
-	name     string
-	input    string
-	expected string
-}, fn func(string) string,
-) {
-	t.Helper()
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			got := fn(tc.input)
-			if got != tc.expected {
-				t.Errorf("transform(%q) = %q, want %q", tc.input, got, tc.expected)
-			}
-		})
-	}
-}
-
 func TestSanitizeMentions_TableDriven(t *testing.T) {
 	t.Parallel()
 
-	assertStringTransformTable(t, []struct {
+	tests := []struct {
 		name     string
 		input    string
 		expected string
 	}{
-		{
-			name:     "empty",
-			input:    "",
-			expected: "",
-		},
-		{
-			name:     "user and role mentions",
-			input:    "Hello <@12345678> and <@!87654321> and <@&11223344>!",
-			expected: "Hello  and  and !",
-		},
-		{
-			name:     "channel and broadcast mentions",
-			input:    "Check <#99887766> @everyone and @here right now",
-			expected: "Check   and  right now",
-		},
-	}, SanitizeMentions)
+		{"empty", "", ""},
+		{"user and role mentions", "Hello <@12345678> and <@!87654321> and <@&11223344>!", "Hello  and  and !"},
+		{"channel and broadcast mentions", "Check <#99887766> @everyone and @here right now", "Check   and  right now"},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			got := SanitizeMentions(tc.input)
+			if got != tc.expected {
+				t.Errorf("SanitizeMentions(%q) = %q, want %q", tc.input, got, tc.expected)
+			}
+		})
+	}
 }
 
 func TestNormalizeWhitespace_TableDriven(t *testing.T) {
@@ -227,16 +167,8 @@ func TestNormalizeWhitespace_TableDriven(t *testing.T) {
 		input    string
 		expected string
 	}{
-		{
-			name:     "empty",
-			input:    "",
-			expected: "",
-		},
-		{
-			name:     "tabs, newlines and multiple spaces",
-			input:    "   hello \t\t world \n\n this is \r a   test   ",
-			expected: "hello world this is a test",
-		},
+		{"empty", "", ""},
+		{"tabs, newlines and multiple spaces", "   hello \t\t world \n\n this is \r a   test   ", "hello world this is a test"},
 	}
 
 	for _, tc := range tests {
@@ -259,26 +191,10 @@ func TestSanitizePromptTags_TableDriven(t *testing.T) {
 		input    string
 		expected string
 	}{
-		{
-			name:     "empty",
-			input:    "",
-			expected: "",
-		},
-		{
-			name:     "opening and closing user request",
-			input:    "<user_request>execute task</user_request>",
-			expected: "<\\USER_REQUEST>execute task<\\/USER_REQUEST>",
-		},
-		{
-			name:     "channel instructions self-closing",
-			input:    "<channel_instructions />",
-			expected: "<\\/CHANNEL_INSTRUCTIONS>",
-		},
-		{
-			name:     "unknown tag left intact",
-			input:    "<custom_tag>hello</custom_tag>",
-			expected: "<custom_tag>hello</custom_tag>",
-		},
+		{"empty", "", ""},
+		{"opening and closing user request", "<user_request>execute task</user_request>", "<\\USER_REQUEST>execute task<\\/USER_REQUEST>"},
+		{"channel instructions self-closing", "<channel_instructions />", "<\\/CHANNEL_INSTRUCTIONS>"},
+		{"unknown tag left intact", "<custom_tag>hello</custom_tag>", "<custom_tag>hello</custom_tag>"},
 	}
 
 	for _, tc := range tests {
@@ -296,31 +212,26 @@ func TestSanitizePromptTags_TableDriven(t *testing.T) {
 func TestSanitizeAuthor_TableDriven(t *testing.T) {
 	t.Parallel()
 
-	assertStringTransformTable(t, []struct {
+	tests := []struct {
 		name     string
 		input    string
 		expected string
 	}{
-		{
-			name:     "empty",
-			input:    "",
-			expected: "",
-		},
-		{
-			name:     "author with newlines and angle brackets",
-			input:    "  <Evil\nAuthor\r>  ",
-			expected: "EvilAuthor",
-		},
-		{
-			name:     "clean author",
-			input:    "NormalUser#1234",
-			expected: "NormalUser#1234",
-		},
-	}, SanitizeAuthor)
-}
+		{"empty", "", ""},
+		{"author with newlines and angle brackets", "  <Evil\nAuthor\r>  ", "EvilAuthor"},
+		{"clean author", "NormalUser#1234", "NormalUser#1234"},
+	}
 
-func resetSensitiveTokens() {
-	ResetSensitiveTokensForTest()
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			got := SanitizeAuthor(tc.input)
+			if got != tc.expected {
+				t.Errorf("SanitizeAuthor(%q) = %q, want %q", tc.input, got, tc.expected)
+			}
+		})
+	}
 }
 
 func TestMaskTokenSample_TableDriven(t *testing.T) {
@@ -359,48 +270,23 @@ func TestMatchSensitiveTokens_TableDriven(t *testing.T) {
 		input    string
 		expected []string
 	}{
+		{"empty input", []string{"secret_token_123"}, "", nil},
+		{"no registered tokens", nil, "safe string", nil},
+		{"no matches", []string{"secret_token_123"}, "completely safe string", nil},
+		{"single match", []string{"secret_token_123"}, "error: secret_token_123 failed", []string{"se***23"}},
 		{
-			name:     "empty input",
-			tokens:   []string{"secret_token_123"},
-			input:    "",
-			expected: nil,
+			"base64 encoded match deduplicated against raw unpadded prefix",
+			[]string{"secret_token_123"},
+			"error: " + b64Sample + " failed",
+			[]string{"c2***Mw"},
 		},
 		{
-			name:     "no registered tokens",
-			tokens:   nil,
-			input:    "safe string",
-			expected: nil,
+			"multiple matches deduplicated and longest first",
+			[]string{"token_alpha_long", "token_beta_longer_value", "token_short"},
+			"contains token_alpha_long and token_beta_longer_value",
+			[]string{"to***ue", "to***ng"},
 		},
-		{
-			name:     "no matches",
-			tokens:   []string{"secret_token_123"},
-			input:    "completely safe string",
-			expected: nil,
-		},
-		{
-			name:     "single match",
-			tokens:   []string{"secret_token_123"},
-			input:    "error: secret_token_123 failed",
-			expected: []string{"se***23"},
-		},
-		{
-			name:     "base64 encoded match deduplicated against raw unpadded prefix",
-			tokens:   []string{"secret_token_123"},
-			input:    "error: " + b64Sample + " failed",
-			expected: []string{MaskTokenSample(b64Sample)},
-		},
-		{
-			name:     "multiple matches deduplicated and longest first",
-			tokens:   []string{"token_alpha_long", "token_beta_longer_value", "token_short"},
-			input:    "contains token_alpha_long and token_beta_longer_value",
-			expected: []string{"to***ue", "to***ng"},
-		},
-		{
-			name:     "short token masked as [REDACTED]",
-			tokens:   []string{"123456", "abcd"},
-			input:    "123456 and abcd",
-			expected: []string{"12***56", "[REDACTED]"},
-		},
+		{"short token masked as [REDACTED]", []string{"123456", "abcd"}, "123456 and abcd", []string{"12***56", "[REDACTED]"}},
 	}
 
 	for _, tc := range tests {
@@ -408,9 +294,7 @@ func TestMatchSensitiveTokens_TableDriven(t *testing.T) {
 			ResetSensitiveTokensForTest()
 			defer ResetSensitiveTokensForTest()
 
-			if len(tc.tokens) > 0 {
-				RegisterSensitiveTokens(tc.tokens...)
-			}
+			RegisterSensitiveTokens(tc.tokens...)
 			got := MatchSensitiveTokens(tc.input)
 			if !slices.Equal(got, tc.expected) {
 				t.Errorf("MatchSensitiveTokens(%q) = %v, want %v", tc.input, got, tc.expected)
@@ -419,68 +303,39 @@ func TestMatchSensitiveTokens_TableDriven(t *testing.T) {
 	}
 }
 
-func TestResetSensitiveTokensForTest_TableDriven(t *testing.T) {
-	tests := []struct {
-		name  string
-		token string
-		input string
-	}{
-		{
-			name:  "token cleared after reset",
-			token: "my_temporary_secret_token_999",
-			input: "log with my_temporary_secret_token_999",
-		},
-	}
-
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			ResetSensitiveTokensForTest()
-			RegisterSensitiveTokens(tc.token)
-			if len(MatchSensitiveTokens(tc.input)) == 0 {
-				t.Fatalf("expected token %q to match before reset", tc.token)
-			}
-			ResetSensitiveTokensForTest()
-			if len(MatchSensitiveTokens(tc.input)) != 0 {
-				t.Fatalf("expected token %q to NOT match after reset", tc.token)
-			}
-		})
-	}
-}
-
 func TestRegisterSensitiveTokens_TableDriven(t *testing.T) {
 	// Not t.Parallel() because it mutates global sensitive tokens state
 	tests := []struct {
-		name         string
-		tokens       []string
-		input        string
-		shouldRedact []string
+		name   string
+		tokens []string
+		input  string
+		want   string
 	}{
 		{
-			name:         "short token ignored and valid token registered",
-			tokens:       []string{"abc", "   ", "my_super_secret_dynamic_token_123"},
-			input:        "failed with my_super_secret_dynamic_token_123 and abc",
-			shouldRedact: []string{"my_super_secret_dynamic_token_123"},
+			"short token ignored and valid token registered",
+			[]string{"abc", "   ", "my_super_secret_dynamic_token_123"},
+			"failed with my_super_secret_dynamic_token_123 and abc", "failed with [REDACTED] and abc",
 		},
 		{
-			name:         "multiple tokens sorted by length",
-			tokens:       []string{"secret_token_long", "secret_token_longer_value"},
-			input:        "values: secret_token_longer_value and secret_token_long",
-			shouldRedact: []string{"secret_token_longer_value", "secret_token_long"},
+			"multiple tokens sorted by length",
+			[]string{"secret_token_long", "secret_token_longer_value"},
+			"values: secret_token_longer_value and secret_token_long", "values: [REDACTED] and [REDACTED]",
+		},
+		{
+			"runtime github app installation token keeps git basic auth variant",
+			[]string{"ghs_inst_123"},
+			"basic " + base64.StdEncoding.EncodeToString([]byte("x-access-token:ghs_inst_123")), "basic [REDACTED]",
 		},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			resetSensitiveTokens()
-			defer resetSensitiveTokens()
+			ResetSensitiveTokensForTest()
+			defer ResetSensitiveTokensForTest()
 
 			RegisterSensitiveTokens(tc.tokens...)
-			got := SanitizeString(tc.input)
-
-			for _, redacted := range tc.shouldRedact {
-				if strings.Contains(got, redacted) {
-					t.Errorf("expected %q to be redacted from %q", redacted, got)
-				}
+			if got := SanitizeString(tc.input); got != tc.want {
+				t.Errorf("SanitizeString(%q) = %q, want %q", tc.input, got, tc.want)
 			}
 		})
 	}
@@ -489,59 +344,39 @@ func TestRegisterSensitiveTokens_TableDriven(t *testing.T) {
 func TestReplaceSensitiveTokens_TableDriven(t *testing.T) {
 	// Not t.Parallel() because it mutates global sensitive tokens state
 	tests := []struct {
-		name            string
-		initialTokens   []string
-		replacedTokens  []string
-		input           string
-		shouldRedact    []string
-		shouldNotRedact []string
+		name           string
+		initialTokens  []string
+		replacedTokens []string
+		input          string
+		want           string
 	}{
 		{
-			name:            "replaced tokens purge prior registered secrets",
-			initialTokens:   []string{"mycustomsecret_old_1111", "mycustomsecret_preserved_2222"},
-			replacedTokens:  []string{"mycustomsecret_preserved_2222", "mycustomsecret_new_3333"},
-			input:           "values: mycustomsecret_old_1111 and mycustomsecret_preserved_2222 and mycustomsecret_new_3333",
-			shouldRedact:    []string{"mycustomsecret_preserved_2222", "mycustomsecret_new_3333"},
-			shouldNotRedact: []string{"mycustomsecret_old_1111"},
+			name: "replaced tokens purge prior registered secrets", initialTokens: []string{"mycustomsecret_old_1111", "mycustomsecret_preserved_2222"},
+			replacedTokens: []string{"mycustomsecret_preserved_2222", "mycustomsecret_new_3333"},
+			input:          "values: mycustomsecret_old_1111 and mycustomsecret_preserved_2222 and mycustomsecret_new_3333",
+			want:           "values: mycustomsecret_old_1111 and [REDACTED] and [REDACTED]",
 		},
 		{
-			name:            "empty replacement clears all registered tokens",
-			initialTokens:   []string{"mycustomsecret_purged_9999"},
-			replacedTokens:  nil,
-			input:           "plain text with mycustomsecret_purged_9999 included",
-			shouldRedact:    nil,
-			shouldNotRedact: []string{"mycustomsecret_purged_9999"},
+			name: "empty replacement clears all registered tokens", initialTokens: []string{"mycustomsecret_purged_9999"},
+			input: "plain text with mycustomsecret_purged_9999 included", want: "plain text with mycustomsecret_purged_9999 included",
 		},
 		{
-			name:            "replacement filters short tokens and sorts longest first",
-			initialTokens:   []string{"mycustomsecret_initial_0000"},
-			replacedTokens:  []string{"short", "shorter_val", "longest_replacement_mycustomsecret", "abc", "   "},
-			input:           "items: longest_replacement_mycustomsecret and shorter_val and short and abc and mycustomsecret_initial_0000",
-			shouldRedact:    []string{"longest_replacement_mycustomsecret", "shorter_val", "short"},
-			shouldNotRedact: []string{"mycustomsecret_initial_0000", "abc"},
+			name: "replacement filters short tokens and sorts longest first", initialTokens: []string{"mycustomsecret_initial_0000"},
+			replacedTokens: []string{"short", "shorter_val", "longest_replacement_mycustomsecret", "abc", "   "},
+			input:          "items: longest_replacement_mycustomsecret and shorter_val and short and abc and mycustomsecret_initial_0000",
+			want:           "items: [REDACTED] and [REDACTED] and [REDACTED] and abc and mycustomsecret_initial_0000",
 		},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			resetSensitiveTokens()
-			defer resetSensitiveTokens()
+			ResetSensitiveTokensForTest()
+			defer ResetSensitiveTokensForTest()
 
-			if len(tc.initialTokens) > 0 {
-				RegisterSensitiveTokens(tc.initialTokens...)
-			}
+			RegisterSensitiveTokens(tc.initialTokens...)
 			ReplaceSensitiveTokens(tc.replacedTokens...)
-			got := SanitizeString(tc.input)
-
-			for _, redacted := range tc.shouldRedact {
-				if strings.Contains(got, redacted) {
-					t.Errorf("expected %q to be redacted from %q", redacted, got)
-				}
-			}
-			for _, notRedacted := range tc.shouldNotRedact {
-				if !strings.Contains(got, notRedacted) {
-					t.Errorf("expected %q to be preserved in %q", notRedacted, got)
-				}
+			if got := SanitizeString(tc.input); got != tc.want {
+				t.Errorf("SanitizeString(%q) = %q, want %q", tc.input, got, tc.want)
 			}
 		})
 	}
@@ -553,15 +388,35 @@ func TestRegisterSharedSecrets_TableDriven(t *testing.T) {
 	if err := os.MkdirAll(secretsDir, 0o755); err != nil {
 		t.Fatalf("failed to create secrets dir: %v", err)
 	}
-	_ = os.WriteFile(filepath.Join(secretsDir, "SECRET_KEY"), []byte("shared_secret_key_val_7890"), 0o600)
-	_ = os.WriteFile(filepath.Join(secretsDir, "EMPTY_KEY"), []byte("   "), 0o600)
-	_ = os.WriteFile(filepath.Join(secretsDir, ".hidden"), []byte("ignore_me"), 0o600)
-	_ = os.MkdirAll(filepath.Join(secretsDir, "subdir"), 0o755)
+	if err := os.WriteFile(filepath.Join(secretsDir, "SECRET_KEY"), []byte("shared_secret_key_val_7890"), 0o600); err != nil {
+		t.Fatalf("write SECRET_KEY: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(secretsDir, "EMPTY_KEY"), []byte("   "), 0o600); err != nil {
+		t.Fatalf("write EMPTY_KEY: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(secretsDir, ".hidden"), []byte("ignore_me"), 0o600); err != nil {
+		t.Fatalf("write .hidden: %v", err)
+	}
+	if err := os.MkdirAll(filepath.Join(secretsDir, "subdir"), 0o755); err != nil {
+		t.Fatalf("mkdir subdir: %v", err)
+	}
+	oauthDir := filepath.Join(tempDir, "oauth_secrets")
+	if err := os.MkdirAll(oauthDir, 0o755); err != nil {
+		t.Fatalf("mkdir oauthDir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(oauthDir, "OAUTH_JSON"),
+		[]byte(`{"refresh_token":"shared_refresh_tok_4321","token_uri":"https://oauth.example.test/tok"}`), 0o600); err != nil {
+		t.Fatalf("write OAUTH_JSON: %v", err)
+	}
 
 	jsonFilePath := filepath.Join(tempDir, "shared_secrets.json")
-	_ = os.WriteFile(jsonFilePath, []byte(`{"JSON_SECRET":"json_secret_key_val_1234"}`), 0o600)
+	if err := os.WriteFile(jsonFilePath, []byte(`{"JSON_SECRET":"json_secret_key_val_1234"}`), 0o600); err != nil {
+		t.Fatalf("write jsonFilePath: %v", err)
+	}
 	invalidJSON := filepath.Join(tempDir, "invalid.json")
-	_ = os.WriteFile(invalidJSON, []byte(`{invalid`), 0o600)
+	if err := os.WriteFile(invalidJSON, []byte(`{invalid`), 0o600); err != nil {
+		t.Fatalf("write invalidJSON: %v", err)
+	}
 
 	tests := []struct {
 		name         string
@@ -571,42 +426,23 @@ func TestRegisterSharedSecrets_TableDriven(t *testing.T) {
 		preserved    string
 	}{
 		{
-			name:         "directory mount registers secrets and redacts them",
-			path:         secretsDir,
-			input:        "found shared_secret_key_val_7890 and ignore_me in text",
-			shouldRedact: "shared_secret_key_val_7890",
-			preserved:    "ignore_me",
+			"directory mount registers secrets and redacts them", secretsDir, "found shared_secret_key_val_7890 and ignore_me in text",
+			"shared_secret_key_val_7890", "ignore_me",
 		},
 		{
-			name:         "json file registers secrets and redacts them",
-			path:         jsonFilePath,
-			input:        "found json_secret_key_val_1234 in text",
-			shouldRedact: "json_secret_key_val_1234",
+			"json object secret file registers credential leaf only", oauthDir, "leak shared_refresh_tok_4321 via https://oauth.example.test/tok",
+			"shared_refresh_tok_4321", "https://oauth.example.test/tok",
 		},
-		{
-			name:      "empty path leaves safe text unchanged",
-			path:      "",
-			input:     "safe text",
-			preserved: "safe text",
-		},
-		{
-			name:      "missing path leaves safe text unchanged",
-			path:      filepath.Join(tempDir, "missing"),
-			input:     "safe text",
-			preserved: "safe text",
-		},
-		{
-			name:      "invalid json leaves safe text unchanged",
-			path:      invalidJSON,
-			input:     "safe text",
-			preserved: "safe text",
-		},
+		{"json file registers secrets and redacts them", jsonFilePath, "found json_secret_key_val_1234 in text", "json_secret_key_val_1234", ""},
+		{"empty path leaves safe text unchanged", "", "safe text", "", "safe text"},
+		{"missing path leaves safe text unchanged", filepath.Join(tempDir, "missing"), "safe text", "", "safe text"},
+		{"invalid json leaves safe text unchanged", invalidJSON, "safe text", "", "safe text"},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			resetSensitiveTokens()
-			defer resetSensitiveTokens()
+			ResetSensitiveTokensForTest()
+			defer ResetSensitiveTokensForTest()
 
 			RegisterSharedSecrets(tc.path)
 			got := SanitizeString(tc.input)
@@ -620,6 +456,193 @@ func TestRegisterSharedSecrets_TableDriven(t *testing.T) {
 				if !strings.Contains(got, tc.preserved) {
 					t.Errorf("expected %q to be preserved in %q", tc.preserved, got)
 				}
+			}
+		})
+	}
+}
+
+func TestValuePattern_TableDriven(t *testing.T) {
+	metaVal := `a.b*c+d?(e)[f]{g}|h^$\i`
+	b64Val := "dummy_b64_value_abc"
+	urlVal := "dummy pass/with&chars"
+	tests := []struct {
+		name       string
+		values     []string
+		wantExact  string
+		matches    []string
+		nonMatches []string
+		wantOrder  []string
+	}{
+		{
+			name:      "duplicate values collapse and longest variant first",
+			values:    []string{"abcd", "abcd", " abcd "},
+			wantOrder: []string{"YWJjZA", "abcd"},
+		},
+		{
+			name:      "github token gets unpadded git basic auth variant only",
+			values:    []string{"ghp_abcd"},
+			wantOrder: []string{"eC1hY2Nlc3MtdG9rZW46Z2hwX2FiY2Q", "Z2hwX2FiY2Q", "ghp_abcd"},
+			matches:   []string{"Basic eC1hY2Nlc3MtdG9rZW46Z2hwX2FiY2Q=", "Z2hwX2FiY2Q="},
+		},
+		{
+			name:       "json object value contributes credential leaves not the blob",
+			values:     []string{`{"client_secret":"leaf_secret_123","token_uri":"https://uri.example.test","client_id":"cid_value_12345"}`},
+			wantOrder:  []string{"bGVhZl9zZWNyZXRfMTIz", "leaf_secret_123"},
+			matches:    []string{"x leaf_secret_123 y"},
+			nonMatches: []string{"https://uri.example.test", "cid_value_12345", `"client_secret"`},
+		},
+		{
+			name:       "json object without credential leaves matches nothing",
+			values:     []string{`{"client_id":"cid_value_12345","password":"short"}`},
+			wantExact:  `[^\s\S]`,
+			nonMatches: []string{"cid_value_12345", "short"},
+		},
+		{
+			name:      "longer value precedes shorter overlapping value",
+			values:    []string{"wxyz", "wxyzwxyz"},
+			wantOrder: []string{"wxyzwxyz", "wxyz"},
+		},
+		{
+			name:       "no values matches nothing",
+			values:     nil,
+			wantExact:  `[^\s\S]`,
+			nonMatches: []string{"", "anything", " "},
+		},
+		{
+			name:       "only short and blank values matches nothing",
+			values:     []string{"abc", "  ", ""},
+			wantExact:  `[^\s\S]`,
+			nonMatches: []string{"", "abc", "xx abc yy"},
+		},
+		{
+			name:       "metacharacter heavy value matched literally",
+			values:     []string{metaVal},
+			matches:    []string{"prefix " + metaVal + " suffix"},
+			nonMatches: []string{"abbbc+d", "a.b*c+d?(e)[f]{g}"},
+		},
+		{
+			name:   "base64 variants matched inside surrounding text",
+			values: []string{b64Val},
+			matches: []string{
+				"hdr=" + base64.StdEncoding.EncodeToString([]byte(b64Val)) + ";",
+				"x" + base64.RawURLEncoding.EncodeToString([]byte(b64Val)) + "x",
+				"pad " + base64.URLEncoding.EncodeToString([]byte(b64Val)),
+			},
+			nonMatches: []string{"dummy_b64_value", "unrelated text", "Basic eC1hY2Nlc3MtdG9rZW46"},
+		},
+		{
+			name:       "url encoded variant matched inside surrounding text",
+			values:     []string{urlVal},
+			matches:    []string{"?q=dummy+pass%2Fwith%26chars&x=1", "raw dummy pass/with&chars end"},
+			nonMatches: []string{"dummy+pass"},
+		},
+		{
+			name:       "short value skipped while long value kept",
+			values:     []string{"xyz", "longenough"},
+			matches:    []string{"a longenough b"},
+			nonMatches: []string{"xyz"},
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := ValuePattern(tc.values)
+			if tc.wantExact != "" && got != tc.wantExact {
+				t.Fatalf("ValuePattern() = %q, want %q", got, tc.wantExact)
+			}
+			re, err := regexp.Compile(got)
+			if err != nil {
+				t.Fatalf("pattern does not compile: %v", err)
+			}
+			for _, s := range tc.matches {
+				if !re.MatchString(s) {
+					t.Errorf("pattern should match %q", s)
+				}
+			}
+			for _, s := range tc.nonMatches {
+				if re.MatchString(s) {
+					t.Errorf("pattern should not match %q", s)
+				}
+			}
+			assertValuePatternOrder(t, re, got, tc.wantOrder)
+		})
+	}
+}
+
+func assertValuePatternOrder(t *testing.T, re *regexp.Regexp, pattern string, wantOrder []string) {
+	t.Helper()
+	if len(wantOrder) == 0 {
+		return
+	}
+	alts := strings.Split(pattern, "|")
+	seen := make(map[string]bool, len(alts))
+	for i, a := range alts {
+		if seen[a] {
+			t.Errorf("duplicate alternative %q", a)
+		}
+		seen[a] = true
+		if i > 0 && len(alts[i-1]) < len(a) {
+			t.Errorf("alternative %q (len %d) follows shorter %q", a, len(a), alts[i-1])
+		}
+	}
+	last := -1
+	for _, w := range wantOrder {
+		idx := slices.Index(alts, regexp.QuoteMeta(w))
+		if idx < 0 {
+			t.Fatalf("missing alternative %q in %v", w, alts)
+		}
+		if idx < last {
+			t.Errorf("alternative %q out of order in %v", w, alts)
+		}
+		last = idx
+	}
+	if m := re.FindString("--" + wantOrder[0] + "--"); m != wantOrder[0] {
+		t.Errorf("leftmost match = %q, want longest %q", m, wantOrder[0])
+	}
+}
+
+func TestOTTLStringBody_TableDriven(t *testing.T) {
+	tests := []struct {
+		name    string
+		pattern string
+		want    string
+	}{
+		{name: "empty", pattern: "", want: ""},
+		{name: "plain", pattern: "abcd|efgh", want: "abcd|efgh"},
+		{name: "match nothing", pattern: `[^\s\S]`, want: `[^\\s\\S]`},
+		{name: "quote and backslash", pattern: `a"b\.c`, want: `a\"b\\.c`},
+		{name: "quoted metachar value", pattern: ValuePattern([]string{`say "hi".now`}), want: ""},
+	}
+	unescape := strings.NewReplacer(`\\`, `\`, `\"`, `"`)
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := OTTLStringBody(tc.pattern)
+			if tc.want != "" && got != tc.want {
+				t.Fatalf("OTTLStringBody(%q) = %q, want %q", tc.pattern, got, tc.want)
+			}
+			if back := unescape.Replace(got); back != tc.pattern {
+				t.Errorf("round trip = %q, want %q", back, tc.pattern)
+			}
+		})
+	}
+}
+
+func TestSensitiveTokenCount_TableDriven(t *testing.T) {
+	tests := []struct {
+		name     string
+		tokens   []string
+		wantSome bool
+	}{
+		{name: "empty pool counts zero"},
+		{name: "registered value counts", tokens: []string{"count_test_secret_value_42"}, wantSome: true},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			ResetSensitiveTokensForTest()
+			defer ResetSensitiveTokensForTest()
+			ReplaceSensitiveTokens(tc.tokens...)
+			if got := SensitiveTokenCount() > 0; got != tc.wantSome {
+				t.Fatalf("SensitiveTokenCount() > 0 = %t, want %t", got, tc.wantSome)
 			}
 		})
 	}

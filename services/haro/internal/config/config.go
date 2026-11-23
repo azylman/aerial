@@ -3,7 +3,6 @@ package config
 import (
 	"fmt"
 	"os"
-	"strconv"
 	"strings"
 
 	"gopkg.in/yaml.v3"
@@ -11,6 +10,7 @@ import (
 	"github.com/azylman/aerial/pkg/httpkit"
 	"github.com/azylman/aerial/pkg/k8sauth"
 	"github.com/azylman/aerial/pkg/sanitizer"
+	"github.com/azylman/aerial/pkg/strutil"
 )
 
 // DefaultConfigPath is the canonical in-container configuration path.
@@ -37,16 +37,20 @@ func ResolveConfigPath(fallbackPath string) string {
 
 // Config represents the runtime configuration for the scheduler MCP server.
 type Config struct {
-	DatabaseURL       string
-	Timezone          string         `yaml:"timezone"`
-	Port              string         `yaml:"port"`
-	EriURL            string         `yaml:"eri_url"`
-	VanadisURL        string         `yaml:"vanadis_url"`
-	NATSURL           string         `yaml:"nats_url"`
-	RestateURL        string         `yaml:"restate_url"`
-	AgentName         string         `yaml:"agent_name"`
-	ExtraEventSources []string       `yaml:"extra_event_sources"`
-	Auth              k8sauth.Config `yaml:"auth"`
+	DatabaseURL         string
+	Timezone            string         `yaml:"timezone"`
+	Port                string         `yaml:"port"`
+	EriURL              string         `yaml:"eri_url"`
+	VanadisURL          string         `yaml:"vanadis_url"`
+	NATSURL             string         `yaml:"nats_url"`
+	RestateURL          string         `yaml:"restate_url"`
+	RestatePort         string         `yaml:"restate_port"`
+	RestateIngressURL   string         `yaml:"restate_ingress_url"`
+	RestateAdminURL     string         `yaml:"restate_admin_url"`
+	RestateAdvertiseURL string         `yaml:"restate_advertise_url"`
+	AgentName           string         `yaml:"agent_name"`
+	ExtraEventSources   []string       `yaml:"extra_event_sources"`
+	Auth                k8sauth.Config `yaml:"auth"`
 }
 
 // LoadConfig loads configuration from path using DATABASE_URL from the environment.
@@ -67,15 +71,19 @@ func LoadConfigFile(path string, dbURL string) (*Config, error) {
 	}
 
 	var ycfg struct {
-		Port              string         `yaml:"port"`
-		Timezone          string         `yaml:"timezone"`
-		EriURL            string         `yaml:"eri_url"`
-		VanadisURL        string         `yaml:"vanadis_url"`
-		NATSURL           string         `yaml:"nats_url"`
-		RestateURL        string         `yaml:"restate_url"`
-		AgentName         string         `yaml:"agent_name"`
-		ExtraEventSources []string       `yaml:"extra_event_sources"`
-		Auth              k8sauth.Config `yaml:"auth"`
+		Port                string         `yaml:"port"`
+		Timezone            string         `yaml:"timezone"`
+		EriURL              string         `yaml:"eri_url"`
+		VanadisURL          string         `yaml:"vanadis_url"`
+		NATSURL             string         `yaml:"nats_url"`
+		RestateURL          string         `yaml:"restate_url"`
+		RestatePort         string         `yaml:"restate_port"`
+		RestateIngressURL   string         `yaml:"restate_ingress_url"`
+		RestateAdminURL     string         `yaml:"restate_admin_url"`
+		RestateAdvertiseURL string         `yaml:"restate_advertise_url"`
+		AgentName           string         `yaml:"agent_name"`
+		ExtraEventSources   []string       `yaml:"extra_event_sources"`
+		Auth                k8sauth.Config `yaml:"auth"`
 	}
 	if unmarshalErr := yaml.Unmarshal(data, &ycfg); unmarshalErr != nil {
 		return nil, fmt.Errorf("config: failed to parse YAML from %s: %w", cleanPath, unmarshalErr)
@@ -121,24 +129,31 @@ func LoadConfigFile(path string, dbURL string) (*Config, error) {
 
 	extraSources := resolveExtraSources(ycfg.ExtraEventSources)
 	natsURL := resolveEnvOrDefault("NATS_URL", ycfg.NATSURL, "nats://nats.aerial:4222")
-	restateURL := strings.TrimRight(resolveEnvOrDefault("RESTATE_INGRESS_URL", ycfg.RestateURL, ""), "/")
+	restatePort := resolveEnvOrDefault("RESTATE_PORT", ycfg.RestatePort, "9080")
+	restateIngressURL := strings.TrimRight(resolveEnvOrDefault("RESTATE_INGRESS_URL", strutil.FirstNonEmpty(ycfg.RestateIngressURL, ycfg.RestateURL), "http://restate.aerial:8080"), "/")
+	restateAdminURL := strings.TrimRight(resolveEnvOrDefault("RESTATE_ADMIN_URL", ycfg.RestateAdminURL, "http://restate.aerial:9070"), "/")
+	restateAdvertiseURL := strings.TrimRight(resolveEnvOrDefault("RESTATE_ADVERTISE_URL", ycfg.RestateAdvertiseURL, "http://haro.default.svc.cluster.local:9080"), "/")
 	agentName := resolveEnvOrDefault("AGENT_NAME", ycfg.AgentName, "aerial")
-	authCfg, err := resolveAuthConfig(ycfg.Auth)
-	if err != nil {
-		return nil, err
+	authCfg := ycfg.Auth
+	if err := k8sauth.ApplyEnvOverride(&authCfg, os.Getenv); err != nil {
+		return nil, fmt.Errorf("config: %w", err)
 	}
 
 	cfg := &Config{
-		DatabaseURL:       cleanDB,
-		Timezone:          tz,
-		Port:              port,
-		EriURL:            eriURL,
-		VanadisURL:        vanadisURL,
-		NATSURL:           natsURL,
-		RestateURL:        restateURL,
-		AgentName:         agentName,
-		ExtraEventSources: extraSources,
-		Auth:              authCfg,
+		DatabaseURL:         cleanDB,
+		Timezone:            tz,
+		Port:                port,
+		EriURL:              eriURL,
+		VanadisURL:          vanadisURL,
+		NATSURL:             natsURL,
+		RestateURL:          restateIngressURL,
+		RestatePort:         restatePort,
+		RestateIngressURL:   restateIngressURL,
+		RestateAdminURL:     restateAdminURL,
+		RestateAdvertiseURL: restateAdvertiseURL,
+		AgentName:           agentName,
+		ExtraEventSources:   extraSources,
+		Auth:                authCfg,
 	}
 	RegisterConfigTokens(cfg)
 	return cfg, nil
@@ -168,18 +183,6 @@ func resolveEnvOrDefault(envKey, fileVal, defaultVal string) string {
 		return defaultVal
 	}
 	return val
-}
-
-func resolveAuthConfig(base k8sauth.Config) (k8sauth.Config, error) {
-	authCfg := base
-	if envVal := strings.TrimSpace(os.Getenv("K8S_AUTH_ENABLED")); envVal != "" {
-		enabled, err := strconv.ParseBool(envVal)
-		if err != nil {
-			return authCfg, fmt.Errorf("config: invalid K8S_AUTH_ENABLED value %q: %w", envVal, err)
-		}
-		authCfg.Enabled = enabled
-	}
-	return authCfg, nil
 }
 
 // RegisterConfigTokens registers sensitive tokens from Haro's configuration,

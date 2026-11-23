@@ -1,19 +1,15 @@
 import { act, cleanup, fireEvent, render, screen, within } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import type { DocketSearchAPIResponse, DocketTaskDTO, DocketTasksAPIResponse, DocketTaskSummaryDTO } from '../../api/types';
-import { useKeyboardShortcuts } from '../../hooks/useKeyboardShortcuts';
+import type { DocketSearchAPIResponse, DocketTaskDTO, DocketTasksAPIResponse } from '../../api/types';
 import { type DrawerState, useConsoleStore } from '../../store/store';
 import DocketView from './DocketView';
 import { TaskDetailPanel } from './TaskDetail';
+import { Shortcuts, text } from '../../test/dom';
+import { json, stubFetch } from '../../test/fetch';
+import { node } from '../../test/fixtures';
 
 const NOW = Date.parse('2026-11-08T12:00:00Z');
 
-const node = (id: number, status = 'open', extra: Partial<DocketTaskSummaryDTO> = {}): DocketTaskSummaryDTO => ({
-  id,
-  title: `Task ${id}`,
-  status,
-  ...extra,
-});
 const LIST: DocketTasksAPIResponse = {
   status: 'ok',
   tasks: [node(3), node(5, 'open', { blocked_by: [3, 4] }), node(4, 'completed'), node(9, 'open', { blocked_by: [5] }), node(2, 'open', { title: '' })],
@@ -63,14 +59,11 @@ beforeEach(() => {
   useConsoleStore.setState(useConsoleStore.getInitialState(), true);
   window.history.replaceState(null, '', '/');
   requests = [];
-  vi.stubGlobal(
-    'fetch',
-    vi.fn((url: string) => {
-      requests.push(url);
-      const [status, body] = BODIES[url] ?? [500, { error: 'no fixture' }];
-      return Promise.resolve(new Response(JSON.stringify(body), { status }));
-    }),
-  );
+  stubFetch((url) => {
+    requests.push(url);
+    const [status, body] = BODIES[url] ?? [500, { error: 'no fixture' }];
+    return json(status, body);
+  });
   vi.useFakeTimers({ now: NOW, toFake: ['Date', 'setInterval', 'clearInterval', 'setTimeout', 'clearTimeout'] });
 });
 afterEach(() => {
@@ -86,12 +79,7 @@ async function settle(): Promise<void> {
 }
 
 const cards = (): string[] => [...document.querySelectorAll('.docket-card')].map((c) => c.getAttribute('data-task-id') ?? '');
-const text = (selector: string): string => (document.querySelector(selector)?.textContent ?? '').replace(/\s+/g, ' ').trim();
 
-function Shortcuts() {
-  useKeyboardShortcuts('docket');
-  return null;
-}
 
 describe('DocketView list states', () => {
   it.each<{ name: string; data: DocketTasksAPIResponse | null; error: string | null; wantCards: string[]; wantBody: string; wantCount: string }>([
@@ -208,7 +196,7 @@ describe('DocketView interactions', () => {
   ])('$name', async ({ steps, wantRequests, wantCards, wantCount, wantPressed }) => {
     render(
       <>
-        <Shortcuts />
+        <Shortcuts tab="docket" />
         <DocketView />
       </>,
     );

@@ -4,107 +4,90 @@ import (
 	"os"
 	"strings"
 	"testing"
+
+	"github.com/azylman/aerial/pkg/prwire"
 )
 
 func TestParseBuildMetadata(t *testing.T) {
-	t.Parallel()
-	fixture, err := os.ReadFile("../../testdata/build-metadata-v1.json")
-	if err != nil {
-		t.Fatal(err)
-	}
-	tests := []struct {
-		name, raw string
-		valid     bool
-	}{
-		{"trailing", string(fixture) + ` {}`, false},
-		{"malformed", `{"version":`, false},
-		{"scalar", `1`, false},
-		{"incomplete final selection", `{"version":1,"kind":"final","repository":"owner/repo","workflow_path":".github/workflows/ci.yml","run_id":1,"run_number":1,"run_attempt":1,"event":"push","source_sha":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","execution_sha":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","pr_number":null,"selected":[{"service":"engine","image_name":"engine"}]}`, false},
-		{"empty selection", `{"version":1,"kind":"manifest","repository":"owner/repo","workflow_path":".github/workflows/ci.yml","run_id":1,"run_number":1,"run_attempt":1,"event":"push","source_sha":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","execution_sha":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","pr_number":null,"selected":[]}`, true},
-		{"oversize", string(fixture) + strings.Repeat(" ", 65537), false},
-		{"empty", "", false},
-		{"fenced", "```json\n{}\n```", false},
-		{"unknown version", strings.Replace(string(fixture), `"version":1`, `"version":2`, 1), false},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			_, err := ParseBuildMetadata([]byte(tc.raw))
-			if (err == nil) != tc.valid {
-				t.Fatalf("err=%v", err)
-			}
-		})
-	}
-}
-
-func TestBuildMetadataValidationCases(t *testing.T) {
-	t.Parallel()
-	tests := []struct {
-		name, replace, with string
-		valid               bool
-	}{
-		{"version alias", `"version":1`, `"version":2,"Version":1`, false},
-		{"identity alias", `"repository":"owner/repo"`, `"repository":"other/repo","Repository":"owner/repo"`, false},
-		{"nested alias", `"selected":[]`, `"selected":[{"service":"engine","Service":"other","image_name":"engine"}]`, false},
-		{"duplicate key", `"version":1`, `"version":1,"version":1`, false},
-		{"null selection", `"selected":[]`, `"selected":null`, false},
-		{"missing selection", `,"selected":[]`, ``, false},
-		{"wrong type", `"version":1`, `"version":"one"`, false},
-		{"unknown field", `"version":1`, `"unknown":1,"version":1`, false},
-		{"selection", `"selected":[]`, `"selected":[{"service":"engine","image_name":"engine"}]`, true},
-		{"duplicate service", `"selected":[]`, `"selected":[{"service":"engine","image_name":"engine"},{"service":"engine","image_name":"other"}]`, false},
-		{"invalid service", `"selected":[]`, `"selected":[{"service":"!","image_name":"engine"}]`, false},
-		{"incomplete final", `"kind":"manifest"`, `"kind":"final","results":[{"service":"engine","image_name":"engine","state":"success","source_attempt":1}]`, false},
-		{"unexpected result", `"selected":[]`, `"selected":[],"results":[{"service":"engine","image_name":"engine","state":"failure","source_attempt":1}]`, false},
-		{"success result", `"selected":[]`, `"selected":[{"service":"engine","image_name":"engine"}],"results":[{"service":"engine","image_name":"engine","state":"success","source_attempt":1,"pushed":true}]`, true},
-		{"running result", `"selected":[]`, `"selected":[{"service":"engine","image_name":"engine"}],"results":[{"service":"engine","image_name":"engine","state":"running","source_attempt":1}]`, true},
-		{"cancelled result", `"selected":[]`, `"selected":[{"service":"engine","image_name":"engine"}],"results":[{"service":"engine","image_name":"engine","state":"cancelled","source_attempt":1}]`, true},
-		{"invalid state", `"selected":[]`, `"selected":[{"service":"engine","image_name":"engine"}],"results":[{"service":"engine","image_name":"engine","state":"unknown","source_attempt":1}]`, false},
-		{"empty final", `"kind":"manifest"`, `"kind":"final"`, true},
-		{"manual dispatch event", `"event":"push"`, `"event":"workflow_dispatch"`, true},
-		{"unsupported event", `"event":"push"`, `"event":"schedule"`, false},
-		{"progress wire kind", `"kind":"manifest"`, `"kind":"progress"`, false},
-		{"manifest with results", `"kind":"manifest"`, `"kind":"manifest","results":[{"service":"engine","image_name":"engine","state":"success","source_attempt":1}]`, false},
-		{"result with invalid transport", `"kind":"manifest"`, `"kind":"result","service":"!","image_name":"engine","state":"success","source_attempt":1}`, false},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			raw, err := os.ReadFile("../../testdata/build-metadata-v1.json")
-			if err != nil {
-				t.Fatal(err)
-			}
-			if tc.replace == `"selected":[]` && strings.Contains(tc.with, `"results"`) {
-				raw = []byte(strings.Replace(string(raw), `"kind":"manifest"`, `"kind":"final"`, 1))
-			}
-			_, err = ParseBuildMetadata([]byte(strings.Replace(string(raw), tc.replace, tc.with, 1)))
-			if (err == nil) != tc.valid {
-				t.Fatalf("err=%v", err)
-			}
-		})
-	}
-}
-
-func TestParseStoredBuildMetadata(t *testing.T) {
 	t.Parallel()
 	raw, err := os.ReadFile("../../testdata/build-metadata-v1.json")
 	if err != nil {
 		t.Fatal(err)
 	}
-	progressRaw := strings.Replace(string(raw), `"kind":"manifest"`, `"kind":"progress"`, 1)
-
-	// Direct parse rejects progress wire kind
-	if _, parseErr := ParseBuildMetadata([]byte(progressRaw)); parseErr == nil {
-		t.Fatal("expected ParseBuildMetadata to reject progress wire kind")
+	fixture := string(raw)
+	// edit applies old/new replacement pairs to the valid manifest fixture.
+	edit := func(pairs ...string) string {
+		return strings.NewReplacer(pairs...).Replace(fixture)
 	}
-
-	// ParseStoredBuildMetadata accepts progress snapshot
-	m, err := ParseStoredBuildMetadata([]byte(progressRaw))
-	if err != nil {
-		t.Fatalf("unexpected error parsing stored progress metadata: %v", err)
+	const final = `"kind":"final"`
+	tests := []struct {
+		name  string
+		raw   string
+		valid bool
+	}{
+		{"fixture manifest", fixture, true},
+		{"trailing", fixture + ` {}`, false},
+		{"malformed", `{"version":`, false},
+		{"scalar", `1`, false},
+		{"oversize", fixture + strings.Repeat(" ", 65537), false},
+		{"empty", "", false},
+		{"fenced", "```json\n{}\n```", false},
+		{"unknown version", edit(`"version":1`, `"version":2`), false},
+		{"version alias", edit(`"version":1`, `"version":2,"Version":1`), false},
+		{"identity alias", edit(`"repository":"owner/repo"`, `"repository":"other/repo","Repository":"owner/repo"`), false},
+		{"nested alias", edit(`"selected":[]`, `"selected":[{"service":"engine","Service":"other","image_name":"engine"}]`), false},
+		{"duplicate key", edit(`"version":1`, `"version":1,"version":1`), false},
+		{"null selection", edit(`"selected":[]`, `"selected":null`), false},
+		{"missing selection", edit(`,"selected":[]`, ``), false},
+		{"wrong type", edit(`"version":1`, `"version":"one"`), false},
+		{"unknown field", edit(`"version":1`, `"unknown":1,"version":1`), false},
+		{"selection", edit(`"selected":[]`, `"selected":[{"service":"engine","image_name":"engine"}]`), true},
+		{"duplicate service", edit(`"selected":[]`, `"selected":[{"service":"engine","image_name":"engine"},{"service":"engine","image_name":"other"}]`), false},
+		{"invalid service", edit(`"selected":[]`, `"selected":[{"service":"!","image_name":"engine"}]`), false},
+		{"incomplete final selection", edit(`"kind":"manifest"`, final, `"selected":[]`, `"selected":[{"service":"engine","image_name":"engine"}]`), false},
+		{"incomplete final", edit(`"kind":"manifest"`, `"kind":"final","results":[{"service":"engine","image_name":"engine","state":"success","source_attempt":1}]`), false},
+		{"unexpected result", edit(`"kind":"manifest"`, final, `"selected":[]`, `"selected":[],"results":[{"service":"engine","image_name":"engine","state":"failure","source_attempt":1}]`), false},
+		{"success result", edit(`"kind":"manifest"`, final, `"selected":[]`, `"selected":[{"service":"engine","image_name":"engine"}],"results":[{"service":"engine","image_name":"engine","state":"success","source_attempt":1,"pushed":true}]`), true},
+		{"running result", edit(`"kind":"manifest"`, final, `"selected":[]`, `"selected":[{"service":"engine","image_name":"engine"}],"results":[{"service":"engine","image_name":"engine","state":"running","source_attempt":1}]`), true},
+		{"cancelled result", edit(`"kind":"manifest"`, final, `"selected":[]`, `"selected":[{"service":"engine","image_name":"engine"}],"results":[{"service":"engine","image_name":"engine","state":"cancelled","source_attempt":1}]`), true},
+		{"invalid state", edit(`"kind":"manifest"`, final, `"selected":[]`, `"selected":[{"service":"engine","image_name":"engine"}],"results":[{"service":"engine","image_name":"engine","state":"unknown","source_attempt":1}]`), false},
+		{"empty final", edit(`"kind":"manifest"`, final), true},
+		{"manual dispatch event", edit(`"event":"push"`, `"event":"workflow_dispatch"`), true},
+		{"unsupported event", edit(`"event":"push"`, `"event":"schedule"`), false},
+		{"progress wire kind", edit(`"kind":"manifest"`, `"kind":"progress"`), false},
+		{"manifest with results", edit(`"kind":"manifest"`, `"kind":"manifest","results":[{"service":"engine","image_name":"engine","state":"success","source_attempt":1}]`), false},
+		{"result with invalid transport", edit(`"kind":"manifest"`, `"kind":"result","service":"!","image_name":"engine","state":"success","source_attempt":1}`), false},
 	}
-	if m.Kind != BuildMetadataProgress {
-		t.Fatalf("got kind %q, want %q", m.Kind, BuildMetadataProgress)
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if _, err := ParseBuildMetadata([]byte(tc.raw)); (err == nil) != tc.valid {
+				t.Fatalf("ParseBuildMetadata() err = %v, want valid %v", err, tc.valid)
+			}
+		})
+	}
+}
+
+func TestIsBuildMetadataCheck(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name  string
+		check string
+		want  bool
+	}{
+		{"manifest check", "build-metadata", true},
+		{"result check", "build-metadata-result", true},
+		{"other check", "roborev", false},
+		{"case differs", "Build-Metadata", false},
+		{"empty", "", false},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got := IsBuildMetadataCheck(tc.check); got != tc.want {
+				t.Fatalf("IsBuildMetadataCheck(%q) = %v, want %v", tc.check, got, tc.want)
+			}
+		})
 	}
 }
 
@@ -134,13 +117,13 @@ func TestValidWorkflowPath(t *testing.T) {
 
 func TestValidBuildMetadataTransport(t *testing.T) {
 	t.Parallel()
-	mManifest := BuildMetadata{Kind: BuildMetadataManifest}
+	mManifest := prwire.BuildMetadata{Kind: prwire.BuildMetadataManifest}
 	if !validBuildMetadataTransport(mManifest) {
 		t.Fatal("manifest should pass transport check")
 	}
 
-	mResultValid := BuildMetadata{
-		Kind:          BuildMetadataResult,
+	mResultValid := prwire.BuildMetadata{
+		Kind:          prwire.BuildMetadataResult,
 		Service:       "engine",
 		ImageName:     "engine",
 		State:         ConclusionSuccess,

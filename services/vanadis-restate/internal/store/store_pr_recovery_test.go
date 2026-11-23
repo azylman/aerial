@@ -3,21 +3,54 @@ package store
 // PR recovery store tests for vanadis-restate.
 //
 // Covers recoverFailedPR head acceptance rules, failure injection, baseline
-// seeding, and head-update tracking. Moved here from store_ci_fail_test.go
-// alongside the production module; assertions unchanged.
+// seeding, and head-update tracking against real Postgres rows in each
+// test's private database.
 
 import (
 	"context"
 	"errors"
 	"strings"
-	"sync"
 	"testing"
 
-	"github.com/jackc/pgx/v5"
-	"github.com/jackc/pgx/v5/pgconn"
+	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/azylman/aerial/services/vanadis-restate/internal/model"
 )
+
+// rcVerified carries the router's verified-head marker.
+func rcVerified(verified bool) context.Context {
+	return context.WithValue(context.Background(), PrHeadVerifiedContextKey{}, verified)
+}
+
+// rcFailNoWrites makes any chunk or build write fail, so a skip that
+// attempted a write surfaces as a non-skip error.
+var rcFailNoWrites = failStatement("vanadis_chunks", "UPDATE") + failStatement("vanadis_builds", "UPDATE")
+
+// rcOpen seeds build b1 in parent status with chunks and applies sabotage.
+func rcOpen(t *testing.T, parent string, chunks []model.VanadisChunk, sabotage string) (*Store, *pgxpool.Pool) {
+	t.Helper()
+	st, pool := openStore(t)
+	seed(t, pool, []model.VanadisBuild{{ID: "b1", ThreadID: "thread-1", Status: parent}}, chunks)
+	mustExec(t, pool, sabotage)
+	return st, pool
+}
+
+// rcOpenStore seeds build b1 in parent status with chunks and applies sabotage, returning only the Store.
+func rcOpenStore(t *testing.T, parent string, chunks []model.VanadisChunk, sabotage string) *Store {
+	t.Helper()
+	st, pool := openStore(t)
+	seed(t, pool, []model.VanadisBuild{{ID: "b1", ThreadID: "thread-1", Status: parent}}, chunks)
+	mustExec(t, pool, sabotage)
+	return st
+}
+
+// rcSetStatus moves a stored chunk to status between recovery steps.
+func rcSetStatus(t *testing.T, pool *pgxpool.Pool, id, status string) {
+	t.Helper()
+	if _, err := pool.Exec(context.Background(), `UPDATE vanadis_chunks SET status = $2 WHERE id = $1`, id, status); err != nil {
+		t.Fatalf("set chunk %s status: %v", id, err)
+	}
+}
 
 func TestPostgresVanadisStore_RecoverFailedPR(t *testing.T) {
 	t.Parallel()
@@ -45,17 +78,26 @@ func TestPostgresVanadisStore_RecoverFailedPR(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			st, _ := dbScript{row: valuesRow("b1"), buildRow: buildRow("b1", tc.parent), chunks: []model.VanadisChunk{{ID: "c1", BuildID: "b1", Status: tc.status, Mode: tc.mode, PRNumber: tc.pr, HeadSHA: "old", MergeSHA: tc.mergeSHA}, {ID: "c2", Status: tc.sibling}}}.open()
-			err := st.recoverFailedPR(context.WithValue(context.Background(), PrHeadVerifiedContextKey{}, !tc.unverified), "c1", tc.head)
+			chunk := model.VanadisChunk{ID: "c1", BuildID: "b1", Repo: "aerial", Status: tc.status, Mode: tc.mode, PRNumber: tc.pr, HeadSHA: "old", MergeSHA: tc.mergeSHA}
+			st, pool := rcOpen(t, tc.parent, []model.VanadisChunk{chunk, {ID: "c2", BuildID: "b1", ChunkIndex: 1, Status: tc.sibling}}, "")
+			err := st.recoverFailedPR(rcVerified(!tc.unverified), "c1", tc.head)
 			if tc.skip && !tc.legacySeed {
-				forbidden := errors.New("excluded legacy chunk attempted write or commit")
-				legacy, _ := dbScript{execErr: forbidden, commitErr: forbidden, row: valuesRow("b1"), buildRow: buildRow("b1", tc.parent), chunks: []model.VanadisChunk{{ID: "c1", BuildID: "b1", Status: tc.status, Mode: tc.mode, PRNumber: tc.pr, MergeSHA: tc.mergeSHA}}}.open()
-				if legacyErr := legacy.recoverFailedPR(context.WithValue(context.Background(), PrHeadVerifiedContextKey{}, !tc.unverified), "c1", tc.head); !errors.Is(legacyErr, ErrPRTransitionSkipped) {
+				legacyChunk := chunk
+				legacyChunk.HeadSHA = ""
+				legacy := rcOpenStore(t, tc.parent, []model.VanadisChunk{legacyChunk}, rcFailNoWrites)
+				if legacyErr := legacy.recoverFailedPR(rcVerified(!tc.unverified), "c1", tc.head); !errors.Is(legacyErr, ErrPRTransitionSkipped) {
 					t.Fatalf("legacy error=%v", legacyErr)
 				}
 			}
 			if errors.Is(err, ErrPRTransitionSkipped) != tc.skip || (err != nil && !tc.skip) {
 				t.Fatalf("error=%v skip=%v", err, tc.skip)
+			}
+			if tc.skip {
+				return
+			}
+			got := loadChunk(t, pool, "c1")
+			if got.Status != "pr_opened" || got.HeadSHA != tc.head || loadBuild(t, pool, "b1").Status != "running" {
+				t.Fatalf("after recovery chunk=%s head=%s", got.Status, got.HeadSHA)
 			}
 		})
 	}
@@ -63,164 +105,58 @@ func TestPostgresVanadisStore_RecoverFailedPR(t *testing.T) {
 
 func TestPostgresVanadisStore_RecoverFailedPRFailures(t *testing.T) {
 	t.Parallel()
-	injected := errors.New("injected")
-	tests := []struct {
-		name     string
-		db       dbScript
-		baseline bool
-		want     error
-	}{
-		{name: "begin", db: dbScript{beginErr: injected}, want: injected},
-		{name: "lookup", db: dbScript{row: errRow(injected)}, want: injected},
-		{name: "parent", db: dbScript{buildRow: errRow(injected)}, want: injected},
-		{name: "chunks", db: dbScript{queryErr: injected}, want: injected},
-		{name: "chunk write", db: dbScript{failExec: "UPDATE vanadis_chunks", execErr: injected}, want: injected},
-		{name: "parent write", db: dbScript{failExec: "UPDATE vanadis_builds", execErr: injected}, want: injected},
-		{name: "baseline write", baseline: true, db: dbScript{failExec: "UPDATE vanadis_chunks", execErr: injected}, want: injected},
-		{name: "baseline commit", baseline: true, db: dbScript{commitErr: injected}, want: injected},
-		{name: "commit", db: dbScript{commitErr: injected}, want: injected},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			db := tc.db
-			if db.row == nil {
-				db.row = valuesRow("b1")
-			}
-			if db.buildRow == nil {
-				db.buildRow = buildRow("b1", "failed")
-			}
-			db.chunks = []model.VanadisChunk{{ID: "c1", BuildID: "b1", Mode: "pr", PRNumber: 12, Status: "failed", HeadSHA: "old"}}
-			if tc.baseline {
-				db.chunks[0].HeadSHA = ""
-			}
-			st, _ := db.open()
-			ctx := context.WithValue(context.Background(), PrHeadVerifiedContextKey{}, true)
-			if err := st.recoverFailedPR(ctx, "c1", "new"); !errors.Is(err, tc.want) {
-				t.Fatalf("err=%v want=%v", err, tc.want)
-			}
-		})
-	}
-}
-
-// recoveryFixtureStore models the external database's atomic commit and parent
-// lock for recovery tests.
-func recoveryFixtureStore(mu *sync.Mutex, parent *string, chunks *[]model.VanadisChunk, failParent bool) *Store {
-	return New(mockDB{execFn: func(context.Context, string, ...any) (pgconn.CommandTag, error) {
-		return pgconn.NewCommandTag("UPDATE 0"), nil
-	}, beginFn: func(context.Context) (pgx.Tx, error) {
-		var local []model.VanadisChunk
-		var state string
-		locked, closed := false, false
-		tx := &mockTx{
-			queryRowFn: func(_ context.Context, q string, _ ...any) pgx.Row {
-				if strings.Contains(q, "SELECT build_id") {
-					return valuesRow("b1")
-				}
-				mu.Lock()
-				locked = true
-				state = *parent
-				local = append([]model.VanadisChunk(nil), (*chunks)...)
-				return buildRow("b1", state)
-			}, queryFn: func(context.Context, string, ...any) (pgx.Rows, error) { return &mockRows{items: local}, nil },
-			execFn: func(_ context.Context, q string, args ...any) (pgconn.CommandTag, error) {
-				if !locked {
-					return pgconn.CommandTag{}, errors.New("write without lock")
-				}
-				if strings.Contains(q, "UPDATE vanadis_chunks") {
-					applyRecoveryFixtureHead(local, args, strings.Contains(q, "SET ci_checks = COALESCE"))
-				} else {
-					if failParent {
-						return pgconn.CommandTag{}, errors.New("parent write failed")
-					}
-					state = "running"
-				}
-				return pgconn.NewCommandTag("UPDATE 1"), nil
-			},
-		}
-		return &retryTransaction{mockTx: tx, finish: func(commit bool) error {
-			if closed {
-				return pgx.ErrTxClosed
-			}
-			closed = true
-			if locked {
-				defer mu.Unlock()
-			}
-			if commit {
-				*chunks = local
-				*parent = state
-			}
-			return nil
-		}}, nil
-	}})
-}
-
-// retryTransaction models the external database's atomic commit and parent lock.
-type retryTransaction struct {
-	*mockTx
-
-	finish func(commit bool) error
-}
-
-func (tx *retryTransaction) Commit(context.Context) error   { return tx.finish(true) }
-func (tx *retryTransaction) Rollback(context.Context) error { return tx.finish(false) }
-
-func applyRecoveryFixtureHead(chunks []model.VanadisChunk, args []any, baseline bool) {
-	for i := range chunks {
-		if chunks[i].ID == args[0] {
-			if !baseline {
-				chunks[i].Status = "pr_opened"
-			}
-			chunks[i].HeadSHA, _ = args[1].(string)
-		}
-	}
-}
-
-func assertLegacyBaseline(t *testing.T, st *Store, parent *string, stored *[]model.VanadisChunk) {
-	t.Helper()
-	for _, head := range []string{"h1", "h1"} {
-		err := st.recoverFailedPR(context.WithValue(context.Background(), PrHeadVerifiedContextKey{}, true), "c1", head)
-		chunks := *stored
-		if !errors.Is(err, ErrPRTransitionSkipped) || chunks[0].HeadSHA != "h1" || chunks[0].Status != "failed" || *parent != "failed" || chunks[1].HeadSHA != "h1" {
-			t.Fatalf("baseline error=%v parent=%s chunks=%+v", err, *parent, chunks)
-		}
-	}
-}
-
-func TestPostgresVanadisStore_PRRecoveryTransactions(t *testing.T) {
-	t.Parallel()
 	tests := []struct {
 		name       string
-		failParent bool
-		wantParent string
-		wantFailed int
+		closed     bool
+		sabotage   string
+		baseline   bool
+		wantErrSub string
 	}{
-		{"parent write rolls back last recovery", true, "failed", 1},
+		{name: "begin", closed: true, wantErrSub: "closed pool"},
+		{name: "lookup", sabotage: `ALTER TABLE vanadis_chunks RENAME COLUMN build_id TO build_ref;`, wantErrSub: "build_id"},
+		{name: "parent", sabotage: `ALTER TABLE vanadis_builds RENAME COLUMN quiet TO quiet_x;`, wantErrSub: "quiet"},
+		{name: "chunks", sabotage: `ALTER TABLE vanadis_chunks RENAME COLUMN banner TO banner_x;`, wantErrSub: "banner"},
+		{name: "chunk write", sabotage: failStatement("vanadis_chunks", "UPDATE"), wantErrSub: "sabotaged UPDATE on vanadis_chunks"},
+		{name: "parent write", sabotage: failStatement("vanadis_builds", "UPDATE"), wantErrSub: "sabotaged UPDATE on vanadis_builds"},
+		{name: "baseline write", baseline: true, sabotage: failStatement("vanadis_chunks", "UPDATE"), wantErrSub: "sabotaged UPDATE on vanadis_chunks"},
+		{name: "baseline commit", baseline: true, sabotage: failCommit("vanadis_chunks", "UPDATE"), wantErrSub: "sabotaged UPDATE on vanadis_chunks"},
+		{name: "commit", sabotage: failCommit("vanadis_builds", "UPDATE"), wantErrSub: "sabotaged UPDATE on vanadis_builds"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			var mu sync.Mutex
-			parent := "failed"
-			chunks := []model.VanadisChunk{{ID: "c1", BuildID: "b1", Mode: "pr", PRNumber: 12, Status: "failed", HeadSHA: "old"}, {ID: "c2", BuildID: "b1", Mode: "pr", PRNumber: 13, Status: "failed", HeadSHA: "old"}}
-			st := recoveryFixtureStore(&mu, &parent, &chunks, tc.failParent)
-			ctx := context.WithValue(context.Background(), PrHeadVerifiedContextKey{}, true)
-			if err := st.recoverFailedPR(ctx, "c1", "new"); err != nil {
-				t.Fatal(err)
+			chunk := model.VanadisChunk{ID: "c1", BuildID: "b1", Mode: "pr", PRNumber: 12, Status: "failed", HeadSHA: "old"}
+			if tc.baseline {
+				chunk.HeadSHA = ""
 			}
-			if err := st.recoverFailedPR(ctx, "c2", "new"); err == nil {
-				t.Fatal("expected parent write failure")
+			st, pool := rcOpen(t, "failed", []model.VanadisChunk{chunk}, tc.sabotage)
+			if tc.closed {
+				pool.Close()
 			}
-			failed := 0
-			for _, c := range chunks {
-				if c.Status == "failed" {
-					failed++
-				}
-			}
-			if parent != tc.wantParent || failed != tc.wantFailed {
-				t.Fatalf("parent=%s failed=%d", parent, failed)
+			err := st.recoverFailedPR(rcVerified(true), "c1", "new")
+			if err == nil || errors.Is(err, ErrPRTransitionSkipped) || !strings.Contains(err.Error(), tc.wantErrSub) {
+				t.Fatalf("err=%v want containing %q", err, tc.wantErrSub)
 			}
 		})
+	}
+}
+
+// A failed sibling no longer blocks reopening the parent, so the first
+// recovery writes the parent; that write's failure must roll back the chunk
+// head update too.
+func TestPostgresVanadisStore_RecoverFailedPRParentWriteRollsBack(t *testing.T) {
+	t.Parallel()
+	chunks := []model.VanadisChunk{{ID: "c1", BuildID: "b1", Mode: "pr", PRNumber: 12, Status: "failed", HeadSHA: "old"}, {ID: "c2", BuildID: "b1", ChunkIndex: 1, Mode: "pr", PRNumber: 13, Status: "failed", HeadSHA: "old"}}
+	st, pool := rcOpen(t, "failed", chunks, failStatement("vanadis_builds", "UPDATE"))
+	err := st.recoverFailedPR(rcVerified(true), "c1", "new")
+	if err == nil || !strings.Contains(err.Error(), "sabotaged UPDATE on vanadis_builds") {
+		t.Fatalf("recoverFailedPR err = %v, want parent write failure", err)
+	}
+	parent := loadBuild(t, pool, "b1").Status
+	for _, id := range []string{"c1", "c2"} {
+		if c := loadChunk(t, pool, id); parent != "failed" || c.Status != "failed" || c.HeadSHA != "old" {
+			t.Fatalf("after rollback parent=%s %s=%s/%s, want failed and unchanged", parent, id, c.Status, c.HeadSHA)
+		}
 	}
 }
 
@@ -240,17 +176,14 @@ func TestPostgresVanadisStore_PRRecoveryHeadUpdates(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			var mu sync.Mutex
-			parent := "failed"
-			chunks := []model.VanadisChunk{{ID: "c1", BuildID: "b1", Mode: "pr", PRNumber: 12, Status: "failed", HeadSHA: "h1"}, {ID: "c2", BuildID: "b1", Mode: "pr", PRNumber: 13, Status: "failed", HeadSHA: "h1"}}
-			st := recoveryFixtureStore(&mu, &parent, &chunks, false)
-			chunks[0].HeadSHA = ""
-			assertLegacyBaseline(t, st, &parent, &chunks)
-			if err := st.recoverFailedPR(context.WithValue(context.Background(), PrHeadVerifiedContextKey{}, true), "c1", "h2"); err != nil {
+			chunks := []model.VanadisChunk{{ID: "c1", BuildID: "b1", Mode: "pr", PRNumber: 12, Status: "failed"}, {ID: "c2", BuildID: "b1", ChunkIndex: 1, Mode: "pr", PRNumber: 13, Status: "failed", HeadSHA: "h1"}}
+			st, pool := rcOpen(t, "failed", chunks, "")
+			rcAssertLegacyBaseline(t, st, pool)
+			if err := st.recoverFailedPR(rcVerified(true), "c1", "h2"); err != nil {
 				t.Fatal(err)
 			}
-			chunks[0].Status = tc.nextStatus
-			err := st.recoverFailedPR(context.WithValue(context.Background(), PrHeadVerifiedContextKey{}, true), "c1", "h3")
+			rcSetStatus(t, pool, "c1", tc.nextStatus)
+			err := st.recoverFailedPR(rcVerified(true), "c1", "h3")
 			if errors.Is(err, ErrPRTransitionSkipped) != tc.skip || (err != nil && !tc.skip) {
 				t.Fatalf("head update: %v", err)
 			}
@@ -258,19 +191,32 @@ func TestPostgresVanadisStore_PRRecoveryHeadUpdates(t *testing.T) {
 			if tc.skip {
 				wantHead = "h2"
 			}
-			if parent != "failed" || chunks[0].HeadSHA != wantHead {
-				t.Fatalf("parent=%s head=%s", parent, chunks[0].HeadSHA)
-			}
-			if err := st.recoverFailedPR(context.WithValue(context.Background(), PrHeadVerifiedContextKey{}, true), "c2", "h2"); err != nil {
+			rcAssertRunningHead(t, pool, wantHead)
+			if err := st.recoverFailedPR(rcVerified(true), "c2", "h2"); err != nil {
 				t.Fatal(err)
 			}
-			wantParent := "running"
-			if tc.nextStatus == "cancelled" {
-				wantParent = "failed"
-			}
-			if parent != wantParent || chunks[0].HeadSHA != wantHead {
-				t.Fatalf("after sibling recovery parent=%s head=%s", parent, chunks[0].HeadSHA)
-			}
+			rcAssertRunningHead(t, pool, wantHead)
 		})
+	}
+}
+
+// rcAssertLegacyBaseline recovers legacy chunk c1 (no stored head) twice: each
+// call only seeds its baseline head, is skipped and keeps the failure state.
+func rcAssertLegacyBaseline(t *testing.T, st *Store, pool *pgxpool.Pool) {
+	t.Helper()
+	for range 2 {
+		err := st.recoverFailedPR(rcVerified(true), "c1", "h1")
+		c1, c2, parent := loadChunk(t, pool, "c1"), loadChunk(t, pool, "c2"), loadBuild(t, pool, "b1").Status
+		if !errors.Is(err, ErrPRTransitionSkipped) || c1.HeadSHA != "h1" || c1.Status != "failed" || parent != "failed" || c2.HeadSHA != "h1" {
+			t.Fatalf("baseline error=%v parent=%s c1=%+v c2=%+v", err, parent, c1, c2)
+		}
+	}
+}
+
+// rcAssertRunningHead checks b1 is running and c1 stores wantHead.
+func rcAssertRunningHead(t *testing.T, pool *pgxpool.Pool, wantHead string) {
+	t.Helper()
+	if parent, head := loadBuild(t, pool, "b1").Status, loadChunk(t, pool, "c1").HeadSHA; parent != "running" || head != wantHead {
+		t.Fatalf("parent=%s head=%s, want running/%s", parent, head, wantHead)
 	}
 }

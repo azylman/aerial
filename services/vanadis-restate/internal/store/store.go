@@ -17,17 +17,19 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 
+	"github.com/azylman/aerial/pkg/agent"
+	"github.com/azylman/aerial/pkg/buildplan"
+	"github.com/azylman/aerial/pkg/githubapi"
 	"github.com/azylman/aerial/pkg/pubsub"
 	"github.com/azylman/aerial/services/vanadis-restate/internal/model"
 )
 
 const (
-	chunkModeAction  = "action"
-	defaultAgent     = "aerial"
-	defaultRepoOwner = "azylman"
-	effortLow        = "low"
-	effortMedium     = "medium"
-	jsonNull         = "null"
+	chunkModeAction = "action"
+	defaultAgent    = "aerial"
+	effortLow       = "low"
+	effortMedium    = "medium"
+	jsonNull        = "null"
 )
 
 // BuildColumns is the canonical build-row select list.
@@ -48,12 +50,14 @@ type rowScanner interface {
 // Store is the shared pgx-backed persistence handle embedded by the root
 // PostgresVanadisStore.
 type Store struct {
-	db PgxQueryExecer
+	db          PgxQueryExecer
+	gitHubOwner string
 }
 
-// New returns a Store backed by db.
-func New(db PgxQueryExecer) *Store {
-	return &Store{db: db}
+// New returns a Store backed by db. gitHubOwner is the configured GitHub
+// owner whose bare and qualified repo spellings chunk lookups treat as one.
+func New(db PgxQueryExecer, gitHubOwner string) *Store {
+	return &Store{db: db, gitHubOwner: gitHubOwner}
 }
 
 type VanadisChunkSummary struct {
@@ -103,6 +107,8 @@ type AttachChunkPRRequest struct {
 	Title    string `json:"title,omitempty"`
 	TargetID string `json:"target_id,omitempty"`
 	Quiet    bool   `json:"quiet,omitempty"`
+	// Agent is the caller agent that owns a new standalone build.
+	Agent string `json:"agent,omitempty"`
 }
 
 type CreateChunkInput struct {
@@ -158,14 +164,13 @@ type VanadisStore interface {
 	RetryActionChunk(ctx context.Context, req RetryActionChunkRequest) (*RetryActionChunkResult, error)
 	CreateBuild(ctx context.Context, build model.VanadisBuild, chunks []model.VanadisChunk) error
 	GetBuild(ctx context.Context, buildID string) (*model.VanadisBuild, []model.VanadisChunk, error)
-	UpdateChunkStatus(ctx context.Context, chunkID, status string) error
 	ReserveChunkForLaunch(ctx context.Context, chunkID string) error
 	UpdateBuildStatus(ctx context.Context, buildID, status string) error
-	UpdateBuildStatusMessageID(ctx context.Context, buildID, messageID string) error
+	CompareAndSwapBuildStatusMessageID(ctx context.Context, buildID, oldID, newID string) (bool, error)
 	GetChunkByPR(ctx context.Context, repo string, prNumber int) (*VanadisChunkPRLookup, error)
-	LookupPRChunk(ctx context.Context, repo string, prNumber int) (buildID, chunkID string, err error)
-	LookupChunkBuildID(ctx context.Context, chunkID string) (buildID string, err error)
-	LookupUnattachedChunkByThreadAndRepo(ctx context.Context, threadID, repo string) (buildID, chunkID string, err error)
+	LookupPRChunk(ctx context.Context, repo string, prNumber int) (route BuildRoute, chunkID string, err error)
+	LookupChunkBuildID(ctx context.Context, chunkID string) (route BuildRoute, err error)
+	LookupUnattachedChunkByThreadAndRepo(ctx context.Context, threadID, repo string) (route BuildRoute, chunkID string, err error)
 	AttachChunkPR(ctx context.Context, req AttachChunkPRRequest) (buildID, chunkID, threadID string, err error)
 	CompleteActionChunk(ctx context.Context, chunkID, dispatchID string) (*VanadisAdvancementResult, error)
 	FailChunk(ctx context.Context, chunkID, reason, dispatchID string) (*model.VanadisBuild, *model.VanadisChunk, bool, error)
@@ -178,81 +183,40 @@ type VanadisStore interface {
 	ResetPRCheckState(ctx context.Context, chunkID, headSHA, mergeSHA string) error
 	IncrementChunkCIFailCount(ctx context.Context, chunkID, banner string, headSHA ...string) (int, error)
 	CompletePRDeployment(ctx context.Context, chunkID string, rolloutState *pubsub.PRRolloutState) error
-	SweepEarlierDeploymentsAcrossBuilds(ctx context.Context, deploying model.VanadisChunk) (swept, recovered []SweptChunk, err error)
+	MarkActionRepairDeployed(ctx context.Context, chunkID string, rolloutState *pubsub.PRRolloutState) error
+	SweepEarlierDeploymentsAcrossBuilds(ctx context.Context, deploying model.VanadisChunk) ([]SweptChunk, error)
 	UpdatePRLifecycleStatus(ctx context.Context, chunkID, status string) error
 	UpdateChunkBannerAndStatus(ctx context.Context, chunkID, status, banner string) error
 }
 
-// FirstNonEmpty returns the first trimmed non-empty value.
-func FirstNonEmpty(vals ...string) string {
-	for _, v := range vals {
-		if trimmed := strings.TrimSpace(v); trimmed != "" {
-			return trimmed
-		}
-	}
-	return ""
-}
-
-// NonNilSlice normalizes a nil slice to an empty slice.
-func NonNilSlice[T any](s []T) []T {
-	if s == nil {
-		return []T{}
-	}
-	return s
-}
-
-// NormalizeRepo trims repo whitespace. Canonical implementation lives in
-// internal/model; this alias preserves the store surface for existing callers.
-func NormalizeRepo(repo string) string {
-	return model.NormalizeRepo(repo)
-}
-
-// NormalizeChunkMode validates and normalizes a chunk mode. Canonical
-// implementation lives in internal/model.
-func NormalizeChunkMode(raw string) (string, error) {
-	return model.NormalizeChunkMode(raw)
-}
-
-// NormalizeChunkEffort validates and normalizes a chunk effort. Canonical
-// implementation lives in internal/model.
-func NormalizeChunkEffort(effort string) (string, error) {
-	return model.NormalizeChunkEffort(effort)
-}
-
 // CapChunkEffort clamps an effort value to a valid effort.
 func CapChunkEffort(effort string) string {
-	eff, err := NormalizeChunkEffort(effort)
+	eff, err := buildplan.NormalizeChunkEffort(effort)
 	if err != nil {
 		return effortMedium
 	}
 	return eff
 }
 
-// IsValidVanadisChunkID reports whether id is a valid chunk identifier.
-// Canonical implementation lives in internal/model.
-func IsValidVanadisChunkID(id string) bool {
-	return model.IsValidVanadisChunkID(id)
-}
-
-// RepoMatchCandidates returns the repo spellings a chunk lookup should match.
-func RepoMatchCandidates(repo string) []string {
-	repo = NormalizeRepo(repo)
+// RepoMatchCandidates returns the repo spellings a chunk lookup should
+// match: a bare repo also matches its owner-qualified form, and a repo
+// under owner also matches its bare name. Other owners match only as given.
+func RepoMatchCandidates(owner, repo string) []string {
+	repo = buildplan.TrimRepo(repo)
 	if repo == "" {
 		return nil
 	}
-	if !strings.Contains(repo, "/") {
-		return []string{repo, defaultRepoOwner + "/" + repo}
+	owner = strings.Trim(strings.TrimSpace(owner), "/")
+	if owner == "" {
+		return []string{repo}
 	}
-	if bare, ok := strings.CutPrefix(repo, defaultRepoOwner+"/"); ok && bare != "" && !strings.Contains(bare, "/") {
+	if !strings.Contains(repo, "/") {
+		return []string{repo, githubapi.QualifyRepo(owner, repo)}
+	}
+	if bare, ok := strings.CutPrefix(repo, owner+"/"); ok && bare != "" && !strings.Contains(bare, "/") {
 		return []string{repo, bare}
 	}
 	return []string{repo}
-}
-
-// ValidateChunkModeAndRepo validates mode/repo coherence for a chunk input.
-// Canonical implementation lives in internal/model.
-func ValidateChunkModeAndRepo(idx int, modeStr, repo string, targetFiles, targetSymbols []string) error {
-	return model.ValidateChunkModeAndRepo(idx, modeStr, repo, targetFiles, targetSymbols)
 }
 
 // ScanBuild scans a single build row.
@@ -268,6 +232,20 @@ func ScanBuild(s rowScanner) (model.VanadisBuild, error) {
 	return b, err
 }
 
+// NormalizeRunnerAgent canonicalizes a runner agent name: trimmed and
+// lowercased, with empty meaning the default agent.
+func NormalizeRunnerAgent(runner string) string {
+	if name := agent.Clean(runner); name != "" {
+		return name
+	}
+	return defaultAgent
+}
+
+// BuildRoute is the Restate routing key for one build: its ID.
+type BuildRoute struct {
+	BuildID string `json:"build_id"`
+}
+
 // ApplyRawChunkCIChecks folds raw CI check JSON into derived chunk fields.
 func ApplyRawChunkCIChecks(c *model.VanadisChunk, rawCIChecks []byte) {
 	if len(rawCIChecks) == 0 || string(rawCIChecks) == jsonNull || string(rawCIChecks) == "{}" {
@@ -280,10 +258,14 @@ func ApplyRawChunkCIChecks(c *model.VanadisChunk, rawCIChecks []byte) {
 	c.HeadSHA = strings.TrimSpace(checks["_head_sha"])
 	c.RemediatedSHA = strings.TrimSpace(checks["_remediated_sha"])
 	c.MergeSHA = strings.TrimSpace(checks["_merge_sha"])
+	mergeQueue := strings.TrimSpace(checks["_merge_queue"])
 	for k := range checks {
 		if strings.HasPrefix(k, "_") {
 			delete(checks, k)
 		}
+	}
+	if mergeQueue != "" {
+		checks["_merge_queue"] = mergeQueue
 	}
 	if len(checks) > 0 {
 		c.CIChecks = checks
@@ -294,33 +276,9 @@ func ApplyRawChunkCIChecks(c *model.VanadisChunk, rawCIChecks []byte) {
 func ScanChunks(rows pgx.Rows) ([]model.VanadisChunk, error) {
 	chunks := make([]model.VanadisChunk, 0)
 	for rows.Next() {
-		var c model.VanadisChunk
-		var startedAt, completedAt sql.NullTime
-		var rawCIChecks, rawRolloutState []byte
-		if err := rows.Scan(
-			&c.ID, &c.BuildID, &c.ChunkIndex, &c.Mode, &c.Repo, &c.Title, &c.Instructions,
-			&c.TargetFiles, &c.TargetSymbols, &c.Effort, &c.AcceptanceCriteria, &c.Status,
-			&c.PRNumber, &c.StallNudges, &c.DependsOn, &c.CIFailCount, &rawCIChecks,
-			&rawRolloutState, &c.Banner, &c.MergeAwakeableID, &c.DeployAwakeableID,
-			&startedAt, &completedAt, &c.CreatedAt, &c.UpdatedAt,
-		); err != nil {
-			return nil, fmt.Errorf("failed to scan vanadis chunk: %w", err)
-		}
-		if startedAt.Valid {
-			c.StartedAt = startedAt.Time
-		}
-		if completedAt.Valid {
-			c.CompletedAt = completedAt.Time
-		}
-		c.TargetFiles, c.TargetSymbols, c.AcceptanceCriteria = NonNilSlice(c.TargetFiles), NonNilSlice(c.TargetSymbols), NonNilSlice(c.AcceptanceCriteria)
-		c.DependsOn = NonNilSlice(c.DependsOn)
-		c.Effort = CapChunkEffort(c.Effort)
-		ApplyRawChunkCIChecks(&c, rawCIChecks)
-		if len(rawRolloutState) > 0 && string(rawRolloutState) != jsonNull && string(rawRolloutState) != "{}" {
-			var rs pubsub.PRRolloutState
-			if err := json.Unmarshal(rawRolloutState, &rs); err == nil {
-				c.RolloutState = &rs
-			}
+		c, err := scanChunkRow(rows)
+		if err != nil {
+			return nil, err
 		}
 		chunks = append(chunks, c)
 	}
@@ -328,4 +286,40 @@ func ScanChunks(rows pgx.Rows) ([]model.VanadisChunk, error) {
 		return nil, fmt.Errorf("error iterating vanadis chunks: %w", err)
 	}
 	return chunks, nil
+}
+
+// scanChunkRow scans one canonical chunk row followed by optional trailing
+// columns (for joins that select extra build fields after the chunk).
+func scanChunkRow(row rowScanner, extra ...any) (model.VanadisChunk, error) {
+	var c model.VanadisChunk
+	var startedAt, completedAt sql.NullTime
+	var rawCIChecks, rawRolloutState []byte
+	dest := make([]any, 0, 23+len(extra))
+	dest = append(dest,
+		&c.ID, &c.BuildID, &c.ChunkIndex, &c.Mode, &c.Repo, &c.Title, &c.Instructions,
+		&c.TargetFiles, &c.TargetSymbols, &c.Effort, &c.AcceptanceCriteria, &c.Status,
+		&c.PRNumber, &c.StallNudges, &c.DependsOn, &c.CIFailCount, &rawCIChecks,
+		&rawRolloutState, &c.Banner,
+		&startedAt, &completedAt, &c.CreatedAt, &c.UpdatedAt,
+	)
+	if err := row.Scan(append(dest, extra...)...); err != nil {
+		return model.VanadisChunk{}, fmt.Errorf("failed to scan vanadis chunk: %w", err)
+	}
+	if startedAt.Valid {
+		c.StartedAt = startedAt.Time
+	}
+	if completedAt.Valid {
+		c.CompletedAt = completedAt.Time
+	}
+	c.TargetFiles, c.TargetSymbols, c.AcceptanceCriteria = buildplan.NonNilSlice(c.TargetFiles), buildplan.NonNilSlice(c.TargetSymbols), buildplan.NonNilSlice(c.AcceptanceCriteria)
+	c.DependsOn = buildplan.NonNilSlice(c.DependsOn)
+	c.Effort = CapChunkEffort(c.Effort)
+	ApplyRawChunkCIChecks(&c, rawCIChecks)
+	if len(rawRolloutState) > 0 && string(rawRolloutState) != jsonNull && string(rawRolloutState) != "{}" {
+		var rs pubsub.PRRolloutState
+		if err := json.Unmarshal(rawRolloutState, &rs); err == nil {
+			c.RolloutState = &rs
+		}
+	}
+	return c, nil
 }

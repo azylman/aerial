@@ -9,6 +9,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/azylman/aerial/services/eri/pkg/config"
 	"github.com/azylman/aerial/services/eri/pkg/runner"
 )
 
@@ -30,19 +31,15 @@ type testRunnerAgentPool struct {
 }
 
 func newTestRunnerAgentPool(cfg WorkerPoolConfig, trackerPool runner.AgentPool) *testRunnerAgentPool {
-	if cfg.TimeoutMinutes <= 0 {
-		cfg.TimeoutMinutes = DefaultTimeoutMinutes
-	}
 	if cfg.RunnerWithOptionsFunc == nil && cfg.RunnerFunc != nil {
 		rf := cfg.RunnerFunc
-		tm := cfg.TimeoutMinutes
 		cfg.RunnerWithOptionsFunc = func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, opts runner.WatchdogOptions) (string, string, int, error) {
 			timeoutMins := int(opts.MaxDuration / time.Minute)
 			if timeoutMins <= 0 {
 				timeoutMins = int(opts.InactivityTimeout / time.Minute)
 			}
 			if timeoutMins <= 0 {
-				timeoutMins = tm
+				timeoutMins = config.DefaultTurnTimeoutMinutes
 			}
 			return rf(ctx, agyBin, prompt, sessionID, apiKey, model, timeoutMins)
 		}
@@ -375,10 +372,7 @@ func (s *testRunnerAgentSession) Send(prompt string, turn *runner.TurnContext) e
 			turn.Sink.OnToolCall(runner.ToolCall{Name: "processing"})
 		}
 	}
-	timeout := s.pool.cfg.TimeoutMinutes
-	if timeout <= 0 {
-		timeout = DefaultTimeoutMinutes
-	}
+	timeout := config.DefaultTurnTimeoutMinutes
 	watchdogOpts := runner.WatchdogOptions{
 		InactivityTimeout: 5 * time.Minute,
 		MaxDuration:       time.Duration(timeout) * time.Minute,

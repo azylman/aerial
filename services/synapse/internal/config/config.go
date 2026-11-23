@@ -1,6 +1,7 @@
 package config
 
 import (
+	"errors"
 	"fmt"
 	"log"
 	"net"
@@ -10,8 +11,10 @@ import (
 
 	"gopkg.in/yaml.v3"
 
-	"github.com/azylman/aerial/pkg/httpkit"
+	"github.com/azylman/aerial/pkg/discordutil"
+	"github.com/azylman/aerial/pkg/githubapi"
 	"github.com/azylman/aerial/pkg/k8sauth"
+	"github.com/azylman/aerial/pkg/strutil"
 	"github.com/azylman/aerial/services/synapse/internal/model"
 )
 
@@ -26,31 +29,37 @@ type BotConfig struct {
 
 // Config holds runtime configuration for synapse.
 type Config struct {
-	LegacyBuildWorkflows []LegacyBuildWorkflow
-	Port                 string
-	KubeAPIServer        string
-	KubeToken            string
-	GitHubToken          string
-	GitHubAPIURL         string
-	GitHubWebhookSecret  string
-	RestateURL           string
-	RestatePRService     string
-	RestateRepoService   string
-	RestateAuthoritative bool
-	PostgresURL          string
-	FluxReceiverURL      string
-	BrainURL             string
-	EriURL               string
-	NATSURL              string
-	SystemChannelID      string
-	DiscordToken         string
-	AutoUpdatePRAuthors  []string
-	BotID                string
-	DefaultOwner         bool
-	Bots                 map[string]BotConfig
-	K8sAuthEnabled       bool
-	K8sAuthConfig        k8sauth.Config
-	CollaboratorCIAlerts []CollaboratorCIAlertRule
+	Port                string
+	KubeAPIServer       string
+	KubeToken           string
+	GitHubToken         string
+	GitHubAPIURL        string
+	GitHubCredential    string
+	GitHubWebhookSecret string
+	// GitHubOwner qualifies bare repo names ("aerial" -> "<owner>/aerial")
+	// before they address a Restate PRObject/RepoObject. Bound at startup.
+	GitHubOwner string
+	// GitHubAppID and GitHubAppInstallationID identify the GitHub App
+	// (non-secret): github_app_id / github_app_installation_id from the
+	// service YAML, with no env fallback. The token
+	// source is built once at startup, so both require a restart.
+	GitHubAppID             string
+	GitHubAppInstallationID string
+	RestateURL              string
+	RestatePRService        string
+	RestateRepoService      string
+	BrainURL                string
+	EriURL                  string
+	NATSURL                 string
+	SystemChannelID         string
+	DiscordToken            string
+	AutoUpdatePRAuthors     []string
+	BotID                   string
+	DefaultOwner            bool
+	Bots                    map[string]BotConfig
+	K8sAuthEnabled          bool
+	K8sAuthConfig           k8sauth.Config
+	CollaboratorCIAlerts    []CollaboratorCIAlertRule
 }
 
 // CollaboratorCIAlertRule defines a notification rule for unregistered collaborator pull requests.
@@ -62,23 +71,15 @@ type CollaboratorCIAlertRule struct {
 
 // RouterYAMLConfig defines the declarative file schema for services/synapse/synapse.yaml.
 type RouterYAMLConfig struct {
-	LegacyBuildWorkflows []LegacyBuildWorkflow `yaml:"legacy_build_workflows"`
-	Port                 string                `yaml:"port"`
-	FluxReceiverURL      string                `yaml:"flux_receiver_url"`
-	EriURL               string                `yaml:"eri_url"`
-	NATSURL              string                `yaml:"nats_url"`
-	RestateURL           string                `yaml:"restate_url"`
-	RestatePRService     string                `yaml:"restate_pr_service"`
-	RestateRepoService   string                `yaml:"restate_repo_service"`
-	// RestateAuthoritative flips github/deploy consumer ownership to the
-	// Restate PRObject/RepoObject journal. Rollback is a YAML rebind
-	// (restate_authoritative: false) with no code revert and no restart:
-	// the flag is read live per request, so it is deliberately absent from
-	// RestartRequired. The rebind rollback window is one deploy soak
-	// (about 48h); it stays valid only until the first Restate-committed
-	// external effect, after which rollback is forward-fix only because
-	// the journal owns effects legacy state cannot replay.
-	RestateAuthoritative bool                      `yaml:"restate_authoritative"`
+	Port    string `yaml:"port"`
+	EriURL  string `yaml:"eri_url"`
+	NATSURL string `yaml:"nats_url"`
+	// RestateURL is the Restate ingress synapse sends every PR lifecycle
+	// event to. Required: a config without it fails validation, and a hot
+	// reload without it keeps the last known good config.
+	RestateURL           string                    `yaml:"restate_url"`
+	RestatePRService     string                    `yaml:"restate_pr_service"`
+	RestateRepoService   string                    `yaml:"restate_repo_service"`
 	SystemChannelID      string                    `yaml:"system_channel_id"`
 	SystemChannel        string                    `yaml:"system_channel"`
 	AutoUpdatePRAuthors  []string                  `yaml:"auto_update_pr_authors"`
@@ -88,13 +89,40 @@ type RouterYAMLConfig struct {
 	K8sAuthEnabled       bool                      `yaml:"k8s_auth_enabled"`
 	K8sAuthConfig        k8sauth.Config            `yaml:"k8s_auth"`
 	CollaboratorCIAlerts []CollaboratorCIAlertRule `yaml:"collaborator_ci_alerts"`
+	// GitHubCredential picks the credential synapse attaches to GitHub REST
+	// calls: "app" (GitHub App installation token, the default when unset)
+	// or "pat" (GITHUB_PAT). It is read per request, so an aerial-config PR
+	// moves traffic without a restart. With the GITHUB_APP_* env unset,
+	// "app" also stays on the PAT. A hot reload carrying any other value is
+	// rejected and the last good config stays live.
+	GitHubCredential string `yaml:"github_credential"`
+	// GitHubOwner is the GitHub account that owns bare repo names. No code
+	// default: with it unset, bare repos are rejected before any Restate
+	// request. Changing it requires a restart.
+	GitHubOwner string `yaml:"github_owner"`
+	// GitHubAppID and GitHubAppInstallationID are the GitHub App's numeric
+	// IDs (not secrets; the private key stays env). Empty means PAT auth.
+	GitHubAppID             string `yaml:"github_app_id"`
+	GitHubAppInstallationID string `yaml:"github_app_installation_id"`
 }
 
-// LegacyBuildWorkflow pins one immutable historical producer revision.
-type LegacyBuildWorkflow struct {
-	Repository   string `yaml:"repository"`
-	WorkflowPath string `yaml:"workflow_path"`
-	BlobSHA      string `yaml:"blob_sha"`
+// GitHub credential choices for github_credential.
+const (
+	GitHubCredentialApp = "app"
+	GitHubCredentialPAT = "pat"
+)
+
+// NormalizeGitHubCredential lowercases and trims a github_credential value;
+// unset selects app. ok is false for anything other than app or pat.
+func NormalizeGitHubCredential(raw string) (string, bool) {
+	switch v := strings.ToLower(strings.TrimSpace(raw)); v {
+	case "", GitHubCredentialApp:
+		return GitHubCredentialApp, true
+	case GitHubCredentialPAT:
+		return v, true
+	default:
+		return v, false
+	}
 }
 
 var (
@@ -126,10 +154,26 @@ func LoadConfigStrict(configPath string) (Config, error) {
 	if err != nil {
 		return Config{}, err
 	}
-	if _, err := NormalizeLegacyBuildWorkflows(fileCfg.LegacyBuildWorkflows); err != nil {
+	if v, ok := NormalizeGitHubCredential(fileCfg.GitHubCredential); !ok {
+		return Config{}, fmt.Errorf("github_credential %q is not app or pat", v)
+	}
+	cfg := buildConfig(fileCfg)
+	if err := ValidateRequired(&cfg); err != nil {
 		return Config{}, err
 	}
-	return buildConfig(fileCfg), nil
+	return cfg, nil
+}
+
+// ErrRestateURLRequired rejects a config without restate_url: synapse sends
+// every PR lifecycle event to Restate and has no other path.
+var ErrRestateURLRequired = errors.New("restate_url is required")
+
+// ValidateRequired reports the first required setting cfg is missing.
+func ValidateRequired(cfg *Config) error {
+	if cfg == nil || strings.TrimSpace(cfg.RestateURL) == "" {
+		return ErrRestateURLRequired
+	}
+	return nil
 }
 
 // LoadConfigFromEnv initializes configuration from environment variables with optional CONFIG_PATH fallback.
@@ -187,27 +231,26 @@ func botsEqual(a, b map[string]BotConfig) bool {
 }
 
 // RestartRequired reports whether moving from old to next changes a
-// field that is bound once at startup (listener, database pool, Discord
-// gateway session, outbound dispatcher and registry clients) and therefore
-// can only take effect through a graceful process restart.
-// RestateAuthoritative is deliberately excluded: the consumer cutover and
-// its YAML-rebind rollback take effect on the next request without restart.
+// field that is bound once at startup (listener, Discord gateway session,
+// outbound dispatcher and Restate ingress) and therefore can only take
+// effect through a graceful process restart.
 func RestartRequired(old, next *Config) bool {
 	if old == nil || next == nil {
 		return true
 	}
 	return old.Port != next.Port ||
-		old.PostgresURL != next.PostgresURL ||
 		old.DiscordToken != next.DiscordToken ||
 		old.BotID != next.BotID ||
 		old.BrainURL != next.BrainURL ||
-		old.FluxReceiverURL != next.FluxReceiverURL ||
 		old.KubeAPIServer != next.KubeAPIServer ||
 		old.KubeToken != next.KubeToken ||
 		old.NATSURL != next.NATSURL ||
 		old.RestateURL != next.RestateURL ||
 		old.RestatePRService != next.RestatePRService ||
 		old.RestateRepoService != next.RestateRepoService ||
+		old.GitHubOwner != next.GitHubOwner ||
+		old.GitHubAppID != next.GitHubAppID ||
+		old.GitHubAppInstallationID != next.GitHubAppInstallationID ||
 		old.K8sAuthEnabled != next.K8sAuthEnabled ||
 		!botsEqual(old.Bots, next.Bots)
 }
@@ -217,7 +260,7 @@ func HasCollaboratorCIAlertsForRepo(cfg *Config, repo string) bool {
 	if cfg == nil || len(cfg.CollaboratorCIAlerts) == 0 {
 		return false
 	}
-	targetRepo := model.NormalizeRepo(repo)
+	targetRepo := githubapi.QualifyRepo(cfg.GitHubOwner, repo)
 	if targetRepo == "" {
 		return false
 	}
@@ -234,7 +277,7 @@ func LookupCollaboratorCIAlert(cfg *Config, repo, author string) (channelID, men
 	if cfg == nil || len(cfg.CollaboratorCIAlerts) == 0 {
 		return "", "", false
 	}
-	targetRepo := model.NormalizeRepo(repo)
+	targetRepo := githubapi.QualifyRepo(cfg.GitHubOwner, repo)
 	cleanAuthor := strings.ToLower(strings.TrimSpace(author))
 	if targetRepo == "" || cleanAuthor == "" {
 		return "", "", false
@@ -249,13 +292,15 @@ func LookupCollaboratorCIAlert(cfg *Config, repo, author string) (channelID, men
 	return "", "", false
 }
 
-func NormalizeCollaboratorCIAlerts(rules []CollaboratorCIAlertRule) []CollaboratorCIAlertRule {
+// NormalizeCollaboratorCIAlerts drops incomplete rules and qualifies each
+// rule repo with owner, so rule matching compares owner-qualified names.
+func NormalizeCollaboratorCIAlerts(owner string, rules []CollaboratorCIAlertRule) []CollaboratorCIAlertRule {
 	if len(rules) == 0 {
 		return nil
 	}
 	var out []CollaboratorCIAlertRule
 	for _, rule := range rules {
-		repo := model.NormalizeRepo(rule.Repo)
+		repo := githubapi.QualifyRepo(owner, rule.Repo)
 		chanID := model.NormalizeDiscordTargetID(rule.ChannelID)
 		if repo == "" || !model.IsValidDiscordSnowflake(chanID) {
 			continue
@@ -281,24 +326,6 @@ func NormalizeCollaboratorCIAlerts(rules []CollaboratorCIAlertRule) []Collaborat
 		return nil
 	}
 	return out
-}
-
-func NormalizeLegacyBuildWorkflows(raw []LegacyBuildWorkflow) ([]LegacyBuildWorkflow, error) {
-	out := make([]LegacyBuildWorkflow, 0, len(raw))
-	seen := map[LegacyBuildWorkflow]bool{}
-	for _, v := range raw {
-		v.Repository = strings.ToLower(strings.TrimSpace(v.Repository))
-		v.WorkflowPath = strings.TrimSpace(v.WorkflowPath)
-		v.BlobSHA = strings.ToLower(strings.TrimSpace(v.BlobSHA))
-		if !model.MetadataRepo.MatchString(v.Repository) || !model.ValidWorkflowPath(v.WorkflowPath) || !model.MetadataSHA.MatchString(v.BlobSHA) {
-			return nil, fmt.Errorf("invalid legacy build workflow")
-		}
-		if !seen[v] {
-			out = append(out, v)
-			seen[v] = true
-		}
-	}
-	return out, nil
 }
 
 func resolveRouterYAMLPath(configPath string) string {
@@ -329,7 +356,7 @@ func readRouterYAML(configPath string) (RouterYAMLConfig, error) {
 	return fileCfg, nil
 }
 
-func loadAerialConfigFallback(path, sysChan, botID string, autoUpdateAuthors []string, collaboratorAlerts []CollaboratorCIAlertRule) (string, string, []string, []CollaboratorCIAlertRule) {
+func loadAerialConfigFallback(path, owner, sysChan, botID string, autoUpdateAuthors []string, collaboratorAlerts []CollaboratorCIAlertRule) (string, string, []string, []CollaboratorCIAlertRule) {
 	data, err := os.ReadFile(path)
 	if err != nil && path == "/share/aerial-config/config.yaml" {
 		data, err = os.ReadFile("/config/config.yaml")
@@ -342,7 +369,7 @@ func loadAerialConfigFallback(path, sysChan, botID string, autoUpdateAuthors []s
 		return sysChan, botID, autoUpdateAuthors, collaboratorAlerts
 	}
 	if sysChan == "" {
-		sysChan = model.FirstNonEmpty(aerialCfg.SystemChannelID, aerialCfg.SystemChannel)
+		sysChan = strutil.FirstNonEmpty(aerialCfg.SystemChannelID, aerialCfg.SystemChannel)
 	}
 	if botID == "" {
 		botID = strings.TrimSpace(aerialCfg.BotID)
@@ -351,38 +378,23 @@ func loadAerialConfigFallback(path, sysChan, botID string, autoUpdateAuthors []s
 		autoUpdateAuthors = model.DedupeTrimmedStrings(aerialCfg.AutoUpdatePRAuthors)
 	}
 	if len(collaboratorAlerts) == 0 {
-		collaboratorAlerts = NormalizeCollaboratorCIAlerts(aerialCfg.CollaboratorCIAlerts)
+		collaboratorAlerts = NormalizeCollaboratorCIAlerts(owner, aerialCfg.CollaboratorCIAlerts)
 	}
 	return sysChan, botID, autoUpdateAuthors, collaboratorAlerts
 }
 
-// PRObjectServiceName returns the Restate PR Virtual Object name for botID.
-// Empty or "aerial" defaults to "PRObject"; any other name is lowercased and formatted as "PRObject-<name>".
-func PRObjectServiceName(botID string) string {
-	name := strings.ToLower(strings.TrimSpace(botID))
-	if name == "" || name == defaultAgentName {
-		return "PRObject"
-	}
-	return "PRObject-" + name
-}
-
-// RepoObjectServiceName returns the Restate Repo Virtual Object name for botID.
-// Empty or "aerial" defaults to "RepoObject"; any other name is lowercased and formatted as "RepoObject-<name>".
-func RepoObjectServiceName(botID string) string {
-	name := strings.ToLower(strings.TrimSpace(botID))
-	if name == "" || name == defaultAgentName {
-		return "RepoObject"
-	}
-	return "RepoObject-" + name
-}
+// Single Restate PR lifecycle Virtual Objects. Every bot's events address
+// these one services; restate_pr_service/restate_repo_service override them
+// explicitly and are never derived from the bot ID.
+const (
+	defaultRestatePRService   = "PRObject"
+	defaultRestateRepoService = "RepoObject"
+)
 
 func parseBotsConfig(fileCfg RouterYAMLConfig, botID, eriURL, sysChan string, defaultOwner bool) map[string]BotConfig {
 	bots := make(map[string]BotConfig)
 	if len(fileCfg.Bots) == 0 {
-		tokenEnv := "DISCORD_TOKEN"
-		if botID != defaultAgentName && botID != "" {
-			tokenEnv = "DISCORD_TOKEN_" + strings.ToUpper(botID)
-		}
+		tokenEnv := discordutil.TokenEnvKey(botID)
 		discordToken := strings.TrimSpace(os.Getenv(tokenEnv))
 		if discordToken == "" {
 			discordToken = strings.TrimSpace(os.Getenv("DISCORD_TOKEN"))
@@ -405,11 +417,7 @@ func parseBotsConfig(fileCfg RouterYAMLConfig, botID, eriURL, sysChan string, de
 		}
 		tokenEnv := strings.TrimSpace(bot.TokenEnv)
 		if tokenEnv == "" {
-			if agent == defaultAgentName {
-				tokenEnv = "DISCORD_TOKEN"
-			} else {
-				tokenEnv = "DISCORD_TOKEN_" + strings.ToUpper(agent)
-			}
+			tokenEnv = discordutil.TokenEnvKey(agent)
 		}
 		bot.TokenEnv = tokenEnv
 		bot.DiscordToken = strings.TrimSpace(os.Getenv(tokenEnv))
@@ -438,49 +446,36 @@ func parseBotsConfig(fileCfg RouterYAMLConfig, botID, eriURL, sysChan string, de
 	return bots
 }
 
+// resolveK8sAuthConfig merges the YAML k8s auth block with the
+// K8S_AUTH_ENABLED override; an unparsable override keeps the YAML value and
+// logs the error.
 func resolveK8sAuthConfig(fileCfg RouterYAMLConfig, kubeServer string) (bool, k8sauth.Config) {
-	k8sAuthEnabled := fileCfg.K8sAuthEnabled
-	if envVal := os.Getenv("K8S_AUTH_ENABLED"); envVal != "" {
-		k8sAuthEnabled = strings.EqualFold(envVal, "true") || envVal == "1"
-	}
 	k8sCfg := fileCfg.K8sAuthConfig
-	k8sCfg.Enabled = k8sAuthEnabled
+	k8sCfg.Enabled = fileCfg.K8sAuthEnabled
+	if err := k8sauth.ApplyEnvOverride(&k8sCfg, os.Getenv); err != nil {
+		log.Printf("[Synapse] config error: %v; keeping k8s_auth_enabled=%v", err, k8sCfg.Enabled)
+	}
 	if k8sCfg.APIServerURL == "" && kubeServer != "" {
 		k8sCfg.APIServerURL = strings.TrimRight(kubeServer, "/")
 	}
-	return k8sAuthEnabled, k8sCfg
+	return k8sCfg.Enabled, k8sCfg
 }
 
 func buildConfig(fileCfg RouterYAMLConfig) Config {
-	legacy, err := NormalizeLegacyBuildWorkflows(fileCfg.LegacyBuildWorkflows)
-	if err != nil {
-		log.Printf("[Synapse] invalid legacy workflows: %v", err)
-	}
 	autoUpdateAuthors := model.DedupeTrimmedStrings(fileCfg.AutoUpdatePRAuthors)
-	sysChan := model.FirstNonEmpty(fileCfg.SystemChannelID, fileCfg.SystemChannel)
-	collaboratorAlerts := NormalizeCollaboratorCIAlerts(fileCfg.CollaboratorCIAlerts)
+	sysChan := strutil.FirstNonEmpty(fileCfg.SystemChannelID, fileCfg.SystemChannel)
+	owner := strings.TrimSpace(fileCfg.GitHubOwner)
+	collaboratorAlerts := NormalizeCollaboratorCIAlerts(owner, fileCfg.CollaboratorCIAlerts)
 	var aerialBotID string
 	if (sysChan == "" || len(autoUpdateAuthors) == 0 || aerialBotID == "" || len(collaboratorAlerts) == 0) && SynapseAerialConfigPath != "" {
-		sysChan, aerialBotID, autoUpdateAuthors, collaboratorAlerts = loadAerialConfigFallback(SynapseAerialConfigPath, sysChan, aerialBotID, autoUpdateAuthors, collaboratorAlerts)
+		sysChan, aerialBotID, autoUpdateAuthors, collaboratorAlerts = loadAerialConfigFallback(SynapseAerialConfigPath, owner, sysChan, aerialBotID, autoUpdateAuthors, collaboratorAlerts)
 	}
 
-	botID := strings.TrimSpace(model.FirstNonEmpty(os.Getenv("AERIAL_BOT_ID"), fileCfg.BotID, aerialBotID, defaultAgentName))
+	botID := strings.TrimSpace(strutil.FirstNonEmpty(os.Getenv("AERIAL_BOT_ID"), fileCfg.BotID, aerialBotID, defaultAgentName))
 	defaultOwner := fileCfg.DefaultOwner
-	if envVal := strings.TrimSpace(model.FirstNonEmpty(os.Getenv("AERIAL_DEFAULT_OWNER"), os.Getenv("DEFAULT_OWNER"))); envVal != "" {
+	if envVal := strings.TrimSpace(strutil.FirstNonEmpty(os.Getenv("AERIAL_DEFAULT_OWNER"), os.Getenv("DEFAULT_OWNER"))); envVal != "" {
 		defaultOwner = strings.EqualFold(envVal, "true") || envVal == "1"
 	}
-
-	// Delegate local fallback DSN synthesis to httpkit.BuildPostgresDSN so config.go
-	// embeds zero plaintext default password literals (enforced by commit-safety-guard).
-	pgURL := model.FirstNonEmpty(
-		httpkit.BuildPostgresDSN(os.Getenv, defaultAgentName),
-		httpkit.BuildPostgresDSN(func(k string) string {
-			if k == "POSTGRES_HOST" {
-				return "127.0.0.1"
-			}
-			return ""
-		}, defaultAgentName),
-	)
 
 	kubeServer := os.Getenv("KUBE_API_SERVER")
 	if kubeServer == "" {
@@ -490,7 +485,7 @@ func buildConfig(fileCfg RouterYAMLConfig) Config {
 		}
 	}
 	kubeToken := os.Getenv("KUBE_TOKEN")
-	eriURL := strings.TrimRight(model.FirstNonEmpty(os.Getenv("ERI_URL"), fileCfg.EriURL, "http://127.0.0.1:8088"), "/")
+	eriURL := strings.TrimRight(strutil.FirstNonEmpty(os.Getenv("ERI_URL"), fileCfg.EriURL, "http://127.0.0.1:8088"), "/")
 
 	bots := parseBotsConfig(fileCfg, botID, eriURL, sysChan, defaultOwner)
 
@@ -503,31 +498,37 @@ func buildConfig(fileCfg RouterYAMLConfig) Config {
 
 	k8sAuthEnabled, k8sCfg := resolveK8sAuthConfig(fileCfg, kubeServer)
 
+	ghCredential, ok := NormalizeGitHubCredential(fileCfg.GitHubCredential)
+	if !ok {
+		log.Printf("[Synapse] config error: github_credential %q is not app or pat; using app", ghCredential)
+		ghCredential = GitHubCredentialApp
+	}
+
 	return Config{
-		LegacyBuildWorkflows: legacy,
-		Port:                 model.FirstNonEmpty(os.Getenv("PORT"), fileCfg.Port, "4020"),
-		KubeAPIServer:        strings.TrimRight(kubeServer, "/"),
-		KubeToken:            kubeToken,
-		GitHubToken:          os.Getenv("GITHUB_PAT"),
-		GitHubAPIURL:         strings.TrimRight(model.FirstNonEmpty(os.Getenv("GITHUB_API_URL"), "https://api.github.com"), "/"),
-		GitHubWebhookSecret:  strings.TrimSpace(os.Getenv("GITHUB_WEBHOOK_SECRET")),
-		PostgresURL:          pgURL,
-		FluxReceiverURL:      strings.TrimRight(model.FirstNonEmpty(os.Getenv("FLUX_RECEIVER_URL"), fileCfg.FluxReceiverURL), "/"),
-		BrainURL:             eriURL,
-		EriURL:               eriURL,
-		NATSURL:              model.FirstNonEmpty(os.Getenv("NATS_URL"), fileCfg.NATSURL, "nats://nats.aerial:4222"),
-		RestateURL:           strings.TrimRight(strings.TrimSpace(fileCfg.RestateURL), "/"),
-		RestatePRService:     model.FirstNonEmpty(strings.TrimSpace(fileCfg.RestatePRService), PRObjectServiceName(botID)),
-		RestateRepoService:   model.FirstNonEmpty(strings.TrimSpace(fileCfg.RestateRepoService), RepoObjectServiceName(botID)),
-		RestateAuthoritative: fileCfg.RestateAuthoritative,
-		SystemChannelID:      strings.TrimSpace(model.FirstNonEmpty(os.Getenv("SYSTEM_CHANNEL_ID"), sysChan)),
-		DiscordToken:         discordToken,
-		AutoUpdatePRAuthors:  autoUpdateAuthors,
-		BotID:                botID,
-		DefaultOwner:         defaultOwner,
-		Bots:                 bots,
-		K8sAuthEnabled:       k8sAuthEnabled,
-		K8sAuthConfig:        k8sCfg,
-		CollaboratorCIAlerts: collaboratorAlerts,
+		Port:                    strutil.FirstNonEmpty(os.Getenv("PORT"), fileCfg.Port, "4020"),
+		KubeAPIServer:           strings.TrimRight(kubeServer, "/"),
+		KubeToken:               kubeToken,
+		GitHubToken:             os.Getenv("GITHUB_PAT"),
+		GitHubAPIURL:            strings.TrimRight(strutil.FirstNonEmpty(os.Getenv("GITHUB_API_URL"), "https://api.github.com"), "/"),
+		GitHubCredential:        ghCredential,
+		GitHubWebhookSecret:     strings.TrimSpace(os.Getenv("GITHUB_WEBHOOK_SECRET")),
+		GitHubOwner:             owner,
+		GitHubAppID:             strings.TrimSpace(fileCfg.GitHubAppID),
+		GitHubAppInstallationID: strings.TrimSpace(fileCfg.GitHubAppInstallationID),
+		BrainURL:                eriURL,
+		EriURL:                  eriURL,
+		NATSURL:                 strutil.FirstNonEmpty(os.Getenv("NATS_URL"), fileCfg.NATSURL, "nats://nats.aerial:4222"),
+		RestateURL:              strings.TrimRight(strings.TrimSpace(fileCfg.RestateURL), "/"),
+		RestatePRService:        strutil.FirstNonEmpty(strings.TrimSpace(fileCfg.RestatePRService), defaultRestatePRService),
+		RestateRepoService:      strutil.FirstNonEmpty(strings.TrimSpace(fileCfg.RestateRepoService), defaultRestateRepoService),
+		SystemChannelID:         strings.TrimSpace(strutil.FirstNonEmpty(os.Getenv("SYSTEM_CHANNEL_ID"), sysChan)),
+		DiscordToken:            discordToken,
+		AutoUpdatePRAuthors:     autoUpdateAuthors,
+		BotID:                   botID,
+		DefaultOwner:            defaultOwner,
+		Bots:                    bots,
+		K8sAuthEnabled:          k8sAuthEnabled,
+		K8sAuthConfig:           k8sCfg,
+		CollaboratorCIAlerts:    collaboratorAlerts,
 	}
 }

@@ -1,4 +1,8 @@
 version: "2"
+run:
+  # Lint the real-Restate integration tests too (services/eri/pkg/restatetest).
+  build-tags:
+    - restateintegration
 linters:
   enable:
     - asasalint
@@ -11,6 +15,7 @@ linters:
     - copyloopvar
     - cyclop
     - decorder
+    - depguard
     - dogsled
     - dupl
     - dupword
@@ -84,6 +89,30 @@ linters:
     - wastedassign
     - whitespace
   settings:
+    depguard:
+      rules:
+        layer0-internal-model-config:
+          files:
+            - "**/internal/model/**"
+            - "**/internal/config/**"
+          deny:
+            - pkg: "github.com/azylman/aerial/**/internal/store"
+            - pkg: "github.com/azylman/aerial/**/internal/server"
+            - pkg: "github.com/azylman/aerial/**/internal/handler"
+            - pkg: "github.com/azylman/aerial/**/internal/mcp"
+            - pkg: "github.com/azylman/aerial/**/internal/tools"
+            - pkg: "github.com/azylman/aerial/**/internal/service"
+            - pkg: "github.com/azylman/aerial/**/internal/router"
+            - pkg: "github.com/azylman/aerial/**/internal/ticker"
+            - pkg: "github.com/azylman/aerial/**/internal/dispatch"
+            - pkg: "github.com/jackc/pgx/v5$"
+            - pkg: "github.com/jackc/pgx/v5/**"
+        banned-grab-bag-packages:
+          deny:
+            - pkg: "github.com/azylman/aerial/**/internal/util"
+            - pkg: "github.com/azylman/aerial/**/internal/utils"
+            - pkg: "github.com/azylman/aerial/**/internal/common"
+            - pkg: "github.com/azylman/aerial/**/internal/helpers"
     cyclop:
       max-complexity: 20
       package-average: 10.0

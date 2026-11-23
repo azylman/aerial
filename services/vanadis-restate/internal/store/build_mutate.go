@@ -7,23 +7,21 @@ package store
 // embedded *Store. SQL text, validation rules, chunk index semantics and
 // error behavior are byte-identical to the root copies they replace.
 //
-// DAG helpers below (validateUpdateChunkDAG, validateAppendChunksDAG,
-// relinkDependenciesAfterRemoval) mirror the frozen root dag.go copies
-// byte-for-byte; dag.go stays frozen until the facade-removal chunk unifies
-// both copies.
+// DAG validation and dependency relinking live in internal/dag, the single
+// copy of the build-DAG rules shared by store and build.
 
 import (
 	"context"
 	"errors"
 	"fmt"
 	"log"
-	"slices"
 	"strconv"
 	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5"
 
+	"github.com/azylman/aerial/pkg/buildplan"
 	"github.com/azylman/aerial/services/vanadis-restate/internal/model"
 )
 
@@ -95,14 +93,14 @@ func validateUpdateChunkInput(buildID, chunkRef string, req UpdateChunkRequest) 
 		if strings.TrimSpace(*req.Mode) == "" {
 			return "", fmt.Errorf("%w: mode cannot be empty string (must be 'pr' or 'action')", ErrInvalidBuildInput)
 		}
-		if _, err := NormalizeChunkMode(*req.Mode); err != nil {
+		if _, err := buildplan.NormalizeChunkMode(*req.Mode); err != nil {
 			return "", fmt.Errorf("%w: %w", ErrInvalidBuildInput, err)
 		}
 	}
 	var normEffort string
 	if strings.TrimSpace(req.Effort) != "" {
 		var effErr error
-		normEffort, effErr = NormalizeChunkEffort(req.Effort)
+		normEffort, effErr = buildplan.NormalizeChunkEffort(req.Effort)
 		if effErr != nil {
 			return "", fmt.Errorf("%w: %w", ErrInvalidBuildInput, effErr)
 		}
@@ -162,9 +160,9 @@ func applyChunkUpdates(chunk *model.VanadisChunk, req UpdateChunkRequest, normEf
 	}
 	effectiveRepo := chunk.Repo
 	if strings.TrimSpace(req.Repo) != "" {
-		effectiveRepo = NormalizeRepo(req.Repo)
+		effectiveRepo = buildplan.TrimRepo(req.Repo)
 	}
-	normMode, modeErr := NormalizeChunkMode(effectiveMode)
+	normMode, modeErr := buildplan.NormalizeChunkMode(effectiveMode)
 	if modeErr != nil {
 		return fmt.Errorf("%w: %w", ErrInvalidBuildInput, modeErr)
 	}
@@ -187,7 +185,7 @@ func applyChunkUpdates(chunk *model.VanadisChunk, req UpdateChunkRequest, normEf
 		chunk.Effort = normEffort
 	}
 	if req.DependsOn != nil {
-		chunk.DependsOn = NonNilSlice(*req.DependsOn)
+		chunk.DependsOn = buildplan.NonNilSlice(*req.DependsOn)
 	}
 	return nil
 }
@@ -248,14 +246,14 @@ func (s *Store) UpdateChunk(ctx context.Context, buildID, chunkRef string, req U
 		return nil, applyErr
 	}
 
-	normalizedDeps, err := validateUpdateChunkDAG(existingChunks, targetIdx, updatedCandidate)
+	normalizedDeps, err := buildplan.ValidateUpdateChunkDAG(existingChunks, targetIdx, updatedCandidate)
 	if err != nil {
 		return nil, err
 	}
 	updatedCandidate.DependsOn = normalizedDeps
 
 	const updQ = `UPDATE vanadis_chunks SET mode = $3, repo = $4, title = $5, instructions = $6, target_files = $7, target_symbols = $8, effort = $9, depends_on = $10, updated_at = CURRENT_TIMESTAMP WHERE id = $1 AND build_id = $2;`
-	_, err = tx.Exec(ctx, updQ, updatedCandidate.ID, buildID, updatedCandidate.Mode, updatedCandidate.Repo, updatedCandidate.Title, updatedCandidate.Instructions, NonNilSlice(updatedCandidate.TargetFiles), NonNilSlice(updatedCandidate.TargetSymbols), updatedCandidate.Effort, NonNilSlice(updatedCandidate.DependsOn))
+	_, err = tx.Exec(ctx, updQ, updatedCandidate.ID, buildID, updatedCandidate.Mode, updatedCandidate.Repo, updatedCandidate.Title, updatedCandidate.Instructions, buildplan.NonNilSlice(updatedCandidate.TargetFiles), buildplan.NonNilSlice(updatedCandidate.TargetSymbols), updatedCandidate.Effort, buildplan.NonNilSlice(updatedCandidate.DependsOn))
 	if err != nil {
 		return nil, fmt.Errorf("execute update chunk %s: %w", updatedCandidate.ID, err)
 	}
@@ -274,13 +272,13 @@ func validateAppendChunksInputs(buildID string, inputs []CreateChunkInput) error
 		if strings.TrimSpace(inp.Title) == "" || strings.TrimSpace(inp.Instructions) == "" {
 			return fmt.Errorf("%w: chunk[%d] title and instructions cannot be empty", ErrInvalidBuildInput, i)
 		}
-		if id := strings.TrimSpace(inp.ID); id != "" && !IsValidVanadisChunkID(id) {
+		if id := strings.TrimSpace(inp.ID); id != "" && !buildplan.IsValidVanadisChunkID(id) {
 			return fmt.Errorf("%w: chunk[%d] invalid id %q", ErrInvalidBuildInput, i, id)
 		}
-		if err := ValidateChunkModeAndRepo(i, inp.Mode, inp.Repo, inp.TargetFiles, inp.TargetSymbols); err != nil {
+		if err := buildplan.ValidateChunkModeAndRepo(i, inp.Mode, inp.Repo, inp.TargetFiles, inp.TargetSymbols); err != nil {
 			return fmt.Errorf("%w: %w", ErrInvalidBuildInput, err)
 		}
-		if _, err := NormalizeChunkEffort(inp.Effort); err != nil {
+		if _, err := buildplan.NormalizeChunkEffort(inp.Effort); err != nil {
 			return fmt.Errorf("%w: chunk[%d] %w", ErrInvalidBuildInput, i, err)
 		}
 	}
@@ -298,15 +296,15 @@ func buildAppendedChunks(buildID string, existingIDs map[string]bool, startIndex
 			return nil, fmt.Errorf("%w: duplicate chunk id %q in build %s", ErrBuildConflict, cid, buildID)
 		}
 		existingIDs[cid] = true
-		cMode, err := NormalizeChunkMode(inp.Mode)
+		cMode, err := buildplan.NormalizeChunkMode(inp.Mode)
 		if err != nil {
 			return nil, err
 		}
-		cEffort, err := NormalizeChunkEffort(inp.Effort)
+		cEffort, err := buildplan.NormalizeChunkEffort(inp.Effort)
 		if err != nil {
 			return nil, err
 		}
-		cRepo := NormalizeRepo(inp.Repo)
+		cRepo := buildplan.TrimRepo(inp.Repo)
 		if cMode == chunkModeAction {
 			cRepo = ""
 		}
@@ -318,10 +316,10 @@ func buildAppendedChunks(buildID string, existingIDs map[string]bool, startIndex
 			Repo:               cRepo,
 			Title:              strings.TrimSpace(inp.Title),
 			Instructions:       strings.TrimSpace(inp.Instructions),
-			TargetFiles:        NonNilSlice(inp.TargetFiles),
-			TargetSymbols:      NonNilSlice(inp.TargetSymbols),
+			TargetFiles:        buildplan.NonNilSlice(inp.TargetFiles),
+			TargetSymbols:      buildplan.NonNilSlice(inp.TargetSymbols),
 			Effort:             cEffort,
-			AcceptanceCriteria: NonNilSlice(inp.AcceptanceCriteria),
+			AcceptanceCriteria: buildplan.NonNilSlice(inp.AcceptanceCriteria),
 			Status:             statusPending,
 			DependsOn:          inp.DependsOn,
 			CreatedAt:          now,
@@ -382,7 +380,7 @@ func (s *Store) AppendChunks(ctx context.Context, buildID string, inputs []Creat
 		return nil, err
 	}
 
-	validatedNew, err := validateAppendChunksDAG(existingChunks, newChunks)
+	validatedNew, err := buildplan.ValidateAppendChunksDAG(existingChunks, newChunks)
 	if err != nil {
 		return nil, err
 	}
@@ -439,9 +437,9 @@ func (s *Store) RemoveChunk(ctx context.Context, buildID, chunkRef string) (*mod
 	remaining = append(remaining, existingChunks[:targetIdx]...)
 	remaining = append(remaining, existingChunks[targetIdx+1:]...)
 
-	relinkDependenciesAfterRemoval(remaining, removed.ID, removed.DependsOn)
+	buildplan.RelinkDependenciesAfterRemoval(remaining, removed.ID, removed.DependsOn)
 
-	validatedRemaining, err := normalizeAndValidateBuildDAG(remaining)
+	validatedRemaining, err := buildplan.NormalizeAndValidateBuildDAG(remaining)
 	if err != nil {
 		return nil, nil, fmt.Errorf("%w: removing chunk causes invalid DAG: %w", ErrBuildConflict, err)
 	}
@@ -490,67 +488,9 @@ func reindexRemainingChunks(ctx context.Context, tx pgx.Tx, buildID string, chun
 	const updQ = `UPDATE vanadis_chunks SET chunk_index = $3, depends_on = $4, updated_at = CURRENT_TIMESTAMP WHERE id = $1 AND build_id = $2;`
 	for i := range chunks {
 		chunks[i].ChunkIndex = i
-		if _, err := tx.Exec(ctx, updQ, chunks[i].ID, buildID, i, NonNilSlice(chunks[i].DependsOn)); err != nil {
+		if _, err := tx.Exec(ctx, updQ, chunks[i].ID, buildID, i, buildplan.NonNilSlice(chunks[i].DependsOn)); err != nil {
 			return fmt.Errorf("reindex chunk %s: %w", chunks[i].ID, err)
 		}
 	}
 	return nil
-}
-
-// validateUpdateChunkDAG substitutes updated into existing, validates the entire DAG, and returns the normalized depends_on.
-func validateUpdateChunkDAG(existing []model.VanadisChunk, updatedIdx int, updated model.VanadisChunk) ([]string, error) {
-	candidateChunks := make([]model.VanadisChunk, len(existing))
-	copy(candidateChunks, existing)
-	candidateChunks[updatedIdx] = updated
-
-	validated, err := normalizeAndValidateBuildDAG(candidateChunks)
-	if err != nil {
-		return nil, fmt.Errorf("%w: %w", ErrInvalidBuildInput, err)
-	}
-	return validated[updatedIdx].DependsOn, nil
-}
-
-// validateAppendChunksDAG combines existing chunks with appended chunks, validates the DAG, and returns the appended chunks with normalized depends_on.
-func validateAppendChunksDAG(existing []model.VanadisChunk, appended []model.VanadisChunk) ([]model.VanadisChunk, error) {
-	allChunks := make([]model.VanadisChunk, 0, len(existing)+len(appended))
-	allChunks = append(allChunks, existing...)
-	allChunks = append(allChunks, appended...)
-
-	validatedAll, err := normalizeAndValidateBuildDAG(allChunks)
-	if err != nil {
-		return nil, fmt.Errorf("%w: %w", ErrInvalidBuildInput, err)
-	}
-	out := make([]model.VanadisChunk, len(appended))
-	copy(out, appended)
-	for i := range out {
-		out[i].DependsOn = validatedAll[len(existing)+i].DependsOn
-	}
-	return out, nil
-}
-
-// relinkDependenciesAfterRemoval rewrites dependencies in remaining after removedID is deleted,
-// removing removedID and replacing it with removedDeps.
-func relinkDependenciesAfterRemoval(remaining []model.VanadisChunk, removedID string, removedDeps []string) {
-	for i := range remaining {
-		c := &remaining[i]
-		if !slices.Contains(c.DependsOn, removedID) {
-			continue
-		}
-		newDeps := make([]string, 0, len(c.DependsOn)+len(removedDeps))
-		seen := make(map[string]bool)
-		for _, dep := range c.DependsOn {
-			if dep == removedID {
-				for _, rd := range removedDeps {
-					if rd != c.ID && !seen[rd] {
-						seen[rd] = true
-						newDeps = append(newDeps, rd)
-					}
-				}
-			} else if !seen[dep] {
-				seen[dep] = true
-				newDeps = append(newDeps, dep)
-			}
-		}
-		c.DependsOn = newDeps
-	}
 }

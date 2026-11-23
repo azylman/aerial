@@ -7,13 +7,14 @@ import (
 	"regexp"
 	"slices"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
 	"github.com/azylman/aerial/pkg/pubsub"
+	"github.com/azylman/aerial/pkg/strutil"
 	"github.com/azylman/aerial/services/vanadis-restate/internal/ericlient"
 	"github.com/azylman/aerial/services/vanadis-restate/internal/model"
-	"github.com/azylman/aerial/services/vanadis-restate/internal/store"
 )
 
 // Status vocabulary mirrored from the executor frozen copies; values stay byte-identical.
@@ -35,8 +36,8 @@ const (
 
 // BuildSyncWidgetRequest formats the Discord tracker widget request for a build.
 func BuildSyncWidgetRequest(build model.VanadisBuild, chunks []model.VanadisChunk, deployUIURL ...string) ericlient.StatusWidgetRequest {
-	widgetStatus := store.FirstNonEmpty(NormalizeWidgetStatus(build.Status), statusRunning)
-	baseURL := store.FirstNonEmpty(deployUIURL...)
+	widgetStatus := strutil.FirstNonEmpty(NormalizeWidgetStatus(build.Status), statusRunning)
+	baseURL := strutil.FirstNonEmpty(deployUIURL...)
 	ordered := orderWidgetChunks(chunks)
 	wChunks := make([]ericlient.StatusWidgetChunk, len(ordered))
 	for i, c := range ordered {
@@ -52,7 +53,7 @@ func BuildSyncWidgetRequest(build model.VanadisBuild, chunks []model.VanadisChun
 		MessageID: build.StatusMessageID,
 		ID:        build.ID,
 		Tier:      build.Tier,
-		Title:     store.FirstNonEmpty(strings.TrimSpace(build.Title), build.Objective),
+		Title:     strutil.FirstNonEmpty(strings.TrimSpace(build.Title), build.Objective),
 		Status:    widgetStatus,
 		Banner:    build.Objective,
 		SkipSink:  build.Quiet,
@@ -173,16 +174,16 @@ func orderWidgetChunks(chunks []model.VanadisChunk) []model.VanadisChunk {
 
 // BuildStatusWidgetChunk formats a single chunk for the Discord tracker widget.
 func BuildStatusWidgetChunk(c model.VanadisChunk, deployUIURL ...string) ericlient.StatusWidgetChunk {
-	baseURL := store.FirstNonEmpty(deployUIURL...)
-	// Action chunks have no repository; only PR chunks fall back to the default repo.
+	baseURL := strutil.FirstNonEmpty(deployUIURL...)
+	// Action chunks have no repository unless a repair PR is attached; PR chunks default to aerial.
 	chunkRepo := ""
-	if c.Mode != chunkModeAction {
-		chunkRepo = store.FirstNonEmpty(c.Repo, "aerial")
+	if c.Mode != chunkModeAction || c.PRNumber > 0 {
+		chunkRepo = strutil.FirstNonEmpty(c.Repo, "aerial")
 	}
 	chunkStatus := NormalizeWidgetStatus(c.Status)
 	activeStep := FormatChunkActiveStep(c, baseURL)
 	if activeStep == "" && !isChunkTerminal(chunkStatus) {
-		activeStep = GetChunkActiveStep(c.ID)
+		activeStep = strings.TrimSpace(c.ActiveStep)
 	}
 	return ericlient.StatusWidgetChunk{
 		ID:          c.ID,
@@ -245,11 +246,34 @@ func dedupeTrimmedStrings(items []string) []string {
 	return out
 }
 
-const statusPassed = "passed"
+const (
+	statusPassed       = "passed"
+	mergeQueueCheckKey = "_merge_queue"
+)
+
+func parseMergeQueuePosition(raw string) (pos, total int, ok bool) {
+	raw = strings.TrimSpace(raw)
+	parts := strings.Split(raw, "/")
+	if len(parts) != 2 {
+		return 0, 0, false
+	}
+	p, err1 := strconv.Atoi(strings.TrimSpace(parts[0]))
+	t, err2 := strconv.Atoi(strings.TrimSpace(parts[1]))
+	if err1 != nil || err2 != nil {
+		return 0, 0, false
+	}
+	if p >= 1 && t >= 2 && p <= t {
+		return p, t, true
+	}
+	return 0, 0, false
+}
 
 func formatOpenCIChecks(checks map[string]string) string {
 	var total, passed, failed int
-	for _, state := range checks {
+	for checkName, state := range checks {
+		if strings.HasPrefix(checkName, "_") {
+			continue
+		}
 		s := strings.ToLower(strings.TrimSpace(state))
 		switch s {
 		case statusPassed, dispatchStatusSuccess:
@@ -267,6 +291,16 @@ func formatOpenCIChecks(checks map[string]string) string {
 	if failed > 0 || total == 0 {
 		return ""
 	}
+	if pos, qTotal, ok := parseMergeQueuePosition(checks[mergeQueueCheckKey]); ok {
+		switch {
+		case passed == total && pos == 1:
+			return fmt.Sprintf("Updating branch with main (#1 of %d · %d/%d passed)", qTotal, passed, total)
+		case passed == total && pos > 1:
+			return fmt.Sprintf("Waiting in merge queue (#%d of %d · %d/%d passed)", pos, qTotal, passed, total)
+		case passed < total:
+			return fmt.Sprintf("Waiting on CI (%d/%d passed · #%d of %d in merge queue)", passed, total, pos, qTotal)
+		}
+	}
 	return fmt.Sprintf("Waiting on CI (%d/%d passed)", passed, total)
 }
 
@@ -275,6 +309,9 @@ func analyzeChunkBuildChecks(checks map[string]string) (checkJobs []string, pass
 	passedBuildJobs = make(map[string]bool)
 
 	for checkName, state := range checks {
+		if strings.HasPrefix(checkName, "_") {
+			continue
+		}
 		s := strings.ToLower(strings.TrimSpace(state))
 		switch s {
 		case statusPassed, dispatchStatusSuccess:
@@ -331,7 +368,7 @@ func formatDeployTargetLabel(name, kind, deployUIURL string) string {
 }
 
 func formatSingleJobRolloutState(job, cleanStatus string, deployedSet, startedSet map[string]bool, jobStates map[string]string, passedBuildJobs map[string]bool, hasStartedJobs bool, deployUIURL ...string) string {
-	baseURL := store.FirstNonEmpty(deployUIURL...)
+	baseURL := strutil.FirstNonEmpty(deployUIURL...)
 	label := formatDeployTargetLabel(job, "job", baseURL)
 	jKey := strings.ToLower(strings.TrimSpace(job))
 	switch {
@@ -350,7 +387,7 @@ func formatSingleJobRolloutState(job, cleanStatus string, deployedSet, startedSe
 
 // FormatPerJobRolloutStatus renders per-job rollout lines for a deploying chunk.
 func FormatPerJobRolloutStatus(allJobs []string, cleanStatus string, startedJobs, deployedJobs []string, jobStates map[string]string, passedBuildJobs map[string]bool, deployUIURL ...string) string {
-	baseURL := store.FirstNonEmpty(deployUIURL...)
+	baseURL := strutil.FirstNonEmpty(deployUIURL...)
 	deployedSet := make(map[string]bool, len(deployedJobs))
 	for _, j := range deployedJobs {
 		deployedSet[strings.ToLower(strings.TrimSpace(j))] = true
@@ -373,7 +410,7 @@ func FormatKustomizationRolloutStatus(cleanStatus string, kustomizationStatuses 
 	if cleanStatus != statusDeploying {
 		return "", false
 	}
-	baseURL := store.FirstNonEmpty(deployUIURL...)
+	baseURL := strutil.FirstNonEmpty(deployUIURL...)
 	names := make([]string, 0, len(kustomizationStatuses))
 	for name := range kustomizationStatuses {
 		names = append(names, name)
@@ -404,21 +441,25 @@ func resolveCandidateJobs(rs *pubsub.PRRolloutState, checkJobs []string) []strin
 	return checkJobs
 }
 
-func formatRecoverableFailureStep(cleanStatus, banner string) (string, bool) {
+func formatRecoverableFailureStep(cleanStatus, banner, activeStep string) (string, bool) {
 	if cleanStatus != statusCIFailed && cleanStatus != statusConflict {
 		return "", false
 	}
+	base := "Remediation in progress"
 	if trimmed := strings.TrimSpace(banner); trimmed != "" {
-		return trimmed + " — remediation in progress", true
+		base = trimmed + " — remediation in progress"
 	}
-	return "Remediation in progress", true
+	if trimmedStep := strings.TrimSpace(activeStep); trimmedStep != "" {
+		return base + "\n" + trimmedStep, true
+	}
+	return base, true
 }
 
 // FormatChunkActiveStep formats the step string for a chunk in a widget.
 func FormatChunkActiveStep(chunk model.VanadisChunk, deployUIURL ...string) string {
-	baseURL := store.FirstNonEmpty(deployUIURL...)
+	baseURL := strutil.FirstNonEmpty(deployUIURL...)
 	cleanStatus := strings.ToLower(strings.TrimSpace(chunk.Status))
-	if step, ok := formatRecoverableFailureStep(cleanStatus, chunk.Banner); ok {
+	if step, ok := formatRecoverableFailureStep(cleanStatus, chunk.Banner, chunk.ActiveStep); ok {
 		return step
 	}
 	if cleanStatus == statusOpen || cleanStatus == statusPROpened {

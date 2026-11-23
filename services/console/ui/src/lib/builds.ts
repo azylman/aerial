@@ -1,7 +1,7 @@
 // Vanadis build queue classification, chunk stats, status badges and timing. Inputs are structural subsets of the /api/builds DTOs so callers can pass either
 // list entries (precomputed *_chunks counters) or detail payloads (full chunk arrays).
 
-import type { VanadisBuildDTO, VanadisChunkDTO } from '../api/types';
+import type { BuildsAPIResponse, VanadisBuildDTO, VanadisChunkDTO } from '../api/types';
 import type { IconName } from '../components/Icon';
 import { formatUptime, parseValidTimestampMs } from './formatters';
 
@@ -237,4 +237,29 @@ export function getBuildTimingInfo(build: BuildLike | null | undefined, now: num
     durationText = formatUptime(Math.floor((now - startMs) / 1000));
   }
   return { startText: formatBuildTimestamp(startMs, true), endText, durationText };
+}
+
+/**
+ * The failure a builds payload reports in-band, or null when it is usable data. Console's
+ * degraded/error payloads carry an empty build list; storing one as data would wipe the last
+ * snapshot and read as "all builds idle", so it is a failed poll instead. A payload that still
+ * carries builds stays data (the reconnect banner flags its status).
+ */
+export function buildsPayloadError(data: Pick<BuildsAPIResponse, 'status' | 'error' | 'builds'>): string | null {
+  if ((data.builds?.length ?? 0) > 0) return null;
+  if (data.error) return data.error;
+  const status = norm(data.status);
+  return status === 'error' || status === 'degraded' ? `Vanadis ${status}` : null;
+}
+
+export type BuildsPanelState = 'loading' | 'error' | 'idle' | 'builds';
+
+/**
+ * What a builds panel's body shows: a failure with nothing cached is an error, never an idle
+ * queue; a failure over a cached snapshot keeps showing the stale builds (with a notice).
+ */
+export function buildsPanelState(loaded: boolean, buildCount: number, error: string | null): BuildsPanelState {
+  if (buildCount > 0) return 'builds';
+  if (error !== null) return 'error';
+  return loaded ? 'idle' : 'loading';
 }

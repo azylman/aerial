@@ -3,21 +3,27 @@ package store
 import (
 	"context"
 	"database/sql"
-	"errors"
+	"os"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/azylman/aerial/pkg/pgtest"
 	"github.com/azylman/aerial/services/haro/internal/config"
 	"github.com/azylman/aerial/services/haro/internal/model"
-	"github.com/azylman/aerial/services/haro/internal/testutil"
 )
 
+func TestMain(m *testing.M) {
+	os.Exit(pgtest.Main(m))
+}
+
+// openStoreTestDB opens a private clone of the production schema through the
+// production constructor OpenDB.
 func openStoreTestDB(t *testing.T) *sql.DB {
 	t.Helper()
-	db, err := testutil.OpenSQLiteTestDB(":memory:")
+	db, err := OpenDB(context.Background(), &config.Config{DatabaseURL: pgtest.NewDSN(t)})
 	if err != nil {
-		t.Fatalf("OpenSQLiteTestDB failed: %v", err)
+		t.Fatalf("OpenDB failed: %v", err)
 	}
 	t.Cleanup(func() { _ = db.Close() })
 	return db
@@ -131,8 +137,8 @@ func TestFindEarliestNextRun(t *testing.T) {
 }
 
 func TestOpenDBValidation(t *testing.T) {
-	addr := testutil.StartMockPostgres(t)
-	pgCfg := &config.Config{DatabaseURL: "postgres://mock_user:mock_pass@" + addr + "/mock_db?sslmode=disable"}
+	t.Parallel()
+	pgCfg := &config.Config{DatabaseURL: pgtest.NewDSN(t)}
 	tests := []struct {
 		name    string
 		cfg     *config.Config
@@ -140,93 +146,28 @@ func TestOpenDBValidation(t *testing.T) {
 		wantOK  bool
 	}{
 		{"nil config", nil, "config cannot be nil", false},
-		{"empty dsn", &config.Config{DatabaseURL: ""}, "db: connection string cannot be empty", false},
-		{"unsupported scheme", &config.Config{DatabaseURL: "mysql://localhost/db"}, "db: unsupported database scheme", false},
-		{"sqlite without hook unsupported", &config.Config{DatabaseURL: ":memory:"}, "db: unsupported database scheme", false},
-		{"mock postgres success", pgCfg, "", true},
+		{"empty dsn", &config.Config{DatabaseURL: ""}, "connection string cannot be empty", false},
+		{"unsupported scheme", &config.Config{DatabaseURL: "mysql://localhost/db"}, "unsupported database scheme", false},
+		{"bare sqlite path unsupported", &config.Config{DatabaseURL: ":memory:"}, "unsupported database scheme", false},
+		{"postgres success", pgCfg, "", true},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
 			db, err := OpenDB(context.Background(), tc.cfg)
 			if tc.wantOK {
 				if err != nil {
 					t.Fatalf("OpenDB err = %v", err)
 				}
-				_ = db.Close()
+				defer func() { _ = db.Close() }()
+				var one int
+				if qErr := db.QueryRowContext(context.Background(), "SELECT 1").Scan(&one); qErr != nil || one != 1 {
+					t.Fatalf("SELECT 1 = (%d, %v), want (1, nil)", one, qErr)
+				}
 				return
 			}
 			if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
 				t.Errorf("OpenDB err = %v, want containing %q", err, tc.wantErr)
-			}
-		})
-	}
-}
-
-func TestOpenDBPostgresRetry(t *testing.T) {
-	origMax, origBase, origAfter := postgresMaxAttempts, postgresRetryBase, postgresRetryAfter
-	t.Cleanup(func() { postgresMaxAttempts, postgresRetryBase, postgresRetryAfter = origMax, origBase, origAfter })
-	tests := []struct {
-		name     string
-		attempts int
-		canceled bool
-		wantErr  string
-		wantCode error
-	}{
-		{"gives up after attempts", 2, false, "after 2 attempts", nil},
-		{"canceled context aborts", 10, true, "after 1 attempts", context.Canceled},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			postgresMaxAttempts, postgresRetryBase = tc.attempts, time.Millisecond
-			postgresRetryAfter = func(time.Duration) <-chan time.Time {
-				fired := make(chan time.Time, 1)
-				fired <- time.Time{}
-				return fired
-			}
-			ctx := context.Background()
-			if tc.canceled {
-				var cancel context.CancelFunc
-				ctx, cancel = context.WithCancel(ctx)
-				cancel()
-				postgresRetryAfter = func(time.Duration) <-chan time.Time { return nil }
-			}
-			_, err := openDB(ctx, "postgres://invalid:invalid@127.0.0.1:59997/db?sslmode=disable")
-			if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
-				t.Errorf("openDB err = %v, want containing %q", err, tc.wantErr)
-			}
-			if tc.wantCode != nil && !errors.Is(err, tc.wantCode) {
-				t.Errorf("openDB err = %v, want wrapping %v", err, tc.wantCode)
-			}
-		})
-	}
-}
-
-func TestIsSQLiteDB(t *testing.T) {
-	t.Parallel()
-	sqliteDB, err := testutil.OpenSQLiteTestDB(":memory:")
-	if err != nil {
-		t.Fatalf("OpenSQLiteTestDB failed: %v", err)
-	}
-	t.Cleanup(func() { _ = sqliteDB.Close() })
-	pgDB, err := sql.Open("pgx", "postgres://invalid:invalid@127.0.0.1:59997/db?sslmode=disable")
-	if err != nil {
-		t.Fatalf("sql.Open pgx failed: %v", err)
-	}
-	t.Cleanup(func() { _ = pgDB.Close() })
-	tests := []struct {
-		name string
-		db   *sql.DB
-		want bool
-	}{
-		{"nil db", nil, false},
-		{"sqlite db", sqliteDB, true},
-		{"postgres db", pgDB, false},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			if got := isSQLiteDB(tc.db); got != tc.want {
-				t.Errorf("isSQLiteDB = %v, want %v", got, tc.want)
 			}
 		})
 	}
@@ -436,27 +377,63 @@ func verifyCronPatch(ctx context.Context, t *testing.T, db *sql.DB, wantEffort, 
 	}
 }
 
-func TestOneShotScheduleRoundTrip(t *testing.T) {
+// scheduleCaseDB applies a row's nilDB/closedDB inputs after seeding.
+func scheduleCaseDB(db *sql.DB, nilDB, closedDB bool) *sql.DB {
+	if closedDB {
+		_ = db.Close()
+	}
+	if nilDB {
+		return nil
+	}
+	return db
+}
+
+// assertScheduleErr fails unless err matches wantErr ("" = no error) and reports whether the row expected one.
+func assertScheduleErr(t *testing.T, err error, wantErr string) bool {
+	t.Helper()
+	if wantErr == "" {
+		if err != nil {
+			t.Fatalf("unexpected err = %v", err)
+		}
+		return false
+	}
+	if err == nil || !strings.Contains(err.Error(), wantErr) {
+		t.Fatalf("err = %v, want %q", err, wantErr)
+	}
+	return true
+}
+
+func seedOneShotPair(ctx context.Context, t *testing.T, db *sql.DB, now time.Time) {
+	t.Helper()
+	mustInsertOneShot(ctx, t, db, model.OneShotSchedule{ID: "s-1", ThreadID: "th-1", Prompt: "p1", RunAt: now, Effort: "HIGH"})
+	mustInsertOneShot(ctx, t, db, model.OneShotSchedule{ID: "s-2", ThreadID: "th-2", Prompt: "p2", RunAt: now.Add(time.Hour), Effort: "bogus"})
+}
+
+func TestListOneShotSchedules(t *testing.T) {
 	now := time.Date(2026, 3, 4, 5, 6, 7, 0, time.UTC)
 	tests := []struct {
 		name       string
 		threadID   string
+		nilDB      bool
+		closedDB   bool
 		wantCount  int
 		wantEffort string
+		wantErr    string
 	}{
-		{"unfiltered lists all", "", 2, ""},
-		{"filtered by thread", "th-1", 1, "high"},
-		{"unknown thread empty", "nope", 0, ""},
+		{name: "unfiltered lists all", wantCount: 2},
+		{name: "filtered by thread", threadID: "th-1", wantCount: 1, wantEffort: "high"},
+		{name: "unknown thread empty", threadID: "nope"},
+		{name: "nil db", nilDB: true, wantErr: "database is nil"},
+		{name: "closed db", closedDB: true, wantErr: "database is closed"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			db := openStoreTestDB(t)
 			ctx := context.Background()
-			mustInsertOneShot(ctx, t, db, model.OneShotSchedule{ID: "s-1", ThreadID: "th-1", Prompt: "p1", RunAt: now, Effort: "HIGH"})
-			mustInsertOneShot(ctx, t, db, model.OneShotSchedule{ID: "s-2", ThreadID: "th-2", Prompt: "p2", RunAt: now.Add(time.Hour), Effort: "bogus"})
-			got, err := ListOneShotSchedules(ctx, db, tc.threadID)
-			if err != nil {
-				t.Fatalf("ListOneShotSchedules err = %v", err)
+			seedOneShotPair(ctx, t, db, now)
+			got, err := ListOneShotSchedules(ctx, scheduleCaseDB(db, tc.nilDB, tc.closedDB), tc.threadID)
+			if assertScheduleErr(t, err, tc.wantErr) {
+				return
 			}
 			if len(got) != tc.wantCount {
 				t.Fatalf("ListOneShotSchedules count = %d, want %d", len(got), tc.wantCount)
@@ -464,95 +441,89 @@ func TestOneShotScheduleRoundTrip(t *testing.T) {
 			if tc.wantEffort != "" && got[0].Effort != tc.wantEffort {
 				t.Errorf("Effort = %q, want %q", got[0].Effort, tc.wantEffort)
 			}
-			fetched, err := GetOneShotSchedule(ctx, db, "s-1")
-			if err != nil {
-				t.Fatalf("GetOneShotSchedule err = %v", err)
-			}
-			if fetched.ThreadID != "th-1" || fetched.Prompt != "p1" {
-				t.Errorf("GetOneShotSchedule = %+v, want th-1/p1", fetched)
-			}
 		})
 	}
 }
 
-func TestOneShotScheduleErrors(t *testing.T) {
+func TestGetOneShotSchedule(t *testing.T) {
+	now := time.Date(2026, 3, 4, 5, 6, 7, 0, time.UTC)
 	tests := []struct {
-		name     string
-		id       string
-		nilDB    bool
-		closedDB bool
-		wantErr  string
+		name       string
+		id         string
+		nilDB      bool
+		wantThread string
+		wantPrompt string
+		wantEffort string
+		wantErr    string
 	}{
-		{"empty get id", "", false, false, "schedule_id cannot be empty"},
-		{"get not found", "missing", false, false, `one-shot schedule "missing" not found`},
-		{"get nil db", "s-1", true, false, "database is nil"},
-		{"delete empty id", "", false, false, "schedule_id cannot be empty"},
-		{"insert nil db", "s-1", true, false, "database is nil"},
-		{"list nil db", "s-1", true, false, "database is nil"},
-		{"list closed db", "s-1", false, true, "database is closed"},
+		{name: "found normalizes effort", id: "s-1", wantThread: "th-1", wantPrompt: "p1", wantEffort: "high"},
+		{name: "invalid stored effort reads medium", id: "s-2", wantThread: "th-2", wantPrompt: "p2", wantEffort: "medium"},
+		{name: "empty id", wantErr: "schedule_id cannot be empty"},
+		{name: "not found", id: "missing", wantErr: `one-shot schedule "missing" not found`},
+		{name: "nil db", id: "s-1", nilDB: true, wantErr: "database is nil"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			db := openStoreTestDB(t)
 			ctx := context.Background()
-			database := db
-			if tc.nilDB {
-				database = nil
+			seedOneShotPair(ctx, t, db, now)
+			got, err := GetOneShotSchedule(ctx, scheduleCaseDB(db, tc.nilDB, false), tc.id)
+			if assertScheduleErr(t, err, tc.wantErr) {
+				return
 			}
-			if tc.closedDB {
-				_ = db.Close()
-			}
-			var err error
-			switch {
-			case strings.HasPrefix(tc.name, "delete"):
-				_, err = DeleteOneShotSchedule(ctx, database, tc.id)
-			case strings.HasPrefix(tc.name, "insert"):
-				err = InsertOneShotSchedule(ctx, database, model.OneShotSchedule{ID: tc.id})
-			case strings.HasPrefix(tc.name, "list"):
-				_, err = ListOneShotSchedules(ctx, database, tc.id)
-			default:
-				_, err = GetOneShotSchedule(ctx, database, tc.id)
-			}
-			if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
-				t.Errorf("err = %v, want %q", err, tc.wantErr)
+			if got.ThreadID != tc.wantThread || got.Prompt != tc.wantPrompt || got.Effort != tc.wantEffort {
+				t.Errorf("GetOneShotSchedule = %+v, want %s/%s/%s", got, tc.wantThread, tc.wantPrompt, tc.wantEffort)
 			}
 		})
 	}
 }
 
+func TestInsertOneShotSchedule(t *testing.T) {
+	now := time.Date(2026, 3, 4, 5, 6, 7, 0, time.UTC)
+	tests := []struct {
+		name    string
+		row     model.OneShotSchedule
+		nilDB   bool
+		wantErr string
+	}{
+		{name: "inserts row", row: model.OneShotSchedule{ID: "s-1", ThreadID: "th-1", Prompt: "p1", RunAt: now}},
+		{name: "nil db", row: model.OneShotSchedule{ID: "s-1"}, nilDB: true, wantErr: "database is nil"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			db := openStoreTestDB(t)
+			ctx := context.Background()
+			if assertScheduleErr(t, InsertOneShotSchedule(ctx, scheduleCaseDB(db, tc.nilDB, false), tc.row), tc.wantErr) {
+				return
+			}
+			listed, err := ListOneShotSchedules(ctx, db, tc.row.ThreadID)
+			if err != nil || len(listed) != 1 || listed[0].Prompt != tc.row.Prompt || listed[0].Effort != "medium" || listed[0].CreatedAt.IsZero() {
+				t.Errorf("ListOneShotSchedules = %+v, %v; want one %s row with medium effort and defaulted CreatedAt", listed, err, tc.row.Prompt)
+			}
+		})
+	}
+}
+
+// TestDeleteOneShotSchedule pins the wrapper's wiring (table and empty-id text); deleteByID's
+// branches live in TestDeleteByID.
 func TestDeleteOneShotSchedule(t *testing.T) {
 	tests := []struct {
 		name        string
-		seed        bool
 		id          string
-		closedDB    bool
 		wantDeleted bool
 		wantErr     string
 	}{
-		{"deletes existing", true, "s-1", false, true, ""},
-		{"missing returns false", false, "missing", false, false, ""},
-		{"closed db errors", false, "s-1", true, false, "database is closed"},
+		{name: "deletes existing", id: "s-1", wantDeleted: true},
+		{name: "empty id", wantErr: "schedule_id cannot be empty"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			db := openStoreTestDB(t)
 			ctx := context.Background()
-			if tc.seed {
-				mustInsertOneShot(ctx, t, db, model.OneShotSchedule{ID: "s-1", ThreadID: "th", Prompt: "p", RunAt: time.Now().UTC()})
-			}
-			database := db
-			if tc.closedDB {
-				_ = db.Close()
-			}
-			deleted, err := DeleteOneShotSchedule(ctx, database, tc.id)
-			if tc.wantErr != "" {
-				if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
-					t.Errorf("DeleteOneShotSchedule err = %v, want %q", err, tc.wantErr)
-				}
+			mustInsertOneShot(ctx, t, db, model.OneShotSchedule{ID: "s-1", ThreadID: "th", Prompt: "p", RunAt: time.Now().UTC()})
+			deleted, err := DeleteOneShotSchedule(ctx, db, tc.id)
+			if assertScheduleErr(t, err, tc.wantErr) {
 				return
-			}
-			if err != nil {
-				t.Fatalf("DeleteOneShotSchedule err = %v", err)
 			}
 			if deleted != tc.wantDeleted {
 				t.Errorf("deleted = %v, want %v", deleted, tc.wantDeleted)
@@ -612,80 +583,98 @@ func TestDeleteByID(t *testing.T) {
 	}
 }
 
-func TestHeartbeatScheduleRoundTrip(t *testing.T) {
+func TestGetHeartbeatSchedule(t *testing.T) {
 	now := time.Date(2026, 3, 4, 5, 6, 7, 0, time.UTC)
 	tests := []struct {
 		name         string
 		effort       string
 		timezone     string
+		id           string
+		nilDB        bool
 		wantEffort   string
 		wantTimezone string
+		wantErr      string
 	}{
-		{"valid effort", "high", "UTC", "high", "UTC"},
-		{"empty effort low timezone utc", "", "", "low", "UTC"},
-		{"invalid effort low", "bogus", "UTC", "low", "UTC"},
+		{name: "valid effort", effort: "high", timezone: "UTC", id: "h-1", wantEffort: "high", wantTimezone: "UTC"},
+		{name: "empty effort low timezone utc", id: "h-1", wantEffort: "low", wantTimezone: "UTC"},
+		{name: "invalid effort low", effort: "bogus", timezone: "UTC", id: "h-1", wantEffort: "low", wantTimezone: "UTC"},
+		{name: "empty id", wantErr: "schedule_id cannot be empty"},
+		{name: "not found", id: "missing", wantErr: `heartbeat schedule "missing" not found`},
+		{name: "nil db", id: "h-1", nilDB: true, wantErr: "database is nil"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			db := openStoreTestDB(t)
 			ctx := context.Background()
 			mustInsertHeartbeat(ctx, t, db, model.HeartbeatSchedule{ID: "h-1", TargetID: "t", CronExpr: "0 * * * *", Prompt: "p", Timezone: tc.timezone, NextRunAt: now, Enabled: true, Effort: tc.effort})
-			got, err := GetHeartbeatSchedule(ctx, db, "h-1")
-			if err != nil {
-				t.Fatalf("GetHeartbeatSchedule err = %v", err)
+			got, err := GetHeartbeatSchedule(ctx, scheduleCaseDB(db, tc.nilDB, false), tc.id)
+			if assertScheduleErr(t, err, tc.wantErr) {
+				return
 			}
-			if got.Effort != tc.wantEffort {
-				t.Errorf("Effort = %q, want %q", got.Effort, tc.wantEffort)
-			}
-			if got.Timezone != tc.wantTimezone {
-				t.Errorf("Timezone = %q, want %q", got.Timezone, tc.wantTimezone)
+			if got.Effort != tc.wantEffort || got.Timezone != tc.wantTimezone {
+				t.Errorf("Effort/Timezone = %q/%q, want %q/%q", got.Effort, got.Timezone, tc.wantEffort, tc.wantTimezone)
 			}
 			if got.LastCompletedAt != nil {
 				t.Errorf("LastCompletedAt = %v, want nil", got.LastCompletedAt)
-			}
-			listed, err := ListHeartbeatSchedules(ctx, db, "t")
-			if err != nil {
-				t.Fatalf("ListHeartbeatSchedules err = %v", err)
-			}
-			if len(listed) != 1 || listed[0].ID != "h-1" {
-				t.Errorf("ListHeartbeatSchedules = %+v, want one h-1 row", listed)
 			}
 		})
 	}
 }
 
-func TestHeartbeatScheduleErrors(t *testing.T) {
+func TestListHeartbeatSchedules(t *testing.T) {
+	now := time.Date(2026, 3, 4, 5, 6, 7, 0, time.UTC)
 	tests := []struct {
-		name    string
-		id      string
-		nilDB   bool
-		wantErr string
+		name     string
+		targetID string
+		nilDB    bool
+		wantIDs  []string
+		wantErr  string
 	}{
-		{"empty get id", "", false, "schedule_id cannot be empty"},
-		{"get not found", "missing", false, `heartbeat schedule "missing" not found`},
-		{"get nil db", "h-1", true, "database is nil"},
-		{"insert nil db", "h-1", true, "database is nil"},
-		{"list nil db", "h-1", true, "database is nil"},
+		{name: "filtered by target", targetID: "t", wantIDs: []string{"h-1"}},
+		{name: "unknown target empty", targetID: "nope"},
+		{name: "nil db", targetID: "t", nilDB: true, wantErr: "database is nil"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			db := openStoreTestDB(t)
 			ctx := context.Background()
-			database := db
-			if tc.nilDB {
-				database = nil
+			mustInsertHeartbeat(ctx, t, db, model.HeartbeatSchedule{ID: "h-1", TargetID: "t", CronExpr: "0 * * * *", Prompt: "p", Timezone: "UTC", NextRunAt: now, Enabled: true})
+			listed, err := ListHeartbeatSchedules(ctx, scheduleCaseDB(db, tc.nilDB, false), tc.targetID)
+			if assertScheduleErr(t, err, tc.wantErr) {
+				return
 			}
-			var err error
-			switch {
-			case strings.HasPrefix(tc.name, "insert"):
-				err = InsertHeartbeatSchedule(ctx, database, model.HeartbeatSchedule{ID: tc.id})
-			case strings.HasPrefix(tc.name, "list"):
-				_, err = ListHeartbeatSchedules(ctx, database, tc.id)
-			default:
-				_, err = GetHeartbeatSchedule(ctx, database, tc.id)
+			ids := make([]string, 0, len(listed))
+			for _, h := range listed {
+				ids = append(ids, h.ID)
 			}
-			if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
-				t.Errorf("err = %v, want %q", err, tc.wantErr)
+			if strings.Join(ids, ",") != strings.Join(tc.wantIDs, ",") {
+				t.Errorf("ListHeartbeatSchedules IDs = %v, want %v", ids, tc.wantIDs)
+			}
+		})
+	}
+}
+
+func TestInsertHeartbeatSchedule(t *testing.T) {
+	now := time.Date(2026, 3, 4, 5, 6, 7, 0, time.UTC)
+	tests := []struct {
+		name    string
+		row     model.HeartbeatSchedule
+		nilDB   bool
+		wantErr string
+	}{
+		{name: "inserts row", row: model.HeartbeatSchedule{ID: "h-1", TargetID: "t", CronExpr: "0 * * * *", Prompt: "p", NextRunAt: now, Enabled: true}},
+		{name: "nil db", row: model.HeartbeatSchedule{ID: "h-1"}, nilDB: true, wantErr: "database is nil"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			db := openStoreTestDB(t)
+			ctx := context.Background()
+			if assertScheduleErr(t, InsertHeartbeatSchedule(ctx, scheduleCaseDB(db, tc.nilDB, false), tc.row), tc.wantErr) {
+				return
+			}
+			got, err := GetHeartbeatSchedule(ctx, db, tc.row.ID)
+			if err != nil || got.TargetID != tc.row.TargetID || got.CronExpr != tc.row.CronExpr {
+				t.Errorf("GetHeartbeatSchedule = %+v, %v; want %s/%s", got, err, tc.row.TargetID, tc.row.CronExpr)
 			}
 		})
 	}
@@ -778,32 +767,81 @@ func TestGetDueSchedules(t *testing.T) {
 	}
 }
 
-func TestGetDueSchedulesScanErrors(t *testing.T) {
+func TestGetDueCronSchedulesErrors(t *testing.T) {
 	now := time.Date(2026, 3, 4, 5, 6, 7, 0, time.UTC)
 	tests := []struct {
-		name   string
-		kind   string
-		badSQL string
+		name     string
+		badSQL   string
+		nilDB    bool
+		closedDB bool
+		wantErr  string
 	}{
-		{"cron bad row fails scan", "cron", `INSERT INTO cron_schedules (id, target_id, title_prefix, cron_expr, prompt, timezone, next_run_at, enabled, created_at, effort) VALUES ('c-bad', 't1', '', '0 0 * * *', 'p', 'UTC', 0, TRUE, CURRENT_TIMESTAMP, 'medium')`},
-		{"heartbeat bad row fails scan", "heartbeat", `INSERT INTO heartbeat_schedules (id, target_id, title_prefix, cron_expr, prompt, timezone, effort, next_run_at, enabled, created_at) VALUES ('h-bad', 't1', '', '0 0 * * *', 'p', 'UTC', 'low', 0, TRUE, CURRENT_TIMESTAMP)`},
+		{name: "nil db", nilDB: true, wantErr: "database is nil"},
+		{name: "closed db", closedDB: true, wantErr: "database is closed"},
+		{
+			name:    "bad row fails scan",
+			badSQL:  `ALTER TABLE cron_schedules ALTER COLUMN created_at TYPE TEXT; INSERT INTO cron_schedules (id, target_id, title_prefix, cron_expr, prompt, timezone, next_run_at, enabled, created_at, effort) VALUES ('c-bad', 't1', '', '0 0 * * *', 'p', 'UTC', '2026-01-01T00:00:00Z', TRUE, 'not-a-date', 'medium')`,
+			wantErr: "Scan error",
+		},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			db := openStoreTestDB(t)
 			ctx := context.Background()
-			if _, err := db.ExecContext(ctx, tc.badSQL); err != nil {
-				t.Fatalf("insert bad row err = %v", err)
+			if tc.badSQL != "" {
+				if _, err := db.ExecContext(ctx, tc.badSQL); err != nil {
+					t.Fatalf("insert bad row err = %v", err)
+				}
 			}
-			var err error
-			if tc.kind == "cron" {
-				_, err = GetDueCronSchedules(ctx, db, now)
-			} else {
-				_, err = GetDueHeartbeatSchedules(ctx, db, now)
+			_, err := GetDueCronSchedules(ctx, scheduleCaseDB(db, tc.nilDB, tc.closedDB), now)
+			assertScheduleErr(t, err, tc.wantErr)
+		})
+	}
+}
+
+func TestGetDueHeartbeatSchedulesErrors(t *testing.T) {
+	now := time.Date(2026, 3, 4, 5, 6, 7, 0, time.UTC)
+	tests := []struct {
+		name    string
+		badSQL  string
+		nilDB   bool
+		wantErr string
+	}{
+		{name: "nil db", nilDB: true, wantErr: "database is nil"},
+		{
+			name:    "bad row fails scan",
+			badSQL:  `ALTER TABLE heartbeat_schedules ALTER COLUMN created_at TYPE TEXT; INSERT INTO heartbeat_schedules (id, target_id, title_prefix, cron_expr, prompt, timezone, effort, next_run_at, enabled, created_at) VALUES ('h-bad', 't1', '', '0 0 * * *', 'p', 'UTC', 'low', '2026-01-01T00:00:00Z', TRUE, 'not-a-date')`,
+			wantErr: "Scan error",
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			db := openStoreTestDB(t)
+			ctx := context.Background()
+			if tc.badSQL != "" {
+				if _, err := db.ExecContext(ctx, tc.badSQL); err != nil {
+					t.Fatalf("insert bad row err = %v", err)
+				}
 			}
-			if err == nil || !strings.Contains(err.Error(), "Scan error") {
-				t.Errorf("due scan err = %v, want Scan error", err)
-			}
+			_, err := GetDueHeartbeatSchedules(ctx, scheduleCaseDB(db, tc.nilDB, false), now)
+			assertScheduleErr(t, err, tc.wantErr)
+		})
+	}
+}
+
+func TestGetDueOneShotSchedulesErrors(t *testing.T) {
+	tests := []struct {
+		name    string
+		nilDB   bool
+		wantErr string
+	}{
+		{name: "nil db", nilDB: true, wantErr: "database is nil"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			db := openStoreTestDB(t)
+			_, err := GetDueOneShotSchedules(context.Background(), scheduleCaseDB(db, tc.nilDB, false), time.Now().UTC())
+			assertScheduleErr(t, err, tc.wantErr)
 		})
 	}
 }
@@ -841,99 +879,64 @@ func fetchDueID(ctx context.Context, t *testing.T, db *sql.DB, kind string, now 
 	}
 }
 
-func TestAdvanceDueSchedules(t *testing.T) {
-	now := time.Date(2026, 3, 4, 5, 6, 7, 0, time.UTC)
-	future := now.Add(time.Hour)
-	tests := []struct {
-		name    string
-		id      string
-		wantErr string
-	}{
-		{"advance cron clears due", "c-due", ""},
-		{"advance cron missing", "missing", `cron schedule "missing" not found`},
-		{"advance heartbeat clears due", "h-due", ""},
+type advanceNextRunCase struct {
+	name    string
+	id      string
+	nilDB   bool
+	wantErr string
+}
+
+// advanceNextRunCases are the shared rows for the cron and heartbeat Advance*NextRun wrappers.
+func advanceNextRunCases(dueID, kind string) []advanceNextRunCase {
+	return []advanceNextRunCase{
+		{name: "advance clears due", id: dueID},
+		{name: "missing", id: "missing", wantErr: kind + ` schedule "missing" not found`},
+		{name: "empty id", wantErr: "schedule_id cannot be empty"},
+		{name: "nil db", id: dueID, nilDB: true, wantErr: "database is nil"},
 	}
-	for _, tc := range tests {
+}
+
+func assertNoneDue(t *testing.T, due int, err error) {
+	t.Helper()
+	if err != nil || due != 0 {
+		t.Errorf("due schedules after advance = %d, err %v; want none", due, err)
+	}
+}
+
+func TestAdvanceCronNextRun(t *testing.T) {
+	now := time.Date(2026, 3, 4, 5, 6, 7, 0, time.UTC)
+	for _, tc := range advanceNextRunCases("c-due", "cron") {
 		t.Run(tc.name, func(t *testing.T) {
 			db := openStoreTestDB(t)
 			ctx := context.Background()
-			seedDueSchedules(ctx, t, db, now.Add(-time.Hour), future)
-			var err error
-			if strings.HasPrefix(tc.id, "h-") {
-				err = AdvanceHeartbeatNextRun(ctx, db, tc.id, future)
-			} else {
-				err = AdvanceCronNextRun(ctx, db, tc.id, future)
-			}
-			if tc.wantErr != "" {
-				if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
-					t.Errorf("advance err = %v, want %q", err, tc.wantErr)
-				}
-				return
-			}
-			if err != nil {
-				t.Fatalf("advance err = %v", err)
-			}
-			dues, err := GetDueCronSchedules(ctx, db, now)
-			if err != nil {
-				t.Fatalf("GetDueCronSchedules err = %v", err)
-			}
-			for _, d := range dues {
-				if d.ID == tc.id {
-					t.Errorf("schedule %q still due after advance", tc.id)
-				}
+			seedDueSchedules(ctx, t, db, now.Add(-time.Hour), now.Add(time.Hour))
+			if !assertScheduleErr(t, AdvanceCronNextRun(ctx, scheduleCaseDB(db, tc.nilDB, false), tc.id, now.Add(time.Hour)), tc.wantErr) {
+				dues, err := GetDueCronSchedules(ctx, db, now)
+				assertNoneDue(t, len(dues), err)
 			}
 		})
 	}
 }
 
-func TestAdvanceScheduleGuards(t *testing.T) {
-	tests := []struct {
-		name     string
-		id       string
-		nilDB    bool
-		closedDB bool
-		wantErr  string
-	}{
-		{"cron empty id", "", false, false, "schedule_id cannot be empty"},
-		{"cron nil db", "c-1", true, false, "database is nil"},
-		{"heartbeat empty id", "", false, false, "schedule_id cannot be empty"},
-		{"heartbeat nil db", "h-1", true, false, "database is nil"},
-		{"watermark empty id", "", false, false, "schedule_id cannot be empty"},
-		{"watermark nil db", "h-1", true, false, "database is nil"},
-		{"due cron nil db", "c-1", true, false, "database is nil"},
-		{"due cron closed db", "c-1", false, true, "database is closed"},
-		{"due heartbeat nil db", "h-1", true, false, "database is nil"},
-		{"due oneshot nil db", "s-1", true, false, "database is nil"},
-	}
-	for _, tc := range tests {
+func TestAdvanceHeartbeatNextRun(t *testing.T) {
+	now := time.Date(2026, 3, 4, 5, 6, 7, 0, time.UTC)
+	for _, tc := range advanceNextRunCases("h-due", "heartbeat") {
 		t.Run(tc.name, func(t *testing.T) {
 			db := openStoreTestDB(t)
 			ctx := context.Background()
-			database := db
-			if tc.nilDB {
-				database = nil
+			seedDueSchedules(ctx, t, db, now.Add(-time.Hour), now.Add(time.Hour))
+			future := now.Add(time.Hour)
+			if assertScheduleErr(t, AdvanceHeartbeatNextRun(ctx, scheduleCaseDB(db, tc.nilDB, false), tc.id, future), tc.wantErr) {
+				return
 			}
-			if tc.closedDB {
-				_ = db.Close()
+			dues, err := GetDueHeartbeatSchedules(ctx, db, now)
+			assertNoneDue(t, len(dues), err)
+			got, err := GetHeartbeatSchedule(ctx, db, tc.id)
+			if err != nil {
+				t.Fatalf("GetHeartbeatSchedule err = %v", err)
 			}
-			now := time.Now().UTC()
-			var err error
-			switch {
-			case strings.HasPrefix(tc.name, "cron"):
-				err = AdvanceCronNextRun(ctx, database, tc.id, now)
-			case strings.HasPrefix(tc.name, "heartbeat"):
-				err = AdvanceHeartbeatNextRun(ctx, database, tc.id, now)
-			case strings.HasPrefix(tc.name, "watermark"):
-				err = AdvanceHeartbeatLastCompletedAt(ctx, database, tc.id, now)
-			case strings.HasPrefix(tc.name, "due cron"):
-				_, err = GetDueCronSchedules(ctx, database, now)
-			case strings.HasPrefix(tc.name, "due heartbeat"):
-				_, err = GetDueHeartbeatSchedules(ctx, database, now)
-			default:
-				_, err = GetDueOneShotSchedules(ctx, database, now)
-			}
-			if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
-				t.Errorf("err = %v, want %q", err, tc.wantErr)
+			if !got.NextRunAt.Equal(future) {
+				t.Errorf("NextRunAt = %v, want %v", got.NextRunAt, future)
 			}
 		})
 	}
@@ -966,27 +969,23 @@ func TestAdvanceHeartbeatLastCompletedAt(t *testing.T) {
 		name      string
 		id        string
 		completed time.Time
-		wantErr   string
 		preset    bool
+		nilDB     bool
+		wantErr   string
 	}{
-		{"sets watermark", "h-1", now, "", false},
-		{"monotonic keeps later", "h-1", now.Add(-time.Hour), "", true},
-		{"unknown id not found", "missing", now, `heartbeat schedule "missing" not found`, false},
+		{name: "sets watermark", id: "h-1", completed: now},
+		{name: "monotonic keeps later", id: "h-1", completed: now.Add(-time.Hour), preset: true},
+		{name: "unknown id not found", id: "missing", completed: now, wantErr: `heartbeat schedule "missing" not found`},
+		{name: "empty id", completed: now, wantErr: "schedule_id cannot be empty"},
+		{name: "nil db", id: "h-1", completed: now, nilDB: true, wantErr: "database is nil"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			db := openStoreTestDB(t)
 			ctx := context.Background()
 			seedWatermarkHeartbeat(ctx, t, db, now, tc.preset)
-			err := AdvanceHeartbeatLastCompletedAt(ctx, db, tc.id, tc.completed)
-			if tc.wantErr != "" {
-				if err == nil || !strings.Contains(strings.ToLower(err.Error()), tc.wantErr) {
-					t.Errorf("AdvanceHeartbeatLastCompletedAt err = %v, want %q", err, tc.wantErr)
-				}
+			if assertScheduleErr(t, AdvanceHeartbeatLastCompletedAt(ctx, scheduleCaseDB(db, tc.nilDB, false), tc.id, tc.completed), tc.wantErr) {
 				return
-			}
-			if err != nil {
-				t.Fatalf("AdvanceHeartbeatLastCompletedAt err = %v", err)
 			}
 			verifyWatermark(ctx, t, db, now)
 		})
@@ -998,7 +997,7 @@ func seedSharedSchedules(ctx context.Context, t *testing.T, db *sql.DB, id strin
 	mustInsertCron(ctx, t, db, model.CronSchedule{ID: id, TargetID: "t", CronExpr: "0 0 * * *", Prompt: "p", NextRunAt: now, Enabled: true})
 	mustInsertOneShot(ctx, t, db, model.OneShotSchedule{ID: id, ThreadID: "th", Prompt: "p", RunAt: now})
 	mustInsertHeartbeat(ctx, t, db, model.HeartbeatSchedule{ID: id, TargetID: "t", CronExpr: "0 * * * *", Prompt: "p", NextRunAt: now, Enabled: true})
-	if _, err := db.ExecContext(ctx, `INSERT INTO event_triggers (id, channel_id, source, target, event_type, prompt, effort, created_at, persistent) VALUES (?, 'ch', 'vanadis_build', 't', 'ev', 'p', 'medium', ?, FALSE)`, id, now); err != nil {
+	if _, err := db.ExecContext(ctx, `INSERT INTO event_triggers (id, channel_id, source, target, event_type, prompt, effort, created_at, persistent) VALUES ($1, 'ch', 'vanadis_build', 't', 'ev', 'p', 'medium', $2, FALSE)`, id, now); err != nil {
 		t.Fatalf("seed event trigger err = %v", err)
 	}
 }

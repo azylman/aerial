@@ -17,6 +17,7 @@
     autoPrune.enable = true;
     logDriver = "json-file";
     daemon.settings = {
+      "registry-mirrors" = [ "https://mirror.gcr.io" ];
       "log-opts" = {
         "max-size" = "10m";
         "max-file" = "3";

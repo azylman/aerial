@@ -25,6 +25,7 @@ import (
 
 	"github.com/jackc/pgx/v5"
 
+	"github.com/azylman/aerial/pkg/buildplan"
 	"github.com/azylman/aerial/pkg/pubsub"
 	"github.com/azylman/aerial/services/vanadis-restate/internal/model"
 )
@@ -38,7 +39,17 @@ const (
 	statusConflict = "conflict"
 )
 
+// CompletePRDeployment completes a PR chunk on deploy_success. Action chunks
+// never complete here: a repair PR's deploy goes through
+// MarkActionRepairDeployed and the chunk completes only on its verdict.
 func (s *Store) CompletePRDeployment(ctx context.Context, chunkID string, rolloutState *pubsub.PRRolloutState) error {
+	return s.execDeployTransition(ctx, chunkID, rolloutState, "complete pr deployment", `WITH reopened_build AS (UPDATE vanadis_builds AS rb SET status = 'running', updated_at = CURRENT_TIMESTAMP FROM vanadis_chunks AS target WHERE target.id = $2 AND rb.id = target.build_id AND rb.status = 'failed' AND target.mode = 'pr' AND COALESCE(target.pr_number, 0) > 0 AND target.status = 'failed' AND NOT EXISTS (SELECT 1 FROM vanadis_chunks AS s WHERE s.build_id = target.build_id AND s.id != target.id AND s.status IN ('failed', 'cancelled'))) UPDATE vanadis_chunks AS c SET status = 'completed', banner = '', rollout_state = COALESCE($1::jsonb, c.rollout_state), completed_at = COALESCE(c.completed_at, CURRENT_TIMESTAMP), updated_at = CURRENT_TIMESTAMP FROM vanadis_builds AS b WHERE c.id = $2 AND b.id = c.build_id AND c.mode = 'pr' AND c.status != 'cancelled' AND (c.status != 'failed' OR COALESCE(c.pr_number, 0) > 0) AND b.status != 'cancelled';`)
+}
+
+// execDeployTransition runs one deploy_success chunk write. The query takes
+// the rollout evidence as $1, then args, then the chunk ID last; a write that
+// matches no row reports ErrPRTransitionSkipped.
+func (s *Store) execDeployTransition(ctx context.Context, chunkID string, rolloutState *pubsub.PRRolloutState, opLabel, query string, args ...any) error {
 	if s == nil || s.db == nil {
 		return errors.New("database connection is nil")
 	}
@@ -54,9 +65,10 @@ func (s *Store) CompletePRDeployment(ctx context.Context, chunkID string, rollou
 		}
 		evidence = data
 	}
-	tag, err := s.db.Exec(ctx, `UPDATE vanadis_chunks AS c SET status = 'completed', banner = '', rollout_state = COALESCE($1::jsonb, c.rollout_state), completed_at = COALESCE(c.completed_at, CURRENT_TIMESTAMP), updated_at = CURRENT_TIMESTAMP FROM vanadis_builds AS b WHERE c.id = $2 AND b.id = c.build_id AND (c.mode = 'pr' OR (c.mode = 'action' AND COALESCE(c.pr_number, 0) > 0)) AND c.status NOT IN ('failed', 'cancelled') AND b.status != 'cancelled';`, evidence, chunkID)
+	params := append(append([]any{evidence}, args...), chunkID)
+	tag, err := s.db.Exec(ctx, query, params...)
 	if err != nil {
-		return fmt.Errorf("complete pr deployment: %w", err)
+		return fmt.Errorf("%s: %w", opLabel, err)
 	}
 	if tag.RowsAffected() == 0 {
 		return ErrPRTransitionSkipped
@@ -64,11 +76,30 @@ func (s *Store) CompletePRDeployment(ctx context.Context, chunkID string, rollou
 	return nil
 }
 
+// actionRepairStageStatuses are the PR stages an action chunk passes through
+// while a repair PR it submitted moves toward deployment.
+var actionRepairStageStatuses = []string{statusPROpened, statusCIFailed, statusConflict, statusMerged, statusSynced, statusDeploying, statusDeployed, statusDeployFailed}
+
+// ActionRepairInFlight reports whether an action chunk has an attached repair
+// PR that has not deployed yet.
+func ActionRepairInFlight(c model.VanadisChunk) bool {
+	return c.Mode == chunkModeAction && c.PRNumber > 0 && slices.Contains(actionRepairStageStatuses, strings.ToLower(strings.TrimSpace(c.Status)))
+}
+
+// MarkActionRepairDeployed moves an action chunk whose repair PR deployed
+// back to running. The repair is a step inside the chunk, so the chunk keeps
+// its repo and pr_number, stores the rollout evidence, clears its banner and
+// waits for its complete_chunk verdict. Chunks outside a repair stage report
+// ErrPRTransitionSkipped.
+func (s *Store) MarkActionRepairDeployed(ctx context.Context, chunkID string, rolloutState *pubsub.PRRolloutState) error {
+	return s.execDeployTransition(ctx, chunkID, rolloutState, "mark action repair deployed", `UPDATE vanadis_chunks AS c SET status = 'running', banner = '', rollout_state = COALESCE($1::jsonb, c.rollout_state), completed_at = NULL, updated_at = CURRENT_TIMESTAMP FROM vanadis_builds AS b WHERE c.id = $3 AND b.id = c.build_id AND c.mode = 'action' AND COALESCE(c.pr_number, 0) > 0 AND c.status = ANY($2) AND b.status NOT IN ('cancelled', 'completed');`, actionRepairStageStatuses)
+}
+
 // SweptChunk identifies one cross-build swept chunk and the foreign build
 // that owns it.
 type SweptChunk struct {
-	ChunkID string
-	BuildID string
+	ChunkID string `json:"chunk_id"`
+	BuildID string `json:"build_id"`
 }
 
 // buildPushJobRegex mirrors the widget Build-and-Push check-name parser so
@@ -127,10 +158,11 @@ func sharedDeployJob(a, b model.VanadisChunk) bool {
 }
 
 // sweepPreDeployStatus reports whether a chunk is still pre-deploy (merged,
-// synced, or deploying). Terminal and never-merged chunks are never swept.
+// synced, deploying, or deploy_failed). Terminal and never-merged chunks are
+// never swept.
 func sweepPreDeployStatus(status string) bool {
 	switch strings.ToLower(strings.TrimSpace(status)) {
-	case statusMerged, "synced", "deploying":
+	case statusMerged, "synced", "deploying", statusDeployFailed:
 		return true
 	default:
 		return false
@@ -170,30 +202,21 @@ func sweepStampStrictlyBefore(candidate, deploying model.VanadisChunk) bool {
 // crossBuildSweepEligible checks the gates shared by sweep and recovery:
 // another build, PR mode with a number, same repo, proven merge inclusion,
 // and a shared deploy job. Status gating stays with the callers.
-func crossBuildSweepEligible(candidate, deploying model.VanadisChunk) bool {
+func crossBuildSweepEligible(owner string, candidate, deploying model.VanadisChunk) bool {
 	if candidate.BuildID == "" || candidate.BuildID == deploying.BuildID {
 		return false
 	}
 	if candidate.Mode != "pr" || candidate.PRNumber <= 0 {
 		return false
 	}
-	return sameDeployRepo(candidate.Repo, deploying.Repo) && sweepStampStrictlyBefore(candidate, deploying) && sharedDeployJob(candidate, deploying)
+	return sameDeployRepo(owner, candidate.Repo, deploying.Repo) && sweepStampStrictlyBefore(candidate, deploying) && sharedDeployJob(candidate, deploying)
 }
 
 // supersededAcrossBuilds reports whether candidate in another build merged
 // early enough and on a shared job to be contained in the deploying chunk's
 // landed commit.
-func supersededAcrossBuilds(candidate, deploying model.VanadisChunk) bool {
-	return crossBuildSweepEligible(candidate, deploying) && sweepPreDeployStatus(candidate.Status)
-}
-
-// recoveredAcrossBuilds reports whether an already-completed chunk in
-// another build matches the cross-build sweep eligibility. A retry that
-// lands after a prior attempt completed the writes but failed before the
-// side effects re-derives these so events, widget sync, and build
-// completion still happen.
-func recoveredAcrossBuilds(candidate, deploying model.VanadisChunk) bool {
-	return crossBuildSweepEligible(candidate, deploying) && strings.EqualFold(strings.TrimSpace(candidate.Status), statusCompleted)
+func supersededAcrossBuilds(owner string, candidate, deploying model.VanadisChunk) bool {
+	return crossBuildSweepEligible(owner, candidate, deploying) && sweepPreDeployStatus(candidate.Status)
 }
 
 // CrossBuildDeploymentSweepIDs returns the earlier chunks in OTHER builds a
@@ -202,77 +225,49 @@ func recoveredAcrossBuilds(candidate, deploying model.VanadisChunk) bool {
 // share at least one deploy job with the deploying chunk. Terminal and
 // never-merged chunks, same-build chunks, and job-disjoint chunks are never
 // swept.
-func CrossBuildDeploymentSweepIDs(deploying model.VanadisChunk, candidates []model.VanadisChunk) []SweptChunk {
+func CrossBuildDeploymentSweepIDs(owner string, deploying model.VanadisChunk, candidates []model.VanadisChunk) []SweptChunk {
 	if strings.TrimSpace(deploying.BuildID) == "" {
 		return nil
 	}
 	var swept []SweptChunk
 	for _, candidate := range candidates {
-		if supersededAcrossBuilds(candidate, deploying) {
+		if supersededAcrossBuilds(owner, candidate, deploying) {
 			swept = append(swept, SweptChunk{ChunkID: candidate.ID, BuildID: candidate.BuildID})
 		}
 	}
 	return swept
 }
 
-// SweepEarlierDeploymentsAcrossBuilds completes eligible earlier chunks in
-// other builds superseded by the deploying chunk's landed commit and
-// returns every affected chunk and build ID, plus already-completed chunks
-// matching the same eligibility so a retry that lands after the writes but
-// before the side effects can still publish events, re-sync widgets, and
-// complete foreign builds. Skipped transitions (a concurrent completion,
-// failure, or cancellation) are harmless; other errors return the chunks
-// completed so far alongside the error so the caller processes partial
-// progress before the journaled step retries the remainder.
-func (s *Store) SweepEarlierDeploymentsAcrossBuilds(ctx context.Context, deploying model.VanadisChunk) (swept, recovered []SweptChunk, err error) {
+// SweepEarlierDeploymentsAcrossBuilds returns eligible earlier chunks in
+// other builds superseded by the deploying chunk's landed commit.
+func (s *Store) SweepEarlierDeploymentsAcrossBuilds(ctx context.Context, deploying model.VanadisChunk) ([]SweptChunk, error) {
 	if s == nil || s.db == nil {
-		return nil, nil, errors.New("database connection is nil")
+		return nil, errors.New("database connection is nil")
 	}
 	if strings.TrimSpace(deploying.BuildID) == "" || strings.TrimSpace(deploying.ID) == "" {
-		return nil, nil, nil
+		return nil, nil
 	}
-	repos := RepoMatchCandidates(deploying.Repo)
+	repos := RepoMatchCandidates(s.gitHubOwner, deploying.Repo)
 	if len(repos) == 0 {
-		return nil, nil, nil
+		return nil, nil
 	}
-	rows, err := s.db.Query(ctx, `SELECT c.id, c.build_id, c.chunk_index, c.mode, c.repo, c.title, c.instructions, c.target_files, c.target_symbols, COALESCE(c.effort, 'medium'), c.acceptance_criteria, c.status, COALESCE(c.pr_number, 0), COALESCE(c.stall_nudges, 0), c.depends_on, c.ci_fail_count, c.ci_checks, c.rollout_state, c.banner, c.merge_awakeable_id, c.deploy_awakeable_id, c.started_at, c.completed_at, c.created_at, c.updated_at FROM vanadis_chunks AS c JOIN vanadis_builds AS b ON b.id = c.build_id WHERE c.build_id != $1 AND c.mode = 'pr' AND COALESCE(c.pr_number, 0) > 0 AND c.status IN ('merged', 'synced', 'deploying', 'completed') AND c.repo = ANY($2) AND b.status NOT IN ('cancelled', 'completed') ORDER BY c.build_id ASC, c.chunk_index ASC;`, deploying.BuildID, repos)
+	rows, err := s.db.Query(ctx, `SELECT c.id, c.build_id, c.chunk_index, c.mode, c.repo, c.title, c.instructions, c.target_files, c.target_symbols, COALESCE(c.effort, 'medium'), c.acceptance_criteria, c.status, COALESCE(c.pr_number, 0), COALESCE(c.stall_nudges, 0), c.depends_on, c.ci_fail_count, c.ci_checks, c.rollout_state, c.banner, c.started_at, c.completed_at, c.created_at, c.updated_at FROM vanadis_chunks AS c JOIN vanadis_builds AS b ON b.id = c.build_id WHERE c.build_id != $1 AND c.mode = 'pr' AND COALESCE(c.pr_number, 0) > 0 AND c.status IN ('merged', 'synced', 'deploying', 'deploy_failed') AND c.repo = ANY($2) AND b.status NOT IN ('cancelled', 'completed') ORDER BY c.build_id ASC, c.chunk_index ASC;`, deploying.BuildID, repos)
 	if err != nil {
-		return nil, nil, fmt.Errorf("query cross-build sweep candidates: %w", err)
+		return nil, fmt.Errorf("query cross-build sweep candidates: %w", err)
 	}
 	defer rows.Close()
-	candidates, err := ScanChunks(rows)
-	if err != nil {
-		return nil, nil, fmt.Errorf("scan cross-build sweep candidates: %w", err)
+	var candidates []model.VanadisChunk
+	for rows.Next() {
+		c, err := scanChunkRow(rows)
+		if err != nil {
+			return nil, fmt.Errorf("scan cross-build sweep candidates: %w", err)
+		}
+		candidates = append(candidates, c)
 	}
 	if err := rows.Err(); err != nil {
-		return nil, nil, fmt.Errorf("iterate cross-build sweep candidates: %w", err)
+		return nil, fmt.Errorf("iterate cross-build sweep candidates: %w", err)
 	}
-	for _, sw := range CrossBuildDeploymentSweepIDs(deploying, candidates) {
-		if err := s.CompletePRDeployment(ctx, sw.ChunkID, nil); err != nil {
-			if errors.Is(err, ErrPRTransitionSkipped) {
-				continue
-			}
-			return swept, recoveredCrossBuildChunks(deploying, candidates), err
-		}
-		swept = append(swept, sw)
-	}
-	return swept, recoveredCrossBuildChunks(deploying, candidates), nil
-}
-
-// recoveredCrossBuildChunks re-derives already-completed chunks matching
-// the cross-build sweep eligibility so a retry can finish their side
-// effects idempotently.
-func recoveredCrossBuildChunks(deploying model.VanadisChunk, candidates []model.VanadisChunk) []SweptChunk {
-	if strings.TrimSpace(deploying.BuildID) == "" {
-		return nil
-	}
-	var recovered []SweptChunk
-	for _, candidate := range candidates {
-		if recoveredAcrossBuilds(candidate, deploying) {
-			recovered = append(recovered, SweptChunk{ChunkID: candidate.ID, BuildID: candidate.BuildID})
-		}
-	}
-	return recovered
+	return CrossBuildDeploymentSweepIDs(s.gitHubOwner, deploying, candidates), nil
 }
 
 // EarlierDeploymentSweepIDs returns the IDs of chunks a deploy_success also
@@ -283,7 +278,7 @@ func recoveredCrossBuildChunks(deploying model.VanadisChunk, candidates []model.
 // candidate is skipped. Terminal (failed, cancelled, completed) and
 // never-merged chunks are never swept, so in-flight builds keep working and
 // completed work is unaffected.
-func EarlierDeploymentSweepIDs(chunks []model.VanadisChunk, chunkID string) []string {
+func EarlierDeploymentSweepIDs(owner string, chunks []model.VanadisChunk, chunkID string) []string {
 	var deploying *model.VanadisChunk
 	for i := range chunks {
 		if chunks[i].ID == chunkID {
@@ -296,7 +291,7 @@ func EarlierDeploymentSweepIDs(chunks []model.VanadisChunk, chunkID string) []st
 	}
 	var swept []string
 	for i := range chunks {
-		if supersededByDeployment(chunks[i], *deploying) {
+		if supersededByDeployment(owner, chunks[i], *deploying) {
 			swept = append(swept, chunks[i].ID)
 		}
 	}
@@ -305,15 +300,16 @@ func EarlierDeploymentSweepIDs(chunks []model.VanadisChunk, chunkID string) []st
 
 // supersededByDeployment reports whether candidate merged early enough to be
 // contained in the deploying chunk's landed commit.
-func supersededByDeployment(candidate, deploying model.VanadisChunk) bool {
+func supersededByDeployment(owner string, candidate, deploying model.VanadisChunk) bool {
 	if candidate.ID == deploying.ID || candidate.BuildID != deploying.BuildID {
 		return false
 	}
-	return sameDeployRepo(candidate.Repo, deploying.Repo) && deployCompletableMode(candidate) && sweepPreDeployStatus(candidate.Status) && sweepStampProvesInclusion(candidate, deploying)
+	return sameDeployRepo(owner, candidate.Repo, deploying.Repo) && deployCompletableMode(candidate) && sweepPreDeployStatus(candidate.Status) && sweepStampProvesInclusion(candidate, deploying)
 }
 
-// deployCompletableMode matches the CompletePRDeployment mode guard: plain
-// PR chunks and PR-attached action chunks.
+// deployCompletableMode reports which chunks a deploy sweep touches: plain PR
+// chunks, which complete, and PR-attached action chunks, whose repair is
+// marked deployed and which stay running until their verdict.
 func deployCompletableMode(c model.VanadisChunk) bool {
 	if c.Mode == "pr" {
 		return true
@@ -323,15 +319,15 @@ func deployCompletableMode(c model.VanadisChunk) bool {
 
 // sameDeployRepo matches repo spellings the chunk lookup already treats as
 // the same repository, including the owner-qualified variant.
-func sameDeployRepo(a, b string) bool {
-	a, b = NormalizeRepo(a), NormalizeRepo(b)
+func sameDeployRepo(owner string, a, b string) bool {
+	a, b = buildplan.TrimRepo(a), buildplan.TrimRepo(b)
 	if a == "" || b == "" {
 		return false
 	}
 	if a == b {
 		return true
 	}
-	return slices.Contains(RepoMatchCandidates(a), b) || slices.Contains(RepoMatchCandidates(b), a)
+	return slices.Contains(RepoMatchCandidates(owner, a), b) || slices.Contains(RepoMatchCandidates(owner, b), a)
 }
 
 // UpdatePRLifecycleStatus prevents delayed pre-deployment events from reopening
@@ -348,7 +344,7 @@ func (s *Store) UpdatePRLifecycleStatus(ctx context.Context, chunkID, status str
 	if strings.TrimSpace(chunkID) == "" {
 		return errors.New("chunk_id cannot be empty")
 	}
-	tag, err := s.db.Exec(ctx, `UPDATE vanadis_chunks SET status = $1, completed_at = CASE WHEN $1 = 'merged' THEN COALESCE(completed_at, CURRENT_TIMESTAMP) WHEN $1 = 'deploying' THEN completed_at ELSE NULL END, updated_at = CURRENT_TIMESTAMP WHERE id = $2 AND status NOT IN ('completed', 'failed', 'cancelled');`, status, strings.TrimSpace(chunkID))
+	tag, err := s.db.Exec(ctx, `WITH reopened_build AS (UPDATE vanadis_builds AS rb SET status = 'running', updated_at = CURRENT_TIMESTAMP FROM vanadis_chunks AS target WHERE target.id = $2 AND rb.id = target.build_id AND rb.status = 'failed' AND target.mode = 'pr' AND COALESCE(target.pr_number, 0) > 0 AND target.status = 'failed' AND $1 IN ('merged', 'deploying') AND NOT EXISTS (SELECT 1 FROM vanadis_chunks AS s WHERE s.build_id = target.build_id AND s.id != target.id AND s.status IN ('failed', 'cancelled'))) UPDATE vanadis_chunks SET status = $1, banner = CASE WHEN status IN ('failed', 'conflict', 'ci_failed') OR $1 IN ('merged', 'synced', 'deploying', 'deployed', 'pr_opened') THEN '' ELSE banner END, completed_at = CASE WHEN $1 = 'merged' THEN COALESCE(completed_at, CURRENT_TIMESTAMP) WHEN $1 = 'deploying' THEN completed_at ELSE NULL END, updated_at = CURRENT_TIMESTAMP WHERE id = $2 AND status NOT IN ('completed', 'failed', 'cancelled') OR (id = $2 AND $1 IN ('merged', 'deploying') AND mode = 'pr' AND COALESCE(pr_number, 0) > 0 AND status = 'failed');`, status, strings.TrimSpace(chunkID))
 	if err != nil {
 		return fmt.Errorf("update pr lifecycle status: %w", err)
 	}
@@ -368,46 +364,96 @@ func (s *Store) RecordPRCheckStatus(ctx context.Context, chunkID, headSHA, check
 	if id == "" || name == "" {
 		return errors.New("chunk_id and check_name cannot be empty")
 	}
-	const q = `UPDATE vanadis_chunks
+	const q = `WITH reopened_build AS (
+    UPDATE vanadis_builds AS rb
+    SET status = 'running', updated_at = CURRENT_TIMESTAMP
+    FROM vanadis_chunks AS target
+    WHERE target.id = $3
+      AND rb.id = target.build_id
+      AND rb.status = 'failed'
+      AND target.mode = 'pr'
+      AND COALESCE(target.pr_number, 0) > 0
+      AND target.status = 'failed'
+      AND COALESCE(target.ci_checks->>'_merge_sha', '') = ''
+      AND $2 = 'passed'
+      AND (
+          $4 = ''
+          OR COALESCE(target.ci_checks->>'_head_sha', '') = ''
+          OR target.ci_checks->>'_head_sha' = $4
+      )
+      AND NOT EXISTS (
+          SELECT 1 FROM jsonb_each_text(jsonb_set(COALESCE(target.ci_checks, '{}'::jsonb), ARRAY[$1], to_jsonb($2::text), true))
+          WHERE key NOT LIKE '\_%' AND value = 'failed'
+      )
+      AND NOT EXISTS (
+          SELECT 1 FROM vanadis_chunks AS s
+          WHERE s.build_id = target.build_id
+            AND s.id != target.id
+            AND s.status IN ('failed', 'cancelled')
+      )
+)
+UPDATE vanadis_chunks AS c
 SET ci_checks = jsonb_set(
         CASE
-            WHEN (status IN ('merged', 'synced', 'deploy_failed') OR COALESCE(ci_checks->>'_merge_sha', '') != '') AND $4 != '' AND COALESCE(ci_checks->>'_merge_sha', '') = ''
-                THEN jsonb_set(COALESCE(ci_checks, '{}'::jsonb) - '_head_sha', '{_merge_sha}', to_jsonb($4::text), true)
-            WHEN status NOT IN ('merged', 'synced', 'deploy_failed') AND COALESCE(ci_checks->>'_merge_sha', '') = '' AND $4 != '' AND COALESCE(ci_checks->>'_head_sha', '') = ''
-                THEN jsonb_set(COALESCE(ci_checks, '{}'::jsonb), '{_head_sha}', to_jsonb($4::text), true)
-            ELSE COALESCE(ci_checks, '{}'::jsonb)
+            WHEN c.status NOT IN ('merged', 'synced', 'deploy_failed') AND COALESCE(c.ci_checks->>'_merge_sha', '') = '' AND $4 != '' AND COALESCE(c.ci_checks->>'_head_sha', '') = ''
+                THEN jsonb_set(COALESCE(c.ci_checks, '{}'::jsonb), '{_head_sha}', to_jsonb($4::text), true)
+            ELSE COALESCE(c.ci_checks, '{}'::jsonb)
         END,
         ARRAY[$1],
         to_jsonb($2::text),
         true
     ),
     status = CASE
-        WHEN status = 'ci_failed' AND $2 = 'passed' AND NOT EXISTS (
-            SELECT 1 FROM jsonb_each_text(jsonb_set(COALESCE(ci_checks, '{}'::jsonb), ARRAY[$1], to_jsonb($2::text), true))
+        WHEN c.status IN ('ci_failed', 'conflict', 'failed') AND COALESCE(c.ci_checks->>'_merge_sha', '') = '' AND $2 = 'passed' AND NOT EXISTS (
+            SELECT 1 FROM jsonb_each_text(jsonb_set(COALESCE(c.ci_checks, '{}'::jsonb), ARRAY[$1], to_jsonb($2::text), true))
             WHERE key NOT LIKE '\_%' AND value = 'failed'
         ) THEN 'pr_opened'
-        ELSE status
+        ELSE c.status
     END,
     banner = CASE
-        WHEN status = 'ci_failed' AND $2 = 'passed' AND NOT EXISTS (
-            SELECT 1 FROM jsonb_each_text(jsonb_set(COALESCE(ci_checks, '{}'::jsonb), ARRAY[$1], to_jsonb($2::text), true))
+        WHEN c.status IN ('ci_failed', 'conflict', 'failed') AND COALESCE(c.ci_checks->>'_merge_sha', '') = '' AND $2 = 'passed' AND NOT EXISTS (
+            SELECT 1 FROM jsonb_each_text(jsonb_set(COALESCE(c.ci_checks, '{}'::jsonb), ARRAY[$1], to_jsonb($2::text), true))
             WHERE key NOT LIKE '\_%' AND value = 'failed'
         ) THEN ''
-        ELSE banner
+        ELSE c.banner
+    END,
+    ci_fail_count = CASE
+        WHEN c.status = 'failed' AND COALESCE(c.ci_checks->>'_merge_sha', '') = '' AND $2 = 'passed' AND NOT EXISTS (
+            SELECT 1 FROM jsonb_each_text(jsonb_set(COALESCE(c.ci_checks, '{}'::jsonb), ARRAY[$1], to_jsonb($2::text), true))
+            WHERE key NOT LIKE '\_%' AND value = 'failed'
+        ) THEN 0
+        ELSE c.ci_fail_count
+    END,
+    completed_at = CASE
+        WHEN c.status = 'failed' AND COALESCE(c.ci_checks->>'_merge_sha', '') = '' AND $2 = 'passed' AND NOT EXISTS (
+            SELECT 1 FROM jsonb_each_text(jsonb_set(COALESCE(c.ci_checks, '{}'::jsonb), ARRAY[$1], to_jsonb($2::text), true))
+            WHERE key NOT LIKE '\_%' AND value = 'failed'
+        ) THEN NULL
+        ELSE c.completed_at
     END,
     updated_at = CURRENT_TIMESTAMP
-WHERE id = $3
-  AND status NOT IN ('deploying', 'deployed', 'completed', 'failed', 'cancelled')
+FROM vanadis_builds AS b
+WHERE c.id = $3
+  AND b.id = c.build_id
+  AND c.status NOT IN ('deploying', 'deployed', 'completed', 'cancelled')
+  AND (c.status != 'failed' OR (c.mode = 'pr' AND COALESCE(c.pr_number, 0) > 0))
+  AND b.status != 'cancelled'
   AND (
-      $4 = ''
-      OR ((status IN ('merged', 'synced', 'deploy_failed') OR COALESCE(ci_checks->>'_merge_sha', '') != '') AND (
-          COALESCE(ci_checks->>'_merge_sha', '') = $4
-          OR (COALESCE(ci_checks->>'_merge_sha', '') = '' AND COALESCE(ci_checks->>'_head_sha', '') IS DISTINCT FROM $4)
-      ))
-      OR (status NOT IN ('merged', 'synced', 'deploy_failed') AND COALESCE(ci_checks->>'_merge_sha', '') = '' AND (
-          COALESCE(ci_checks->>'_head_sha', '') = ''
-          OR ci_checks->>'_head_sha' = $4
-      ))
+      (
+          (c.status IN ('merged', 'synced', 'deploy_failed') OR COALESCE(c.ci_checks->>'_merge_sha', '') != '')
+          AND $2 != 'failed'
+          AND COALESCE(c.ci_checks->>'_merge_sha', '') != ''
+          AND c.ci_checks->>'_merge_sha' = $4
+      )
+      OR (
+          c.status NOT IN ('merged', 'synced', 'deploy_failed')
+          AND COALESCE(c.ci_checks->>'_merge_sha', '') = ''
+          AND (
+              $4 = ''
+              OR COALESCE(c.ci_checks->>'_head_sha', '') = ''
+              OR c.ci_checks->>'_head_sha' = $4
+          )
+      )
   );`
 	tag, err := s.db.Exec(ctx, q, name, strings.TrimSpace(checkState), id, sha)
 	switch {
@@ -434,12 +480,12 @@ func (s *Store) ResetPRCheckState(ctx context.Context, chunkID, headSHA, mergeSH
 		const mergeQ = `UPDATE vanadis_chunks
 SET ci_checks = CASE
         WHEN COALESCE(ci_checks->>'_merge_sha', '') = $3
-            THEN jsonb_strip_nulls(COALESCE(ci_checks, '{}'::jsonb) || jsonb_build_object('_head_sha', COALESCE(NULLIF($2::text, ''), NULLIF(ci_checks->>'_head_sha', '')), '_merge_sha', NULLIF($3::text, '')))
+            THEN jsonb_strip_nulls((COALESCE(ci_checks, '{}'::jsonb) - '_merge_queue') || jsonb_build_object('_head_sha', COALESCE(NULLIF($2::text, ''), NULLIF(ci_checks->>'_head_sha', '')), '_merge_sha', NULLIF($3::text, '')))
         ELSE jsonb_strip_nulls(jsonb_build_object('_head_sha', COALESCE(NULLIF($2::text, ''), NULLIF(ci_checks->>'_head_sha', '')), '_merge_sha', NULLIF($3::text, '')))
     END,
     banner = '',
     updated_at = CURRENT_TIMESTAMP
-WHERE id = $1 AND status NOT IN ('completed', 'failed', 'cancelled');`
+WHERE id = $1 AND status NOT IN ('completed', 'cancelled') AND (status != 'failed' OR (mode = 'pr' AND COALESCE(pr_number, 0) > 0));`
 		tag, err := s.db.Exec(ctx, mergeQ, id, cleanHead, cleanMerge)
 		if err != nil {
 			return fmt.Errorf("reset merge check state: %w", err)
@@ -452,7 +498,7 @@ WHERE id = $1 AND status NOT IN ('completed', 'failed', 'cancelled');`
 	const syncQ = `UPDATE vanadis_chunks AS c
 SET ci_checks = CASE
         WHEN $2 != '' AND LOWER(COALESCE(c.ci_checks->>'_head_sha', '')) = LOWER($2) THEN c.ci_checks - '_merge_sha'
-        WHEN $2 != '' THEN jsonb_build_object('_head_sha', $2::text)
+        WHEN $2 != '' THEN jsonb_strip_nulls(jsonb_build_object('_head_sha', $2::text, '_merge_queue', NULLIF(c.ci_checks->>'_merge_queue', '')))
         ELSE '{}'::jsonb
     END,
     banner = '',

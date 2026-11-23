@@ -195,18 +195,8 @@ channels:
 `,
 			wantModel: DefaultConfigData().Model,
 		},
-		{
-			name:        "invalid yaml syntax",
-			content:     `model: [invalid {::`,
-			wantErr:     true,
-			errContains: "failed to parse",
-		},
-		{
-			name:        "missing channels section",
-			content:     `model: "gemini-flash"`,
-			wantErr:     true,
-			errContains: "channels.default is required",
-		},
+		{name: "invalid yaml syntax", content: `model: [invalid {::`, wantErr: true, errContains: "failed to parse"},
+		{name: "missing channels section", content: `model: "gemini-flash"`, wantErr: true, errContains: "channels.default is required"},
 		{
 			name: "minimal valid channels config",
 			content: `
@@ -255,6 +245,17 @@ mcp_config:
       serverUrl: "http://s2:2000"
 `,
 			wantModel: DefaultConfigData().Model,
+		},
+		{
+			name: "stray turn_queue key ignored",
+			content: `
+model: "gemini-1.5-pro"
+channels:
+  default:
+    mode: "threads"
+turn_queue: coordinator
+`,
+			wantModel: "gemini-1.5-pro",
 		},
 		{
 			name: "service urls trimming and bot id",
@@ -335,28 +336,6 @@ channels:
 	}
 }
 
-func TestTranscriptsConfig_EffectiveMaxBatchBytes(t *testing.T) {
-	t.Parallel()
-	tests := []struct {
-		name   string
-		budget int
-		want   int
-	}{
-		{name: "zero falls back to wire budget", budget: 0, want: 512 * 1024},
-		{name: "negative falls back to wire budget", budget: -1, want: 512 * 1024},
-		{name: "positive budget honored", budget: 65536, want: 65536},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			cfg := TranscriptsConfig{MaxBatchBytes: tc.budget}
-			if got := cfg.EffectiveMaxBatchBytes(); got != tc.want {
-				t.Errorf("EffectiveMaxBatchBytes() = %d, want %d", got, tc.want)
-			}
-		})
-	}
-}
-
 func TestTranscriptsConfig_UnmarshalStaleDatabase(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
@@ -389,18 +368,8 @@ func TestTranscriptsConfig_UnmarshalStaleDatabase(t *testing.T) {
 			json:      `{"stack": "alpha", "indexer_url": "http://indexer:4030/", "max_batch_bytes": 12345}`,
 			wantStack: "alpha",
 		},
-		{
-			name:        "yaml invalid syntax",
-			yaml:        "[invalid yaml",
-			wantErr:     true,
-			errContains: "did not find expected",
-		},
-		{
-			name:        "json invalid syntax",
-			json:        `{"database": invalid}`,
-			wantErr:     true,
-			errContains: "invalid character",
-		},
+		{name: "yaml invalid syntax", yaml: "[invalid yaml", wantErr: true, errContains: "did not find expected"},
+		{name: "json invalid syntax", json: `{"database": invalid}`, wantErr: true, errContains: "invalid character"},
 	}
 
 	for _, tc := range tests {
@@ -455,9 +424,7 @@ type loadConfigLKGCBootCase struct {
 	name          string
 	files         []string
 	wantModel     string
-	wantErr       bool
-	errSubstr     string
-	testReload    bool
+	wantErr       string
 	badReloadYAML string
 }
 
@@ -479,15 +446,16 @@ func assertReloadWithSupplierCases(t *testing.T) {
 	}); err != nil || ActiveConfig().Current().Model != "reloaded-hermetic" {
 		t.Errorf("expected ReloadWithSupplier success, got err=%v model=%q", err, ActiveConfig().Current().Model)
 	}
-	_ = ReloadWithSupplier(ActiveConfig(), nil)
-	_ = ReloadWithSupplier(ActiveConfig(), New)
+	if err := ReloadWithSupplier(ActiveConfig(), nil); err == nil {
+		t.Errorf("expected error for nil supplier")
+	}
+	if err := ReloadWithSupplier(ActiveConfig(), New); err == nil && ActiveConfig().Current() == nil {
+		t.Errorf("unexpected nil config after ReloadWithSupplier")
+	}
 }
 
 func assertLoadConfigLKGCBootCase(t *testing.T, tc loadConfigLKGCBootCase) {
 	t.Helper()
-	t.Setenv("AGY_MODEL", "")
-	t.Setenv("DEFAULT_TIMEZONE", "")
-	t.Setenv("TZ", "")
 	tmpDir := t.TempDir()
 	paths := make([]string, 0, len(tc.files))
 	for _, f := range tc.files {
@@ -501,13 +469,12 @@ func assertLoadConfigLKGCBootCase(t *testing.T, tc loadConfigLKGCBootCase) {
 		paths = append(paths, p)
 	}
 
-	cfg, err := LoadConfigFromPaths(paths...)
-	if tc.wantErr {
-		if err == nil {
-			t.Fatalf("expected error containing %q, got nil", tc.errSubstr)
-		}
-		if !strings.Contains(err.Error(), tc.errSubstr) {
-			t.Fatalf("expected error containing %q, got: %v", tc.errSubstr, err)
+	// An empty map lookup keeps live POSTGRES_*, PORT and token vars out of the loaded config.
+	lookup := mapLookup(nil)
+	cfg, err := LoadConfigFromLookup(lookup, paths...)
+	if tc.wantErr != "" {
+		if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+			t.Fatalf("expected error containing %q, got: %v", tc.wantErr, err)
 		}
 		return
 	}
@@ -518,11 +485,11 @@ func assertLoadConfigLKGCBootCase(t *testing.T, tc loadConfigLKGCBootCase) {
 		t.Fatalf("got model %q, want %q", cfg.Current().Model, tc.wantModel)
 	}
 
-	if tc.testReload {
+	if tc.badReloadYAML != "" {
 		primaryPath := paths[0]
 		_ = os.WriteFile(primaryPath, []byte(tc.badReloadYAML), 0o600)
 		errReload := ReloadWithSupplier(cfg, func() (*Config, error) {
-			return LoadConfigFromPaths(primaryPath)
+			return LoadConfigFromLookup(lookup, primaryPath)
 		})
 		if errReload == nil {
 			t.Fatal("expected ReloadWithSupplier to fail on corrupted file")
@@ -539,50 +506,23 @@ func TestLoadConfig_LKGCAndColdBoot(t *testing.T) {
 		activeGlobalConfig.update(origGlobal)
 	})
 
+	threads := "channels:\n  default:\n    mode: threads\n"
 	tests := []loadConfigLKGCBootCase{
-		{
-			name:      "missing search paths fails",
-			files:     []string{"nonexistent.yaml"},
-			wantErr:   true,
-			errSubstr: "no configuration file found in search paths",
-		},
-		{
-			name:      "corrupted yaml fails fast",
-			files:     []string{"broken.yaml:model: [broken {::"},
-			wantErr:   true,
-			errSubstr: "failed to load configuration from any path",
-		},
-		{
-			name: "corrupted primary corrupted fallback fails",
-			files: []string{
-				"p1.yaml:model: [broken1",
-				"p2.yaml:model: [broken2",
-			},
-			wantErr:   true,
-			errSubstr: "failed to load configuration from any path",
-		},
+		{name: "missing search paths fails", files: []string{"nonexistent.yaml"}, wantErr: "no configuration file found in search paths"},
+		{name: "corrupted yaml fails fast", files: []string{"broken.yaml:model: [broken {::"}, wantErr: "failed to load configuration from any path"},
+		{name: "corrupted primary corrupted fallback fails", files: []string{"p1.yaml:model: [broken1", "p2.yaml:model: [broken2"}, wantErr: "failed to load configuration from any path"},
 		{
 			name: "stale openobserve keys are ignored",
 			files: []string{
-				"stale.yaml:model: gemini-stale-keys\nopenobserve_url: http://openobserve:5080/openobserve\nopenobserve_org: default\nopenobserve_user: root@example.com\nchannels:\n  default:\n    mode: threads\n",
+				"stale.yaml:model: gemini-stale-keys\nopenobserve_url: http://openobserve:5080/openobserve\nopenobserve_org: default\nopenobserve_user: root@example.com\n" + threads,
 			},
 			wantModel: "gemini-stale-keys",
 		},
+		{name: "corrupted primary on-disk lkgc fallback succeeds", files: []string{"primary.yaml:model: [broken", "lkgc.yaml:model: gemini-disk-lkgc\n" + threads}, wantModel: "gemini-disk-lkgc"},
 		{
-			name: "corrupted primary on-disk lkgc fallback succeeds",
-			files: []string{
-				"primary.yaml:model: [broken",
-				"lkgc.yaml:model: gemini-disk-lkgc\nchannels:\n  default:\n    mode: threads\n",
-			},
-			wantModel: "gemini-disk-lkgc",
-		},
-		{
-			name: "reload corrupt retains in-memory lkgc",
-			files: []string{
-				"active.yaml:model: gemini-retained\nsystem_channel: retained-alerts\nchannels:\n  default:\n    mode: threads\n",
-			},
+			name:          "reload corrupt retains in-memory lkgc",
+			files:         []string{"active.yaml:model: gemini-retained\nsystem_channel: retained-alerts\n" + threads},
 			wantModel:     "gemini-retained",
-			testReload:    true,
 			badReloadYAML: "corrupt: [broken:::",
 		},
 	}
@@ -697,11 +637,7 @@ type channelPolicyValidationCase struct {
 
 func channelPolicyValidationCases() []channelPolicyValidationCase {
 	return []channelPolicyValidationCase{
-		{
-			name:        "missing channels",
-			yaml:        `model: "gemini-flash"`,
-			expectedErr: "channels.default is required",
-		},
+		{name: "missing channels", yaml: `model: "gemini-flash"`, expectedErr: "channels.default is required"},
 		{
 			name: "missing default channel",
 			yaml: `
@@ -903,29 +839,9 @@ func channelPolicyResolutionCases(channels map[string]ChannelPolicy) []channelPo
 			wantThreshold: 0.75,
 			wantHasHook:   true,
 		},
-		{
-			channels:    channels,
-			channelID:   "77777",
-			channelName: "ignored-channel",
-			wantMode:    "ignore",
-			wantIgnore:  true,
-		},
-		{
-			channels:    channels,
-			channelID:   "66666",
-			channelName: "disabled-channel",
-			wantMode:    "disabled",
-			wantIgnore:  true,
-		},
-		{
-			channels:      nil,
-			channelID:     "",
-			channelName:   "any-chan",
-			wantMode:      "threads",
-			wantEffort:    "high",
-			wantBotIgn:    true,
-			wantThreshold: 0.0,
-		},
+		{channels: channels, channelID: "77777", channelName: "ignored-channel", wantMode: "ignore", wantIgnore: true},
+		{channels: channels, channelID: "66666", channelName: "disabled-channel", wantMode: "disabled", wantIgnore: true},
+		{channels: nil, channelID: "", channelName: "any-chan", wantMode: "threads", wantEffort: "high", wantBotIgn: true, wantThreshold: 0.0},
 	}
 }
 
@@ -1132,11 +1048,7 @@ func TestConfig_EnvironmentAndDSN(t *testing.T) {
 		envMap   map[string]string
 		expected string
 	}{
-		{
-			name:     "unset host returns empty",
-			envMap:   map[string]string{},
-			expected: "",
-		},
+		{name: "unset host returns empty", envMap: map[string]string{}, expected: ""},
 		{
 			name:     "host only uses defaults",
 			envMap:   map[string]string{"POSTGRES_HOST": "db.internal"},
@@ -1346,7 +1258,7 @@ func runConfigConcurrency(t *testing.T) {
 		Timezone:      "America/New_York",
 		SystemChannel: "ops-channel",
 	})
-	if GetTimezone() != "America/New_York" || activeGlobalConfig.Current().SystemChannel != "ops-channel" {
+	if activeGlobalConfig.Current().Timezone != "America/New_York" || activeGlobalConfig.Current().SystemChannel != "ops-channel" {
 		t.Errorf("expected updated timezone and channel from globals")
 	}
 	activeGlobalConfig.update(origG)
@@ -1451,4 +1363,66 @@ func slicesEqual(a, b []string) bool {
 		}
 	}
 	return true
+}
+
+func TestPushScanConfig_PrefixesFor(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name  string
+		yaml  string
+		owner string
+		repo  string
+		want  []string
+	}{
+		{name: "absent key defaults empty", yaml: "model: m\n", owner: "acme", repo: "widgets"},
+		{name: "matches repo case-insensitively", yaml: "push_scan:\n  regex_allowlist:\n    - \"Acme/Widgets:testdata/\"\n    - \"acme/widgets:/pkg/guard/\"\n    - \"acme/other:docs/\"\n", owner: "acme", repo: "widgets", want: []string{"testdata/", "pkg/guard/"}},
+		{name: "malformed and empty prefixes skipped", yaml: "push_scan:\n  regex_allowlist:\n    - \"acme/widgets\"\n    - \"acme/widgets:\"\n", owner: "acme", repo: "widgets"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			var cd ConfigData
+			if err := yaml.Unmarshal([]byte(tc.yaml), &cd); err != nil {
+				t.Fatalf("unmarshal: %v", err)
+			}
+			cloned := cloneConfigData(&cd)
+			if got := cloned.PushScan.PrefixesFor(tc.owner, tc.repo); fmt.Sprint(got) != fmt.Sprint(tc.want) {
+				t.Fatalf("PrefixesFor = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestEgressScanConfig_Blocks(t *testing.T) {
+	t.Parallel()
+	const blocklist = "egress_scan:\n  blocked_mcp:\n    - \" Discord \"\n    - \"github/Add_Issue_Comment\"\n    - \"\"\n    - \"/orphan_tool\"\n"
+	tests := []struct {
+		name   string
+		yaml   string
+		server string
+		tool   string
+		want   bool
+	}{
+		{name: "absent key blocks nothing", yaml: "model: m\n", server: "discord", tool: "send"},
+		{name: "server entry blocks every tool", yaml: blocklist, server: "discord", tool: "discord_send_message", want: true},
+		{name: "server entry matches case and whitespace", yaml: blocklist, server: " DISCORD ", tool: "anything", want: true},
+		{name: "server/tool entry blocks that tool", yaml: blocklist, server: "GitHub", tool: "add_issue_comment", want: true},
+		{name: "server/tool entry leaves sibling tool", yaml: blocklist, server: "github", tool: "get_file_contents"},
+		{name: "unlisted server passes", yaml: blocklist, server: "kernel", tool: "browser_type"},
+		{name: "empty server never blocked", yaml: blocklist, server: "", tool: "orphan_tool"},
+		{name: "server prefix is not a match", yaml: blocklist, server: "discord-mcp", tool: "send"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			var cd ConfigData
+			if err := yaml.Unmarshal([]byte(tc.yaml), &cd); err != nil {
+				t.Fatalf("unmarshal: %v", err)
+			}
+			cloned := cloneConfigData(&cd)
+			if got := cloned.EgressScan.Blocks(tc.server, tc.tool); got != tc.want {
+				t.Fatalf("Blocks(%q, %q) = %t, want %t", tc.server, tc.tool, got, tc.want)
+			}
+		})
+	}
 }

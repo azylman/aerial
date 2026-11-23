@@ -28,12 +28,7 @@ func TestStreamingDaemon_WatchdogRescue(t *testing.T) {
 			wantResp:    "Rescued turn after hanging tool",
 			wantAborted: true,
 		},
-		{
-			name:          "NonSubstantiveIgnoredFallsBackToEOF",
-			rescuedText:   "",
-			closeStdout:   true,
-			wantErrSubstr: "unexpected EOF",
-		},
+		{name: "NonSubstantiveIgnoredFallsBackToEOF", rescuedText: "", closeStdout: true, wantErrSubstr: "unexpected EOF"},
 	}
 	for _, tc := range tests {
 		rescuerChecked := make(chan struct{}, 1)

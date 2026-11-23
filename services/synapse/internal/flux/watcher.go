@@ -14,6 +14,8 @@ import (
 	"sync"
 	"time"
 
+	"github.com/azylman/aerial/pkg/githubapi"
+	"github.com/azylman/aerial/pkg/prwire"
 	"github.com/azylman/aerial/services/synapse/internal/ericlient"
 	"github.com/azylman/aerial/services/synapse/internal/kube"
 	"github.com/azylman/aerial/services/synapse/internal/model"
@@ -82,7 +84,7 @@ type KustomizationAction struct {
 }
 
 // KustomizationRequestAction decides how an observation affects a recorded reconcile request.
-func KustomizationRequestAction(recorded model.KustomizationRequest, obs model.KustomizationObservation) KustomizationAction {
+func KustomizationRequestAction(recorded prwire.KustomizationRequest, obs model.KustomizationObservation) KustomizationAction {
 	if KustomizationRequestHandled(recorded.RequestedAt, obs.LastHandledReconcileAt) {
 		ready, failed, reason := KustomizationReady(obs.Conditions)
 		switch {
@@ -250,6 +252,7 @@ func RecheckPendingRollouts(ctx context.Context, client KubeClient, sink Rollout
 
 // RunRolloutRechecks re-evaluates pending rollouts on every tick until ctx ends or ticks closes.
 func RunRolloutRechecks(ctx context.Context, client KubeClient, sink RolloutSink, ticks <-chan time.Time) {
+	var rateLimitUntil time.Time
 	for {
 		select {
 		case <-ctx.Done():
@@ -258,7 +261,13 @@ func RunRolloutRechecks(ctx context.Context, client KubeClient, sink RolloutSink
 			if !ok {
 				return
 			}
+			if time.Now().Before(rateLimitUntil) {
+				continue
+			}
 			if err := RecheckPendingRollouts(ctx, client, sink); err != nil && ctx.Err() == nil {
+				if rlDelay, ok := githubapi.RateLimitDelay(err); ok {
+					rateLimitUntil = time.Now().Add(rlDelay)
+				}
 				log.Printf("[synapse] [flux-watch] error re-checking pending rollouts: %v", err)
 			}
 		}
@@ -290,9 +299,13 @@ func (w *KubeWatcher) Run(ctx context.Context) {
 		if ctx.Err() != nil {
 			return
 		}
-		log.Printf("[synapse] [flux-watch] error watching %s (retrying in %s): %v", w.source, delay, err)
+		wait := delay
+		if rlDelay, ok := githubapi.RateLimitDelay(err); ok && rlDelay > wait {
+			wait = rlDelay
+		}
+		log.Printf("[synapse] [flux-watch] error watching %s (retrying in %s): %v", w.source, wait, err)
 		select {
-		case <-time.After(delay):
+		case <-time.After(wait):
 			delay = ericlient.AdvanceBackoffDelay(delay, true)
 		case <-ctx.Done():
 			return
@@ -402,18 +415,18 @@ func StartWatcher(ctx context.Context, client KubeClient, sink RolloutSink) func
 // TrackedRollout is a deploying PR whose completion is gated on recorded Kustomization requests.
 type TrackedRollout struct {
 	PR       model.DeployingPR
-	Requests map[string]model.KustomizationRequest
+	Requests map[string]prwire.KustomizationRequest
 	Deployed []string
 }
 
 // PendingRequest returns the PR's recorded request for ref while it has not been deployed.
-func (t TrackedRollout) PendingRequest(ref model.FluxKustomizationRef) (model.KustomizationRequest, bool) {
+func (t TrackedRollout) PendingRequest(ref model.FluxKustomizationRef) (prwire.KustomizationRequest, bool) {
 	req, ok := t.Requests[ref.Name]
 	if !ok || req.RequestedAt == "" || cmp.Or(req.Namespace, fluxSystemNamespace) != ref.Namespace {
-		return model.KustomizationRequest{}, false
+		return prwire.KustomizationRequest{}, false
 	}
 	if slices.Contains(t.Deployed, ref.Name) && !IsDeploySuccessPending(t.PR.Metadata) {
-		return model.KustomizationRequest{}, false
+		return prwire.KustomizationRequest{}, false
 	}
 	return req, true
 }
@@ -426,23 +439,6 @@ func (t TrackedRollout) HasPending() bool {
 		}
 	}
 	return false
-}
-
-// RecordedKustomizationRequests decodes the PR's kustomization_requests metadata, if any.
-func RecordedKustomizationRequests(meta map[string]any) map[string]model.KustomizationRequest {
-	raw, ok := meta[kustomizationRequestsKey].(map[string]any)
-	if !ok {
-		return nil
-	}
-	encoded, err := json.Marshal(raw)
-	if err != nil {
-		return nil
-	}
-	var requests map[string]model.KustomizationRequest
-	if err := json.Unmarshal(encoded, &requests); err != nil {
-		return nil
-	}
-	return requests
 }
 
 // IsDeploySuccessPending reports whether the deploy_success_pending flag is true in metadata.
@@ -465,11 +461,11 @@ func IsDeploySuccessPending(meta map[string]any) bool {
 }
 
 // NewKustomizationRequests builds the reconcile request recorded for each ref, all requested at now.
-func NewKustomizationRequests(refs []model.FluxKustomizationRef, now time.Time) map[string]model.KustomizationRequest {
+func NewKustomizationRequests(refs []model.FluxKustomizationRef, now time.Time) map[string]prwire.KustomizationRequest {
 	requestedAt := now.Format(time.RFC3339Nano)
-	requests := make(map[string]model.KustomizationRequest, len(refs))
+	requests := make(map[string]prwire.KustomizationRequest, len(refs))
 	for _, ref := range refs {
-		requests[ref.Name] = model.KustomizationRequest{Namespace: ref.Namespace, RequestedAt: requestedAt}
+		requests[ref.Name] = prwire.KustomizationRequest{Namespace: ref.Namespace, RequestedAt: requestedAt}
 	}
 	return requests
 }

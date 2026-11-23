@@ -69,3 +69,10 @@ maintenance database, and rerun the sweep after connections close. Never force
 terminate application sessions. A successful Atlas command does not guarantee
 immediate database removal: scheduled cleanup is authoritative. Verify both
 migration generation and cleanup outcomes before enabling this rollout.
+
+## Agent turns
+
+Agent turns receive `ATLAS_DEV_PASSWORD` through the spawning pod's environment. It is
+the only `*_PASSWORD` key eri passes to agents; every other secret stays filtered.
+Agents must reference it by name (`scripts/atlas-diff.sh` reads it) and never paste,
+print, or log its value.

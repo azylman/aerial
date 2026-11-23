@@ -18,7 +18,6 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"log"
 	"net/http"
 	"strconv"
@@ -131,32 +130,6 @@ func (s *Server) authEnabled() bool {
 	return s.auth != nil && s.auth.Enabled()
 }
 
-func (s *Server) wrapAuth(next http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if s.authEnabled() {
-			s.auth.Middleware("/health", "/healthz", "/readyz", "/metrics", "/debug/coverage/flush")(next).ServeHTTP(w, r)
-			return
-		}
-		next.ServeHTTP(w, r)
-	})
-}
-
-func writeAuthError(w http.ResponseWriter, err error) {
-	if valErr, ok := errors.AsType[*k8sauth.ValidationError](err); ok {
-		http.Error(w, fmt.Sprintf(`{"error":%q}`, valErr.Error()), http.StatusBadRequest)
-		return
-	}
-	if unauthErr, ok := errors.AsType[*k8sauth.UnauthorizedError](err); ok {
-		http.Error(w, fmt.Sprintf(`{"error":%q}`, unauthErr.Error()), http.StatusUnauthorized)
-		return
-	}
-	if forbErr, ok := errors.AsType[*k8sauth.ForbiddenError](err); ok {
-		http.Error(w, fmt.Sprintf(`{"error":%q}`, forbErr.Error()), http.StatusForbidden)
-		return
-	}
-	http.Error(w, fmt.Sprintf(`{"error":%q}`, err.Error()), http.StatusInternalServerError)
-}
-
 func (s *Server) authorizeScheduleTarget(ctx context.Context, agent string) (string, error) {
 	if !s.authEnabled() {
 		return agent, nil
@@ -224,7 +197,7 @@ func (s *Server) registerScheduleCreationTools() {
 			return nil, nil, err
 		}
 		args.Agent = resolved
-		res, err := tools.HandleScheduleHeartbeat(ctx, s.handler.DB, s.handler.Timezone, args.ToMap())
+		res, err := tools.HandleScheduleHeartbeat(ctx, s.handler.DB, s.handler.Timezone, args.ToMap(), s.handler.RestateIngressURL())
 		if err == nil {
 			s.InvalidateSchedulesCache()
 		}
@@ -270,7 +243,7 @@ func (s *Server) registerScheduleUpdateTools() {
 				return nil, nil, err
 			}
 		}
-		res, err := tools.HandleUpdateHeartbeat(ctx, s.handler.DB, args.ToMap())
+		res, err := tools.HandleUpdateHeartbeat(ctx, s.handler.DB, args.ToMap(), s.handler.RestateIngressURL())
 		if err == nil {
 			s.InvalidateSchedulesCache()
 		}
@@ -401,7 +374,7 @@ func (s *Server) Routes() http.Handler {
 	mux.Handle("/sse", mcpBridge)
 	mux.Handle("/", mcpBridge)
 
-	return s.wrapAuth(mux)
+	return s.auth.Middleware(k8sauth.DefaultExemptPaths...)(mux)
 }
 
 func (*Server) handleHealth(w http.ResponseWriter, r *http.Request) {
@@ -453,7 +426,7 @@ func (s *Server) handleSchedules(w http.ResponseWriter, r *http.Request) {
 	if s.authEnabled() {
 		caller, _ := k8sauth.CallerFromContext(r.Context())
 		if err := s.auth.Authorize(r.Context(), caller, "schedules", "list", agentFilter); err != nil {
-			writeAuthError(w, err)
+			k8sauth.WriteError(w, err)
 			return
 		}
 	}
@@ -538,7 +511,7 @@ func (s *Server) handleScheduleRuns(w http.ResponseWriter, r *http.Request) {
 	if s.authEnabled() {
 		caller, _ := k8sauth.CallerFromContext(r.Context())
 		if err := s.auth.Authorize(r.Context(), caller, "schedules", "list", agentFilter); err != nil {
-			writeAuthError(w, err)
+			k8sauth.WriteError(w, err)
 			return
 		}
 	}
@@ -562,12 +535,6 @@ func (s *Server) handleScheduleRuns(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		httpkit.WriteJSON(w, http.StatusInternalServerError, map[string]string{model.FieldError: err.Error()})
 		return
-	}
-
-	for i := range runs {
-		runs[i].Prompt = model.SanitizeScheduleText(runs[i].Prompt)
-		runs[i].Error = model.SanitizeScheduleText(runs[i].Error)
-		runs[i].Title = model.SanitizeScheduleText(runs[i].Title)
 	}
 
 	if limit <= 0 {

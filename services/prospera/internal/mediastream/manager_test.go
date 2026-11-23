@@ -5,7 +5,6 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
-	"runtime"
 	"strconv"
 	"strings"
 	"sync"
@@ -15,19 +14,12 @@ import (
 	"github.com/gorilla/websocket"
 
 	"github.com/azylman/aerial/services/prospera/internal/config"
+	"github.com/azylman/aerial/services/prospera/internal/fakes"
 	"github.com/azylman/aerial/services/prospera/internal/model"
 	"github.com/azylman/aerial/services/prospera/internal/store"
 	"github.com/azylman/aerial/services/prospera/internal/testutil"
 	"github.com/azylman/aerial/services/prospera/internal/twilio"
 )
-
-type staticManagerConfig struct {
-	cfg *config.Config
-}
-
-func (s staticManagerConfig) Current() *config.Config {
-	return s.cfg
-}
 
 type fakeManagedSession struct {
 	mu           sync.Mutex
@@ -99,7 +91,7 @@ func (s *fakeManagedSession) Run(_ context.Context) {
 }
 
 func newTestManager() *CallSessionManager {
-	return NewCallSessionManager(staticManagerConfig{cfg: &config.Config{}}, nil, nil, nil, twilio.NewStreamTokenManager(time.Now))
+	return NewCallSessionManager(fakes.StaticConfig{Cfg: &config.Config{}}, nil, nil, nil, twilio.NewStreamTokenManager(time.Now, nil))
 }
 
 func TestCallSessionManager_GetSession(t *testing.T) {
@@ -244,138 +236,6 @@ func TestCallSessionManager_Deregister(t *testing.T) {
 	}
 }
 
-func TestCallSessionManager_WaitForSession(t *testing.T) {
-	t.Parallel()
-
-	mgr := newTestManager()
-	sess := newFakeManagedSession("", nil)
-	mgr.RegisterSession("call-wait", sess)
-
-	found, err := mgr.WaitForSession(context.Background(), "call-wait")
-	if err != nil {
-		t.Fatalf("WaitForSession failed: %v", err)
-	}
-	if found != Session(sess) {
-		t.Fatal("WaitForSession returned unexpected session")
-	}
-}
-
-func TestCallSessionManager_WaitForSessionNotifiesWaiter(t *testing.T) {
-	t.Parallel()
-
-	mgr := newTestManager()
-	sess := newFakeManagedSession("", nil)
-	type waitResult struct {
-		sess Session
-		err  error
-	}
-	done := make(chan waitResult, 1)
-	go func() {
-		found, err := mgr.WaitForSession(context.Background(), "call-wait-notify")
-		done <- waitResult{sess: found, err: err}
-	}()
-
-	for range 100000 {
-		mgr.mu.RLock()
-		waiting := len(mgr.sessionWaiters["call-wait-notify"]) > 0
-		mgr.mu.RUnlock()
-		if waiting {
-			break
-		}
-		runtime.Gosched()
-	}
-	mgr.mu.RLock()
-	waiting := len(mgr.sessionWaiters["call-wait-notify"]) > 0
-	mgr.mu.RUnlock()
-	if !waiting {
-		t.Fatal("waiter was not registered before RegisterSession")
-	}
-	mgr.RegisterSession("call-wait-notify", sess)
-
-	select {
-	case res := <-done:
-		if res.err != nil {
-			t.Fatalf("WaitForSession failed: %v", res.err)
-		}
-		if res.sess != Session(sess) {
-			t.Fatal("WaitForSession returned unexpected session")
-		}
-	case <-time.After(5 * time.Second):
-		t.Fatal("timed out waiting for waiter notification")
-	}
-}
-
-func TestCallSessionManager_WaitForSessionCleansUpOnCancel(t *testing.T) {
-	t.Parallel()
-
-	mgr := newTestManager()
-	cancelCtx, cancel := context.WithCancel(context.Background())
-	cancel()
-	if _, err := mgr.WaitForSession(cancelCtx, "call-wait-cancel-leak"); err == nil {
-		t.Fatal("WaitForSession with canceled context returned nil error")
-	}
-	mgr.mu.RLock()
-	leftover := len(mgr.sessionWaiters)
-	mgr.mu.RUnlock()
-	if leftover != 0 {
-		t.Fatalf("sessionWaiters holds %d stale entries after canceled wait, want 0", leftover)
-	}
-}
-
-func TestCallSessionManager_WaitForSessionNotifiesAllWaiters(t *testing.T) {
-	t.Parallel()
-
-	mgr := newTestManager()
-	sess := newFakeManagedSession("", nil)
-	type waitResult struct {
-		sess Session
-		err  error
-	}
-	first := make(chan waitResult, 1)
-	second := make(chan waitResult, 1)
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	go func() {
-		found, err := mgr.WaitForSession(ctx, "call-wait-fanout")
-		first <- waitResult{sess: found, err: err}
-	}()
-	go func() {
-		found, err := mgr.WaitForSession(ctx, "call-wait-fanout")
-		second <- waitResult{sess: found, err: err}
-	}()
-
-	for range 100000 {
-		mgr.mu.RLock()
-		waiting := len(mgr.sessionWaiters["call-wait-fanout"]) == 2
-		mgr.mu.RUnlock()
-		if waiting {
-			break
-		}
-		runtime.Gosched()
-	}
-	mgr.mu.RLock()
-	ready := len(mgr.sessionWaiters["call-wait-fanout"]) == 2
-	mgr.mu.RUnlock()
-	if !ready {
-		t.Fatal("both waiters were not registered before RegisterSession")
-	}
-	mgr.RegisterSession("call-wait-fanout", sess)
-
-	for i, ch := range []chan waitResult{first, second} {
-		select {
-		case res := <-ch:
-			if res.err != nil {
-				t.Fatalf("waiter %d failed: %v", i, res.err)
-			}
-			if res.sess != Session(sess) {
-				t.Fatalf("waiter %d returned unexpected session", i)
-			}
-		case <-time.After(5 * time.Second):
-			t.Fatalf("waiter %d was not notified of registration", i)
-		}
-	}
-}
-
 func TestCallSessionManager_SteerCall(t *testing.T) {
 	t.Parallel()
 
@@ -398,7 +258,7 @@ func TestCallSessionManager_SteerCall(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			st := makeSteerStore(t, tc.withStore)
-			mgr := NewCallSessionManager(staticManagerConfig{cfg: &config.Config{}}, st, nil, nil, twilio.NewStreamTokenManager(time.Now))
+			mgr := NewCallSessionManager(fakes.StaticConfig{Cfg: &config.Config{}}, st, nil, nil, twilio.NewStreamTokenManager(time.Now, nil))
 			sess := newFakeManagedSession("", nil)
 			if tc.steerErr {
 				sess.steerErr = errors.New("bridge offline")
@@ -488,7 +348,7 @@ func TestCallSessionManager_HandleAMDWebhook(t *testing.T) {
 			if tc.storeErr {
 				st = errStore{Store: st}
 			}
-			mgr := NewCallSessionManager(staticManagerConfig{cfg: &config.Config{}}, st, nil, nil, twilio.NewStreamTokenManager(time.Now))
+			mgr := NewCallSessionManager(fakes.StaticConfig{Cfg: &config.Config{}}, st, nil, nil, twilio.NewStreamTokenManager(time.Now, nil))
 			sid := "CA_missing"
 			sess := newFakeManagedSession("CA_direct", nil)
 			if tc.directHit {
@@ -678,7 +538,7 @@ func TestCallSessionManager_HandleMediaWebSocketRejects(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			mgr := NewCallSessionManager(staticManagerConfig{cfg: &config.Config{}}, nil, nil, nil, twilio.NewStreamTokenManager(time.Now),
+			mgr := NewCallSessionManager(fakes.StaticConfig{Cfg: &config.Config{}}, nil, nil, nil, twilio.NewStreamTokenManager(time.Now, nil),
 				WithSessionFactory(func(_ SessionConfig) Session { return newFakeManagedSession("", nil) }),
 			)
 			rec := httptest.NewRecorder()
@@ -694,8 +554,8 @@ func TestCallSessionManager_HandleMediaWebSocketRejects(t *testing.T) {
 func TestCallSessionManager_HandleMediaWebSocketRequiresFactory(t *testing.T) {
 	t.Parallel()
 
-	tokenMgr := twilio.NewStreamTokenManager(time.Now)
-	mgr := NewCallSessionManager(staticManagerConfig{cfg: &config.Config{}}, nil, nil, nil, tokenMgr)
+	tokenMgr := twilio.NewStreamTokenManager(time.Now, nil)
+	mgr := NewCallSessionManager(fakes.StaticConfig{Cfg: &config.Config{}}, nil, nil, nil, tokenMgr)
 	validTok, err := tokenMgr.Issue("call-no-factory", 10*time.Second)
 	if err != nil {
 		t.Fatalf("Issue failed: %v", err)
@@ -829,9 +689,9 @@ func TestCallSessionManager_HandleMediaWebSocketServesStream(t *testing.T) {
 			t.Parallel()
 			callID := "call-ws-" + strings.ReplaceAll(strings.ToLower(tc.name), " ", "-")
 			st := makeServeStore(t, tc, callID)
-			tokenMgr := twilio.NewStreamTokenManager(time.Now)
+			tokenMgr := twilio.NewStreamTokenManager(time.Now, nil)
 			fc := &captureFactory{sess: newFakeManagedSession("", nil)}
-			mgr := NewCallSessionManager(staticManagerConfig{cfg: &config.Config{}}, st, nil, nil, tokenMgr,
+			mgr := NewCallSessionManager(fakes.StaticConfig{Cfg: &config.Config{}}, st, nil, nil, tokenMgr,
 				WithPacerInterval(1*time.Millisecond),
 				WithSessionFactory(fc.factory),
 			)

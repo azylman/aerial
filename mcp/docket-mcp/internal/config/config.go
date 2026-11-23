@@ -1,0 +1,789 @@
+package config
+
+import (
+	"cmp"
+	"context"
+	"fmt"
+	"net/url"
+	"os"
+	"slices"
+	"strconv"
+	"strings"
+	"time"
+
+	"gopkg.in/yaml.v3"
+
+	"github.com/azylman/aerial/pkg/httpkit"
+	"github.com/azylman/aerial/pkg/ollama"
+)
+
+const (
+	TaskStatusAll       = "all"
+	RelationRelated     = "related"
+	RelationParent      = "parent"
+	TaskStatusOpen      = "open"
+	TaskStatusCompleted = "completed"
+	TaskStatusWontDo    = "wont_do"
+)
+
+// VikunjaTask models a task object from the Vikunja REST API.
+type VikunjaTask struct {
+	ID           int64                    `json:"id"`
+	Title        string                   `json:"title"`
+	Description  string                   `json:"description"`
+	Done         bool                     `json:"done"`
+	DoneAt       *time.Time               `json:"done_at,omitempty"`
+	Created      time.Time                `json:"created"`
+	Updated      time.Time                `json:"updated"`
+	ProjectID    int64                    `json:"project_id"`
+	RelatedTasks map[string][]VikunjaTask `json:"related_tasks,omitempty"`
+}
+
+// VikunjaProject models a project object in Vikunja.
+type VikunjaProject struct {
+	ID    int64  `json:"id"`
+	Title string `json:"title"`
+}
+
+// VikunjaComment models a comment on a Vikunja task.
+type VikunjaComment struct {
+	ID     int64 `json:"id"`
+	Author struct {
+		Username string `json:"username"`
+	} `json:"author"`
+	Comment string    `json:"comment"`
+	Created time.Time `json:"created"`
+}
+
+// VikunjaRelationReq models the body for creating a task relation.
+type VikunjaRelationReq struct {
+	OtherTaskID  int64  `json:"other_task_id"`
+	RelationKind string `json:"relation_kind"`
+}
+
+// Config holds runtime configuration for docket-mcp.
+type Config struct {
+	Port             string        `yaml:"port"`
+	VikunjaURL       string        `yaml:"vikunja_url"`
+	VikunjaUsername  string        `yaml:"vikunja_username"`
+	VikunjaPassword  string        `yaml:"vikunja_password"`
+	DefaultProjectID int64         `yaml:"default_project_id"`
+	DatabaseURL      string        `yaml:"database_url"`
+	Ollama           ollama.Config `yaml:"ollama"`
+}
+
+// LoadConfig loads configuration from path (built-in defaults only when path is
+// empty) and applies overrides read through getenv. Callers inject os.Getenv in
+// production so tests never see the process environment.
+func LoadConfig(path string, getenv func(string) string) (*Config, error) {
+	cfg := &Config{
+		Port:            "8080",
+		VikunjaURL:      "",
+		VikunjaUsername: "aerial",
+		VikunjaPassword: "aerial-password",
+		DatabaseURL:     "",
+		Ollama: ollama.Config{
+			BaseURL: "",
+			Model:   ollama.DefaultModel,
+			NumCtx:  ollama.DefaultNumCtx,
+		},
+	}
+
+	if err := loadConfigFile(strings.TrimSpace(path), cfg); err != nil {
+		return nil, err
+	}
+
+	applyEnvOverrides(cfg, getenv)
+	return cfg, nil
+}
+
+// ResolveConfigPath picks the config file from CONFIG_PATH or the default locations.
+func ResolveConfigPath() string {
+	return httpkit.ResolveConfigPathWithLocal(
+		"CONFIG_PATH",
+		"docket-mcp.yaml",
+		"/etc/docket-mcp/config.yaml",
+		"config.yaml",
+	)
+}
+
+func loadConfigFile(resolved string, cfg *Config) error {
+	if resolved == "" {
+		return nil
+	}
+	fi, err := os.Stat(resolved)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return err
+	}
+	if fi.IsDir() {
+		return fmt.Errorf("config path is a directory: %s", resolved)
+	}
+	data, err := os.ReadFile(resolved)
+	if err != nil || len(data) == 0 {
+		return err
+	}
+	if err := yaml.Unmarshal(data, cfg); err != nil {
+		return fmt.Errorf("failed to parse config %s: %w", resolved, err)
+	}
+	return nil
+}
+
+func applyEnvOverrides(cfg *Config, getenv func(string) string) {
+	if p := strings.TrimSpace(getenv("PORT")); p != "" {
+		cfg.Port = p
+	}
+	if vu := strings.TrimSpace(getenv("VIKUNJA_URL")); vu != "" {
+		cfg.VikunjaURL = vu
+	}
+	if vu := strings.TrimSpace(getenv("VIKUNJA_USERNAME")); vu != "" {
+		cfg.VikunjaUsername = vu
+	}
+	if vp := strings.TrimSpace(getenv("VIKUNJA_PASSWORD")); vp != "" {
+		cfg.VikunjaPassword = vp
+	}
+	if pidStr := strings.TrimSpace(getenv("DEFAULT_PROJECT_ID")); pidStr != "" {
+		if pid, err := strconv.ParseInt(pidStr, 10, 64); err == nil && pid > 0 {
+			cfg.DefaultProjectID = pid
+		}
+	}
+	if dsn := httpkit.BuildPostgresDSN(getenv, "docket"); dsn != "" {
+		cfg.DatabaseURL = dsn
+	}
+	if ob := strings.TrimSpace(getenv("OLLAMA_BASE_URL")); ob != "" {
+		cfg.Ollama.BaseURL = ob
+	}
+	if om := strings.TrimSpace(getenv("OLLAMA_MODEL")); om != "" {
+		cfg.Ollama.Model = om
+	}
+}
+
+// TaskNode represents a task graph node with relations.
+type TaskNode struct {
+	ID          int64   `json:"id"`
+	Title       string  `json:"title"`
+	Description string  `json:"description,omitempty"`
+	Done        bool    `json:"done"`
+	Resolution  string  `json:"resolution,omitempty"`
+	Status      string  `json:"status"`
+	ParentID    *int64  `json:"parent_id,omitempty"`
+	SubtaskIDs  []int64 `json:"subtask_ids,omitempty"`
+	BlockedBy   []int64 `json:"blocked_by,omitempty"`
+	Blocks      []int64 `json:"blocks,omitempty"`
+	Related     []int64 `json:"related,omitempty"`
+}
+
+// TaskSummary is a compact task representation.
+type TaskSummary struct {
+	ID        int64   `json:"id"`
+	Title     string  `json:"title"`
+	Status    string  `json:"status"`
+	ParentID  *int64  `json:"parent_id,omitempty"`
+	BlockedBy []int64 `json:"blocked_by,omitempty"`
+	Blocks    []int64 `json:"blocks,omitempty"`
+}
+
+// ReadyTask represents an unblocked open task with nested ready subtasks.
+type ReadyTask struct {
+	ID            int64       `json:"id"`
+	Title         string      `json:"title"`
+	Status        string      `json:"status"`
+	ParentID      *int64      `json:"parent_id,omitempty"`
+	ReadySubtasks []ReadyTask `json:"ready_subtasks,omitempty"`
+}
+
+// ScoredTaskSummary couples a task with its search relevance score.
+type ScoredTaskSummary struct {
+	ID       int64   `json:"id"`
+	Title    string  `json:"title"`
+	Status   string  `json:"status"`
+	ParentID *int64  `json:"parent_id,omitempty"`
+	Score    float64 `json:"score"`
+}
+
+// TaskComment represents a comment on a task.
+type TaskComment struct {
+	ID        int64     `json:"id"`
+	Author    string    `json:"author,omitempty"`
+	Comment   string    `json:"comment"`
+	CreatedAt time.Time `json:"created_at"`
+}
+
+// HydratedTask contains full task details, relations, and comments.
+type HydratedTask struct {
+	ID          int64         `json:"id"`
+	Title       string        `json:"title"`
+	Status      string        `json:"status"`
+	Description string        `json:"description,omitempty"`
+	CreatedAt   time.Time     `json:"created_at"`
+	UpdatedAt   time.Time     `json:"updated_at"`
+	ClosedAt    *time.Time    `json:"closed_at,omitempty"`
+	Parent      *TaskSummary  `json:"parent,omitempty"`
+	Subtasks    []TaskSummary `json:"subtasks,omitempty"`
+	Blocks      []TaskSummary `json:"blocks,omitempty"`
+	BlockedBy   []TaskSummary `json:"blocked_by,omitempty"`
+	Related     []TaskSummary `json:"related,omitempty"`
+	Comments    []TaskComment `json:"comments,omitempty"`
+}
+
+// Search result limits applied to REST search requests.
+const (
+	defaultRESTSearchLimit = 20
+	maxRESTSearchLimit     = 50
+)
+
+// TaskListQuery is the validated query for GET /api/tasks.
+type TaskListQuery struct {
+	Status string
+}
+
+// TaskSearchQuery is the validated query for GET /api/search.
+type TaskSearchQuery struct {
+	Query  string
+	Status string
+	Limit  int
+}
+
+// ParseTaskListQuery validates REST list query parameters.
+func ParseTaskListQuery(values url.Values) (TaskListQuery, error) {
+	status, err := parseTaskStatusFilter(values.Get("status"))
+	if err != nil {
+		return TaskListQuery{}, err
+	}
+	return TaskListQuery{Status: status}, nil
+}
+
+// ParseTaskSearchQuery validates REST search query parameters, defaulting
+// status to open and clamping limit to [1, 50] (default 20).
+func ParseTaskSearchQuery(values url.Values) (TaskSearchQuery, error) {
+	query := strings.TrimSpace(values.Get("q"))
+	if query == "" {
+		return TaskSearchQuery{}, fmt.Errorf("parameter 'q' is required")
+	}
+	status, err := parseTaskStatusFilter(values.Get("status"))
+	if err != nil {
+		return TaskSearchQuery{}, err
+	}
+	limit := defaultRESTSearchLimit
+	if raw := values.Get("limit"); raw != "" {
+		n, err := strconv.Atoi(raw)
+		if err != nil || n < 1 {
+			return TaskSearchQuery{}, fmt.Errorf("invalid limit %q: must be a positive integer", raw)
+		}
+		limit = min(n, maxRESTSearchLimit)
+	}
+	return TaskSearchQuery{Query: query, Status: status, Limit: limit}, nil
+}
+
+// ParseTaskID validates a REST path task id as a positive integer.
+func ParseTaskID(raw string) (int64, error) {
+	id, err := strconv.ParseInt(raw, 10, 64)
+	if err != nil || id <= 0 {
+		return 0, fmt.Errorf("invalid task id %q: must be a positive integer", raw)
+	}
+	return id, nil
+}
+
+func parseTaskStatusFilter(raw string) (string, error) {
+	switch raw {
+	case "":
+		return TaskStatusOpen, nil
+	case TaskStatusOpen, TaskStatusCompleted, TaskStatusWontDo, TaskStatusAll:
+		return raw, nil
+	default:
+		return "", fmt.Errorf("invalid status %q: must be one of open, completed, wont_do, all", raw)
+	}
+}
+
+// ClosedTaskResult encapsulates the result of closing a task.
+type ClosedTaskResult struct {
+	ID           int64   `json:"id"`
+	Title        string  `json:"title"`
+	Status       string  `json:"status"`
+	UnblockedIDs []int64 `json:"unblocked_ids,omitempty"`
+}
+
+// ResolveTaskStatus converts done and resolution flags to a 3-state status string.
+func ResolveTaskStatus(done bool, resolution string) string {
+	if !done {
+		return TaskStatusOpen
+	}
+	if strings.TrimSpace(resolution) == TaskStatusWontDo {
+		return TaskStatusWontDo
+	}
+	return TaskStatusCompleted
+}
+
+// NodeSource resolves task graph nodes on demand. ok=false means the task does
+// not exist or lies outside Docket's project; err means an upstream failure.
+type NodeSource interface {
+	Node(ctx context.Context, id int64) (TaskNode, bool, error)
+}
+
+// TaskToNode converts a Vikunja task and its stored resolution into a graph node.
+func TaskToNode(t VikunjaTask, resolution string) TaskNode {
+	node := TaskNode{
+		ID:          t.ID,
+		Title:       t.Title,
+		Description: t.Description,
+		Done:        t.Done,
+		Resolution:  resolution,
+		Status:      ResolveTaskStatus(t.Done, resolution),
+	}
+	if parents := t.RelatedTasks["parenttask"]; len(parents) > 0 {
+		pID := parents[0].ID
+		node.ParentID = &pID
+	}
+	for _, sub := range t.RelatedTasks["subtask"] {
+		node.SubtaskIDs = append(node.SubtaskIDs, sub.ID)
+	}
+	for _, blk := range t.RelatedTasks["blocking"] {
+		node.Blocks = append(node.Blocks, blk.ID)
+	}
+	for _, bkd := range t.RelatedTasks["blocked"] {
+		node.BlockedBy = append(node.BlockedBy, bkd.ID)
+	}
+	for _, rel := range t.RelatedTasks[RelationRelated] {
+		node.Related = append(node.Related, rel.ID)
+	}
+	return node
+}
+
+// HydrateTask builds the full task view from a fetched task, its own status,
+// comments, and the graph nodes of its neighbors. Neighbor order follows
+// Vikunja's embedded related tasks; a neighbor missing from neighbors (deleted
+// or outside the project) falls back to its embedded id, title, and status.
+func HydrateTask(task VikunjaTask, status string, comments []VikunjaComment, neighbors map[int64]TaskNode) HydratedTask {
+	summarize := func(t VikunjaTask) TaskSummary {
+		if node, ok := neighbors[t.ID]; ok {
+			return SummarizeNode(node)
+		}
+		return TaskSummary{ID: t.ID, Title: t.Title, Status: ResolveTaskStatus(t.Done, "")}
+	}
+	summarizeAll := func(kind string) []TaskSummary {
+		related := task.RelatedTasks[kind]
+		if len(related) == 0 {
+			return nil
+		}
+		out := make([]TaskSummary, 0, len(related))
+		for _, t := range related {
+			out = append(out, summarize(t))
+		}
+		return out
+	}
+
+	hydrated := HydratedTask{
+		ID:          task.ID,
+		Title:       task.Title,
+		Status:      status,
+		Description: task.Description,
+		CreatedAt:   task.Created,
+		UpdatedAt:   task.Updated,
+		ClosedAt:    task.DoneAt,
+		Subtasks:    summarizeAll("subtask"),
+		Blocks:      summarizeAll("blocking"),
+		BlockedBy:   summarizeAll("blocked"),
+		Related:     summarizeAll("related"),
+	}
+	if parents := task.RelatedTasks["parenttask"]; len(parents) > 0 {
+		p := summarize(parents[0])
+		hydrated.Parent = &p
+	}
+	for _, c := range comments {
+		hydrated.Comments = append(hydrated.Comments, TaskComment{
+			ID:        c.ID,
+			Author:    c.Author.Username,
+			Comment:   c.Comment,
+			CreatedAt: c.Created,
+		})
+	}
+	return hydrated
+}
+
+// DetectGraphCycle checks if adding a directed edge would introduce a cycle,
+// fetching only the nodes along the walked path.
+func DetectGraphCycle(ctx context.Context, src NodeSource, sourceID, targetID int64, edgeType string) error {
+	if sourceID == targetID {
+		return fmt.Errorf("self-link cycle: task %d cannot link to itself", sourceID)
+	}
+	switch edgeType {
+	case RelationParent:
+		isAncestor, err := hasAncestor(ctx, src, targetID, sourceID)
+		if err != nil {
+			return err
+		}
+		if isAncestor {
+			return fmt.Errorf("cycle detected: task %d is already an ancestor of task %d", sourceID, targetID)
+		}
+	case "blocks":
+		_, reached, err := firstReachableAlongBlocks(ctx, src, targetID, map[int64]bool{sourceID: true})
+		if err != nil {
+			return err
+		}
+		if reached {
+			return fmt.Errorf("cycle detected: task %d already transitively blocks task %d", targetID, sourceID)
+		}
+	case RelationRelated:
+		return nil
+	default:
+		return fmt.Errorf("unknown edge type: %q", edgeType)
+	}
+	return nil
+}
+
+// DetectCreateCycle checks whether a new task blocked by blockedBy and blocking
+// blocks would close a blocking cycle. New tasks cannot form parent cycles.
+func DetectCreateCycle(ctx context.Context, src NodeSource, blocks, blockedBy []int64) error {
+	if len(blocks) == 0 || len(blockedBy) == 0 {
+		return nil
+	}
+	blockers := make(map[int64]bool, len(blockedBy))
+	for _, a := range blockedBy {
+		blockers[a] = true
+	}
+	for _, b := range blocks {
+		a, reached, err := firstReachableAlongBlocks(ctx, src, b, blockers)
+		if err != nil {
+			return err
+		}
+		if reached {
+			return fmt.Errorf("cycle detected: task %d already transitively blocks task %d", b, a)
+		}
+	}
+	return nil
+}
+
+// hasAncestor walks up the parent chain from startID and reports whether ancestorID is on it.
+func hasAncestor(ctx context.Context, src NodeSource, startID, ancestorID int64) (bool, error) {
+	visited := make(map[int64]bool)
+	for curr := startID; !visited[curr]; {
+		visited[curr] = true
+		node, ok, err := src.Node(ctx, curr)
+		if err != nil {
+			return false, err
+		}
+		if !ok || node.ParentID == nil {
+			return false, nil
+		}
+		if *node.ParentID == ancestorID {
+			return true, nil
+		}
+		curr = *node.ParentID
+	}
+	return false, nil
+}
+
+// firstReachableAlongBlocks runs a BFS from startID along Blocks edges and returns
+// the first task in targets it reaches. Target tasks are never fetched.
+func firstReachableAlongBlocks(ctx context.Context, src NodeSource, startID int64, targets map[int64]bool) (int64, bool, error) {
+	visited := map[int64]bool{startID: true}
+	queue := []int64{startID}
+	for len(queue) > 0 {
+		curr := queue[0]
+		queue = queue[1:]
+		if targets[curr] {
+			return curr, true, nil
+		}
+		node, ok, err := src.Node(ctx, curr)
+		if err != nil {
+			return 0, false, err
+		}
+		if !ok {
+			continue
+		}
+		for _, next := range node.Blocks {
+			if !visited[next] {
+				visited[next] = true
+				queue = append(queue, next)
+			}
+		}
+	}
+	return 0, false, nil
+}
+
+// LoadCloseNeighborhood fetches exactly the nodes closing id can observe: the task
+// and its descendants, their blockers and blocked tasks, and every blocker of
+// those blocked tasks (to judge whether they become unblocked).
+func LoadCloseNeighborhood(ctx context.Context, src NodeSource, id int64) (map[int64]TaskNode, error) {
+	nb := neighborhood{src: src, nodes: make(map[int64]TaskNode)}
+	subtree, err := nb.loadSubtree(ctx, id)
+	if err != nil {
+		return nil, err
+	}
+	for _, node := range subtree {
+		if _, err := nb.fetchAll(ctx, node.BlockedBy); err != nil {
+			return nil, err
+		}
+		blocked, err := nb.fetchAll(ctx, node.Blocks)
+		if err != nil {
+			return nil, err
+		}
+		for _, b := range blocked {
+			if _, err := nb.fetchAll(ctx, b.BlockedBy); err != nil {
+				return nil, err
+			}
+		}
+	}
+	return nb.nodes, nil
+}
+
+// neighborhood accumulates nodes fetched from a NodeSource, fetching each id once.
+type neighborhood struct {
+	src   NodeSource
+	nodes map[int64]TaskNode
+}
+
+func (nb *neighborhood) fetch(ctx context.Context, id int64) (TaskNode, bool, error) {
+	if n, ok := nb.nodes[id]; ok {
+		return n, true, nil
+	}
+	n, ok, err := nb.src.Node(ctx, id)
+	if err != nil || !ok {
+		return TaskNode{}, false, err
+	}
+	nb.nodes[id] = n
+	return n, true, nil
+}
+
+// fetchAll fetches ids and returns the nodes that exist.
+func (nb *neighborhood) fetchAll(ctx context.Context, ids []int64) ([]TaskNode, error) {
+	var found []TaskNode
+	for _, id := range ids {
+		n, ok, err := nb.fetch(ctx, id)
+		if err != nil {
+			return nil, err
+		}
+		if ok {
+			found = append(found, n)
+		}
+	}
+	return found, nil
+}
+
+// loadSubtree fetches rootID and all its descendants breadth-first.
+func (nb *neighborhood) loadSubtree(ctx context.Context, rootID int64) ([]TaskNode, error) {
+	root, ok, err := nb.fetch(ctx, rootID)
+	if err != nil {
+		return nil, err
+	}
+	if !ok {
+		return nil, fmt.Errorf("task %d not found in graph", rootID)
+	}
+	subtree := []TaskNode{root}
+	visited := map[int64]bool{rootID: true}
+	for i := 0; i < len(subtree); i++ {
+		var children []int64
+		for _, sid := range subtree[i].SubtaskIDs {
+			if !visited[sid] {
+				visited[sid] = true
+				children = append(children, sid)
+			}
+		}
+		found, err := nb.fetchAll(ctx, children)
+		if err != nil {
+			return nil, err
+		}
+		subtree = append(subtree, found...)
+	}
+	return subtree, nil
+}
+
+func isTaskReady(node TaskNode, nodes map[int64]TaskNode) bool {
+	if node.Status != TaskStatusOpen {
+		return false
+	}
+	for _, bid := range node.BlockedBy {
+		if bNode, exists := nodes[bid]; exists && bNode.Status != TaskStatusCompleted {
+			return false
+		}
+	}
+	return true
+}
+
+func isTopNode(node TaskNode, nodes map[int64]TaskNode) bool {
+	if node.ParentID == nil || *node.ParentID <= 0 {
+		return true
+	}
+	_, parentExists := nodes[*node.ParentID]
+	return !parentExists
+}
+
+func collectTopReadyNodes(nodes map[int64]TaskNode, scopedParentID *int64) []TaskNode {
+	var topNodes []TaskNode
+	if scopedParentID == nil {
+		for _, node := range nodes {
+			if isTopNode(node, nodes) && isTaskReady(node, nodes) {
+				topNodes = append(topNodes, node)
+			}
+		}
+	} else {
+		for _, node := range nodes {
+			if node.ParentID != nil && *node.ParentID == *scopedParentID && isTaskReady(node, nodes) {
+				topNodes = append(topNodes, node)
+			}
+		}
+	}
+	slices.SortFunc(topNodes, func(a, b TaskNode) int { return cmp.Compare(a.ID, b.ID) })
+	return topNodes
+}
+
+// BuildReadyTree computes unblocked ready tasks nested top-down.
+func BuildReadyTree(nodes map[int64]TaskNode, scopedParentID *int64) []ReadyTask {
+	topNodes := collectTopReadyNodes(nodes, scopedParentID)
+	res := make([]ReadyTask, 0, len(topNodes))
+	for _, n := range topNodes {
+		res = append(res, buildReadyNode(n, nodes))
+	}
+	return res
+}
+
+func buildReadyNode(node TaskNode, nodes map[int64]TaskNode) ReadyTask {
+	rt := ReadyTask{
+		ID:       node.ID,
+		Title:    node.Title,
+		Status:   node.Status,
+		ParentID: node.ParentID,
+	}
+	var readySubs []ReadyTask
+	for _, sid := range node.SubtaskIDs {
+		if sub, ok := nodes[sid]; ok && isTaskReady(sub, nodes) {
+			readySubs = append(readySubs, buildReadyNode(sub, nodes))
+		}
+	}
+	slices.SortFunc(readySubs, func(a, b ReadyTask) int { return cmp.Compare(a.ID, b.ID) })
+	if len(readySubs) > 0 {
+		rt.ReadySubtasks = readySubs
+	}
+	return rt
+}
+
+// ValidateCloseGuard validates completion prerequisites for closing a task.
+func ValidateCloseGuard(nodes map[int64]TaskNode, id int64, resolution string) error {
+	switch resolution {
+	case TaskStatusWontDo:
+		if _, exists := nodes[id]; !exists {
+			return fmt.Errorf("task %d not found in graph", id)
+		}
+		return validateWontDoClose(nodes, id)
+	case TaskStatusCompleted:
+		node, exists := nodes[id]
+		if !exists {
+			return fmt.Errorf("task %d not found in graph", id)
+		}
+		return validateCompletedClose(nodes, node, id)
+	default:
+		return fmt.Errorf("invalid resolution: %q (must be 'completed' or 'wont_do')", resolution)
+	}
+}
+
+func validateWontDoClose(nodes map[int64]TaskNode, id int64) error {
+	closingSet := make(map[int64]bool)
+	closingSet[id] = true
+	for _, sid := range CollectOpenSubtreeIDs(nodes, id) {
+		closingSet[sid] = true
+	}
+	openBlockedSet := make(map[int64]bool)
+	for cid := range closingSet {
+		for _, bid := range nodes[cid].Blocks {
+			if !closingSet[bid] {
+				if bNode, ok := nodes[bid]; ok && bNode.Status == TaskStatusOpen {
+					openBlockedSet[bid] = true
+				}
+			}
+		}
+	}
+	if len(openBlockedSet) > 0 {
+		openBlocked := make([]int64, 0, len(openBlockedSet))
+		for bid := range openBlockedSet {
+			openBlocked = append(openBlocked, bid)
+		}
+		slices.Sort(openBlocked)
+		return fmt.Errorf("cannot close task %d as wont_do: blocks open tasks: %v", id, openBlocked)
+	}
+	return nil
+}
+
+func validateCompletedClose(nodes map[int64]TaskNode, node TaskNode, id int64) error {
+	var openBlockers []int64
+	for _, bid := range node.BlockedBy {
+		if b, ok := nodes[bid]; ok && b.Status == TaskStatusOpen {
+			openBlockers = append(openBlockers, bid)
+		}
+	}
+	var openSubtasks []int64
+	for _, sid := range node.SubtaskIDs {
+		if s, ok := nodes[sid]; ok && s.Status == TaskStatusOpen {
+			openSubtasks = append(openSubtasks, sid)
+		}
+	}
+	if len(openBlockers) > 0 || len(openSubtasks) > 0 {
+		return fmt.Errorf("cannot complete task %d: open blockers: %v, open subtasks: %v", id, openBlockers, openSubtasks)
+	}
+	return nil
+}
+
+// CollectOpenSubtreeIDs collects IDs of all open tasks transitively beneath rootID.
+func CollectOpenSubtreeIDs(nodes map[int64]TaskNode, rootID int64) []int64 {
+	var openIDs []int64
+	visited := make(map[int64]bool)
+
+	var walk func(currID int64)
+	walk = func(currID int64) {
+		node, exists := nodes[currID]
+		if !exists {
+			return
+		}
+		for _, sid := range node.SubtaskIDs {
+			if visited[sid] {
+				continue
+			}
+			visited[sid] = true
+			if sub, ok := nodes[sid]; ok {
+				if sub.Status == TaskStatusOpen {
+					openIDs = append(openIDs, sid)
+				}
+				walk(sid)
+			}
+		}
+	}
+	walk(rootID)
+	slices.Sort(openIDs)
+	return openIDs
+}
+
+// ComputeUnblockedIDs identifies tasks that transitioned from blocked to ready.
+func ComputeUnblockedIDs(before, after map[int64]TaskNode, closedIDs []int64) []int64 {
+	closedSet := make(map[int64]bool, len(closedIDs))
+	for _, id := range closedIDs {
+		closedSet[id] = true
+	}
+	var unblocked []int64
+	for id, afterNode := range after {
+		if closedSet[id] || afterNode.Status != TaskStatusOpen {
+			continue
+		}
+		beforeNode, exists := before[id]
+		if !exists || beforeNode.Status != TaskStatusOpen {
+			continue
+		}
+		if !isTaskReady(beforeNode, before) && isTaskReady(afterNode, after) {
+			unblocked = append(unblocked, id)
+		}
+	}
+	slices.Sort(unblocked)
+	return unblocked
+}
+
+// SummarizeNode projects a graph node onto its compact summary.
+func SummarizeNode(node TaskNode) TaskSummary {
+	return TaskSummary{
+		ID:        node.ID,
+		Title:     node.Title,
+		Status:    node.Status,
+		ParentID:  node.ParentID,
+		BlockedBy: node.BlockedBy,
+		Blocks:    node.Blocks,
+	}
+}

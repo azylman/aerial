@@ -5,15 +5,20 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"log/slog"
 	"net/http"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	"github.com/bwmarrin/discordgo"
 	"gopkg.in/yaml.v3"
 
+	"github.com/azylman/aerial/pkg/discordutil"
+	"github.com/azylman/aerial/pkg/githubapi"
 	"github.com/azylman/aerial/services/vanadis-restate/internal/ericlient"
 )
 
@@ -25,69 +30,7 @@ const (
 
 	configCacheTTL         = 1 * time.Minute
 	channelResolveCacheTTL = 5 * time.Minute
-	MaxChunkActiveSteps    = 500
 )
-
-// Active step storage for live build chunks.
-var (
-	chunkActiveStepsMu sync.RWMutex
-	chunkActiveSteps   = make(map[string]string)
-	chunkActiveOrder   []string
-)
-
-func removeChunkFromOrderLocked(id string) {
-	n := 0
-	for _, chunkID := range chunkActiveOrder {
-		if chunkID != id {
-			chunkActiveOrder[n] = chunkID
-			n++
-		}
-	}
-	chunkActiveOrder = chunkActiveOrder[:n]
-}
-
-// SetChunkActiveStep sets the live active step description for a chunk.
-func SetChunkActiveStep(chunkID, step string) {
-	chunkActiveStepsMu.Lock()
-	defer chunkActiveStepsMu.Unlock()
-	clean := strings.TrimSpace(step)
-	if clean == "" {
-		delete(chunkActiveSteps, chunkID)
-		removeChunkFromOrderLocked(chunkID)
-		return
-	}
-	if _, exists := chunkActiveSteps[chunkID]; !exists {
-		for len(chunkActiveSteps) >= MaxChunkActiveSteps {
-			if len(chunkActiveOrder) > 0 {
-				oldest := chunkActiveOrder[0]
-				chunkActiveOrder = chunkActiveOrder[1:]
-				delete(chunkActiveSteps, oldest)
-			} else {
-				for k := range chunkActiveSteps {
-					delete(chunkActiveSteps, k)
-					break
-				}
-			}
-		}
-		chunkActiveOrder = append(chunkActiveOrder, chunkID)
-	}
-	chunkActiveSteps[chunkID] = clean
-}
-
-// GetChunkActiveStep retrieves the live active step description for a chunk.
-func GetChunkActiveStep(chunkID string) string {
-	chunkActiveStepsMu.RLock()
-	defer chunkActiveStepsMu.RUnlock()
-	return chunkActiveSteps[chunkID]
-}
-
-// ClearChunkActiveStep clears the live active step description for a chunk.
-func ClearChunkActiveStep(chunkID string) {
-	chunkActiveStepsMu.Lock()
-	defer chunkActiveStepsMu.Unlock()
-	delete(chunkActiveSteps, chunkID)
-	removeChunkFromOrderLocked(chunkID)
-}
 
 // DiscordWidgetSender defines the interface required by DeliverStatusWidget to send, edit, query, and delete Discord messages.
 type DiscordWidgetSender interface {
@@ -107,20 +50,23 @@ type cachedChannelMeta struct {
 	expiresAt time.Time
 }
 
+type cachedConfigEntry struct {
+	cfg    *rawConfigFile
+	readAt time.Time
+}
+
 // DiscordWidgetDeliverer delivers Components V2 status widgets directly to Discord REST.
 type DiscordWidgetDeliverer struct {
 	session               *discordgo.Session
-	sender                DiscordWidgetSender
 	agentSenders          map[string]DiscordWidgetSender
 	configPath            string
+	gitHubOwner           string
 	nowFn                 func() time.Time
 	channelPolicyResolver func(channelID string) (noBuildUpdates bool, systemChannel string)
 	channelResolver       func(nameOrID string) (string, error)
 
-	configMu         sync.RWMutex
-	cachedConfig     *rawConfigFile
-	cachedConfigPath string
-	configReadAt     time.Time
+	configMu      sync.RWMutex
+	cachedConfigs map[string]cachedConfigEntry
 
 	resolvedMu       sync.RWMutex
 	resolvedChannels map[string]cachedResolvedChannel
@@ -128,48 +74,59 @@ type DiscordWidgetDeliverer struct {
 	channelMetaMu    sync.RWMutex
 	channelMetaCache map[string]cachedChannelMeta
 
-	channelLocks sync.Map
+	channelLocks       sync.Map
+	replacedMessageIDs sync.Map
+	buildMessageIDs    sync.Map
 }
 
-func discoverAgentTokens() map[string]string {
-	tokens := make(map[string]string)
-	for _, env := range os.Environ() {
-		parts := strings.SplitN(env, "=", 2)
-		if len(parts) != 2 {
-			continue
-		}
-		key, val := parts[0], strings.TrimSpace(parts[1])
-		if val == "" {
-			continue
-		}
-		if rawAgent, ok := strings.CutPrefix(key, "DISCORD_TOKEN_"); ok {
-			agent := strings.ToLower(strings.ReplaceAll(rawAgent, "_", "-"))
-			if agent != "" {
-				tokens[agent] = val
+// normalizeRunnerAgent lowercases and trims a runner's AGENT_NAME, mapping "" to the default agent.
+func normalizeRunnerAgent(agent string) string {
+	clean := strings.ToLower(strings.TrimSpace(agent))
+	if clean == "" {
+		return defaultAgent
+	}
+	return clean
+}
+
+// discoverAgentTokens loads every DISCORD_TOKEN_<AGENT> entry from environ, then keys the plain
+// DISCORD_TOKEN (or DISCORD_BOT_TOKEN) under the runner's own normalized agent unless an explicit
+// entry exists. environ uses os.Environ's KEY=VALUE form; the caller owns reading the process env.
+func discoverAgentTokens(runnerAgent string, environ []string) map[string]string {
+	tokens := discordutil.AgentTokensFromEnv(environ)
+	owner := normalizeRunnerAgent(runnerAgent)
+	if _, ok := tokens[owner]; ok {
+		return tokens
+	}
+	plain := make(map[string]string)
+	for _, env := range environ {
+		key, rawVal, ok := strings.Cut(env, "=")
+		if ok && (key == "DISCORD_TOKEN" || key == "DISCORD_BOT_TOKEN") {
+			if val := strings.TrimSpace(rawVal); val != "" {
+				plain[key] = val
 			}
 		}
 	}
-	if _, ok := tokens[defaultAgent]; !ok {
-		if t := strings.TrimSpace(os.Getenv("DISCORD_TOKEN")); t != "" {
-			tokens[defaultAgent] = t
-		} else if t := strings.TrimSpace(os.Getenv("DISCORD_BOT_TOKEN")); t != "" {
-			tokens[defaultAgent] = t
-		}
+	if t := plain["DISCORD_TOKEN"]; t != "" {
+		tokens[owner] = t
+	} else if t := plain["DISCORD_BOT_TOKEN"]; t != "" {
+		tokens[owner] = t
 	}
 	return tokens
 }
 
-// NewDiscordWidgetDeliverer constructs a DiscordWidgetDeliverer using the provided token or DISCORD_TOKEN env.
-func NewDiscordWidgetDeliverer(token string, configPath ...string) (*DiscordWidgetDeliverer, error) {
-	tokens := discoverAgentTokens()
+// NewDiscordWidgetDeliverer constructs a DiscordWidgetDeliverer for the runner agent agentName.
+// The explicit token (or DISCORD_TOKEN in environ) is keyed under the normalized agentName and
+// becomes the deliverer's default session; DISCORD_TOKEN_<AGENT> entries in environ stay available
+// per agent. configPath is the channel-policy config.yaml; empty disables channel policy lookups.
+// gitHubOwner qualifies bare chunk repos in PR links.
+func NewDiscordWidgetDeliverer(agentName, token, gitHubOwner string, environ []string, configPath string) (*DiscordWidgetDeliverer, error) {
+	owner := normalizeRunnerAgent(agentName)
+	tokens := discoverAgentTokens(owner, environ)
 	cleanToken := strings.TrimSpace(token)
 	if cleanToken != "" {
-		tokens[defaultAgent] = cleanToken
+		tokens[owner] = cleanToken
 	}
-	cfgPath := "/share/aerial-config/config.yaml"
-	if len(configPath) > 0 && strings.TrimSpace(configPath[0]) != "" {
-		cfgPath = strings.TrimSpace(configPath[0])
-	}
+	cfgPath := strings.TrimSpace(configPath)
 
 	agentSenders := make(map[string]DiscordWidgetSender)
 	var defaultSess *discordgo.Session
@@ -183,71 +140,80 @@ func NewDiscordWidgetDeliverer(token string, configPath ...string) (*DiscordWidg
 			continue
 		}
 		agentSenders[agent] = sess
-		if agent == defaultAgent {
+		if agent == owner {
 			defaultSess = sess
 		}
 	}
 
-	var sender DiscordWidgetSender
-	if defaultSess != nil {
-		sender = defaultSess
-	}
 	return &DiscordWidgetDeliverer{
 		session:          defaultSess,
-		sender:           sender,
 		agentSenders:     agentSenders,
 		configPath:       cfgPath,
+		cachedConfigs:    make(map[string]cachedConfigEntry),
+		gitHubOwner:      gitHubOwner,
 		resolvedChannels: make(map[string]cachedResolvedChannel),
 		channelMetaCache: make(map[string]cachedChannelMeta),
 	}, nil
 }
 
-func (d *DiscordWidgetDeliverer) senderForAgent(agent string) DiscordWidgetSender {
+// configPathForAgent resolves the config path for the requested agent:
+// empty or default agent ("aerial") returns d.configPath; other agents probe
+// services/<agent>/config.yaml next to configPath, falling back to d.configPath.
+func (d *DiscordWidgetDeliverer) configPathForAgent(agent string) string {
+	if d == nil || d.configPath == "" {
+		return ""
+	}
+	cleanAgent := normalizeRunnerAgent(agent)
+	if cleanAgent == defaultAgent {
+		return d.configPath
+	}
+	agentCfgPath := filepath.Join(filepath.Dir(d.configPath), "services", cleanAgent, "config.yaml")
+	info, err := os.Stat(agentCfgPath)
+	if err == nil && !info.IsDir() && info.Size() > 0 {
+		return agentCfgPath
+	}
+	return d.configPath
+}
+
+// sessionForAgent returns the *discordgo.Session for the requested agent from
+// agentSenders if present, falling back to d.session.
+func (d *DiscordWidgetDeliverer) sessionForAgent(agent string) *discordgo.Session {
 	if d == nil {
 		return nil
 	}
-	clean := strings.ToLower(strings.TrimSpace(agent))
-	if clean == "" {
-		clean = defaultAgent
-	}
+	clean := normalizeRunnerAgent(agent)
 	d.configMu.RLock()
 	s, ok := d.agentSenders[clean]
 	d.configMu.RUnlock()
 	if ok && !isNilSender(s) {
-		return s
-	}
-	if clean != defaultAgent {
-		d.configMu.RLock()
-		s, ok = d.agentSenders[defaultAgent]
-		d.configMu.RUnlock()
-		if ok && !isNilSender(s) {
-			return s
+		if sess, ok := s.(*discordgo.Session); ok && sess != nil {
+			return sess
 		}
 	}
-	if !isNilSender(d.sender) {
-		return d.sender
-	}
-	if !isNilSender(d.session) {
-		return d.session
-	}
-	return nil
+	return d.session
 }
 
-// SetAgentSender sets or overrides the DiscordWidgetSender for a specific agent.
-func (d *DiscordWidgetDeliverer) SetAgentSender(agent string, s DiscordWidgetSender) {
-	if d == nil {
-		return
-	}
+// ErrNoSenderForAgent means no Discord sender is configured for the requested agent. Delivery never
+// falls back to another agent's bot; callers surface it so the Restate step retries loudly.
+var ErrNoSenderForAgent = errors.New("no discord sender configured for agent")
+
+// senderForAgent returns the sender keyed under agent ("" is the default agent), or
+// ErrNoSenderForAgent. It never substitutes another agent's sender.
+func (d *DiscordWidgetDeliverer) senderForAgent(agent string) (DiscordWidgetSender, error) {
 	clean := strings.ToLower(strings.TrimSpace(agent))
 	if clean == "" {
 		clean = defaultAgent
 	}
-	d.configMu.Lock()
-	defer d.configMu.Unlock()
-	if d.agentSenders == nil {
-		d.agentSenders = make(map[string]DiscordWidgetSender)
+	if d == nil {
+		return nil, fmt.Errorf("%w %q", ErrNoSenderForAgent, clean)
 	}
-	d.agentSenders[clean] = s
+	d.configMu.RLock()
+	s, ok := d.agentSenders[clean]
+	d.configMu.RUnlock()
+	if !ok || isNilSender(s) {
+		return nil, fmt.Errorf("%w %q", ErrNoSenderForAgent, clean)
+	}
+	return s, nil
 }
 
 // shouldSinkWidget reports whether the status widget messageID is buried enough to re-post: either
@@ -299,19 +265,6 @@ type rawConfigFile struct {
 	Channels      map[string]channelConfigData `yaml:"channels"`
 }
 
-func isNumericSnowflake(s string) bool {
-	clean := strings.TrimSpace(s)
-	if clean == "" {
-		return false
-	}
-	for i := range len(clean) {
-		if clean[i] < '0' || clean[i] > '9' {
-			return false
-		}
-	}
-	return true
-}
-
 func matchChannelPolicy(key string, channels map[string]channelConfigData) bool {
 	clean := strings.ToLower(strings.TrimPrefix(strings.TrimSpace(key), "#"))
 	if clean == "" {
@@ -350,22 +303,23 @@ func (d *DiscordWidgetDeliverer) setCachedChannelMeta(channelID string, ch *disc
 	}
 }
 
-func (d *DiscordWidgetDeliverer) lookupSessionChannel(channelID string) *discordgo.Channel {
-	if d.session == nil {
+func (d *DiscordWidgetDeliverer) lookupSessionChannel(agent, channelID string) *discordgo.Channel {
+	sess := d.sessionForAgent(agent)
+	if sess == nil {
 		return nil
 	}
-	if d.session.State != nil {
-		if ch, err := d.session.State.Channel(channelID); err == nil && ch != nil {
+	if sess.State != nil {
+		if ch, err := sess.State.Channel(channelID); err == nil && ch != nil {
 			return ch
 		}
 	}
-	if ch, err := d.session.Channel(channelID); err == nil && ch != nil {
+	if ch, err := sess.Channel(channelID); err == nil && ch != nil {
 		return ch
 	}
 	return nil
 }
 
-func (d *DiscordWidgetDeliverer) findChannel(channelID string, now ...time.Time) *discordgo.Channel {
+func (d *DiscordWidgetDeliverer) findChannel(agent, channelID string, now ...time.Time) *discordgo.Channel {
 	currentTime := d.now()
 	if len(now) > 0 && !now[0].IsZero() {
 		currentTime = now[0]
@@ -373,16 +327,16 @@ func (d *DiscordWidgetDeliverer) findChannel(channelID string, now ...time.Time)
 	if cachedCh, ok := d.getCachedChannelMeta(channelID, currentTime); ok {
 		return cachedCh
 	}
-	ch := d.lookupSessionChannel(channelID)
+	ch := d.lookupSessionChannel(agent, channelID)
 	d.setCachedChannelMeta(channelID, ch, currentTime)
 	return ch
 }
 
-func (d *DiscordWidgetDeliverer) checkNoBuildUpdates(channelID string, channels map[string]channelConfigData, now ...time.Time) bool {
+func (d *DiscordWidgetDeliverer) checkNoBuildUpdates(agent, channelID string, channels map[string]channelConfigData, now ...time.Time) bool {
 	if matchChannelPolicy(channelID, channels) {
 		return true
 	}
-	ch := d.findChannel(channelID, now...)
+	ch := d.findChannel(agent, channelID, now...)
 	if ch == nil {
 		return false
 	}
@@ -395,7 +349,7 @@ func (d *DiscordWidgetDeliverer) checkNoBuildUpdates(channelID string, channels 
 	if matchChannelPolicy(ch.ParentID, channels) {
 		return true
 	}
-	parentCh := d.findChannel(ch.ParentID, now...)
+	parentCh := d.findChannel(agent, ch.ParentID, now...)
 	if parentCh != nil && (matchChannelPolicy(parentCh.Name, channels) || matchChannelPolicy(parentCh.ID, channels)) {
 		return true
 	}
@@ -434,42 +388,44 @@ func (d *DiscordWidgetDeliverer) setCachedChannelID(target, id string, now time.
 	}
 }
 
-func (d *DiscordWidgetDeliverer) resolveChannelID(targetNameOrID, fallback string, now ...time.Time) string {
+func (d *DiscordWidgetDeliverer) resolveChannelID(agent, targetNameOrID, fallback string, now ...time.Time) string {
 	target := strings.TrimSpace(targetNameOrID)
 	target = strings.TrimPrefix(target, "#")
 	if target == "" {
 		return fallback
 	}
-	if isNumericSnowflake(target) {
+	if discordutil.IsSnowflake(strings.TrimSpace(target)) {
 		return target
 	}
 	currentTime := d.now()
 	if len(now) > 0 && !now[0].IsZero() {
 		currentTime = now[0]
 	}
-	if cachedID, ok := d.getCachedChannelID(target, currentTime); ok {
+	cacheKey := normalizeRunnerAgent(agent) + ":" + target
+	if cachedID, ok := d.getCachedChannelID(cacheKey, currentTime); ok {
 		return cachedID
 	}
 	if d.channelResolver != nil {
-		if id, err := d.channelResolver(target); err == nil && isNumericSnowflake(id) {
-			d.setCachedChannelID(target, id, currentTime)
+		if id, err := d.channelResolver(target); err == nil && discordutil.IsSnowflake(strings.TrimSpace(id)) {
+			d.setCachedChannelID(cacheKey, id, currentTime)
 			return id
 		}
 		return fallback
 	}
-	if id := d.resolveGuildChannelID(target); id != "" {
-		d.setCachedChannelID(target, id, currentTime)
+	if id := d.resolveGuildChannelID(agent, target); id != "" {
+		d.setCachedChannelID(cacheKey, id, currentTime)
 		return id
 	}
 	return fallback
 }
 
-func (d *DiscordWidgetDeliverer) resolveGuildChannelID(target string) string {
-	if d.session == nil {
+func (d *DiscordWidgetDeliverer) resolveGuildChannelID(agent, target string) string {
+	sess := d.sessionForAgent(agent)
+	if sess == nil {
 		return ""
 	}
-	if d.session.State != nil {
-		for _, g := range d.session.State.Guilds {
+	if sess.State != nil {
+		for _, g := range sess.State.Guilds {
 			for _, ch := range g.Channels {
 				if strings.EqualFold(ch.Name, target) {
 					return ch.ID
@@ -477,12 +433,12 @@ func (d *DiscordWidgetDeliverer) resolveGuildChannelID(target string) string {
 			}
 		}
 	}
-	userGuilds, err := d.session.UserGuilds(100, "", "", false)
+	userGuilds, err := sess.UserGuilds(100, "", "", false)
 	if err != nil {
 		return ""
 	}
 	for _, g := range userGuilds {
-		channels, err := d.session.GuildChannels(g.ID)
+		channels, err := sess.GuildChannels(g.ID)
 		if err != nil {
 			continue
 		}
@@ -495,17 +451,20 @@ func (d *DiscordWidgetDeliverer) resolveGuildChannelID(target string) string {
 	return ""
 }
 
-func (d *DiscordWidgetDeliverer) loadConfigFile(now time.Time) *rawConfigFile {
+func (d *DiscordWidgetDeliverer) loadConfigFile(cfgPath string, now time.Time) *rawConfigFile {
 	d.configMu.Lock()
 	defer d.configMu.Unlock()
 
-	cfgPath := d.configPath
 	if cfgPath == "" {
-		cfgPath = "/share/aerial-config/config.yaml"
+		return nil
 	}
 
-	if d.cachedConfig != nil && now.Sub(d.configReadAt) < configCacheTTL && d.cachedConfigPath == cfgPath {
-		return d.cachedConfig
+	if d.cachedConfigs == nil {
+		d.cachedConfigs = make(map[string]cachedConfigEntry)
+	}
+
+	if entry, ok := d.cachedConfigs[cfgPath]; ok && now.Sub(entry.readAt) < configCacheTTL && entry.cfg != nil {
+		return entry.cfg
 	}
 
 	data, err := os.ReadFile(cfgPath)
@@ -518,13 +477,14 @@ func (d *DiscordWidgetDeliverer) loadConfigFile(now time.Time) *rawConfigFile {
 		return nil
 	}
 
-	d.cachedConfig = &cfg
-	d.cachedConfigPath = cfgPath
-	d.configReadAt = now
-	return d.cachedConfig
+	d.cachedConfigs[cfgPath] = cachedConfigEntry{
+		cfg:    &cfg,
+		readAt: now,
+	}
+	return &cfg
 }
 
-func (d *DiscordWidgetDeliverer) redirectChannelIfNoBuildUpdates(channelID string, now ...time.Time) string {
+func (d *DiscordWidgetDeliverer) redirectChannelIfNoBuildUpdates(agent, channelID string, now ...time.Time) string {
 	if strings.TrimSpace(channelID) == "" {
 		return channelID
 	}
@@ -537,10 +497,11 @@ func (d *DiscordWidgetDeliverer) redirectChannelIfNoBuildUpdates(channelID strin
 		if !noBuild || sysChan == "" {
 			return channelID
 		}
-		return d.resolveChannelID(sysChan, channelID, currentTime)
+		return d.resolveChannelID(agent, sysChan, channelID, currentTime)
 	}
 
-	cfg := d.loadConfigFile(currentTime)
+	cfgPath := d.configPathForAgent(agent)
+	cfg := d.loadConfigFile(cfgPath, currentTime)
 	if cfg == nil {
 		return channelID
 	}
@@ -550,11 +511,11 @@ func (d *DiscordWidgetDeliverer) redirectChannelIfNoBuildUpdates(channelID strin
 		return channelID
 	}
 
-	if !d.checkNoBuildUpdates(channelID, cfg.Channels, currentTime) {
+	if !d.checkNoBuildUpdates(agent, channelID, cfg.Channels, currentTime) {
 		return channelID
 	}
 
-	return d.resolveChannelID(systemChannel, channelID, currentTime)
+	return d.resolveChannelID(agent, systemChannel, channelID, currentTime)
 }
 
 func isNilSender(s DiscordWidgetSender) bool {
@@ -567,18 +528,78 @@ func isNilSender(s DiscordWidgetSender) bool {
 	return false
 }
 
+func (d *DiscordWidgetDeliverer) resolveLatestMessageID(buildID, msgID string) string {
+	if d == nil {
+		return msgID
+	}
+	curr := strings.TrimSpace(msgID)
+	if curr != "" {
+		visited := make(map[string]bool)
+		for {
+			val, ok := d.replacedMessageIDs.Load(curr)
+			if !ok {
+				break
+			}
+			next, ok := val.(string)
+			if !ok {
+				break
+			}
+			next = strings.TrimSpace(next)
+			if next == "" || next == curr || visited[next] {
+				break
+			}
+			visited[curr] = true
+			curr = next
+		}
+		if curr != strings.TrimSpace(msgID) {
+			return curr
+		}
+	}
+	cleanBuildID := strings.TrimSpace(buildID)
+	if cleanBuildID == "" {
+		return curr
+	}
+	val, ok := d.buildMessageIDs.Load(cleanBuildID)
+	if !ok {
+		return curr
+	}
+	latest, ok := val.(string)
+	if ok && latest != "" && curr == "" {
+		return latest
+	}
+	return curr
+}
+
+func (d *DiscordWidgetDeliverer) recordMessageIDAdvance(buildID, oldMsgID, newMsgID string) {
+	if d == nil {
+		return
+	}
+	cleanNew := strings.TrimSpace(newMsgID)
+	if cleanNew == "" {
+		return
+	}
+	cleanOld := strings.TrimSpace(oldMsgID)
+	if cleanOld != "" && cleanOld != cleanNew {
+		d.replacedMessageIDs.Store(cleanOld, cleanNew)
+	}
+	cleanBuildID := strings.TrimSpace(buildID)
+	if cleanBuildID != "" {
+		d.buildMessageIDs.Store(cleanBuildID, cleanNew)
+	}
+}
+
 // DeliverStatusWidget delivers or updates a status widget via Discord Components V2.
 func (d *DiscordWidgetDeliverer) DeliverStatusWidget(ctx context.Context, req ericlient.StatusWidgetRequest) (string, error) {
 	if d == nil {
 		return "", errors.New("discord widget deliverer is nil")
 	}
-	sender := d.senderForAgent(req.Agent)
-	if isNilSender(sender) {
-		return "", errors.New("discord widget sender is nil")
+	sender, err := d.senderForAgent(req.Agent)
+	if err != nil {
+		return "", err
 	}
 
 	now := d.now()
-	req.ChannelID = d.redirectChannelIfNoBuildUpdates(req.ChannelID, now)
+	req.ChannelID = d.redirectChannelIfNoBuildUpdates(req.Agent, req.ChannelID, now)
 
 	var opts []discordgo.RequestOption
 	if ctx != nil {
@@ -591,7 +612,44 @@ func (d *DiscordWidgetDeliverer) DeliverStatusWidget(ctx context.Context, req er
 		defer chLock.Unlock()
 	}
 
-	return DeliverStatusWidget(sender, req, now, opts...)
+	origMsgID := strings.TrimSpace(req.MessageID)
+	if latestMsgID := d.resolveLatestMessageID(req.ID, origMsgID); latestMsgID != "" && latestMsgID != origMsgID {
+		req.MessageID = latestMsgID
+	}
+
+	newID, err := DeliverStatusWidget(sender, d.gitHubOwner, req, now, opts...)
+	if err == nil && newID != "" && (newID != origMsgID || newID != req.MessageID) {
+		d.recordMessageIDAdvance(req.ID, origMsgID, newID)
+		if req.MessageID != origMsgID {
+			d.recordMessageIDAdvance(req.ID, req.MessageID, newID)
+		}
+	}
+	return newID, err
+}
+
+// DeleteStatusWidget removes a status widget message with agent's own sender,
+// resolving the channel the same way DeliverStatusWidget does. Deletion is
+// best effort: a missing message is a success and Discord failures are only
+// logged; only a missing sender for agent is returned.
+func (d *DiscordWidgetDeliverer) DeleteStatusWidget(ctx context.Context, agent, channelID, messageID string) error {
+	if d == nil {
+		return errors.New("discord widget deliverer is nil")
+	}
+	sender, err := d.senderForAgent(agent)
+	if err != nil {
+		return err
+	}
+	cleanChannelID, cleanMessageID := strings.TrimSpace(channelID), strings.TrimSpace(messageID)
+	if cleanChannelID == "" || cleanMessageID == "" {
+		return nil
+	}
+	targetChannelID := d.redirectChannelIfNoBuildUpdates(agent, cleanChannelID, d.now())
+	var opts []discordgo.RequestOption
+	if ctx != nil {
+		opts = append(opts, discordgo.WithContext(ctx))
+	}
+	deleteOldWidgetBestEffort(sender, targetChannelID, cleanMessageID, opts...)
+	return nil
 }
 
 // DeliverDirectMessageWithAgent delivers a direct plain-text channel alert message using the specified agent sender.
@@ -599,9 +657,9 @@ func (d *DiscordWidgetDeliverer) DeliverDirectMessageWithAgent(ctx context.Conte
 	if d == nil {
 		return errors.New("discord widget deliverer is nil")
 	}
-	sender := d.senderForAgent(agent)
-	if isNilSender(sender) {
-		return errors.New("discord widget sender is nil")
+	sender, err := d.senderForAgent(agent)
+	if err != nil {
+		return err
 	}
 
 	cleanChannelID := strings.TrimSpace(channelID)
@@ -611,7 +669,7 @@ func (d *DiscordWidgetDeliverer) DeliverDirectMessageWithAgent(ctx context.Conte
 	}
 
 	now := d.now()
-	targetChannelID := d.resolveChannelID(d.redirectChannelIfNoBuildUpdates(cleanChannelID, now), cleanChannelID, now)
+	targetChannelID := d.resolveChannelID(agent, d.redirectChannelIfNoBuildUpdates(agent, cleanChannelID, now), cleanChannelID, now)
 
 	var opts []discordgo.RequestOption
 	if ctx != nil {
@@ -624,7 +682,7 @@ func (d *DiscordWidgetDeliverer) DeliverDirectMessageWithAgent(ctx context.Conte
 		defer chLock.Unlock()
 	}
 
-	_, err := sender.ChannelMessageSendComplex(targetChannelID, &discordgo.MessageSend{
+	_, err = sender.ChannelMessageSendComplex(targetChannelID, &discordgo.MessageSend{
 		Content:         cleanContent,
 		AllowedMentions: &discordgo.MessageAllowedMentions{Parse: []discordgo.AllowedMentionType{}},
 	}, opts...)
@@ -654,6 +712,42 @@ func isNotFoundError(err error) bool {
 	return false
 }
 
+// Discord JSON error codes for widget edit/delete recovery.
+const (
+	discordCodeCannotEditForeignAuthor = 50005
+	discordCodeMissingPermissions      = 50013
+)
+
+// discordErrorCode returns the Discord JSON error code carried by a RESTError, or 0.
+func discordErrorCode(err error) int {
+	if restErr, ok := errors.AsType[*discordgo.RESTError](err); ok && restErr.Message != nil {
+		return restErr.Message.Code
+	}
+	return 0
+}
+
+// isForeignAuthorError reports whether an edit failed because the message was authored by
+// a different bot (403 code 50005), e.g. after a per-agent token rotation.
+func isForeignAuthorError(err error) bool {
+	return discordErrorCode(err) == discordCodeCannotEditForeignAuthor
+}
+
+// deleteOldWidgetBestEffort removes a replaced widget message with the owner's own sender.
+// Failures never propagate: the replacement card is already posted, and the owner's bot may
+// lack permission to delete another bot's message (403 code 50013). No other agent's sender
+// is ever used to touch the message.
+func deleteOldWidgetBestEffort(s DiscordWidgetSender, channelID, msgID string, opts ...discordgo.RequestOption) {
+	delErr := s.ChannelMessageDelete(channelID, msgID, opts...)
+	switch {
+	case delErr == nil, isNotFoundError(delErr):
+		return
+	case discordErrorCode(delErr) == discordCodeMissingPermissions:
+		log.Printf("[Widget] Old status widget message %s left in place: missing permission to delete it: %v", msgID, delErr)
+	default:
+		log.Printf("[Widget] Warning: failed to delete old status widget message %s: %v", msgID, delErr)
+	}
+}
+
 func newWidgetMessageSend(components []discordgo.MessageComponent) *discordgo.MessageSend {
 	return &discordgo.MessageSend{
 		Flags:           discordgo.MessageFlagsIsComponentsV2 | discordgo.MessageFlagsSuppressNotifications,
@@ -668,9 +762,7 @@ func trySinkStatusWidget(s DiscordWidgetSender, channelID, trimmedMsgID string, 
 	if sendErr != nil || created == nil {
 		return "", false
 	}
-	if delErr := s.ChannelMessageDelete(channelID, trimmedMsgID, opts...); delErr != nil && !isNotFoundError(delErr) {
-		log.Printf("[Widget] Warning: failed to delete old status widget message %s: %v", trimmedMsgID, delErr)
-	}
+	deleteOldWidgetBestEffort(s, channelID, trimmedMsgID, opts...)
 	return created.ID, true
 }
 
@@ -707,11 +799,26 @@ func updateExistingStatusWidget(s DiscordWidgetSender, req ericlient.StatusWidge
 		return created.ID, nil
 	}
 
+	if isForeignAuthorError(editErr) {
+		slog.Warn("[Widget] status widget authored by another bot; re-posting with the owner's sender",
+			"build_id", req.ID, "agent", req.Agent, "channel_id", req.ChannelID, "message_id", trimmedMsgID)
+		send := newWidgetMessageSend(components)
+		created, sendErr := s.ChannelMessageSendComplex(req.ChannelID, send, opts...)
+		if sendErr != nil {
+			return "", fmt.Errorf("failed to send new status widget message after foreign-author edit: %w", sendErr)
+		}
+		if created == nil {
+			return "", errors.New("failed to send new status widget message after foreign-author edit: received nil message")
+		}
+		deleteOldWidgetBestEffort(s, req.ChannelID, trimmedMsgID, opts...)
+		return created.ID, nil
+	}
+
 	return "", fmt.Errorf("failed to edit status widget message %s: %w", trimmedMsgID, editErr)
 }
 
-// DeliverStatusWidget delivers or updates a status widget via Discord Components V2.
-func DeliverStatusWidget(s DiscordWidgetSender, req ericlient.StatusWidgetRequest, now time.Time, opts ...discordgo.RequestOption) (string, error) {
+// DeliverStatusWidget delivers or updates a status widget via Discord Components V2 using only s.
+func DeliverStatusWidget(s DiscordWidgetSender, owner string, req ericlient.StatusWidgetRequest, now time.Time, opts ...discordgo.RequestOption) (string, error) {
 	if isNilSender(s) {
 		return "", errors.New("discord widget sender is nil")
 	}
@@ -719,7 +826,7 @@ func DeliverStatusWidget(s DiscordWidgetSender, req ericlient.StatusWidgetReques
 		return "", errors.New("channel_id is required")
 	}
 
-	components, err := BuildStatusWidgetComponents(req, now)
+	components, err := BuildStatusWidgetComponents(owner, req, now)
 	if err != nil {
 		return "", fmt.Errorf("failed to build status widget components: %w", err)
 	}
@@ -777,17 +884,11 @@ func statusBadge(status string) string {
 	}
 }
 
-// NormalizeRepo returns the full repository path (e.g. "azylman/aerial") and short name ("aerial").
-func NormalizeRepo(repo string) (fullRepo string, shortRepo string) {
-	trimmed := strings.TrimSpace(repo)
-	if trimmed == "" {
-		return "", ""
-	}
-	parts := strings.Split(trimmed, "/")
-	if len(parts) == 1 {
-		return "azylman/" + parts[0], parts[0]
-	}
-	return trimmed, parts[len(parts)-1]
+// NormalizeRepo returns repo qualified with owner (e.g. "acme/aerial") and
+// its short name, the last path segment ("aerial").
+func NormalizeRepo(owner, repo string) (fullRepo string, shortRepo string) {
+	fullRepo = githubapi.QualifyRepo(owner, repo)
+	return fullRepo, fullRepo[strings.LastIndex(fullRepo, "/")+1:]
 }
 
 // FormatChunkDuration formats a chunk execution duration into a concise human-readable string.
@@ -851,7 +952,7 @@ func buildWidgetHeaderText(req ericlient.StatusWidgetRequest) string {
 	shortRepo := ""
 	if len(req.Chunks) == 1 {
 		prNum = req.Chunks[0].PRNumber
-		_, shortRepo = NormalizeRepo(req.Chunks[0].Repo)
+		_, shortRepo = NormalizeRepo("", req.Chunks[0].Repo)
 	}
 	repoTag := shortRepo
 	if repoTag == "" {
@@ -935,9 +1036,9 @@ func isChunkTerminal(status string) bool {
 	}
 }
 
-func buildWidgetChunkComponent(c ericlient.StatusWidgetChunk) discordgo.MessageComponent {
+func buildWidgetChunkComponent(owner string, c ericlient.StatusWidgetChunk) discordgo.MessageComponent {
 	badge := statusBadge(c.Status)
-	fullRepo, shortRepo := NormalizeRepo(c.Repo)
+	fullRepo, shortRepo := NormalizeRepo(owner, c.Repo)
 	repoTag := shortRepo
 	switch {
 	case c.Mode == chunkModeAction:
@@ -949,10 +1050,7 @@ func buildWidgetChunkComponent(c ericlient.StatusWidgetChunk) discordgo.MessageC
 	rowText := fmt.Sprintf("%s **`%s`**: %s%s", badge, repoTag, strings.TrimSpace(c.Title), formatChunkRuntimeSuffix(c))
 	step := c.ActiveStep
 	if isChunkTerminal(c.Status) {
-		ClearChunkActiveStep(c.ID)
 		step = ""
-	} else if step == "" {
-		step = GetChunkActiveStep(c.ID)
 	}
 	rowText += formatChunkActiveStepLines(step)
 
@@ -1033,16 +1131,162 @@ func formatWidgetFooterText(req ericlient.StatusWidgetRequest, now time.Time) st
 	return fmt.Sprintf("*Updated <t:%d:R>*", now.Unix())
 }
 
-// BuildStatusWidgetComponents constructs a Components V2 Container message component.
-func BuildStatusWidgetComponents(req ericlient.StatusWidgetRequest, now time.Time) ([]discordgo.MessageComponent, error) {
-	// Evict stale active step entries for terminal chunks or completed widgets.
-	completed := isWidgetCompleted(req)
-	for _, c := range req.Chunks {
-		if completed || isChunkTerminal(c.Status) {
-			ClearChunkActiveStep(c.ID)
+// Discord Components V2 per-message limits: total components (nested ones
+// included) and total TextDisplay characters.
+const (
+	maxWidgetComponents = 40
+	maxWidgetTextRunes  = 4000
+)
+
+// widgetRow is one rendered chunk row tagged with its widget lifecycle stage.
+type widgetRow struct {
+	stage     int
+	component discordgo.MessageComponent
+}
+
+// widgetStagePriority lists the stages in the order rows keep their place when
+// the card overflows: in-progress (incl. failed) first, then done, then pending.
+var widgetStagePriority = [...]int{widgetStageInProgress, widgetStageDone, widgetStagePending}
+
+// widgetComponentCount counts c and every nested component, as Discord does.
+func widgetComponentCount(c discordgo.MessageComponent) int {
+	switch v := c.(type) {
+	case *discordgo.Section:
+		n := 1
+		for _, child := range v.Components {
+			n += widgetComponentCount(child)
+		}
+		if v.Accessory != nil {
+			n++
+		}
+		return n
+	default:
+		return 1
+	}
+}
+
+// widgetTextRunes totals the TextDisplay content runes in comps, including Section text.
+func widgetTextRunes(comps []discordgo.MessageComponent) int {
+	n := 0
+	for _, c := range comps {
+		switch v := c.(type) {
+		case *discordgo.TextDisplay:
+			n += utf8.RuneCountInString(v.Content)
+		case *discordgo.Section:
+			n += widgetTextRunes(v.Components)
+		}
+	}
+	return n
+}
+
+// widgetFoldText is the single line that replaces rows folded out of a stage.
+func widgetFoldText(stage, n int) string {
+	switch stage {
+	case widgetStageInProgress:
+		return fmt.Sprintf("🔨 *+%d more active chunks*", n)
+	case widgetStageDone:
+		return fmt.Sprintf("✅ *+%d more completed chunks*", n)
+	default:
+		return fmt.Sprintf("⏳ *+%d more pending chunks*", n)
+	}
+}
+
+// assembleWidgetRows renders the kept rows in order; each stage with folded rows
+// gets its fold line at the position of that stage's last row.
+func assembleWidgetRows(rows []widgetRow, keep []bool) []discordgo.MessageComponent {
+	var dropped [widgetStagePending + 1]int
+	last := map[int]int{}
+	for i, r := range rows {
+		last[r.stage] = i
+		if !keep[i] {
+			dropped[r.stage]++
+		}
+	}
+	out := make([]discordgo.MessageComponent, 0, len(rows))
+	for i, r := range rows {
+		if keep[i] {
+			out = append(out, r.component)
+		}
+		if last[r.stage] == i && dropped[r.stage] > 0 {
+			out = append(out, &discordgo.TextDisplay{Content: widgetFoldText(r.stage, dropped[r.stage])})
+		}
+	}
+	return out
+}
+
+// fitWidgetRows returns the chunk rows that fit beside fixedComponents and
+// fixedRunes within maxWidgetComponents and maxWidgetTextRunes. Rows that fit
+// already are returned unchanged. Otherwise rows are kept by stage priority in
+// plan order, and each stage's overflow folds into one summary line.
+func fitWidgetRows(rows []widgetRow, fixedComponents, fixedRunes int) []discordgo.MessageComponent {
+	all := make([]discordgo.MessageComponent, 0, len(rows))
+	total := fixedComponents
+	for _, r := range rows {
+		all = append(all, r.component)
+		total += widgetComponentCount(r.component)
+	}
+	if total <= maxWidgetComponents && fixedRunes+widgetTextRunes(all) <= maxWidgetTextRunes {
+		return all
+	}
+
+	byStage := map[int][]int{}
+	for i, r := range rows {
+		byStage[r.stage] = append(byStage[r.stage], i)
+	}
+	keep := make([]bool, len(rows))
+	remaining := maxWidgetComponents - fixedComponents
+	for p, stage := range widgetStagePriority {
+		// Every later non-empty stage can always fall back to one fold line.
+		reserve := 0
+		for _, later := range widgetStagePriority[p+1:] {
+			if len(byStage[later]) > 0 {
+				reserve++
+			}
+		}
+		idxs := byStage[stage]
+		kept := 0
+		for k, i := range idxs {
+			more := 0
+			if k < len(idxs)-1 {
+				more = 1
+			}
+			cost := widgetComponentCount(rows[i].component)
+			if remaining-cost < more+reserve {
+				break
+			}
+			keep[i] = true
+			remaining -= cost
+			kept++
+		}
+		if kept < len(idxs) {
+			remaining--
 		}
 	}
 
+	out := assembleWidgetRows(rows, keep)
+	for fixedRunes+widgetTextRunes(out) > maxWidgetTextRunes && dropLastWidgetRow(rows, keep) {
+		out = assembleWidgetRows(rows, keep)
+	}
+	return out
+}
+
+// dropLastWidgetRow unkeeps the last kept row of the lowest-priority stage that
+// still has one, reporting whether any row was dropped.
+func dropLastWidgetRow(rows []widgetRow, keep []bool) bool {
+	for p := len(widgetStagePriority) - 1; p >= 0; p-- {
+		for i := len(rows) - 1; i >= 0; i-- {
+			if keep[i] && rows[i].stage == widgetStagePriority[p] {
+				keep[i] = false
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// BuildStatusWidgetComponents constructs a Components V2 Container message
+// component; owner qualifies bare chunk repos in PR links.
+func BuildStatusWidgetComponents(owner string, req ericlient.StatusWidgetRequest, now time.Time) ([]discordgo.MessageComponent, error) {
 	color := AccentColor(req.Status)
 	var containerComponents []discordgo.MessageComponent
 
@@ -1059,8 +1303,8 @@ func BuildStatusWidgetComponents(req ericlient.StatusWidgetRequest, now time.Tim
 		})
 	}
 
-	// 40-Component Ceiling Guard
-	// If len(req.Chunks) > 10, collapse older completed/merged chunks into a single summary TextDisplay.
+	// Fold older done chunks into one summary line, then fit the remaining rows
+	// within Discord's per-message component and text limits.
 	chunks, summaryText := collapseCompletedWidgetChunks(req.Chunks)
 	if summaryText != "" {
 		containerComponents = append(containerComponents, &discordgo.TextDisplay{
@@ -1068,16 +1312,19 @@ func BuildStatusWidgetComponents(req ericlient.StatusWidgetRequest, now time.Tim
 		})
 	}
 
-	// Chunk rows
+	rows := make([]widgetRow, 0, len(chunks))
 	for _, c := range chunks {
-		containerComponents = append(containerComponents, buildWidgetChunkComponent(c))
+		rows = append(rows, widgetRow{stage: widgetChunkStage(c.Status), component: buildWidgetChunkComponent(owner, c)})
 	}
 
-	// Footer TextDisplay
-	footerText := formatWidgetFooterText(req, now)
-	containerComponents = append(containerComponents, &discordgo.TextDisplay{
-		Content: footerText,
-	})
+	footer := &discordgo.TextDisplay{
+		Content: formatWidgetFooterText(req, now),
+	}
+	// Container + header/banner/summary + footer.
+	fixedComponents := 1 + len(containerComponents) + 1
+	fixedRunes := widgetTextRunes(containerComponents) + utf8.RuneCountInString(footer.Content)
+	containerComponents = append(containerComponents, fitWidgetRows(rows, fixedComponents, fixedRunes)...)
+	containerComponents = append(containerComponents, footer)
 
 	container := &discordgo.Container{
 		AccentColor: &color,

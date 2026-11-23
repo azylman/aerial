@@ -16,25 +16,29 @@ import (
 	"github.com/azylman/aerial/services/prospera/internal/server"
 )
 
-var prosperaRestartRequired = config.RestartRequired
-
 var (
 	configPath   = config.DefaultConfigPath
-	loadConfigFn = config.LoadConfig
+	loadConfigFn = config.LoadConfigFile
 	runAppFn     = server.RunApp
 	exitFn       = log.Fatalf
 )
 
 func main() {
+	runMain(os.Getenv, tracing.DefaultConfigPath)
+}
+
+// runMain loads config through getenv, initializes tracing from
+// tracingConfigPath and runs the app until a signal or restart request.
+func runMain(getenv func(string) string, tracingConfigPath string) {
 	resolvedPath := config.ResolveConfigPath(configPath)
-	cfg, err := loadConfigFn(resolvedPath)
+	cfg, err := loadConfigFn(resolvedPath, getenv)
 	if err != nil {
 		exitFn("failed to load config: %v", err)
 		return
 	}
 	cfgSrc := httpkit.NewReloadable(cfg, func() (*config.Config, error) {
-		return loadConfigFn(resolvedPath)
-	}, prosperaRestartRequired)
+		return loadConfigFn(resolvedPath, getenv)
+	}, config.RestartRequired)
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
@@ -46,7 +50,7 @@ func main() {
 		}
 	}()
 
-	_, flushTracing := tracing.Init(ctx, "prospera", tracing.DefaultConfigPath)
+	_, flushTracing := tracing.Init(ctx, "prospera", tracingConfigPath)
 	slog.SetDefault(slog.New(tracing.SlogHandler(slog.NewJSONHandler(os.Stdout, nil))))
 
 	err = runAppFn(ctx, cfgSrc)

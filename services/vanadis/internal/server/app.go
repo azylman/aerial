@@ -7,11 +7,14 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"os"
 	"time"
 
-	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 
+	"github.com/azylman/aerial/pkg/buildplan"
+	"github.com/azylman/aerial/pkg/pgutil"
+	"github.com/azylman/aerial/pkg/pubsub"
 	"github.com/azylman/aerial/services/vanadis/internal/metrics"
 	"github.com/azylman/aerial/services/vanadis/internal/restate"
 )
@@ -47,8 +50,6 @@ var (
 	QueueOldestAgeSeconds = metrics.QueueOldestAgeSeconds
 	// RecordBuildTotal increments the vanadis_builds_total counter for a given status.
 	RecordBuildTotal = metrics.RecordBuildTotal
-	// NewHandler returns the Prometheus metrics HTTP handler.
-	NewHandler = metrics.NewHandler
 )
 
 // consumerStatsQuerier reports pending and in-flight consumer counts.
@@ -94,8 +95,9 @@ func (s *VanadisServer) restateClient() *Client {
 	return NewClient(s.restateCfg, s.httpClient)
 }
 
-func (s *VanadisServer) restateObjectPath(buildID, handler string) string {
-	return s.restateClient().ObjectPath(buildID, handler)
+// restateObjectPath targets the canonical Build object.
+func (s *VanadisServer) restateObjectPath(runnerAgent, buildID, handler string) string {
+	return s.restateClient().ObjectPath(buildplan.BuildServiceName(runnerAgent), buildID, handler)
 }
 
 func (s *VanadisServer) restateRouterPath(handler string) string {
@@ -105,6 +107,11 @@ func (s *VanadisServer) restateRouterPath(handler string) string {
 // callRestateIngress proxies a synchronous command to Restate ingress.
 func (s *VanadisServer) callRestateIngress(ctx context.Context, path string, payload any, out any) error {
 	return s.restateClient().CallIngress(ctx, path, payload, out)
+}
+
+// callRestateIngressKeyed proxies a synchronous command with an Idempotency-Key to Restate ingress.
+func (s *VanadisServer) callRestateIngressKeyed(ctx context.Context, path, idempotencyKey string, payload any, out any) error {
+	return s.restateClient().CallIngressKeyed(ctx, path, idempotencyKey, payload, out)
 }
 
 func (s *VanadisServer) collectBuildMetrics(ctx context.Context) {
@@ -134,18 +141,11 @@ func (s *VanadisServer) handleMetrics(w http.ResponseWriter, r *http.Request) {
 	promhttp.Handler().ServeHTTP(w, r)
 }
 
-var newPgxPoolFn = pgxpool.NewWithConfig
-
 // InitPostgres initializes the PostgreSQL store backing the server.
 func InitPostgres(ctx context.Context, server *VanadisServer, pgURL string) (func(context.Context), error) {
-	poolConfig, err := pgxpool.ParseConfig(pgURL)
+	pool, err := pgutil.NewPool(ctx, pgURL, pgutil.PoolOptions{MaxConns: 10, MinConns: 2})
 	if err != nil {
-		return nil, fmt.Errorf("parse postgres url: %w", err)
-	}
-	poolConfig.MaxConns, poolConfig.MinConns = 10, 2
-	pool, err := newPgxPoolFn(ctx, poolConfig)
-	if err != nil {
-		return nil, fmt.Errorf("create pgxpool: %w", err)
+		return nil, err
 	}
 	server.SetStore(NewPostgresVanadisStore(pool))
 	return func(context.Context) {
@@ -155,8 +155,38 @@ func InitPostgres(ctx context.Context, server *VanadisServer, pgURL string) (fun
 
 var initPostgres = InitPostgres
 
-func runServer(ctx context.Context, cfg Config, onReady func(addr string)) error {
-	server := NewVanadisServer(cfg, nil, nil)
+// queueStatsBus reads consumer backlog for the queue gauges and is closed on shutdown.
+type queueStatsBus interface {
+	consumerStatsQuerier
+	Close() error
+}
+
+var newQueueStatsBusFn = func(ctx context.Context, natsURL string) (queueStatsBus, error) {
+	return pubsub.NewJetStreamBus(ctx, natsURL)
+}
+
+// initQueueStats connects the JetStream stats reader behind vanadis_queue_* when a
+// NATS URL is configured. It is metrics-only, so a failure is logged, not fatal.
+func initQueueStats(ctx context.Context, server *VanadisServer, natsURL string, newBus func(context.Context, string) (queueStatsBus, error)) func() {
+	if natsURL == "" {
+		return func() {}
+	}
+	bus, err := newBus(ctx, natsURL)
+	if err != nil {
+		log.Printf("[vanadis] queue metrics disabled: %v", err)
+		return func() {}
+	}
+	server.queueStats = bus
+	log.Println("[vanadis] JetStream queue metrics initialized")
+	return func() {
+		if err := bus.Close(); err != nil {
+			log.Printf("[vanadis] JetStream close error: %v", err)
+		}
+	}
+}
+
+func runServer(ctx context.Context, cfg Config, restateCfg RestateConfig, onReady func(addr string)) error {
+	server := NewVanadisServer(cfg, restateCfg, nil, nil)
 	var cleanupDB func(context.Context)
 	if cfg.PostgresURL != "" {
 		cleanup, err := initPostgres(ctx, server, cfg.PostgresURL)
@@ -166,6 +196,8 @@ func runServer(ctx context.Context, cfg Config, onReady func(addr string)) error
 		cleanupDB = cleanup
 		log.Println("[vanadis] PostgreSQL store initialized")
 	}
+	closeQueueStats := initQueueStats(ctx, server, cfg.NATSURL, newQueueStatsBusFn)
+	defer closeQueueStats()
 
 	var lc net.ListenConfig
 	ln, err := lc.Listen(ctx, "tcp", ":"+cfg.Port)
@@ -175,7 +207,7 @@ func runServer(ctx context.Context, cfg Config, onReady func(addr string)) error
 		}
 		return fmt.Errorf("listening on port %s: %w", cfg.Port, err)
 	}
-	httpServer := &http.Server{Handler: server.Routes(), ReadTimeout: 15 * time.Second, WriteTimeout: 15 * time.Second, IdleTimeout: 60 * time.Second}
+	httpServer := &http.Server{Handler: server.Routes(), ReadTimeout: 15 * time.Second, WriteTimeout: 35 * time.Second, IdleTimeout: 60 * time.Second}
 	if onReady != nil {
 		onReady(ln.Addr().String())
 	}
@@ -205,5 +237,9 @@ func runServer(ctx context.Context, cfg Config, onReady func(addr string)) error
 	return runErr
 }
 
-// RunApp runs the Vanadis orchestrator application until the context is canceled.
-func RunApp(ctx context.Context, cfg Config) error { return runServer(ctx, cfg, nil) }
+// RunApp runs the Vanadis orchestrator application until the context is
+// canceled. It is the only place that resolves Restate config from
+// CONFIG_PATH and its env overrides.
+func RunApp(ctx context.Context, cfg Config) error {
+	return runServer(ctx, cfg, LoadRestateConfig(os.Getenv("CONFIG_PATH")), nil)
+}

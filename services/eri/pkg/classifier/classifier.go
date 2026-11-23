@@ -867,8 +867,7 @@ func (c *Classifier) ClassifyBurst(ctx context.Context, targetBurst []db.Message
 
 // CleanThreadTitle cleans and formats raw LLM output for use as a Discord thread title.
 func CleanThreadTitle(raw string) string {
-	cleaned := sanitizer.SanitizeString(raw)
-	cleaned = sanitizer.SanitizeMentions(cleaned)
+	cleaned := sanitizer.SanitizeMentions(raw)
 	cleaned = strings.ReplaceAll(cleaned, "`", "")
 	cleaned = strings.TrimSpace(cleaned)
 	cleaned = strings.Trim(cleaned, `"'`)

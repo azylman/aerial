@@ -9,6 +9,7 @@ import {
   fetchSchedules,
   fetchStatus,
 } from './api';
+import { raw, stubFetch } from '../test/fetch';
 
 describe('apiBase', () => {
   it.each([
@@ -24,12 +25,6 @@ describe('apiBase', () => {
     expect(apiBase(pathname)).toBe(want);
   });
 });
-
-function stubFetch(status: number, body: string): ReturnType<typeof vi.fn> {
-  const fn = vi.fn(async () => new Response(body, { status, headers: { 'Content-Type': 'application/json' } }));
-  vi.stubGlobal('fetch', fn);
-  return fn;
-}
 
 afterEach(() => {
   vi.unstubAllGlobals();
@@ -66,7 +61,7 @@ describe('typed fetchers', () => {
     { name: 'fetchBuilds with agent', fetcher: 'fetchBuilds' as const, pathname: '/console/next/builds', agent: 'agent-beta', wantURL: '/console/api/builds?agent=agent-beta' },
   ])('$name requests $wantURL', async ({ fetcher, pathname, agent, wantURL }) => {
     window.history.replaceState(null, '', pathname);
-    const fetchMock = stubFetch(200, OK_BODY);
+    const fetchMock = stubFetch(() => raw(200, OK_BODY));
     const controller = new AbortController();
 
     await expect(FETCHERS[fetcher](controller.signal, agent)).resolves.toEqual({ status: 'ok' });
@@ -78,7 +73,7 @@ describe('typed fetchers', () => {
     { id: 'a/b c', wantURL: '/console/api/builds/a%2Fb%20c' },
   ])('fetchBuildDetail($id) requests $wantURL', async ({ id, wantURL }) => {
     window.history.replaceState(null, '', '/console/next/');
-    const fetchMock = stubFetch(200, OK_BODY);
+    const fetchMock = stubFetch(() => raw(200, OK_BODY));
     const controller = new AbortController();
 
     await expect(fetchBuildDetail(id, controller.signal)).resolves.toEqual({ status: 'ok' });
@@ -93,7 +88,7 @@ describe('typed fetchers', () => {
     { status: 500, body: 'null', wantMessage: 'HTTP 500' },
     { status: 405, body: '{"error":42}', wantMessage: 'HTTP 405' },
   ])('non-2xx $status rejects with ApiError "$wantMessage"', async ({ status, body, wantMessage }) => {
-    stubFetch(status, body);
+    stubFetch(() => raw(status, body));
 
     const err: unknown = await fetchBuildDetail('x', new AbortController().signal).catch((e: unknown) => e);
     expect(err).toBeInstanceOf(ApiError);
@@ -102,13 +97,10 @@ describe('typed fetchers', () => {
 
   it('propagates aborts without wrapping', async () => {
     const controller = new AbortController();
-    vi.stubGlobal(
-      'fetch',
-      vi.fn(async (_url: string, init: RequestInit) => {
-        init.signal?.throwIfAborted();
-        return new Response(OK_BODY);
-      }),
-    );
+    stubFetch(async (_url, init) => {
+      init?.signal?.throwIfAborted();
+      return new Response(OK_BODY);
+    });
     controller.abort();
 
     const err: unknown = await fetchStatus(controller.signal).catch((e: unknown) => e);

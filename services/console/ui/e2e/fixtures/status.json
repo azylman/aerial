@@ -448,47 +448,6 @@
       "is_custom": true
     }
   ],
-  "git_sync": {
-    "status": "lagging",
-    "max_lag_seconds": 75,
-    "last_sync_time": "2026-11-08T11:58:45.000Z",
-    "repos": {
-      "aerial": {
-        "repo": "aerial",
-        "github_repo": "azylman/aerial",
-        "disk_commit": "a1b2c3d",
-        "disk_commit_time": "2026-11-08T11:53:20.000Z",
-        "remote_commit": "b2c3d4e",
-        "remote_commit_time": "2026-11-08T11:54:35.000Z",
-        "time_lag_seconds": 75,
-        "sync_status": "lagging",
-        "last_sync_time": "2026-11-08T11:58:45.000Z"
-      },
-      "aerial-config": {
-        "repo": "aerial-config",
-        "github_repo": "azylman/aerial-config",
-        "disk_commit": "f607182",
-        "disk_commit_time": "2026-11-08T10:00:00.000Z",
-        "remote_commit": "f607182",
-        "remote_commit_time": "2026-11-08T10:00:00.000Z",
-        "time_lag_seconds": 0,
-        "sync_status": "synced",
-        "last_sync_time": "2026-11-08T11:59:50.000Z"
-      }
-    },
-    "reconciliation": {
-      "active": true,
-      "state": "pulling",
-      "stage": "pulling",
-      "trigger": "image_poll",
-      "target_services": [
-        "console"
-      ],
-      "commit_sha": "a1b2c3d",
-      "started_at": "2026-11-08T11:59:30.000Z",
-      "completed_at": "0001-01-01T00:00:00Z"
-    }
-  },
   "ongoing_deploy": "console",
   "is_deploying": true
 }

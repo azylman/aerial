@@ -12,10 +12,10 @@ import (
 	"time"
 
 	"github.com/bwmarrin/discordgo"
-	"github.com/google/uuid"
 
 	"github.com/azylman/aerial/services/eri/pkg/config"
 	"github.com/azylman/aerial/services/eri/pkg/db"
+	"github.com/azylman/aerial/services/eri/pkg/delivery"
 	"github.com/azylman/aerial/services/eri/pkg/metrics"
 	"github.com/azylman/aerial/services/eri/pkg/queue"
 )
@@ -29,17 +29,13 @@ var (
 )
 
 func (r *Router) handleQuota(s *discordgo.Session, i *discordgo.InteractionCreate) {
-	var groups []metrics.QuotaGroup
-	var updatedAt time.Time
+	var snapshot metrics.QuotaSnapshot
 	if r.deps.QuotaProvider != nil {
-		groups = r.deps.QuotaProvider()
+		snapshot = r.deps.QuotaProvider()
 	} else {
-		groups = metrics.LatestQuotaGroups()
-		updatedAt = metrics.LatestQuotaUpdatedAt()
+		snapshot = metrics.LatestQuotaSnapshot()
 	}
-	if r.deps.QuotaTimeProvider != nil {
-		updatedAt = r.deps.QuotaTimeProvider()
-	}
+	groups, updatedAt := snapshot.Groups, snapshot.UpdatedAt
 	var lines []string
 	now := time.Now().UTC()
 	for _, g := range groups {
@@ -67,7 +63,7 @@ func (r *Router) handleQuota(s *discordgo.Session, i *discordgo.InteractionCreat
 	}
 	if err := s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
 		Type: discordgo.InteractionResponseChannelMessageWithSource,
-		Data: &discordgo.InteractionResponseData{Content: content, Flags: discordgo.MessageFlagsEphemeral},
+		Data: &discordgo.InteractionResponseData{Content: delivery.RedactOutbound(content), Flags: discordgo.MessageFlagsEphemeral},
 	}); err != nil {
 		log.Printf("[Interactions] Failed to respond to /quota: %v", err)
 	}
@@ -86,6 +82,7 @@ func (r *Router) handleStatus(ctx context.Context, s *discordgo.Session, i *disc
 		"**Runtime**: %s\n**Deployment**: %s\n**Memory**: %d facts recorded • *Latest: %s*\n**Next Action**: %s",
 		runtimeStr, deployStr, factCount, latestFactStr, nextActionStr,
 	)
+	content = delivery.RedactOutbound(content)
 
 	if err := s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
 		Type: discordgo.InteractionResponseChannelMessageWithSource,
@@ -249,97 +246,54 @@ func resolveNextScheduleAction(ctx context.Context, explicitHaroURL string) stri
 	return noScheduleAction
 }
 
-func (r *Router) handleRotate(ctx context.Context, s *discordgo.Session, i *discordgo.InteractionCreate, data discordgo.ApplicationCommandInteractionData) {
+func (r *Router) handleInterrupt(ctx context.Context, s *discordgo.Session, i *discordgo.InteractionCreate, _ discordgo.ApplicationCommandInteractionData) {
+	targetThreadID := i.ChannelID
+
+	// Defer first: Discord's 3s window is shorter than a Restate round-trip can take.
 	if err := s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
 		Type: discordgo.InteractionResponseDeferredChannelMessageWithSource,
 		Data: &discordgo.InteractionResponseData{
 			Flags: discordgo.MessageFlagsEphemeral,
 		},
 	}); err != nil {
-		log.Printf("[Interactions] Failed to defer /rotate response: %v", err)
+		log.Printf("[Interactions] Failed to defer /interrupt: %v", err)
 		return
 	}
 
-	bare := getBoolOption(data.Options, "bare", false)
-	topic := getStringOption(data.Options, "topic", "")
-	targetThreadID := i.ChannelID
-
-	newSessionID := uuid.New().String()
 	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
 
-	if r.deps.Store != nil {
-		if err := r.deps.Store.RotateSessionID(ctx, targetThreadID, newSessionID); err != nil {
-			log.Printf("[Interactions] Warning: RotateSessionID failed in DB for %s: %v", targetThreadID, err)
-		}
-	}
-
-	r.closeThreadProcesses(targetThreadID, "rotate")
-
-	msg := fmt.Sprintf("🔄 Session rotated for <#%s>. Fresh context initialized (`%s`).", targetThreadID, newSessionID[:8])
-	if bare {
-		msg = fmt.Sprintf("🧹 Bare session wipe complete for <#%s>. Context reset with zero history (`%s`).", targetThreadID, newSessionID[:8])
-	}
-	if topic != "" {
-		msg += fmt.Sprintf(" Initial topic focus: %q.", topic)
-	}
-
-	if _, err := s.InteractionResponseEdit(i.Interaction, &discordgo.WebhookEdit{
-		Content: &msg,
-	}); err != nil {
-		log.Printf("[Interactions] Failed to edit /rotate response: %v", err)
+	reply := r.cancelThreadTurn(ctx, targetThreadID)
+	if _, err := s.InteractionResponseEdit(i.Interaction, &discordgo.WebhookEdit{Content: &reply}); err != nil {
+		log.Printf("[Interactions] Failed to edit /interrupt response: %v", err)
 	}
 }
 
-func (r *Router) closeThreadProcesses(threadID, reason string) {
-	if pool := r.getPool(); pool != nil {
-		pool.CloseThreadProcesses(threadID, reason)
+func (r *Router) cancelThreadTurn(ctx context.Context, threadID string) string {
+	if r.deps.TurnCancellerProvider == nil {
+		return "interrupt unavailable"
 	}
+	canceller := r.deps.TurnCancellerProvider()
+	if canceller == nil {
+		return "interrupt unavailable"
+	}
+	resp, err := canceller.CancelThreadTurn(ctx, threadID, queue.CancelTurnRequest{Reason: "cancelled by operator via /interrupt"})
+	if err != nil {
+		return fmt.Sprintf("Interrupt failed: %v", err)
+	}
+	return formatInterruptReply(threadID, resp)
 }
 
-func (r *Router) drainThreadPendingMessages(ctx context.Context, targetThreadID string) {
-	queue.DrainThreadPendingMessages(ctx, r.deps.Store, targetThreadID, queue.InterruptedByOperatorReason)
-}
-
-func (r *Router) handleInterrupt(ctx context.Context, s *discordgo.Session, i *discordgo.InteractionCreate, data discordgo.ApplicationCommandInteractionData) {
-	drainQueue := getBoolOption(data.Options, "drain_queue", true)
-	reset := getBoolOption(data.Options, "reset", false)
-	targetThreadID := i.ChannelID
-
-	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
-	defer cancel()
-
-	pool := r.getPool()
-	if pool != nil {
-		pool.InterruptThread(ctx, targetThreadID, drainQueue, reset)
-	}
-	if pool == nil || pool.Store() == nil {
-		if drainQueue {
-			r.drainThreadPendingMessages(ctx, targetThreadID)
-		}
-		if reset && r.deps.Store != nil {
-			if err := r.deps.Store.RotateSessionID(ctx, targetThreadID, uuid.New().String()); err != nil {
-				log.Printf("[Interactions] Warning: failed to rotate session ID on interrupt: %v", err)
-			}
-		}
-	}
-
-	reply := fmt.Sprintf("🛑 Interrupted active turn execution for <#%s>. Process group terminated.", targetThreadID)
-	if drainQueue {
-		reply += " Pending message backlog purged."
-	}
-	if reset {
-		reply += " Session rotated."
-	}
-
-	if err := s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
-		Type: discordgo.InteractionResponseChannelMessageWithSource,
-		Data: &discordgo.InteractionResponseData{
-			Content: reply,
-			Flags:   discordgo.MessageFlagsEphemeral,
-		},
-	}); err != nil {
-		log.Printf("[Interactions] Failed to respond to /interrupt: %v", err)
+func formatInterruptReply(threadID string, resp queue.CancelTurnResponse) string {
+	switch {
+	case resp.CancelledActiveTurn && resp.CancelledCount > 0:
+		return fmt.Sprintf("🛑 Interrupted the active turn in <#%s> and dropped %d queued messages", threadID, resp.CancelledCount)
+	case resp.CancelledActiveTurn:
+		return fmt.Sprintf("🛑 Interrupted the active turn in <#%s>", threadID)
+	case resp.CancelledCount > 0:
+		return fmt.Sprintf("No active turn in <#%s>; dropped %d queued messages.", threadID, resp.CancelledCount)
+	default:
+		return fmt.Sprintf("Nothing was running in <#%s>.", threadID)
 	}
 }
 
@@ -449,7 +403,7 @@ func (r *Router) trackDeployProgress(ctx context.Context, s *discordgo.Session, 
 	}
 
 	if err := r.applyChannelPolicyUpdate(pollerCtx, channelID, key, val); err != nil {
-		errMsg := fmt.Sprintf("🚨 Failed to apply GitOps update for <#%s>: %v", channelID, err)
+		errMsg := delivery.RedactOutbound(fmt.Sprintf("🚨 Failed to apply GitOps update for <#%s>: %v", channelID, err))
 		if _, editErr := s.InteractionResponseEdit(interaction, &discordgo.WebhookEdit{Content: &errMsg}); editErr != nil {
 			log.Printf("[Interactions] Failed to edit deploy progress error: %v", editErr)
 		}

@@ -20,7 +20,7 @@ import (
 
 	"github.com/jackc/pgx/v5"
 
-	"github.com/azylman/aerial/services/vanadis-restate/internal/dag"
+	"github.com/azylman/aerial/pkg/buildplan"
 	"github.com/azylman/aerial/services/vanadis-restate/internal/model"
 )
 
@@ -57,7 +57,7 @@ func (s *Store) RetryActionChunk(ctx context.Context, req RetryActionChunkReques
 		if c.StallNudges >= 2147483647 {
 			return nil, fmt.Errorf("%w: generation exhausted", ErrBuildConflict)
 		}
-		const reset = `UPDATE vanadis_chunks SET instructions = COALESCE($2, instructions), status = 'pending', stall_nudges = stall_nudges + 1, started_at = NULL, completed_at = NULL, ci_fail_count = 0, ci_checks = '{}'::jsonb, rollout_state = '{}'::jsonb, banner = '', merge_awakeable_id = '', deploy_awakeable_id = '', updated_at = CURRENT_TIMESTAMP WHERE id = $1;`
+		const reset = `UPDATE vanadis_chunks SET instructions = COALESCE($2, instructions), status = 'pending', stall_nudges = stall_nudges + 1, repo = '', pr_number = NULL, started_at = NULL, completed_at = NULL, ci_fail_count = 0, ci_checks = '{}'::jsonb, rollout_state = '{}'::jsonb, banner = '', updated_at = CURRENT_TIMESTAMP WHERE id = $1;`
 		if _, err := tx.Exec(ctx, reset, c.ID, req.ReplacementInstructions); err != nil {
 			return nil, err
 		}
@@ -73,7 +73,7 @@ func (s *Store) RetryActionChunk(ctx context.Context, req RetryActionChunkReques
 }
 
 func retryActionGraphReady(c model.VanadisChunk, chunks []model.VanadisChunk) bool {
-	if err := dag.CheckChunkDependenciesReady(c, chunks); err != nil {
+	if err := buildplan.CheckChunkDependenciesReady(c, chunks); err != nil {
 		return false
 	}
 	descendants := map[string]bool{c.ID: true}
@@ -92,14 +92,10 @@ func retryActionGraphReady(c model.VanadisChunk, chunks []model.VanadisChunk) bo
 			}
 		}
 	}
+	// Siblings outside the chunk's descendants may keep running: a failed
+	// chunk blocks only its dependents.
 	for _, other := range chunks {
-		if other.ID == c.ID {
-			continue
-		}
-		if other.Status != statusCompleted && other.Status != statusPending {
-			return false
-		}
-		if descendants[other.ID] && other.Status != statusPending {
+		if other.ID != c.ID && descendants[other.ID] && other.Status != statusPending {
 			return false
 		}
 	}
@@ -121,13 +117,13 @@ func retryActionCandidate(b model.VanadisBuild, chunks []model.VanadisChunk, req
 	conflict := func() (model.VanadisChunk, bool, error) {
 		return model.VanadisChunk{}, false, fmt.Errorf("%w: action retry preconditions changed", ErrBuildConflict)
 	}
-	if c.BuildID != req.BuildID || c.Mode != chunkModeAction || c.PRNumber != 0 || c.StallNudges < 0 {
+	if c.BuildID != req.BuildID || c.Mode != chunkModeAction || c.StallNudges < 0 {
 		return conflict()
 	}
 	previous := c
 	previous.StallNudges--
-	replay := c.StallNudges > 0 && req.ExpectedDispatchID == model.ActionDispatchID(previous) && b.Status == statusRunning && (c.Status == statusPending || c.Status == statusRunning)
-	if !replay && (b.Status != statusFailed || c.Status != statusFailed || req.ExpectedDispatchID != model.ActionDispatchID(c)) {
+	replay := c.StallNudges > 0 && req.ExpectedDispatchID == model.ActionDispatchID(previous) && buildActive(b.Status) && (c.Status == statusPending || c.Status == statusRunning)
+	if !replay && (!buildActive(b.Status) || c.Status != statusFailed || req.ExpectedDispatchID != model.ActionDispatchID(c)) {
 		return conflict()
 	}
 	if !replay && !retryInstructionsMatch(req, c) {

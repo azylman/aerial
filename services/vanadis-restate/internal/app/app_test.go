@@ -7,7 +7,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
-	"strings"
+	"slices"
 	"testing"
 	"time"
 
@@ -15,210 +15,172 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/azylman/aerial/pkg/httpkit"
+	"github.com/azylman/aerial/pkg/pgutil"
 	"github.com/azylman/aerial/pkg/pubsub"
+	"github.com/azylman/aerial/pkg/pubsubtest"
 	"github.com/azylman/aerial/services/vanadis-restate/internal/build"
+	"github.com/azylman/aerial/services/vanadis-restate/internal/prstate"
 	"github.com/azylman/aerial/services/vanadis-restate/internal/router"
-	"github.com/azylman/aerial/services/vanadis-restate/internal/store"
 	"github.com/azylman/aerial/services/vanadis-restate/internal/widget"
 )
 
-func TestConfig_LoadConfigFromEnv(t *testing.T) {
-	t.Setenv("RESTATE_PORT", "9999")
-	t.Setenv("HEALTH_PORT", "4444")
-	t.Setenv("VANADIS_URL", "http://test-vanadis:4025/")
-	t.Setenv("RESTATE_INGRESS_URL", "http://test-restate:8080/")
-	t.Setenv("DISCORD_TOKEN", "test-token")
-	cfg := LoadConfigFromEnv()
-	assert.Equal(t, "9999", cfg.RestatePort)
-	assert.Equal(t, "4444", cfg.HealthPort)
-	assert.Equal(t, "http://test-vanadis:4025", cfg.VanadisURL)
-	assert.Equal(t, "http://test-restate:8080", cfg.RestateIngressURL)
-	assert.Equal(t, "test-token", cfg.DiscordToken)
-
-	t.Setenv("RESTATE_PORT", "")
-	t.Setenv("PORT", "9191")
-	t.Setenv("HEALTH_PORT", "")
-	t.Setenv("VANADIS_URL", "")
-	t.Setenv("RESTATE_INGRESS_URL", "")
-	t.Setenv("DISCORD_TOKEN", "")
-	cfgDefault := LoadConfigFromEnv()
-	assert.Equal(t, "9191", cfgDefault.RestatePort)
-	assert.Equal(t, "4026", cfgDefault.HealthPort)
-	assert.Equal(t, "http://vanadis.aerial:4025", cfgDefault.VanadisURL)
-	assert.Equal(t, "http://restate.aerial:8080", cfgDefault.RestateIngressURL)
-	assert.Equal(t, "", cfgDefault.DiscordToken)
-
-	t.Setenv("PORT", "")
-	cfgFallback := LoadConfigFromEnv()
-	assert.Equal(t, "9080", cfgFallback.RestatePort)
+// runAppClosedAddr returns a loopback address nothing listens on, so a dial
+// fails fast with connection refused and never leaves the host.
+func runAppClosedAddr(t *testing.T) string {
+	t.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	addr := ln.Addr().String()
+	require.NoError(t, ln.Close())
+	return addr
 }
 
-func TestHealthEndpoints(t *testing.T) {
-	origMeta, origCounters := httpkit.WriteMetaDirFn, httpkit.WriteCountersDirFn
-	t.Cleanup(func() {
-		httpkit.WriteMetaDirFn, httpkit.WriteCountersDirFn = origMeta, origCounters
-	})
-	httpkit.WriteMetaDirFn = func(string) error { return nil }
-	httpkit.WriteCountersDirFn = func(string) error { return nil }
-
-	mux := SetupHealthMux()
-
-	for _, path := range []string{"/health", "/healthz", "/metrics", "/debug/coverage/flush"} {
-		req := httptest.NewRequest(http.MethodGet, path, http.NoBody)
-		rec := httptest.NewRecorder()
-		mux.ServeHTTP(rec, req)
-		assert.Equal(t, http.StatusOK, rec.Code, "endpoint %s should return 200 OK", path)
-	}
+// runAppFreePort returns a loopback port that was free a moment ago.
+func runAppFreePort(t *testing.T) string {
+	t.Helper()
+	_, port, err := net.SplitHostPort(runAppClosedAddr(t))
+	require.NoError(t, err)
+	return port
 }
 
-func TestRunApp_Shutdown(t *testing.T) {
-	origMeta, origCounters := httpkit.WriteMetaDirFn, httpkit.WriteCountersDirFn
-	origPing, origBus := pingPgxPoolFn, newBusFn
-	t.Cleanup(func() {
-		httpkit.WriteMetaDirFn, httpkit.WriteCountersDirFn = origMeta, origCounters
-		pingPgxPoolFn, newBusFn = origPing, origBus
-	})
-	httpkit.WriteMetaDirFn = func(string) error { return nil }
-	httpkit.WriteCountersDirFn = func(string) error { return nil }
-	pingPgxPoolFn = func(context.Context, *pgxpool.Pool) error { return nil }
-	newBusFn = func(context.Context, string) (pubsub.Bus, error) { return pubsub.NewMemoryBus(), nil }
-
-	// Find two free ports for health and restate
-	lHealth, err := net.Listen("tcp", "127.0.0.1:0")
-	require.NoError(t, err)
-	healthPort := strings.TrimPrefix(lHealth.Addr().String(), "127.0.0.1:")
-	_ = lHealth.Close()
-
-	lRestate, err := net.Listen("tcp", "127.0.0.1:0")
-	require.NoError(t, err)
-	restatePort := strings.TrimPrefix(lRestate.Addr().String(), "127.0.0.1:")
-	_ = lRestate.Close()
-
-	cfg := Config{
-		HealthPort:   healthPort,
-		RestatePort:  restatePort,
-		VanadisURL:   "http://127.0.0.1:4025",
-		PostgresURL:  "postgres://mock:mock@localhost:5432/mock",
-		NATSURL:      "nats://mock:4222",
-		DiscordToken: "test-token",
-	}
-
-	ctx, cancel := context.WithCancel(context.Background())
-	appDone := make(chan error, 1)
-	go func() {
-		appDone <- RunApp(ctx, cfg)
-	}()
-
-	// Wait for health endpoint to become ready
-	healthURL := "http://127.0.0.1:" + healthPort + "/healthz"
+// runAppWaitHealthy blocks until the health server on port answers /healthz.
+func runAppWaitHealthy(t *testing.T, port string) {
+	t.Helper()
 	require.Eventually(t, func() bool {
-		resp, hErr := http.Get(healthURL)
-		if hErr == nil && resp.StatusCode == http.StatusOK {
-			_ = resp.Body.Close()
-			return true
+		resp, err := http.Get("http://127.0.0.1:" + port + "/healthz")
+		if err != nil {
+			return false
 		}
-		if resp != nil {
-			_ = resp.Body.Close()
-		}
-		return false
-	}, 3*time.Second, 50*time.Millisecond)
-
-	// Cancel context and verify shutdown
-	cancel()
-	select {
-	case err := <-appDone:
-		assert.NoError(t, err)
-	case <-time.After(5 * time.Second):
-		t.Fatal("RunApp failed to stop within 5s")
-	}
+		_ = resp.Body.Close()
+		return resp.StatusCode == http.StatusOK
+	}, 3*time.Second, 20*time.Millisecond)
 }
 
-func TestRunApp_ErrorCases(t *testing.T) {
-	origMeta, origCounters := httpkit.WriteMetaDirFn, httpkit.WriteCountersDirFn
-	origPing, origBus := pingPgxPoolFn, newBusFn
-	t.Cleanup(func() {
-		httpkit.WriteMetaDirFn, httpkit.WriteCountersDirFn = origMeta, origCounters
-		pingPgxPoolFn, newBusFn = origPing, origBus
-	})
-	httpkit.WriteMetaDirFn = func(string) error { return nil }
-	httpkit.WriteCountersDirFn = func(string) error { return nil }
-	pingPgxPoolFn = func(context.Context, *pgxpool.Pool) error { return nil }
-	newBusFn = func(context.Context, string) (pubsub.Bus, error) { return pubsub.NewMemoryBus(), nil }
-
-	// 1. Invalid health port causes listen error
-	errHealth := RunApp(context.Background(), Config{
-		HealthPort:  "invalid-port",
-		RestatePort: "9080",
-		VanadisURL:  "http://vanadis.aerial:4025",
-		PostgresURL: "postgres://mock:mock@localhost:5432/mock",
-		NATSURL:     "nats://mock:4222",
-	})
-	assert.Error(t, errHealth)
-
-	// 2. Invalid Restate port causes server error
-	lHealth, err := net.Listen("tcp", "127.0.0.1:0")
-	require.NoError(t, err)
-	healthPort := strings.TrimPrefix(lHealth.Addr().String(), "127.0.0.1:")
-	_ = lHealth.Close()
-
-	errRestate := RunApp(context.Background(), Config{
-		HealthPort:  healthPort,
-		RestatePort: "invalid-port",
-		VanadisURL:  "http://vanadis.aerial:4025",
-		PostgresURL: "postgres://mock:mock@localhost:5432/mock",
-		NATSURL:     "nats://mock:4222",
-	})
-	assert.Error(t, errRestate)
-
-	// 3. Widget deliverer constructor error logs warning without failing RunApp
-	origDeliverer := newDiscordWidgetDelivererFn
-	defer func() { newDiscordWidgetDelivererFn = origDeliverer }()
-	newDiscordWidgetDelivererFn = func(string, ...string) (*widget.DiscordWidgetDeliverer, error) {
-		return nil, errors.New("mock deliverer fail")
+// runAppSwapSeams installs the RunApp package seams for one row and restores
+// them on cleanup. It returns the memory bus behind bus (nil without one).
+func runAppSwapSeams(t *testing.T, poolErr error, bus *pubsubtest.FaultBus, busErr, delivererErr error) pubsub.Bus {
+	t.Helper()
+	origPool, origBus, origDeliverer := newPoolFn, newBusFn, newDiscordWidgetDelivererFn
+	t.Cleanup(func() { newPoolFn, newBusFn, newDiscordWidgetDelivererFn = origPool, origBus, origDeliverer })
+	newPoolFn = func(ctx context.Context, dsn string, opts pgutil.PoolOptions) (*pgxpool.Pool, error) {
+		if poolErr != nil {
+			return nil, poolErr
+		}
+		opts.Ping, opts.MinConns = false, 0
+		return pgutil.NewPool(ctx, dsn, opts)
 	}
+	var mem pubsub.Bus
+	if bus != nil {
+		mem = pubsub.NewMemoryBus()
+		bus.Bus = mem
+	}
+	if bus != nil || busErr != nil {
+		newBusFn = func(context.Context, string) (pubsub.Bus, error) {
+			if busErr != nil {
+				return nil, busErr
+			}
+			return bus, nil
+		}
+	}
+	if delivererErr != nil {
+		newDiscordWidgetDelivererFn = func(string, string, string, []string, string) (*widget.DiscordWidgetDeliverer, error) {
+			return nil, delivererErr
+		}
+	}
+	return mem
+}
 
-	lHealth2, err := net.Listen("tcp", "127.0.0.1:0")
-	require.NoError(t, err)
-	healthPort2 := strings.TrimPrefix(lHealth2.Addr().String(), "127.0.0.1:")
-	_ = lHealth2.Close()
+// runAppRequireErr asserts err is nil when want is empty, else that its text
+// contains want.
+func runAppRequireErr(t *testing.T, err error, want string) {
+	t.Helper()
+	if want == "" {
+		require.NoError(t, err)
+		return
+	}
+	require.ErrorContains(t, err, want)
+}
 
-	lRestate2, err := net.Listen("tcp", "127.0.0.1:0")
-	require.NoError(t, err)
-	restatePort2 := strings.TrimPrefix(lRestate2.Addr().String(), "127.0.0.1:")
-	_ = lRestate2.Close()
+// runAppCfg is a RunApp config with the fields the TestRunApp rows vary.
+func runAppCfg(pgURL, owner, natsURL, healthPort, restatePort, discordToken string) Config {
+	return Config{PostgresURL: pgURL, GitHubOwner: owner, NATSURL: natsURL, HealthPort: healthPort, RestatePort: restatePort, DiscordToken: discordToken, VanadisURL: "http://127.0.0.1:4025"}
+}
 
-	ctxDeliverer, cancelDeliverer := context.WithCancel(context.Background())
-	delivererDone := make(chan error, 1)
-	go func() {
-		delivererDone <- RunApp(ctxDeliverer, Config{
-			HealthPort:  healthPort2,
-			RestatePort: restatePort2,
-			VanadisURL:  "http://127.0.0.1:4025",
-			PostgresURL: "postgres://mock:mock@localhost:5432/mock",
-			NATSURL:     "nats://mock:4222",
+// TestRunApp drives RunApp through every startup branch. Rows run serially
+// because they swap the package seams newPoolFn, newBusFn and
+// newDiscordWidgetDelivererFn. newPoolFn always returns a lazy pool
+// (no ping, no min conns) on a closed loopback port, so no row dials
+// Postgres. newBusFn is swapped only when the row sets bus or busErr; the
+// remaining row dials NATS on a closed loopback port through the default
+// dialer.
+func TestRunApp(t *testing.T) {
+	closed := runAppClosedAddr(t)
+	pgURL := "postgres://user:pass@" + closed + "/db"
+	base := runAppCfg(pgURL, "acme", "nats://bus.test:4222", "invalid-port", "", "")
+	readyHealth, readyRestate := runAppFreePort(t), runAppFreePort(t)
+	warnHealth, warnRestate := runAppFreePort(t), runAppFreePort(t)
+	startHealth := runAppFreePort(t)
+	tests := []struct {
+		name            string
+		cfg             Config
+		poolErr         error
+		bus             *pubsubtest.FaultBus
+		busErr          error
+		delivererErr    error
+		cancelWhenReady bool
+		wantErr         string
+	}{
+		{name: "missing postgres url fails first", cfg: Config{NATSURL: "nats://bus.test:4222"}, wantErr: "postgres_url is required"},
+		{
+			name: "blank github owner fails before connecting", cfg: runAppCfg(pgURL, "  ", "nats://bus.test:4222", "invalid-port", "", ""),
+			wantErr: "github_owner is required (vanadis_restate.github_owner in the vanadis service config)",
+		},
+		{name: "postgres pool error", cfg: base, poolErr: errors.New("parse postgres url: bad"), wantErr: "connect to postgres: parse postgres url: bad"},
+		{name: "missing nats url", cfg: runAppCfg(pgURL, "acme", "", "invalid-port", "", ""), wantErr: "nats_url is required"},
+		{name: "nats connect failure", cfg: base, busErr: errors.New("nats down"), wantErr: "connect to nats: nats down"},
+		{name: "default dialer fails fast on unreachable nats", cfg: runAppCfg(pgURL, "acme", "nats://"+closed, "invalid-port", "", ""), wantErr: "connect to nats: "},
+		{
+			name: "jetstream verification failure closes bus", cfg: base, bus: &pubsubtest.FaultBus{EnsureErr: errors.New("jetstream unavailable")},
+			wantErr: "verify nats jetstream: jetstream unavailable",
+		},
+		{
+			name: "health listen failure still closes bus", cfg: base, bus: &pubsubtest.FaultBus{CloseErr: errors.New("close failed")},
+			wantErr: "listening on health port invalid-port: ",
+		},
+		{
+			name: "restate start failure surfaces", cfg: runAppCfg(pgURL, "acme", "nats://bus.test:4222", startHealth, "invalid-port", ""), bus: &pubsubtest.FaultBus{},
+			wantErr: "invalid-port",
+		},
+		{
+			name: "cancel after ready shuts down cleanly with discord auth", cfg: runAppCfg(pgURL, "acme", "nats://bus.test:4222", readyHealth, readyRestate, "test-token"),
+			bus: &pubsubtest.FaultBus{}, cancelWhenReady: true,
+		},
+		{
+			name: "widget deliverer failure only warns", cfg: runAppCfg(pgURL, "acme", "nats://bus.test:4222", warnHealth, warnRestate, ""), bus: &pubsubtest.FaultBus{},
+			delivererErr: errors.New("deliverer down"), cancelWhenReady: true,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			mem := runAppSwapSeams(t, tc.poolErr, tc.bus, tc.busErr, tc.delivererErr)
+			ctx, cancel := context.WithCancel(t.Context())
+			defer cancel()
+			done := make(chan error, 1)
+			go func() { done <- RunApp(ctx, tc.cfg) }()
+			if tc.cancelWhenReady {
+				runAppWaitHealthy(t, tc.cfg.HealthPort)
+				cancel()
+			}
+			select {
+			case err := <-done:
+				runAppRequireErr(t, err, tc.wantErr)
+			case <-time.After(10 * time.Second):
+				t.Fatal("RunApp did not return within 10s")
+			}
+			if tc.bus != nil && tc.bus.CloseErr == nil {
+				assert.EqualError(t, mem.Publish(context.Background(), "probe", "", "x"), "pubsub: memory bus closed", "RunApp must close the bus")
+			}
 		})
-	}()
-
-	healthURL2 := "http://127.0.0.1:" + healthPort2 + "/healthz"
-	require.Eventually(t, func() bool {
-		resp, hErr := http.Get(healthURL2)
-		if hErr == nil && resp.StatusCode == http.StatusOK {
-			_ = resp.Body.Close()
-			return true
-		}
-		if resp != nil {
-			_ = resp.Body.Close()
-		}
-		return false
-	}, 3*time.Second, 50*time.Millisecond)
-
-	cancelDeliverer()
-	select {
-	case err := <-delivererDone:
-		assert.NoError(t, err)
-	case <-time.After(5 * time.Second):
-		t.Fatal("RunApp with deliverer failure failed to stop within 5s")
 	}
 }
 
@@ -226,232 +188,245 @@ func TestRunApp_ErrorCases(t *testing.T) {
 // assembly test decodes: service names with their handler names.
 type discoveryManifest struct {
 	Services []struct {
-		Name     string `json:"name"`
-		Ty       string `json:"ty"`
-		Handlers []struct {
+		Name              string `json:"name"`
+		Ty                string `json:"ty"`
+		InactivityTimeout int    `json:"inactivityTimeout"`
+		AbortTimeout      int    `json:"abortTimeout"`
+		Handlers          []struct {
 			Name string `json:"name"`
 		} `json:"handlers"`
 	} `json:"services"`
 }
 
+// bindPRObjectHandlers and bindRepoObjectHandlers are the complete sorted
+// handler sets the default-agent runner registers (37 and 17).
+var (
+	bindPRObjectHandlers = []string{
+		"DropUntracked", "GetBuildLifecycle", "GetDeployView", "HandleBranchConflict", "HandleBuildMetadata", "HandleCIRecovered",
+		"HandleCheckFailed", "HandleCheckPassed", "HandleCheckRerunRequested", "HandleCheckStatus", "HandleClosed", "HandleCollaboratorAlert", "HandleConflict",
+		"HandleConflictCheck", "HandleConflictResolved", "HandleDeployAttemptFailed",
+		"HandleDeployFailed", "HandleDeployFailureDeadline", "HandleDeployObserved", "HandleDeploySuccess", "HandleHeadRefMissing",
+		"HandleKustomizationRequested", "HandleMainAdvanced", "HandleMerged", "HandleOpened", "HandleReadinessRetry", "HandleReconcileLost", "HandleReopened",
+		"HandleRolloutProgress", "HandleSelfRegistered", "HandleSynchronized", "Register", "RetryEriEffect", "RetryFactEffect", "RetryFluxReconcile",
+		"RetryReadiness",
+	}
+	bindRepoObjectHandlers = []string{
+		"HandleAutoUpdate", "HandleCheckRunBySHA", "HandleFanout", "HandleGitPush", "HandleHeldExpiry", "HandleHeldReplay", "HandleImagePromotion",
+		"HandleImageReadyBySHA", "HandleKustomizationStatus", "HandleMainPush", "HandlePRIndex", "HandlePushBySHA", "HandleRolloutIndex", "HandleUntrackedReconcile",
+		"HandleWorkflowRerun",
+		"HandleWorkflowRunBySHA", "ListRollouts", "ResolvePRBySHA",
+	}
+)
+
 func TestBindRestateServices(t *testing.T) {
 	t.Parallel()
+	prState := map[string][]string{"PRObject": bindPRObjectHandlers, "RepoObject": bindRepoObjectHandlers}
+	expectedTimeouts := map[string][2]int{
+		"Build":       {45000, 15000},
+		"BuildRouter": {45000, 15000},
+	}
 	tests := []struct {
-		name       string
-		agent      string
-		wantBuild  string
-		wantRouter string
-		wantPR     string
-		wantRepo   string
+		name         string
+		agent        string
+		nilDeps      bool
+		wantServices []string
+		wantPRState  map[string][]string
+		wantTimeouts map[string][2]int
 	}{
-		{
-			name:       "default agent binds dark services",
-			agent:      "",
-			wantBuild:  "Build",
-			wantRouter: "BuildRouter",
-			wantPR:     "PRObject",
-			wantRepo:   "RepoObject",
-		},
-		{
-			name:       "scoped agent binds dark services",
-			agent:      "marida",
-			wantBuild:  "Build-marida",
-			wantRouter: "BuildRouter-marida",
-			wantPR:     "PRObject-marida",
-			wantRepo:   "RepoObject-marida",
-		},
+		{name: "empty agent owns pr state", agent: "", wantServices: []string{"Build", "BuildRouter", "PRObject", "RepoObject"}, wantPRState: prState, wantTimeouts: expectedTimeouts},
+		{name: "aerial agent owns pr state", agent: "aerial", wantServices: []string{"Build", "BuildRouter", "PRObject", "RepoObject"}, wantPRState: prState, wantTimeouts: expectedTimeouts},
+		{name: "mixed case aerial owns pr state", agent: " Aerial ", wantServices: []string{"Build", "BuildRouter", "PRObject", "RepoObject"}, wantPRState: prState, wantTimeouts: expectedTimeouts},
+		{name: "sibling agent never binds pr state", agent: "agent-alpha", nilDeps: true, wantServices: []string{"Build", "BuildRouter"}, wantPRState: map[string][]string{}, wantTimeouts: expectedTimeouts},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			restateObj := build.NewBuildObjectWithAgent("http://127.0.0.1:4025", tc.agent, nil)
-			routerSvc := router.NewBuildRouterServiceWithAgent(nil, tc.agent)
-			srv := bindRestateServices(restateObj, routerSvc, tc.agent)
-			require.NotNil(t, srv)
+			gh := prstate.NewGitHubClient(nil, "", "")
+			kube := prstate.NewKubeClient(nil, "", "", "", "")
+			if tc.nilDeps {
+				gh, kube = nil, nil
+			}
+			srv, err := bindRestateServices(tc.agent, build.NewBuildObjectWithAgent("http://127.0.0.1:4025", tc.agent, nil), router.NewBuildRouterServiceWithAgent(nil, tc.agent),
+				prstate.NewSessionEriEffector(nil), prstate.NewBusFactPublisher(nil), gh, kube)
+			require.NoError(t, err)
 			handler, err := srv.Handler()
 			require.NoError(t, err)
 			req := httptest.NewRequest(http.MethodGet, "/discover", http.NoBody)
-			req.Header.Set("Accept", "application/vnd.restate.endpointmanifest.v2+json")
+			req.Header.Set("Accept", "application/vnd.restate.endpointmanifest.v3+json")
 			rec := httptest.NewRecorder()
 			handler(rec, req)
 			require.Equal(t, http.StatusOK, rec.Code)
 			var manifest discoveryManifest
 			require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &manifest))
-			byName := make(map[string]map[string]bool, len(manifest.Services))
-			types := make(map[string]string, len(manifest.Services))
+
+			services := make([]string, 0, len(manifest.Services))
+			handlers := map[string][]string{}
+			gotPRState := map[string][]string{}
+			inactivityTimeouts := map[string]int{}
+			abortTimeouts := map[string]int{}
 			for _, svc := range manifest.Services {
-				handlers := make(map[string]bool, len(svc.Handlers))
+				services = append(services, svc.Name)
+				inactivityTimeouts[svc.Name] = svc.InactivityTimeout
+				abortTimeouts[svc.Name] = svc.AbortTimeout
 				for _, h := range svc.Handlers {
-					handlers[h.Name] = true
+					handlers[svc.Name] = append(handlers[svc.Name], h.Name)
 				}
-				byName[svc.Name] = handlers
-				types[svc.Name] = svc.Ty
+				slices.Sort(handlers[svc.Name])
+				if svc.Name == "PRObject" || svc.Name == "RepoObject" {
+					assert.Equal(t, "VIRTUAL_OBJECT", svc.Ty, svc.Name)
+					gotPRState[svc.Name] = handlers[svc.Name]
+				}
 			}
-			require.Len(t, byName, 4)
-			for _, want := range []string{tc.wantBuild, tc.wantRouter, tc.wantPR, tc.wantRepo} {
-				require.Contains(t, byName, want)
+			slices.Sort(services)
+			assert.Equal(t, tc.wantServices, services)
+			assert.Subset(t, handlers["Build"], []string{"CompleteChunk", "FailChunk"})
+			assert.Equal(t, tc.wantPRState, gotPRState)
+			for svc, timeouts := range tc.wantTimeouts {
+				assert.Equal(t, timeouts[0], inactivityTimeouts[svc], "service %s inactivityTimeout", svc)
+				assert.Equal(t, timeouts[1], abortTimeouts[svc], "service %s abortTimeout", svc)
 			}
-			require.Len(t, byName[tc.wantPR], 16)
-			require.True(t, byName[tc.wantPR]["HandleCheckFailed"])
-			require.True(t, byName[tc.wantPR]["HandleDeploySuccessPublished"])
-			require.True(t, byName[tc.wantPR]["HandleConflictDetected"])
-			require.True(t, byName[tc.wantPR]["HandleConflictPublished"])
-			require.True(t, byName[tc.wantPR]["HandleCIRecovery"])
-			require.Equal(t, "VIRTUAL_OBJECT", types[tc.wantPR])
-			require.Len(t, byName[tc.wantRepo], 4)
-			require.True(t, byName[tc.wantRepo]["ResolvePRBySHA"])
-			require.Equal(t, "VIRTUAL_OBJECT", types[tc.wantRepo])
 		})
 	}
 }
 
-func TestLoadConfigFromEnv_Authoritative(t *testing.T) {
-	t.Setenv("RESTATE_PORT", "9999")
-	t.Setenv("HEALTH_PORT", "8888")
-	t.Setenv("VANADIS_URL", "http://vanadis.local:4025")
-	t.Setenv("DATABASE_URL", "postgres://user:pass@localhost:5432/db")
-	t.Setenv("ERI_URL", "http://eri.local")
-	t.Setenv("RESTATE_INGRESS_URL", "http://restate.local:8080")
-	t.Setenv("NATS_URL", "nats://localhost:4222")
-	t.Setenv("GITHUB_TOKEN", "token-xyz")
-	t.Setenv("DISCORD_TOKEN", "discord-xyz")
-	t.Setenv("SHARE_ROOT", "/tmp/share")
-	t.Setenv("POSTGRES_DB", "")
-
-	cfg := LoadConfigFromEnv()
-	assert.Equal(t, "9999", cfg.RestatePort)
-	assert.Equal(t, "8888", cfg.HealthPort)
-	assert.Equal(t, "http://vanadis.local:4025", cfg.VanadisURL)
-	assert.Equal(t, "postgres://user:pass@localhost:5432/db", cfg.PostgresURL)
-	assert.Equal(t, "http://eri.local", cfg.EriURL)
-	assert.Equal(t, "http://restate.local:8080", cfg.RestateIngressURL)
-	assert.Equal(t, "nats://localhost:4222", cfg.NATSURL)
-	assert.Equal(t, "token-xyz", cfg.GitHubToken)
-	assert.Equal(t, "discord-xyz", cfg.DiscordToken)
-	assert.Equal(t, "/tmp/share", cfg.ShareRoot)
-
-	t.Setenv("DATABASE_URL", "")
-	t.Setenv("POSTGRES_URL", "")
-	t.Setenv("POSTGRES_PASSWORD", "secret-pass")
-	cfgDSN := LoadConfigFromEnv()
-	assert.Equal(t, "postgres://aerial:secret-pass@postgres:5432/aerial?sslmode=disable", cfgDSN.PostgresURL)
-}
-
-func TestRunApp_ContextCancellation(t *testing.T) {
+func TestLoadConfig(t *testing.T) {
 	t.Parallel()
-	ctx, cancel := context.WithCancel(context.Background())
-	cancel() // cancel immediately
-
-	cfg := Config{
-		RestatePort: "0",
-		HealthPort:  "0",
+	defaults := Config{
+		RestatePort:       "9080",
+		HealthPort:        "4026",
+		VanadisURL:        "http://vanadis.aerial:4025",
+		PostgresURL:       "",
+		EriURL:            "http://eri.aerial",
+		RestateIngressURL: "http://restate.aerial:8080",
+		NATSURL:           "nats://nats.aerial:4222",
+		ShareRoot:         "/share",
+		AgentName:         "aerial",
+		ConfigPath:        "/share/aerial-config/config.yaml",
+		ServiceConfigPath: DefaultServiceConfigPath,
 	}
-	err := RunApp(ctx, cfg)
-	// Server should cleanly exit when context is cancelled
-	if err != nil && !errors.Is(err, context.Canceled) {
-		t.Logf("RunApp returned: %v", err)
-	}
-}
-
-type mockStartupBus struct {
-	pubsub.Bus
-
-	ensureErr error
-	closed    bool
-}
-
-func (m *mockStartupBus) EnsureCoreStreams(context.Context) error { return m.ensureErr }
-func (m *mockStartupBus) Close() error {
-	m.closed = true
-	return nil
-}
-
-func TestRunApp_FailFast(t *testing.T) {
-	// Missing Postgres URL
-	err := RunApp(context.Background(), Config{PostgresURL: "", NATSURL: "nats://localhost:4222"})
-	assert.ErrorContains(t, err, "postgres_url is required")
-
-	// Invalid Postgres URL
-	err = RunApp(context.Background(), Config{PostgresURL: "invalid://url", NATSURL: "nats://localhost:4222"})
-	assert.ErrorContains(t, err, "connect to postgres")
-
-	// Unreachable NATS via default newBusFn fails fast (RetryOnFailedConnect(false))
-	_, natsDialErr := newBusFn(context.Background(), "nats://127.0.0.1:1")
-	assert.Error(t, natsDialErr)
-
-	// Missing NATS URL
-	oldInitPg := initPostgres
-	initPostgres = func(context.Context, string) (*store.Store, func(context.Context), error) {
-		return &store.Store{}, func(context.Context) {}, nil
-	}
-	defer func() { initPostgres = oldInitPg }()
-
-	err = RunApp(context.Background(), Config{PostgresURL: "postgres://mock", NATSURL: ""})
-	assert.ErrorContains(t, err, "nats_url is required")
-
-	// NATS connect failure
-	oldNewBus := newBusFn
-	newBusFn = func(context.Context, string) (pubsub.Bus, error) {
-		return nil, errors.New("nats down")
-	}
-	defer func() { newBusFn = oldNewBus }()
-
-	err = RunApp(context.Background(), Config{PostgresURL: "postgres://mock", NATSURL: "nats://mock"})
-	assert.ErrorContains(t, err, "connect to nats")
-
-	// NATS JetStream verification failure closes bus and fails fast
-	startupBus := &mockStartupBus{ensureErr: errors.New("jetstream unavailable")}
-	newBusFn = func(context.Context, string) (pubsub.Bus, error) {
-		return startupBus, nil
-	}
-	err = RunApp(context.Background(), Config{PostgresURL: "postgres://mock", NATSURL: "nats://mock"})
-	assert.ErrorContains(t, err, "verify nats jetstream")
-	assert.True(t, startupBus.closed)
-}
-
-func TestInitPostgres(t *testing.T) {
-	ctx := context.Background()
 	tests := []struct {
-		name       string
-		url        string
-		mockFail   bool
-		pingFail   bool
-		wantErr    bool
-		wantSubstr string
+		name string
+		env  map[string]string
+		want Config
 	}{
-		{name: "invalid url", url: "://invalid-url", wantErr: true, wantSubstr: "parse postgres url"},
-		{name: "pool creation error", url: "postgres://user:pass@localhost:5432/db", mockFail: true, wantErr: true, wantSubstr: "create pgxpool"},
-		{name: "ping error closes pool", url: "postgres://user:pass@localhost:5432/db", pingFail: true, wantErr: true, wantSubstr: "ping postgres"},
+		{"empty env uses defaults", map[string]string{}, defaults},
+		{"explicit values trimmed and authoritative", map[string]string{
+			"RESTATE_PORT":            "9999",
+			"PORT":                    "9191",
+			"HEALTH_PORT":             "8888",
+			"VANADIS_URL":             "http://vanadis.local:4025/",
+			"DATABASE_URL":            "postgres://user:pass@localhost:5432/db",
+			"POSTGRES_URL":            "postgres://ignored",
+			"POSTGRES_USER":           "leaked-user",
+			"ERI_URL":                 "http://eri.local/",
+			"RESTATE_INGRESS_URL":     "http://restate.local:8080/",
+			"NATS_URL":                "nats://localhost:4222",
+			"GITHUB_TOKEN":            "token-xyz",
+			"GITHUB_PAT":              "pat-ignored",
+			"DISCORD_TOKEN":           " discord-xyz ",
+			"SHARE_ROOT":              "/tmp/share",
+			"AGENT_NAME":              "agent-alpha",
+			"CONFIG_PATH":             "/tmp/share/agent-alpha/config.yaml",
+			"KUBERNETES_SERVICE_HOST": "kube.test",
+			"KUBERNETES_SERVICE_PORT": "443",
+			"FLUX_RECEIVER_URL":       " http://receiver.local/hook ",
+			"GITHUB_APP_PRIVATE_KEY":  "\npem-text\n",
+		}, Config{
+			RestatePort:         "9999",
+			HealthPort:          "8888",
+			VanadisURL:          "http://vanadis.local:4025",
+			PostgresURL:         "postgres://user:pass@localhost:5432/db",
+			EriURL:              "http://eri.local",
+			RestateIngressURL:   "http://restate.local:8080",
+			NATSURL:             "nats://localhost:4222",
+			GitHubToken:         "token-xyz",
+			DiscordToken:        "discord-xyz",
+			ShareRoot:           "/tmp/share",
+			AgentName:           "agent-alpha",
+			ConfigPath:          "/tmp/share/agent-alpha/config.yaml",
+			KubeAPIServer:       "https://kube.test:443",
+			FluxReceiverURL:     "http://receiver.local/hook",
+			GitHubAppPrivateKey: "pem-text",
+			ServiceConfigPath:   DefaultServiceConfigPath,
+		}},
+		{"PORT fallback, POSTGRES_URL and GITHUB_PAT fallbacks", map[string]string{
+			"PORT":         "9191",
+			"POSTGRES_URL": "postgres://pg-url",
+			"GITHUB_PAT":   "pat-xyz",
+		}, Config{
+			RestatePort:       "9191",
+			HealthPort:        "4026",
+			VanadisURL:        "http://vanadis.aerial:4025",
+			PostgresURL:       "postgres://pg-url",
+			EriURL:            "http://eri.aerial",
+			RestateIngressURL: "http://restate.aerial:8080",
+			NATSURL:           "nats://nats.aerial:4222",
+			GitHubToken:       "pat-xyz",
+			ShareRoot:         "/share",
+			AgentName:         "aerial",
+			ConfigPath:        "/share/aerial-config/config.yaml",
+			ServiceConfigPath: DefaultServiceConfigPath,
+		}},
+		{"DSN built from POSTGRES_* parts", map[string]string{
+			"POSTGRES_PASSWORD": "secret-pass",
+		}, Config{
+			RestatePort:       "9080",
+			HealthPort:        "4026",
+			VanadisURL:        "http://vanadis.aerial:4025",
+			PostgresURL:       "postgres://aerial:secret-pass@postgres:5432/aerial?sslmode=disable",
+			EriURL:            "http://eri.aerial",
+			RestateIngressURL: "http://restate.aerial:8080",
+			NATSURL:           "nats://nats.aerial:4222",
+			ShareRoot:         "/share",
+			AgentName:         "aerial",
+			ConfigPath:        "/share/aerial-config/config.yaml",
+			ServiceConfigPath: DefaultServiceConfigPath,
+		}},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			closed := false
-			origNew, origPing, origClose := newPgxPoolFn, pingPgxPoolFn, closePgxPoolFn
-			defer func() { newPgxPoolFn, pingPgxPoolFn, closePgxPoolFn = origNew, origPing, origClose }()
-			closePgxPoolFn = func(pool *pgxpool.Pool) {
-				closed = true
-				origClose(pool)
+			t.Parallel()
+			got := LoadConfig(func(k string) string { return tc.env[k] })
+			assert.Equal(t, tc.want, got)
+		})
+	}
+}
+
+// TestNewPRStateServices pins that the default-agent prstate wiring needs
+// every boundary and names the missing one.
+func TestNewPRStateServices(t *testing.T) {
+	t.Parallel()
+	eri := prstate.NewSessionEriEffector(nil)
+	facts := prstate.NewBusFactPublisher(nil)
+	gh := prstate.NewGitHubClient(nil, "", "")
+	kube := prstate.NewKubeClient(nil, "", "", "", "")
+	tests := []struct {
+		name    string
+		eri     prstate.EriEffector
+		facts   prstate.FactPublisher
+		gh      *prstate.GitHubClient
+		kube    *prstate.KubeClient
+		wantErr string
+	}{
+		{name: "every boundary wires", eri: eri, facts: facts, gh: gh, kube: kube},
+		{name: "nil eri fails", facts: facts, gh: gh, kube: kube, wantErr: "vanadis-restate: prstate dependency is nil: eri effector"},
+		{name: "nil facts fails", eri: eri, gh: gh, kube: kube, wantErr: "vanadis-restate: prstate dependency is nil: fact publisher"},
+		{name: "nil github fails", eri: eri, facts: facts, kube: kube, wantErr: "vanadis-restate: prstate dependency is nil: GitHub client"},
+		{name: "nil kube fails", eri: eri, facts: facts, gh: gh, wantErr: "vanadis-restate: prstate dependency is nil: Kubernetes client"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			pr, repo, err := newPRStateServices(tc.eri, tc.facts, tc.gh, tc.kube)
+			if tc.wantErr != "" {
+				require.EqualError(t, err, tc.wantErr)
+				require.Nil(t, pr)
+				require.Nil(t, repo)
+				return
 			}
-			if tc.mockFail {
-				newPgxPoolFn = func(context.Context, *pgxpool.Config) (*pgxpool.Pool, error) {
-					return nil, errors.New("mock pool fail")
-				}
-			}
-			if tc.pingFail {
-				pingPgxPoolFn = func(context.Context, *pgxpool.Pool) error {
-					return errors.New("ping refused")
-				}
-			}
-			_, _, err := initPostgres(ctx, tc.url)
-			if (err != nil) != tc.wantErr {
-				t.Fatalf("initPostgres() err = %v, wantErr %v", err, tc.wantErr)
-			}
-			if tc.wantSubstr != "" && !strings.Contains(err.Error(), tc.wantSubstr) {
-				t.Fatalf("expected error containing %q, got %v", tc.wantSubstr, err)
-			}
-			if tc.pingFail && !closed {
-				t.Fatal("expected pool to be closed on ping failure")
-			}
+			require.NoError(t, err)
+			require.NotNil(t, pr)
+			require.NotNil(t, repo)
 		})
 	}
 }

@@ -12,37 +12,6 @@ import (
 	"github.com/azylman/aerial/services/vanadis-restate/internal/model"
 )
 
-func TestSymbolResolution(t *testing.T) {
-	t.Parallel()
-	tmpDir := t.TempDir()
-	repoDir := filepath.Join(tmpDir, "aerial")
-	if err := os.MkdirAll(repoDir, 0o755); err != nil {
-		t.Fatal(err)
-	}
-
-	code := `package test
-
-func DoAwesomeThing() {
-	println("awesome")
-}
-
-type AwesomeStruct struct {
-	Field int
-}
-`
-	if err := os.WriteFile(filepath.Join(repoDir, "awesome.go"), []byte(code), 0o644); err != nil {
-		t.Fatal(err)
-	}
-
-	spans, ok := ResolveSymbolSpans(tmpDir, "aerial", []string{"awesome.go"}, []string{"DoAwesomeThing", "AwesomeStruct"})
-	if !ok || len(spans) == 0 {
-		t.Fatalf("ResolveSymbolSpans failed, spans = %v, ok = %v", spans, ok)
-	}
-	if !strings.Contains(spans[0], "DoAwesomeThing") || !strings.Contains(spans[0], "AwesomeStruct") {
-		t.Errorf("spans missing symbols: %v", spans)
-	}
-}
-
 func TestFormatChunkPromptWithShareRoot(t *testing.T) {
 	t.Parallel()
 	b := model.VanadisBuild{
@@ -81,6 +50,13 @@ func TestFormatChunkPromptWithShareRoot(t *testing.T) {
 		{name: "out of range index error", chunks: chunks, activeIdx: 5, wantErr: true},
 		{name: "first chunk prompt", chunks: chunks, activeIdx: 0, wantPart: "=== Active Chunk (Chunk 1 of 2) ==="},
 		{name: "action chunk prompt", chunks: chunks, activeIdx: 1, wantPart: "=== Active Chunk (Chunk 2 of 2) ==="},
+		{name: "action chunk states verdict contract", chunks: chunks, activeIdx: 1, wantPart: `This chunk completes ONLY when you call complete_chunk(chunk_id="c-2", dispatch_id="vanadis-c-2-turn-0", summary="<PASS evidence>")`},
+		{name: "action chunk states resume cap", chunks: chunks, activeIdx: 1, wantPart: "Vanadis resumes it automatically (up to 12 times) and then fails it as RESUMABLE."},
+		{name: "action chunk states turn budget", chunks: chunks, activeIdx: 1, wantPart: "Turns stop at about 1h. Wait at most 45 min per turn"},
+		{name: "action chunk states repair pr step", chunks: chunks, activeIdx: 1, wantPart: "is a step, not the verdict: after it deploys, re-verify live and then call complete_chunk."},
+		{name: "action chunk states resumable failure", chunks: chunks, activeIdx: 1, wantPart: `call fail_chunk(chunk_id="c-2", dispatch_id="vanadis-c-2-turn-0", reason="RESUMABLE: <blocker>")`},
+		{name: "action chunk contract finishes with verdict", chunks: chunks, activeIdx: 1, wantPart: "=== Mandatory Execution Contract ===\n1. Execute chunk instructions directly in this turn.\n2. Finish only with complete_chunk(chunk_id=\"c-2\", dispatch_id=\"vanadis-c-2-turn-0\", summary=\"<PASS evidence>\").\n"},
+		{name: "pr chunk contract submits pr", chunks: chunks, activeIdx: 0, wantPart: "2. Submit via `/share/aerial/scripts/aerial-pr.sh submit \"$SCRATCH_DIR\" \"<commit_msg>\" --vanadis-chunk c-1`.\n"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -149,7 +125,7 @@ func TestRepoCheckoutDir_Cases(t *testing.T) {
 		{repo: ".", wantOK: false},
 		{repo: "..", wantOK: false},
 		{repo: "aerial", wantPath: "/share/aerial", wantOK: true},
-		{repo: "azylman/aerial", wantPath: "/share/aerial", wantOK: true},
+		{repo: "acme/aerial", wantPath: "/share/aerial", wantOK: true},
 	}
 	for _, tc := range tests {
 		t.Run(tc.repo, func(t *testing.T) {
@@ -215,69 +191,50 @@ func TestFindSymbolSpan_Cases(t *testing.T) {
 
 func TestResolveSymbolSpans(t *testing.T) {
 	t.Parallel()
-	tmpDir := t.TempDir()
-	repoDir := filepath.Join(tmpDir, "aerial")
+	shareRoot := t.TempDir()
+	repoDir := filepath.Join(shareRoot, "aerial")
 	if err := os.MkdirAll(repoDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	testFile := filepath.Join(repoDir, "test.go")
-	if err := os.WriteFile(testFile, []byte("package main\n\nfunc MyTargetFunc() {\n}\n"), 0o644); err != nil {
-		t.Fatal(err)
+	for name, content := range map[string]string{
+		"test.go":    "package main\n\nfunc MyTargetFunc() {\n}\n",
+		"awesome.go": "package test\n\nfunc DoAwesomeThing() {\n\tprintln(\"awesome\")\n}\n\ntype AwesomeStruct struct {\n\tField int\n}\n",
+	} {
+		if err := os.WriteFile(filepath.Join(repoDir, name), []byte(content), 0o644); err != nil {
+			t.Fatal(err)
+		}
 	}
 
 	tests := []struct {
-		name          string
-		shareRoot     string
-		repo          string
-		files         []string
-		symbols       []string
-		wantResolved  bool
-		wantSpanCount int
+		name         string
+		repo         string
+		files        []string
+		symbols      []string
+		want         []string
+		wantResolved bool
 	}{
+		{name: "invalid repo path", repo: ".", files: []string{"test.go"}, symbols: []string{"MyTargetFunc"}},
+		{name: "nonexistent file", repo: "aerial", files: []string{"nonexistent.go"}, symbols: []string{"MyTargetFunc"}},
+		{name: "file exists symbol missing", repo: "aerial", files: []string{"test.go"}, symbols: []string{"MissingSymbol"}},
 		{
-			name:         "invalid repo path",
-			shareRoot:    tmpDir,
-			repo:         ".",
-			files:        []string{"test.go"},
-			symbols:      []string{"MyTargetFunc"},
-			wantResolved: false,
+			name: "success resolving symbol", repo: "aerial", files: []string{"./test.go"}, symbols: []string{"MyTargetFunc"},
+			want: []string{"- test.go: MyTargetFunc (L3-L4)"}, wantResolved: true,
 		},
 		{
-			name:         "nonexistent file",
-			shareRoot:    tmpDir,
-			repo:         "aerial",
-			files:        []string{"nonexistent.go"},
-			symbols:      []string{"MyTargetFunc"},
-			wantResolved: false,
+			name: "multiple symbols in one file", repo: "aerial", files: []string{"awesome.go"}, symbols: []string{"DoAwesomeThing", "AwesomeStruct"},
+			want: []string{"- awesome.go: DoAwesomeThing (L3-L5), AwesomeStruct (L7-L9)"}, wantResolved: true,
 		},
 		{
-			name:         "file exists symbol missing",
-			shareRoot:    tmpDir,
-			repo:         "aerial",
-			files:        []string{"test.go"},
-			symbols:      []string{"MissingSymbol"},
-			wantResolved: false,
-		},
-		{
-			name:          "success resolving symbol",
-			shareRoot:     tmpDir,
-			repo:          "aerial",
-			files:         []string{"test.go"},
-			symbols:       []string{"MyTargetFunc"},
-			wantResolved:  true,
-			wantSpanCount: 1,
+			name: "partial resolution keeps found spans", repo: "aerial", files: []string{"test.go", "awesome.go"}, symbols: []string{"MyTargetFunc"},
+			want: []string{"- test.go: MyTargetFunc (L3-L4)"},
 		},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			spans, ok := ResolveSymbolSpans(tc.shareRoot, tc.repo, tc.files, tc.symbols)
-			if ok != tc.wantResolved {
-				t.Fatalf("ResolveSymbolSpans ok = %v, want %v", ok, tc.wantResolved)
-			}
-			if len(spans) != tc.wantSpanCount {
-				t.Errorf("spans count = %d, want %d", len(spans), tc.wantSpanCount)
-			}
+			spans, ok := ResolveSymbolSpans(shareRoot, tc.repo, tc.files, tc.symbols)
+			assert.Equal(t, tc.wantResolved, ok)
+			assert.Equal(t, tc.want, spans)
 		})
 	}
 }
@@ -292,62 +249,148 @@ func TestNormalizeSymbolName(t *testing.T) {
 	}
 }
 
-func TestTruncatePromptRunes(t *testing.T) {
+func TestFormatCIFailurePrompt(t *testing.T) {
 	t.Parallel()
-	shortStr := "hello"
-	if got := TruncatePromptRunes(shortStr, 10); got != shortStr {
-		t.Errorf("expected %q, got %q", shortStr, got)
+	const failChunk = `call fail_chunk(chunk_id=chunk-a, dispatch_id=vanadis-chunk-a-cifail-abcdef1-1, reason="BLOCKED: <reason and the decision needed>") and then end the turn`
+	tests := []struct {
+		name         string
+		ev           pubsub.PRLifecycleEvent
+		details      string
+		wantContains []string
+		wantMissing  []string
+	}{
+		{
+			name:    "ci check uses fail_chunk and loopback fallback",
+			ev:      pubsub.PRLifecycleEvent{Repo: "acme/aerial", PRNumber: 123, CheckName: "test-unit", Branch: "feat/test", HeadSHA: "abcdef1"},
+			details: "extracted failure details",
+			wantContains: []string{
+				"PR #123", "extracted failure details", "[VANADIS CI REMEDIATION — MANDATORY]",
+				"must end in exactly one machine-visible outcome: (1) a fix pushed", failChunk,
+				"pauses the chunk for human review automatically", "smallest boundary-crossing fix",
+				"http://127.0.0.1:4028/internal/github-api/repos/<owner>/<repo>/actions/runs/<run_id>/jobs",
+			},
+			wantMissing: []string{"critically evaluate each RoboRev finding", "REMEDIATION BLOCKED"},
+		},
+		{
+			name: "roborev check uses fail_chunk without loopback fallback",
+			ev: pubsub.PRLifecycleEvent{
+				Repo: "aerial", PRNumber: 101, CheckName: "roborev", HeadSHA: "abcdef1", Branch: "feat/test",
+				CheckURL: "https://github.com/acme/aerial/actions/runs/123/job/456789",
+			},
+			details: "details",
+			wantContains: []string{
+				"critically evaluate each RoboRev finding", "[VANADIS CI REMEDIATION — MANDATORY]",
+				"(2) a technical rebuttal recorded via", "(3) when genuinely blocked, " + failChunk,
+				"pauses the chunk for human review automatically",
+			},
+			wantMissing: []string{"REMEDIATION BLOCKED", "127.0.0.1:4028"},
+		},
 	}
-	longStr := "hello world from vanadis"
-	if got := TruncatePromptRunes(longStr, 5); !strings.HasSuffix(got, "... (truncated)") {
-		t.Errorf("expected truncation, got %q", got)
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			got := FormatCIFailurePrompt(tc.ev, tc.details, "chunk-a", "vanadis-chunk-a-cifail-abcdef1-1")
+			for _, want := range tc.wantContains {
+				assert.Contains(t, got, want)
+			}
+			for _, missing := range tc.wantMissing {
+				assert.NotContains(t, got, missing)
+			}
+		})
 	}
 }
 
-func TestFailurePromptDirectives(t *testing.T) {
+func TestFormatInlineCapRemediationPrompt(t *testing.T) {
 	t.Parallel()
-	ev := pubsub.PRLifecycleEvent{
-		Repo:      "azylman/aerial",
-		PRNumber:  123,
-		CheckName: "test-unit",
-		Branch:    "feat/test",
-		HeadSHA:   "abcdef1",
+	tests := []struct {
+		name         string
+		ev           pubsub.PRLifecycleEvent
+		details      string
+		chunkID      string
+		failCount    int
+		maxAttempts  int
+		wantContains []string
+		wantMissing  []string
+	}{
+		{
+			name:        "ci check cap reached instructs source thread remediation",
+			ev:          pubsub.PRLifecycleEvent{Repo: "acme/aerial", PRNumber: 123, CheckName: "test-unit", Branch: "feat/test", HeadSHA: "abcdef1", CheckURL: "https://ci.example.com/build/1"},
+			details:     "extracted failure details",
+			chunkID:     "chunk-a",
+			failCount:   5,
+			maxAttempts: 5,
+			wantContains: []string{
+				`CI check "test-unit" failed 5 times for PR #123 on acme/aerial (chunk: chunk-a, head commit: abcdef1; worker remediation cap 5/5 reached).`,
+				"Branch: feat/test",
+				"Check URL: https://ci.example.com/build/1",
+				"extracted failure details",
+				"[VANADIS INLINE THREAD CI REMEDIATION — MANDATORY]",
+				"source-thread agent running in-line on the thread's high-effort model with full thread context",
+				"/share/aerial/scripts/aerial-pr.sh init aerial --branch feat/test",
+				`/share/aerial/scripts/aerial-pr.sh submit <scratch_dir> "<commit_msg>"`,
+				"recovers the paused chunk to pr_opened and resumes the build",
+			},
+			wantMissing: []string{"critically evaluate each RoboRev finding", "override-roborev"},
+		},
+		{
+			name:        "roborev check cap reached includes rebuttal directive",
+			ev:          pubsub.PRLifecycleEvent{Repo: "aerial", PRNumber: 101, CheckName: "roborev", HeadSHA: "abcdef1"},
+			details:     "roborev finding",
+			chunkID:     "chunk-b",
+			failCount:   5,
+			maxAttempts: 5,
+			wantContains: []string{
+				`CI check "roborev" failed 5 times for PR #101 on aerial (chunk: chunk-b, head commit: abcdef1; worker remediation cap 5/5 reached).`,
+				"[VANADIS INLINE THREAD CI REMEDIATION — MANDATORY]",
+				"critically evaluating each RoboRev finding against codebase reality and full thread context",
+				"/share/aerial/scripts/aerial-pr.sh --repo aerial override-roborev 101 '<technical_rebuttal>'",
+				"recovers the paused chunk to pr_opened and resumes the build",
+			},
+			wantMissing: []string{"Branch:", "Check URL:"},
+		},
 	}
-	got := FormatCIFailurePrompt(ev, "extracted failure details")
-	if !strings.Contains(got, "PR #123") || !strings.Contains(got, "extracted failure details") {
-		t.Errorf("FormatCIFailurePrompt missing details: %s", got)
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			got := FormatInlineCapRemediationPrompt(tc.ev, tc.details, tc.chunkID, tc.failCount, tc.maxAttempts)
+			for _, want := range tc.wantContains {
+				assert.Contains(t, got, want)
+			}
+			for _, missing := range tc.wantMissing {
+				assert.NotContains(t, got, missing)
+			}
+		})
 	}
-	for _, want := range []string{"[VANADIS CI REMEDIATION — MANDATORY]", "must end in exactly one machine-visible outcome: (1) a fix pushed", "(2) a final line in the form REMEDIATION BLOCKED", "Ending this turn with neither a commit nor that blocked final line is a failed remediation", "counts as no outcome", "smallest boundary-crossing fix", "REMEDIATION BLOCKED: <reason and the decision needed>"} {
-		if !strings.Contains(got, want) {
-			t.Errorf("FormatCIFailurePrompt missing %q: %s", want, got)
-		}
-	}
+}
 
-	conflictGot := FormatConflictPrompt(ev)
-	if !strings.Contains(conflictGot, "Merge conflict") || !strings.Contains(conflictGot, "PR #123") {
-		t.Errorf("FormatConflictPrompt missing details: %s", conflictGot)
+func TestFormatConflictPrompt(t *testing.T) {
+	t.Parallel()
+	const tail = ", merge origin/main to resolve conflicts, verify locally, and push to update the PR via " +
+		`'/share/aerial/scripts/aerial-pr.sh submit <scratch_dir> "<commit_msg>"' ` +
+		"(PR_DESCRIPTION.md is not required when updating an existing PR; never run bare 'git push')."
+	tests := []struct {
+		name string
+		ev   pubsub.PRLifecycleEvent
+		want string
+	}{
+		{
+			name: "qualified repo and branch",
+			ev:   pubsub.PRLifecycleEvent{Repo: "acme/aerial", PRNumber: 123, Branch: "refs/heads/feat/test", HeadSHA: "abcdef1"},
+			want: "Merge conflict detected on PR #123 on acme/aerial (branch: feat/test, head: abcdef1). " +
+				"Please check out the branch via '/share/aerial/scripts/aerial-pr.sh init aerial --branch feat/test'" + tail,
+		},
+		{
+			name: "missing repo and branch fall back to placeholders",
+			ev:   pubsub.PRLifecycleEvent{PRNumber: 101, HeadSHA: "abcdef1"},
+			want: "Merge conflict detected on PR #101 on  (branch: <branch>, head: abcdef1). " +
+				"Please check out the branch via '/share/aerial/scripts/aerial-pr.sh init aerial --branch <branch>'" + tail,
+		},
 	}
-
-	roborevEv := pubsub.PRLifecycleEvent{
-		Repo:      "aerial",
-		PRNumber:  101,
-		CheckName: "roborev",
-		HeadSHA:   "abcdef1",
-		Branch:    "feat/test",
-		CheckURL:  "https://github.com/azylman/aerial/actions/runs/123/job/456789",
-	}
-	roborevGot := FormatCIFailurePrompt(roborevEv, "details")
-	if !strings.Contains(roborevGot, "critically evaluate each RoboRev finding") {
-		t.Errorf("expected RoboRev directive, got %q", roborevGot)
-	}
-	for _, want := range []string{"[VANADIS CI REMEDIATION — MANDATORY]", "must end in exactly one machine-visible outcome: (1) a verified fix pushed", "(2) a technical rebuttal recorded via", "(3) a final line in the form REMEDIATION BLOCKED", "Ending this turn with no commit, no override, and no blocked final line is a failed remediation", "REMEDIATION BLOCKED: <reason and the decision needed>"} {
-		if !strings.Contains(roborevGot, want) {
-			t.Errorf("RoboRev prompt missing %q: %s", want, roborevGot)
-		}
-	}
-	roborevConflict := FormatConflictPrompt(roborevEv)
-	if !strings.Contains(roborevConflict, "Merge conflict detected on PR #101") {
-		t.Errorf("expected conflict prompt, got %q", roborevConflict)
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			assert.Equal(t, tc.want, FormatConflictPrompt(tc.ev))
+		})
 	}
 }
 
@@ -454,6 +497,52 @@ func TestFormatNoPRResumePrompt(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			got := FormatNoPRResumePrompt(tc.chunk, tc.chunkPrompt)
+			for _, want := range tc.wantContains {
+				assert.Contains(t, got, want)
+			}
+		})
+	}
+}
+
+func TestFormatActionResumePrompt(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name         string
+		chunk        model.VanadisChunk
+		chunkPrompt  string
+		k            int
+		wantPrefix   string
+		wantContains []string
+	}{
+		{
+			name:        "first resume",
+			chunk:       model.VanadisChunk{ID: "c1", StallNudges: 1},
+			chunkPrompt: "ORIGINAL CHUNK PROMPT",
+			k:           1,
+			wantPrefix:  "[VANADIS AUTOMATIC RESUME 1/12]\nYour previous turn for action chunk c1 ended without calling complete_chunk. Dispatch ID for this turn: vanadis-c1-turn-1-resume-1 ",
+			wantContains: []string{
+				"Continue from your checkpoint (/tmp/vanadis-c1/checkpoint.md",
+				`complete_chunk(chunk_id="c1", dispatch_id="vanadis-c1-turn-1-resume-1", summary="<PASS evidence>")`,
+				"Wait at most 45 min per turn",
+				"is a step, not the verdict",
+				`fail_chunk(chunk_id="c1", dispatch_id="vanadis-c1-turn-1-resume-1", reason="RESUMABLE: <blocker>")`,
+				"The original chunk instructions follow.\n\nORIGINAL CHUNK PROMPT",
+			},
+		},
+		{
+			name:         "trims chunk id on last resume",
+			chunk:        model.VanadisChunk{ID: " c2 "},
+			chunkPrompt:  "P",
+			k:            12,
+			wantPrefix:   "[VANADIS AUTOMATIC RESUME 12/12]\nYour previous turn for action chunk c2 ended",
+			wantContains: []string{"Dispatch ID for this turn: vanadis-c2-turn-0-resume-12 ", "--vanadis-chunk c2)"},
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			got := FormatActionResumePrompt(tc.chunk, tc.chunkPrompt, tc.k, 12)
+			assert.True(t, strings.HasPrefix(got, tc.wantPrefix), got)
 			for _, want := range tc.wantContains {
 				assert.Contains(t, got, want)
 			}

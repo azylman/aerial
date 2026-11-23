@@ -1,108 +1,41 @@
 package server
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/propagation"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 
 	"github.com/azylman/aerial/pkg/httpkit"
+	"github.com/azylman/aerial/pkg/k8sauth"
+	"github.com/azylman/aerial/pkg/k8sauthtest"
+	"github.com/azylman/aerial/pkg/pubsubtest"
 	"github.com/azylman/aerial/pkg/tracing"
 	"github.com/azylman/aerial/services/vanadis/internal/metrics"
+	"github.com/azylman/aerial/services/vanadis/internal/storetest"
 )
 
 func scrapeRootMetrics(t *testing.T) string {
 	t.Helper()
 	rec := httptest.NewRecorder()
-	NewHandler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/metrics", http.NoBody))
+	promhttp.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/metrics", http.NoBody))
 	if rec.Code != http.StatusOK {
 		t.Fatalf("metrics handler status = %d, want %d", rec.Code, http.StatusOK)
 	}
 	return rec.Body.String()
-}
-
-func TestServerDelegateEdges(t *testing.T) {
-	tests := []struct {
-		name, target, storeKind string
-		want                    string
-	}{
-		{name: "nil server leaves gauges unchanged", target: "build-metrics", storeKind: "nil-server", want: `vanadis_builds_active{queue_state="running"} 7`},
-		{name: "nil store leaves gauges unchanged", target: "build-metrics", storeKind: "nil-store", want: `vanadis_builds_active{queue_state="running"} 7`},
-		{name: "store error leaves gauges unchanged", target: "build-metrics", storeKind: "list-error", want: `vanadis_builds_active{queue_state="running"} 7`},
-		{name: "restate client inherits server config", target: "restate-client", want: "/Build-suletta/b1/Create"},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			switch tc.target {
-			case "build-metrics":
-				metrics.BuildsActive.WithLabelValues("running").Set(7)
-				var srv *VanadisServer
-				switch tc.storeKind {
-				case "nil-store":
-					srv = &VanadisServer{}
-				case "list-error":
-					srv = NewVanadisServer(Config{}, &memoryVanadisStore{listErr: errors.New("db down")}, nil)
-				}
-				srv.collectBuildMetrics(context.Background())
-				if body := scrapeRootMetrics(t); !strings.Contains(body, tc.want) {
-					t.Errorf("metrics exposition missing %q\nbody:\n%s", tc.want, body)
-				}
-			case "restate-client":
-				srv := NewVanadisServer(Config{}, nil, nil)
-				srv.restateCfg = RestateConfig{AgentName: "suletta", RestateIngressURL: "http://restate.test"}
-				if got := srv.restateClient().ObjectPath("b1", "Create"); got != tc.want {
-					t.Errorf("restateClient().ObjectPath() = %q, want %q", got, tc.want)
-				}
-			}
-		})
-	}
-}
-
-func TestMetricsEndToEndSeededStore(t *testing.T) {
-	memStore := newMemoryVanadisStore()
-	bRun := mkBuild("b-e2e-run", "111", "Running", "obj", "running")
-	bQueue := mkBuild("b-e2e-queue", "222", "Queued", "obj", "running")
-	bDone := mkBuild("b-e2e-done", "333", "Done", "obj", "completed")
-	cRun1, cRun2 := mkChunk("c-e2e-1", "b-e2e-run", 0, "C1", "I1", "", "running"), mkChunk("c-e2e-2", "b-e2e-run", 1, "C2", "I2", "", "pending")
-	cRun1.TargetFiles, cRun2.TargetFiles = []string{"a.go"}, []string{"b.go"}
-	if err := memStore.CreateBuild(context.Background(), bRun, []VanadisChunk{cRun1, cRun2}); err != nil {
-		t.Fatalf("seed running build: %v", err)
-	}
-	if err := memStore.CreateBuild(context.Background(), bQueue, []VanadisChunk{mkChunk("c-e2e-3", "b-e2e-queue", 0, "C3", "I3", "", "pending")}); err != nil {
-		t.Fatalf("seed queued build: %v", err)
-	}
-	if err := memStore.CreateBuild(context.Background(), bDone, []VanadisChunk{mkChunk("c-e2e-4", "b-e2e-done", 0, "C4", "I4", "", "merged")}); err != nil {
-		t.Fatalf("seed completed build: %v", err)
-	}
-	srv := NewVanadisServer(Config{}, memStore, nil)
-	rec := httptest.NewRecorder()
-	srv.Routes().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/metrics", http.NoBody))
-	if rec.Code != http.StatusOK {
-		t.Fatalf("GET /metrics status = %d, want %d", rec.Code, http.StatusOK)
-	}
-	for _, want := range []string{
-		`vanadis_builds_active{queue_state="running"} 1`,
-		`vanadis_builds_active{queue_state="queued"} 1`,
-		`vanadis_chunks_active{status="pending"} 2`,
-		`vanadis_chunks_active{status="running"} 1`,
-		`vanadis_chunks_active{status="pr_opened"} 0`,
-		`vanadis_queue_depth{state="pending"} 0`,
-	} {
-		if !strings.Contains(rec.Body.String(), want) {
-			t.Errorf("metrics exposition missing %q\nbody:\n%s", want, rec.Body.String())
-		}
-	}
 }
 
 func TestVanadisConsumerStatsQuerier(t *testing.T) {
@@ -113,246 +46,83 @@ func TestVanadisConsumerStatsQuerier(t *testing.T) {
 	}
 	nilSrv.collectQueueMetrics(context.Background())
 
-	srv := NewVanadisServer(Config{}, nil, nil)
+	srv := NewVanadisServer(Config{}, RestateConfig{}, nil, nil)
 	if srv.consumerStatsQuerier() != nil {
 		t.Errorf("expected nil when no stats or bus configured")
 	}
-	mockQ := &mockConsumerStatsQuerier{}
+	mockQ := &pubsubtest.ConsumerStats{}
 	srv.queueStats = mockQ
 	if srv.consumerStatsQuerier() != mockQ {
 		t.Errorf("expected queueStats override")
 	}
 }
 
-func testHTTPEndpointsBasicAndFlush(t *testing.T, srv *VanadisServer, doReq func(string, string, io.Reader) *httptest.ResponseRecorder) {
-	t.Helper()
-	checkCode := func(method, path string, body io.Reader, want int) {
-		if rec := doReq(method, path, body); rec.Code != want {
-			t.Fatalf("%s %s got %d, want %d", method, path, rec.Code, want)
-		}
-	}
-	for _, p := range []string{"/health", "/healthz", "/metrics"} {
-		checkCode(http.MethodGet, p, nil, http.StatusOK)
-	}
-	origMeta, origCounters := httpkit.WriteMetaDirFn, httpkit.WriteCountersDirFn
-	defer func() { httpkit.WriteMetaDirFn, httpkit.WriteCountersDirFn = origMeta, origCounters }()
-	httpkit.WriteMetaDirFn, httpkit.WriteCountersDirFn = func(string) error { return errors.New("meta err") }, func(string) error { return nil }
-	checkCode(http.MethodPost, "/debug/coverage/flush", nil, http.StatusOK)
-	httpkit.WriteCountersDirFn = func(string) error { return errors.New("counters err") }
-	checkCode(http.MethodGet, "/debug/coverage/flush", nil, http.StatusInternalServerError)
-	srv.SetStore(nil)
-	checkCode(http.MethodPost, "/builds", strings.NewReader(`{}`), http.StatusInternalServerError)
-	checkCode(http.MethodGet, "/builds/b1", nil, http.StatusInternalServerError)
-	checkCode(http.MethodGet, "/builds", nil, http.StatusInternalServerError)
+type fakeQueueStatsBus struct {
+	stats    pubsubtest.ConsumerStats
+	closeErr error
 }
 
-func testHTTPEndpointsBuildCreation(t *testing.T, srv *VanadisServer, memStore *memoryVanadisStore, doReq func(string, string, io.Reader) *httptest.ResponseRecorder) string {
-	t.Helper()
-	checkCode := func(method, path string, body io.Reader, want int) {
-		if rec := doReq(method, path, body); rec.Code != want {
-			t.Fatalf("%s %s got %d, want %d", method, path, rec.Code, want)
-		}
-	}
-	srv.SetStore(memStore)
-	checkCode(http.MethodPost, "/builds", errorReader{}, http.StatusBadRequest)
-	invalidPayloads := []string{
-		`{invalid`, `{"thread_id":""}`,
-		`{"thread_id":"not-numeric","objective":"obj","chunks":[{"repo":"aerial","title":"t","instructions":"i"}]}`,
-		`{"thread_id":"123","objective":""}`, `{"thread_id":"123","objective":"obj","chunks":[]}`,
-		`{"thread_id":"123","objective":"obj","chunks":[{"repo":"aerial","title":"","instructions":"i"}]}`,
-		`{"thread_id":"123","objective":"obj","chunks":[{"repo":"aerial","title":"t","instructions":""}]}`,
-		`{"thread_id":"123","objective":"obj","chunks":[{"repo":"aerial","title":"t","instructions":"i","effort":"unsupported"}]}`,
-		`{"thread_id":"123","objective":"obj","chunks":[{"repo":"aerial","id":"bad:id","title":"t","instructions":"i"}]}`,
-		`{"thread_id":"123","objective":"obj","chunks":[{"mode":"pr","repo":"","title":"t","instructions":"i"}]}`,
-		`{"thread_id":"123","objective":"obj","chunks":[{"mode":"action","repo":"aerial","title":"t","instructions":"i"}]}`,
-		`{"thread_id":"123","objective":"obj","chunks":[{"mode":"invalid","repo":"aerial","title":"t","instructions":"i"}]}`,
-		`{"thread_id":"123","objective":"obj","chunks":[{"mode":"action","repo":"","target_files":["a.go"],"title":"t","instructions":"i"}]}`,
-		`{"thread_id":"123","objective":"obj","chunks":[{"mode":"action","repo":"","target_symbols":["A"],"title":"t","instructions":"i"}]}`,
-	}
-	for _, p := range invalidPayloads {
-		checkCode(http.MethodPost, "/builds", strings.NewReader(p), http.StatusBadRequest)
-	}
-	validPayload := `{"thread_id":"stateful_medium:discord-1555999","title":"Implement Feature X Build Title","objective":"Implement feature X","shared_context":"Targeting Nomad cluster","chunks":[{"repo":"aerial","title":"Part 1","instructions":"Do part 1","effort":"low","depends_on":[]},{"repo":"aerial","id":"custom-chunk-2","title":"Part 2","instructions":"Do part 2","target_files":["a.go"],"target_symbols":["A"],"effort":"high","acceptance_criteria":["All green"],"depends_on":["0"]}]}`
-	rec := doReq(http.MethodPost, "/builds", strings.NewReader(validPayload))
-	if rec.Code != http.StatusAccepted {
-		t.Fatalf("expected 202 Accepted, got %d: %s", rec.Code, rec.Body.String())
-	}
-	var createResp map[string]any
-	_ = json.Unmarshal(rec.Body.Bytes(), &createResp)
-	buildID, _ := createResp["build_id"].(string)
-	if buildID == "" || createResp["status"] != "accepted" {
-		t.Fatalf("unexpected create response: %+v", createResp)
-	}
-	// Verify that chunks returned by create build start with "pending" status and zero started_at.
-	rawCreatedChunks, _ := createResp["chunks"].([]any)
-	if len(rawCreatedChunks) != 2 {
-		t.Fatalf("expected 2 chunks in create response, got %d", len(rawCreatedChunks))
-	}
-	for i, rc := range rawCreatedChunks {
-		chunkMap, _ := rc.(map[string]any)
-		if chunkMap["status"] != "pending" {
-			t.Fatalf("expected chunk[%d].status to be pending, got %v", i, chunkMap["status"])
-		}
-		if startedAt, ok := chunkMap["started_at"].(string); ok && startedAt != "" && startedAt != "0001-01-01T00:00:00Z" {
-			t.Fatalf("expected chunk[%d].started_at to be zero, got %v", i, startedAt)
-		}
-	}
-	// Simulate storing the created build in memStore for subsequent tests
-	c1 := mkChunk(buildID+"-chunk-1", buildID, 0, "Part 1", "Do part 1", "low", "pending")
-	c2 := mkChunk("custom-chunk-2", buildID, 1, "Part 2", "Do part 2", "high", "pending")
-	c2.DependsOn = []string{c1.ID}
-	if err := memStore.CreateBuild(context.Background(), mkBuild(buildID, "1555999", "Implement Feature X Build Title", "Implement feature X", "running"), []VanadisChunk{c1, c2}); err != nil {
-		t.Fatalf("failed to seed created build in memStore: %v", err)
-	}
-	return buildID
+func (f *fakeQueueStatsBus) ConsumerStats(ctx context.Context, stream, consumer string) (int64, int64, error) {
+	return f.stats.ConsumerStats(ctx, stream, consumer)
 }
 
-func testHTTPEndpointsBuildCancel(t *testing.T, srv *VanadisServer, memStore *memoryVanadisStore, buildID string, doReq func(string, string, io.Reader) *httptest.ResponseRecorder) {
-	t.Helper()
-	checkCode := func(method, path string, body io.Reader, want int) {
-		if rec := doReq(method, path, body); rec.Code != want {
-			t.Fatalf("%s %s got %d, want %d", method, path, rec.Code, want)
-		}
-	}
-	routes := []struct {
-		m, p string
-		w    int
+func (f *fakeQueueStatsBus) Close() error { return f.closeErr }
+
+func TestInitQueueStats(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name      string
+		natsURL   string
+		bus       *fakeQueueStatsBus
+		busErr    error
+		wantStats bool
 	}{
-		{http.MethodGet, "/builds/", http.StatusBadRequest},
-		{http.MethodDelete, "/builds/" + buildID, http.StatusMethodNotAllowed},
-		{http.MethodGet, "/builds/unknown-id", http.StatusNotFound},
-		{http.MethodGet, "/builds/" + buildID, http.StatusOK},
-		{http.MethodGet, "/builds/" + buildID + "/cancel", http.StatusMethodNotAllowed},
-		{http.MethodPost, "/builds/%20/cancel", http.StatusBadRequest},
+		{name: "no nats url leaves stats unset", natsURL: ""},
+		{name: "connect error leaves stats unset", natsURL: "nats://nats.test:4222", busErr: errors.New("connect refused")},
+		{name: "connected bus backs queue stats", natsURL: "nats://nats.test:4222", bus: &fakeQueueStatsBus{}, wantStats: true},
+		{name: "close error is logged not fatal", natsURL: "nats://nats.test:4222", bus: &fakeQueueStatsBus{closeErr: errors.New("already closed")}, wantStats: true},
 	}
-	for _, tc := range routes {
-		checkCode(tc.m, tc.p, nil, tc.w)
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			srv := NewVanadisServer(Config{}, RestateConfig{}, nil, nil)
+			newBus := func(context.Context, string) (queueStatsBus, error) {
+				if tc.busErr != nil {
+					return nil, tc.busErr
+				}
+				return tc.bus, nil
+			}
+			closeFn := initQueueStats(context.Background(), srv, tc.natsURL, newBus)
+			if got := srv.consumerStatsQuerier() != nil; got != tc.wantStats {
+				t.Errorf("queue stats configured = %v, want %v", got, tc.wantStats)
+			}
+			closeFn()
+		})
 	}
-	memStore.getErr = errors.New("get error")
-	checkCode(http.MethodGet, "/builds/"+buildID, nil, http.StatusInternalServerError)
-	memStore.getErr = nil
-	checkCode(http.MethodPost, "/builds/"+buildID+"/cancel", bytes.NewReader(nil), http.StatusOK)
-	checkCode(http.MethodPost, "/builds/b-conflict/cancel", bytes.NewReader(nil), http.StatusConflict)
-}
-
-func testHTTPEndpointsListAndFilter(t *testing.T, srv *VanadisServer, doReq func(string, string, io.Reader) *httptest.ResponseRecorder) {
-	t.Helper()
-	wPost := httptest.NewRecorder()
-	srv.handleListBuilds(wPost, httptest.NewRequest(http.MethodPost, "/builds", http.NoBody))
-	if wPost.Code != http.StatusMethodNotAllowed {
-		t.Fatalf("expected 405 on handleListBuilds POST, got %d", wPost.Code)
-	}
-	now := time.Now().UTC()
-	bRunning, bCompleted, bQueued := mkBuild("b-run", "111", "", "", "running"), mkBuild("b-comp", "222", "", "", "completed"), mkBuild("b-q", "333", "", "", "running")
-	bRunning.CreatedAt, bCompleted.CreatedAt, bQueued.CreatedAt = now.Add(-time.Minute), now.Add(-5*time.Minute), now.Add(-10*time.Minute)
-	listStore := newMemoryVanadisStore()
-	_ = listStore.CreateBuild(context.Background(), bRunning, []VanadisChunk{mkChunk("c-run-1", "b-run", 0, "C1", "", "", "running")})
-	_ = listStore.CreateBuild(context.Background(), bCompleted, []VanadisChunk{mkChunk("c-comp-1", "b-comp", 0, "C2", "", "", "completed")})
-	_ = listStore.CreateBuild(context.Background(), bQueued, []VanadisChunk{mkChunk("c-q-1", "b-q", 0, "C3", "", "", "pending")})
-	srv.SetStore(listStore)
-	listStore.listErr = errors.New("simulated list failure")
-	if rec := doReq(http.MethodGet, "/builds", nil); rec.Code != http.StatusInternalServerError {
-		t.Fatalf("expected 500 on listErr, got %d", rec.Code)
-	}
-	listStore.listErr = nil
-	recList := doReq(http.MethodGet, "/builds", nil)
-	var resp struct {
-		Total          int                 `json:"total"`
-		RunningCount   int                 `json:"running_count"`
-		QueuedCount    int                 `json:"queued_count"`
-		CompletedCount int                 `json:"completed_count"`
-		Builds         []VanadisBuildEntry `json:"builds"`
-	}
-	if recList.Code != http.StatusOK || json.Unmarshal(recList.Body.Bytes(), &resp) != nil || resp.Total != 3 || resp.RunningCount != 1 || resp.CompletedCount != 1 || resp.QueuedCount != 1 {
-		t.Fatalf("unexpected list response: code=%d resp=%+v", recList.Code, resp)
-	}
-	if rec := doReq(http.MethodGet, "/runs", nil); rec.Code != http.StatusOK {
-		t.Fatalf("expected 200 on /runs, got %d", rec.Code)
-	}
-	fetchList := func(query string) (int, string) {
-		rec := doReq(http.MethodGet, query, nil)
-		var out struct {
-			Total  int                 `json:"total"`
-			Builds []VanadisBuildEntry `json:"builds"`
-		}
-		_ = json.Unmarshal(rec.Body.Bytes(), &out)
-		id := ""
-		if len(out.Builds) > 0 {
-			id = out.Builds[0].ID
-		}
-		return out.Total, id
-	}
-	queryCases := []struct {
-		query, wantID string
-		wantTot       int
-	}{
-		{"/builds?queue_state=running", "b-run", 1},
-		{"/builds?status=completed", "b-comp", 1},
-		{"/builds?limit=1", "", 1},
-	}
-	for _, tc := range queryCases {
-		tot, id := fetchList(tc.query)
-		if tot != tc.wantTot || (tc.wantID != "" && id != tc.wantID) {
-			t.Fatalf("query %s got total=%d id=%s", tc.query, tot, id)
-		}
-	}
-	recDetail := doReq(http.MethodGet, "/builds/b-run", nil)
-	var detailResp struct {
-		Entry VanadisBuildEntry `json:"entry"`
-	}
-	if err := json.Unmarshal(recDetail.Body.Bytes(), &detailResp); err != nil || detailResp.Entry.ID != "b-run" || detailResp.Entry.QueueState != "running" || detailResp.Entry.TotalChunks != 1 {
-		t.Fatalf("unexpected Entry: %+v", detailResp.Entry)
-	}
-}
-
-func TestHTTPEndpoints(t *testing.T) {
-	restateSrv := newMockRestateServer()
-	defer restateSrv.Close()
-
-	memStore := newMemoryVanadisStore()
-	srv := NewVanadisServer(Config{Port: "0"}, memStore, restateSrv.Client())
-	srv.restateCfg.RestateIngressURL = restateSrv.URL
-	mux := srv.Routes()
-	doReq := func(method, path string, body io.Reader) *httptest.ResponseRecorder {
-		rec := httptest.NewRecorder()
-		mux.ServeHTTP(rec, httptest.NewRequest(method, path, body))
-		return rec
-	}
-
-	testHTTPEndpointsBasicAndFlush(t, srv, doReq)
-	buildID := testHTTPEndpointsBuildCreation(t, srv, memStore, doReq)
-	testHTTPEndpointsBuildCancel(t, srv, memStore, buildID, doReq)
-	testHTTPEndpointsListAndFilter(t, srv, doReq)
 }
 
 func TestInitPostgresAndRunServer(t *testing.T) {
-	origPoolFn := newPgxPoolFn
-	defer func() { newPgxPoolFn = origPoolFn }()
 	ctx := context.Background()
-	srv := NewVanadisServer(Config{}, nil, nil)
+	srv := NewVanadisServer(Config{}, RestateConfig{}, nil, nil)
 	if _, err := initPostgres(ctx, srv, "postgres://user:pass@invalid%xx/db"); err == nil {
 		t.Fatal("expected parse error")
 	}
-	newPgxPoolFn = func(context.Context, *pgxpool.Config) (*pgxpool.Pool, error) {
-		return nil, errors.New("pool creation failed")
+	cfg, err := pgxpool.ParseConfig("postgres://u:p@127.0.0.1:5432/db")
+	if err != nil {
+		t.Fatalf("pgxpool.ParseConfig failed: %v", err)
 	}
-	if _, err := initPostgres(ctx, srv, "postgres://u:p@127.0.0.1:5432/db"); err == nil {
-		t.Fatal("expected pool error")
-	}
-	cfg, _ := pgxpool.ParseConfig("postgres://u:p@127.0.0.1:5432/db")
-	newPgxPoolFn = origPoolFn
 	cleanup, err := initPostgres(ctx, srv, cfg.ConnString())
 	if err != nil || cleanup == nil {
 		t.Fatalf("expected success from initPostgres, got err=%v", err)
 	}
 	cleanup(ctx)
-	if runServer(ctx, Config{Port: "-1", PostgresURL: cfg.ConnString()}, nil) == nil || runServer(ctx, Config{Port: "0", PostgresURL: "postgres://user:pass@invalid%xx/db"}, nil) == nil {
+	if runServer(ctx, Config{Port: "-1", PostgresURL: cfg.ConnString()}, RestateConfig{}, nil) == nil || runServer(ctx, Config{Port: "0", PostgresURL: "postgres://user:pass@invalid%xx/db"}, RestateConfig{}, nil) == nil {
 		t.Fatal("expected error on invalid runServer configs")
 	}
 	runCtx, runCancel := context.WithCancel(context.Background())
 	ready, done := make(chan string, 1), make(chan error, 1)
 	go func() {
-		done <- runServer(runCtx, Config{Port: "0", PostgresURL: cfg.ConnString()}, func(addr string) { ready <- addr })
+		done <- runServer(runCtx, Config{Port: "0", PostgresURL: cfg.ConnString()}, RestateConfig{}, func(addr string) { ready <- addr })
 	}()
 	select {
 	case addr := <-ready:
@@ -366,82 +136,20 @@ func TestInitPostgresAndRunServer(t *testing.T) {
 	if err := <-done; err != nil {
 		t.Fatalf("unexpected runServer exit error: %v", err)
 	}
+	// RunApp resolves Restate config from CONFIG_PATH plus env overrides; pin
+	// both to hermetic values so the test never reads real config or pod env.
+	restateYAML := filepath.Join(t.TempDir(), "vanadis.yaml")
+	if err := os.WriteFile(restateYAML, []byte("enabled: false\n"), 0o600); err != nil {
+		t.Fatalf("write restate config: %v", err)
+	}
+	t.Setenv("CONFIG_PATH", restateYAML)
+	for _, key := range []string{"RESTATE_INGRESS_URL", "VANADIS_RESTATE_ENABLED", "RESTATE_ENABLED", "AGENT_NAME"} {
+		t.Setenv(key, "")
+	}
 	appCtx, appCancel := context.WithCancel(context.Background())
 	appCancel()
 	if err := RunApp(appCtx, Config{Port: "0"}); err != nil && !errors.Is(err, http.ErrServerClosed) {
 		t.Fatalf("unexpected RunApp error: %v", err)
-	}
-}
-
-type mockConsumerStatsQuerier struct {
-	stats map[string][2]int64
-	err   error
-}
-
-func (m *mockConsumerStatsQuerier) ConsumerStats(_ context.Context, stream, consumer string) (int64, int64, error) {
-	if m.err != nil {
-		return 0, 0, m.err
-	}
-	if v, ok := m.stats[stream+"/"+consumer]; ok {
-		return v[0], v[1], nil
-	}
-	return 0, 0, nil
-}
-
-func TestVanadisEndpointCounterIncrements(t *testing.T) {
-	restateSrv := newMockRestateServer()
-	defer restateSrv.Close()
-
-	memStore := newMemoryVanadisStore()
-	srv := NewVanadisServer(Config{}, memStore, restateSrv.Client())
-	srv.restateCfg.RestateIngressURL = restateSrv.URL
-
-	// 1. handleCreateBuild success -> created
-	reqBody := `{"thread_id":"123456789012345678","tier":2,"objective":"Metric test build","chunks":[{"repo":"aerial","title":"C1","instructions":"I1","depends_on":[]}]}`
-	recCreate := httptest.NewRecorder()
-	srv.handleCreateBuild(recCreate, httptest.NewRequest(http.MethodPost, "/builds", strings.NewReader(reqBody)))
-	if recCreate.Code != http.StatusAccepted {
-		t.Fatalf("handleCreateBuild status = %d, want %d", recCreate.Code, http.StatusAccepted)
-	}
-
-	// 2. handleCreateBuild enqueue failure -> failed
-	srvFailInsert := NewVanadisServer(Config{}, memStore, restateSrv.Client())
-	srvFailInsert.restateCfg.RestateIngressURL = restateSrv.URL + "/fail"
-	recCreateFail := httptest.NewRecorder()
-	srvFailInsert.handleCreateBuild(recCreateFail, httptest.NewRequest(http.MethodPost, "/builds", strings.NewReader(reqBody)))
-	if recCreateFail.Code != http.StatusInternalServerError {
-		t.Fatalf("handleCreateBuild failure status = %d, want %d", recCreateFail.Code, http.StatusInternalServerError)
-	}
-
-	// 3. handleBuildCancel -> cancelled
-	recCancel := httptest.NewRecorder()
-	srv.handleBuildCancel(recCancel, httptest.NewRequest(http.MethodPost, "/builds/b-to-cancel/cancel", http.NoBody), "b-to-cancel")
-	if recCancel.Code != http.StatusOK {
-		t.Fatalf("handleBuildCancel status = %d, want %d", recCancel.Code, http.StatusOK)
-	}
-}
-
-func TestParseCreateBuildChunks_InitialStatus(t *testing.T) {
-	t.Parallel()
-	now := time.Date(2026, 11, 16, 12, 0, 0, 0, time.UTC)
-	raw := []CreateChunkInput{
-		{Title: "First Chunk", Instructions: "Do 1", Repo: "aerial", DependsOn: []string{}},
-		{Title: "Second Chunk", Instructions: "Do 2", Repo: "aerial", DependsOn: []string{"b-initial-chunk-1"}},
-	}
-	chunks, err := parseCreateBuildChunks("b-initial", now, raw)
-	if err != nil {
-		t.Fatalf("parseCreateBuildChunks failed: %v", err)
-	}
-	if len(chunks) != 2 {
-		t.Fatalf("expected 2 chunks, got %d", len(chunks))
-	}
-	for i, c := range chunks {
-		if c.Status != "pending" {
-			t.Errorf("chunk[%d].Status = %q, want %q", i, c.Status, "pending")
-		}
-		if !c.StartedAt.IsZero() {
-			t.Errorf("chunk[%d].StartedAt = %v, want zero time", i, c.StartedAt)
-		}
 	}
 }
 
@@ -465,92 +173,12 @@ func TestCreateBuildTerminalResponses(t *testing.T) {
 				_, _ = w.Write([]byte(tc.body))
 			}))
 			defer upstream.Close()
-			s := NewVanadisServer(Config{}, newMemoryVanadisStore(), upstream.Client())
+			s := NewVanadisServer(Config{}, RestateConfig{}, newMemoryVanadisStore(), upstream.Client())
 			s.restateCfg.RestateIngressURL = upstream.URL
 			rec := httptest.NewRecorder()
 			s.handleCreateBuild(rec, httptest.NewRequest(http.MethodPost, "/builds", strings.NewReader(`{"id":"example","thread_id":"123456789012345678","objective":"test","chunks":[{"repo":"aerial","title":"test","instructions":"test","depends_on":[]}]}`)))
 			if rec.Code != tc.status || !strings.Contains(rec.Body.String(), tc.want) {
 				t.Fatalf("response = %d %s", rec.Code, rec.Body.String())
-			}
-		})
-	}
-}
-
-func TestInitPostgres(t *testing.T) {
-	t.Parallel()
-	ctx := context.Background()
-	srv := &VanadisServer{}
-
-	// invalid postgres URL
-	_, err := initPostgres(ctx, srv, ":::invalid-url")
-	if err == nil {
-		t.Fatal("expected error on invalid postgres url")
-	}
-}
-
-func TestVanadisServer_StoreHTTPEndpointErrors(t *testing.T) {
-	t.Parallel()
-
-	sErr := newMemoryVanadisStore()
-	sErr.getErr = errors.New("simulated get err")
-
-	srv := &VanadisServer{store: sErr}
-	mux := srv.Routes()
-
-	doReq := func(method, path, body string) int {
-		var r *http.Request
-		if body != "" {
-			r = httptest.NewRequest(method, path, strings.NewReader(body))
-		} else {
-			r = httptest.NewRequest(method, path, http.NoBody)
-		}
-		rec := httptest.NewRecorder()
-		mux.ServeHTTP(rec, r)
-		return rec.Code
-	}
-
-	if code := doReq(http.MethodPost, "/chunks/attach-pr", `{"repo":"aerial","pr_number":101}`); code != http.StatusInternalServerError {
-		t.Errorf("expected 500 on AttachChunkPR err, got %d", code)
-	}
-	if code := doReq(http.MethodGet, "/chunks/c1", ""); code != http.StatusInternalServerError {
-		t.Errorf("expected 500 on GetChunk err, got %d", code)
-	}
-	if code := doReq(http.MethodGet, "/builds/b1", ""); code != http.StatusInternalServerError {
-		t.Errorf("expected 500 on GetBuild err, got %d", code)
-	}
-	if code := doReq(http.MethodPost, "/builds/b1/cancel", ""); code != http.StatusInternalServerError {
-		t.Errorf("expected 500 on CancelBuild err, got %d", code)
-	}
-}
-
-func TestValidVanadisChunkID(t *testing.T) {
-	t.Parallel()
-	tests := []struct {
-		name      string
-		id        string
-		wantValid bool
-	}{
-		{
-			name:      "valid",
-			id:        "valid-chunk_1",
-			wantValid: true,
-		},
-		{
-			name:      "empty",
-			id:        "",
-			wantValid: false,
-		},
-		{
-			name:      "too_long",
-			id:        strings.Repeat("a", 121),
-			wantValid: false,
-		},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			if got := isValidVanadisChunkID(tc.id); got != tc.wantValid {
-				t.Fatalf("isValidVanadisChunkID(%q) = %v, want %v", tc.id, got, tc.wantValid)
 			}
 		})
 	}
@@ -601,42 +229,6 @@ func TestRoutes_ServerSpanPropagatesToRestate(t *testing.T) {
 	}
 }
 
-// TestMCPRouteWiring guards the Streamable HTTP readiness banner contract on
-// both the /mcp and /sse aliases after the L2 internal/mcp extraction.
-func TestMCPRouteWiring(t *testing.T) {
-	t.Parallel()
-	srv := NewVanadisServer(Config{Port: "0"}, newMemoryVanadisStore(), nil)
-	ts := httptest.NewServer(srv.Routes())
-	t.Cleanup(ts.Close)
-
-	tests := []struct {
-		name       string
-		path       string
-		wantStatus int
-		wantSubstr string
-	}{
-		{name: "ready banner on /mcp", path: "/mcp", wantStatus: http.StatusOK, wantSubstr: "Aerial Vanadis MCP Server (Streamable HTTP) Ready\n"},
-		{name: "ready banner on /sse", path: "/sse", wantStatus: http.StatusOK, wantSubstr: "Aerial Vanadis MCP Server (Streamable HTTP) Ready\n"},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			resp, err := ts.Client().Get(ts.URL + tc.path)
-			if err != nil {
-				t.Fatalf("request failed: %v", err)
-			}
-			defer resp.Body.Close()
-			body, _ := io.ReadAll(resp.Body)
-			if resp.StatusCode != tc.wantStatus {
-				t.Fatalf("status = %d, want %d (body: %s)", resp.StatusCode, tc.wantStatus, string(body))
-			}
-			if !strings.Contains(string(body), tc.wantSubstr) {
-				t.Fatalf("body %q does not contain %q", string(body), tc.wantSubstr)
-			}
-		})
-	}
-}
-
 // TestRetryActionRouteWiring exercises the POST /builds/{id}/retry-action
 // route through SetupMux so the root delegation wrapper stays covered.
 func TestRetryActionRouteWiring(t *testing.T) {
@@ -653,7 +245,11 @@ func TestRetryActionRouteWiring(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			srv := NewVanadisServer(Config{Port: "0"}, newMemoryVanadisStore(), nil)
+			mem := newMemoryVanadisStore()
+			if err := mem.CreateBuild(context.Background(), storetest.Build("b1", "1555999", "Retry", "obj", "failed"), nil); err != nil {
+				t.Fatalf("seed retry build: %v", err)
+			}
+			srv := NewVanadisServer(Config{Port: "0"}, RestateConfig{}, mem, nil)
 			srv.restateCfg = RestateConfig{}
 			ts := httptest.NewServer(srv.Routes())
 			t.Cleanup(ts.Close)
@@ -662,7 +258,10 @@ func TestRetryActionRouteWiring(t *testing.T) {
 				t.Fatalf("request failed: %v", err)
 			}
 			defer resp.Body.Close()
-			body, _ := io.ReadAll(resp.Body)
+			body, err := io.ReadAll(resp.Body)
+			if err != nil {
+				t.Fatalf("failed to read body: %v", err)
+			}
 			if resp.StatusCode != tc.wantStatus {
 				t.Fatalf("status = %d, want %d (body: %s)", resp.StatusCode, tc.wantStatus, string(body))
 			}
@@ -675,8 +274,8 @@ func TestRetryActionRouteWiring(t *testing.T) {
 
 // TestMCPHandlerReceivers pins the observable wiring of the root MCP
 // delegation helpers: which store instance is propagated, the RestateEnabled
-// flag value, and that a nil server reports ingress unavailable instead of
-// panicking.
+// flag value, and that a nil server reports a missing store (it cannot
+// resolve the build's runner) instead of panicking.
 func TestMCPHandlerReceivers(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
@@ -697,7 +296,7 @@ func TestMCPHandlerReceivers(t *testing.T) {
 			var mem *memoryVanadisStore
 			if !tc.nilServer {
 				mem = newMemoryVanadisStore()
-				srv = NewVanadisServer(Config{Port: "0"}, mem, nil)
+				srv = NewVanadisServer(Config{Port: "0"}, RestateConfig{}, mem, nil)
 				srv.restateCfg = RestateConfig{Enabled: tc.enabled, RestateIngressURL: "http://restate.invalid"}
 			}
 			h := srv.mcpHandler()
@@ -722,41 +321,9 @@ func TestMCPHandlerReceivers(t *testing.T) {
 				r.Header.Set("Content-Type", "application/json")
 				w := httptest.NewRecorder()
 				h.NewHTTPHandler()(w, r)
-				if w.Code != http.StatusOK || !strings.Contains(w.Body.String(), "durable Restate ingress is required") {
-					t.Fatalf("nil-server retry status=%d body=%s, want ingress-unavailable tool error", w.Code, w.Body.String())
+				if w.Code != http.StatusOK || !strings.Contains(w.Body.String(), "vanadis store not configured") {
+					t.Fatalf("nil-server retry status=%d body=%s, want store-unavailable tool error", w.Code, w.Body.String())
 				}
-			}
-		})
-	}
-}
-
-// TestWriteStoreErrMapping pins the store/Restate error-to-HTTP-status mapping
-// shared by the root handlers and the extracted MCP surface.
-func TestWriteStoreErrMapping(t *testing.T) {
-	t.Parallel()
-	tests := []struct {
-		name       string
-		storeErr   error
-		wantStatus int
-	}{
-		{name: "restate timeout maps to gateway timeout", storeErr: ErrRestateTimeout, wantStatus: http.StatusGatewayTimeout},
-		{name: "build conflict maps to conflict", storeErr: ErrBuildConflict, wantStatus: http.StatusConflict},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			st := newMemoryVanadisStore()
-			st.getErr = tc.storeErr
-			srv := NewVanadisServer(Config{Port: "0"}, st, nil)
-			ts := httptest.NewServer(srv.Routes())
-			t.Cleanup(ts.Close)
-			resp, err := ts.Client().Get(ts.URL + "/builds/b1")
-			if err != nil {
-				t.Fatalf("request failed: %v", err)
-			}
-			defer resp.Body.Close()
-			if resp.StatusCode != tc.wantStatus {
-				t.Fatalf("status = %d, want %d", resp.StatusCode, tc.wantStatus)
 			}
 		})
 	}
@@ -775,13 +342,13 @@ func TestMCPHandlerLiveDependencies(t *testing.T) {
 	}))
 	t.Cleanup(ingress.Close)
 
-	srv := NewVanadisServer(Config{Port: "0"}, newMemoryVanadisStore(), nil)
+	srv := NewVanadisServer(Config{Port: "0"}, RestateConfig{}, newMemoryVanadisStore(), nil)
 	srv.restateCfg = RestateConfig{}
 	ts := httptest.NewServer(srv.Routes())
 	t.Cleanup(ts.Close)
 
 	seeded := newMemoryVanadisStore()
-	if err := seeded.CreateBuild(context.Background(), mkBuild("build-live", "1234567890", "Live Title", "Live Objective", "running"), []VanadisChunk{mkChunk("chunk-1", "build-live", 0, "Chunk 1", "Inst 1", "medium", "pending")}); err != nil {
+	if err := seeded.CreateBuild(context.Background(), storetest.Build("build-live", "1234567890", "Live Title", "Live Objective", "running"), []VanadisChunk{storetest.Chunk("chunk-1", "build-live", 0, "Chunk 1", "Inst 1", "medium", "pending")}); err != nil {
 		t.Fatalf("seed store: %v", err)
 	}
 	srv.SetStore(seeded)
@@ -805,7 +372,10 @@ func TestMCPHandlerLiveDependencies(t *testing.T) {
 				t.Fatalf("request failed: %v", err)
 			}
 			defer resp.Body.Close()
-			body, _ := io.ReadAll(resp.Body)
+			body, err := io.ReadAll(resp.Body)
+			if err != nil {
+				t.Fatalf("failed to read body: %v", err)
+			}
 			if resp.StatusCode != http.StatusOK || !strings.Contains(string(body), tc.wantSubstr) {
 				t.Fatalf("status=%d body=%s, want substring %q", resp.StatusCode, string(body), tc.wantSubstr)
 			}
@@ -816,52 +386,382 @@ func TestMCPHandlerLiveDependencies(t *testing.T) {
 	}
 }
 
-// TestSetupMuxNilSafeDelegation proves a nil-backed mux stays nil-safe: the
-// per-request MCP closure serves the readiness banner and reports the missing
-// store as a tool error instead of panicking, and the standalone metrics
-// branch still serves.
-func TestSetupMuxNilSafeDelegation(t *testing.T) {
-	t.Parallel()
-	ts := httptest.NewServer(SetupMux(nil))
-	t.Cleanup(ts.Close)
-
+// TestCollectBuildMetrics pins that collectBuildMetrics leaves the gauges
+// untouched when it has nothing to read. Not parallel: shares global gauges.
+func TestCollectBuildMetrics(t *testing.T) {
 	tests := []struct {
-		name       string
-		method     string
-		path       string
-		body       string
-		wantStatus int
-		wantSubstr string
+		name string
+		srv  *VanadisServer
 	}{
-		{name: "nil mux serves MCP banner without a store", method: http.MethodGet, path: "/mcp", wantStatus: http.StatusOK, wantSubstr: "Aerial Vanadis MCP Server (Streamable HTTP) Ready\n"},
-		{name: "nil mux reports missing store as tool error", method: http.MethodPost, path: "/mcp", body: `{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"get_build","arguments":{"build_id":"build-live"}}}`, wantStatus: http.StatusOK, wantSubstr: "vanadis store not configured"},
-		{name: "nil mux serves standalone metrics", method: http.MethodGet, path: "/metrics", wantStatus: http.StatusOK, wantSubstr: ""},
+		{name: "nil server", srv: nil},
+		{name: "nil store", srv: &VanadisServer{}},
+		{name: "store list error", srv: NewVanadisServer(Config{}, RestateConfig{}, &storetest.Store{ListErr: errors.New("db down")}, nil)},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			metrics.BuildsActive.WithLabelValues("running").Set(7)
+			tc.srv.collectBuildMetrics(context.Background())
+			if want, body := `vanadis_builds_active{queue_state="running"} 7`, scrapeRootMetrics(t); !strings.Contains(body, want) {
+				t.Errorf("metrics exposition missing %q\nbody:\n%s", want, body)
+			}
+		})
+	}
+}
+
+func TestRestateObjectPath(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name, runner, buildID, handler, want string
+	}{
+		{name: "named runner targets the canonical Build service", runner: "agent-alpha", buildID: "b1", handler: "Create", want: "/Build/b1/Create"},
+		{name: "default runner targets the canonical Build service", runner: "", buildID: "b2", handler: "Cancel", want: "/Build/b2/Cancel"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			var bodyReader io.Reader
+			srv := NewVanadisServer(Config{}, RestateConfig{AgentName: "agent-beta", RestateIngressURL: "http://restate.test"}, nil, nil)
+			if got := srv.restateObjectPath(tc.runner, tc.buildID, tc.handler); got != tc.want {
+				t.Errorf("restateObjectPath() = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+// routesStore seeds every build the TestRoutes rows address. Chunk IDs are
+// unique across builds so GetChunk resolves deterministically; the Restate
+// mock fails Build paths containing "fail" and conflicts on "b-done".
+func routesStore() *memoryVanadisStore {
+	s := newMemoryVanadisStore()
+	seed := func(id, buildAgent, status string, chunks ...VanadisChunk) {
+		b := storetest.Build(id, "1234567890", "Build "+id, "obj", status)
+		b.Agent = buildAgent
+		s.Builds[id], s.Chunks[id] = b, chunks
+	}
+	seed("b1", "aerial", "running", storetest.Chunk("c1", "b1", 0, "Chunk 1", "Inst 1", "", "running"), storetest.Chunk("c2", "b1", 1, "Chunk 2", "Inst 2", "", "pending"))
+	seed("b-empty", "", "running", storetest.Chunk("c-empty", "b-empty", 0, "Chunk", "Inst", "", "running"))
+	seed("b-fail", "aerial", "running", storetest.Chunk("c-fail", "b-fail", 0, "Chunk", "Inst", "", "running"))
+	seed("b-done", "aerial", "completed")
+	seed("b-runner-alpha", "agent-alpha", "running",
+		storetest.Chunk("c-alpha-1", "b-runner-alpha", 0, "Chunk", "Inst", "", "running"), storetest.Chunk("c-alpha-2", "b-runner-alpha", 1, "Chunk", "Inst", "", "pending"))
+	return s
+}
+
+// routesFailingStore is routesStore with injected GetBuild/GetChunk and ListBuilds errors.
+func routesFailingStore(getErr, listErr error) *memoryVanadisStore {
+	s := routesStore()
+	s.GetErr, s.ListErr = getErr, listErr
+	return s
+}
+
+// routesListStore holds one running, one completed and one queued build, newest first.
+func routesListStore() *memoryVanadisStore {
+	s := newMemoryVanadisStore()
+	now := time.Now().UTC()
+	for i, b := range []struct{ id, buildStatus, chunkStatus string }{{"b-run", "running", "running"}, {"b-comp", "completed", "completed"}, {"b-q", "running", "pending"}} {
+		build := storetest.Build(b.id, "111", "", "", b.buildStatus)
+		build.CreatedAt = now.Add(-time.Duration(i+1) * time.Minute)
+		s.Builds[b.id], s.Chunks[b.id] = build, []VanadisChunk{storetest.Chunk("c-"+b.id, b.id, 0, "C", "", "", b.chunkStatus)}
+	}
+	return s
+}
+
+// routesMetricsStore holds a running build (one running, one pending chunk),
+// a queued build (one pending chunk) and a completed build.
+func routesMetricsStore() *memoryVanadisStore {
+	s := newMemoryVanadisStore()
+	s.Builds["b-e2e-run"] = storetest.Build("b-e2e-run", "111", "Running", "obj", "running")
+	s.Chunks["b-e2e-run"] = []VanadisChunk{storetest.Chunk("c-e2e-1", "b-e2e-run", 0, "C1", "I1", "", "running"), storetest.Chunk("c-e2e-2", "b-e2e-run", 1, "C2", "I2", "", "pending")}
+	s.Builds["b-e2e-queue"] = storetest.Build("b-e2e-queue", "222", "Queued", "obj", "running")
+	s.Chunks["b-e2e-queue"] = []VanadisChunk{storetest.Chunk("c-e2e-3", "b-e2e-queue", 0, "C3", "I3", "", "pending")}
+	s.Builds["b-e2e-done"] = storetest.Build("b-e2e-done", "333", "Done", "obj", "completed")
+	s.Chunks["b-e2e-done"] = []VanadisChunk{storetest.Chunk("c-e2e-4", "b-e2e-done", 0, "C4", "I4", "", "merged")}
+	return s
+}
+
+const (
+	routesToken      = "Bearer valid-token"
+	routesCreate     = `{"thread_id":"1234567890","objective":"obj","chunks":[{"mode":"action","title":"c","instructions":"i","depends_on":[]}]}`
+	routesCreateFull = `{"thread_id":"stateful_medium:discord-1555999","title":"Feature X","objective":"Implement feature X","chunks":[` +
+		`{"repo":"aerial","title":"Part 1","instructions":"Do part 1","effort":"low","depends_on":[]},` +
+		`{"repo":"aerial","id":"custom-chunk-2","title":"Part 2","instructions":"Do part 2","target_files":["a.go"],"effort":"high","depends_on":["0"]}]}`
+	routesMCPBanner = "Aerial Vanadis MCP Server (Streamable HTTP) Ready\n"
+	routesStep      = `{"chunk_id":"c1","active_step":"step 1"}`
+	routesAppend    = `{"chunks":[{"mode":"action","title":"c2","instructions":"i2"}]}`
+)
+
+// TestRoutes fixtures: stores and auth fakes are read-only once built.
+var (
+	routesSeeded, routesListed, routesMetrics = routesStore(), routesListStore(), routesMetricsStore()
+	routesGetFails                            = routesFailingStore(errors.New("simulated get err"), nil)
+	routesListFails                           = routesFailingStore(nil, errors.New("simulated list failure"))
+	routesAllow, routesDeny, routesUnauth     = authFake(true, true), authFake(true, false), authFake(false, false)
+)
+
+// routeCase is one TestRoutes row.
+type routeCase struct {
+	name, method, path, body string
+	errBody                  bool
+	store                    VanadisStore
+	nilServer                bool
+	auth                     *k8sauthtest.RoundTripper
+	token                    string
+	wantStatus               int
+	wantSubstr               string
+}
+
+var routeCases = []routeCase{
+	// Health, metrics, MCP and coverage flush (auth-exempt or wiring).
+	{name: "health exempt from auth", method: http.MethodGet, path: "/health", store: routesSeeded, auth: routesAllow, wantStatus: http.StatusOK, wantSubstr: `"status":"ok"`},
+	{name: "healthz exempt from auth", method: http.MethodGet, path: "/healthz", store: routesSeeded, auth: routesAllow, wantStatus: http.StatusOK, wantSubstr: `"status":"ok"`},
+	{name: "metrics exempt from auth", method: http.MethodGet, path: "/metrics", store: routesSeeded, auth: routesAllow, wantStatus: http.StatusOK},
+	{name: "metrics running builds", method: http.MethodGet, path: "/metrics", store: routesMetrics, wantStatus: http.StatusOK, wantSubstr: `vanadis_builds_active{queue_state="running"} 1`},
+	{name: "metrics queued builds", method: http.MethodGet, path: "/metrics", store: routesMetrics, wantStatus: http.StatusOK, wantSubstr: `vanadis_builds_active{queue_state="queued"} 1`},
+	{name: "metrics pending chunks", method: http.MethodGet, path: "/metrics", store: routesMetrics, wantStatus: http.StatusOK, wantSubstr: `vanadis_chunks_active{status="pending"} 2`},
+	{name: "metrics running chunks", method: http.MethodGet, path: "/metrics", store: routesMetrics, wantStatus: http.StatusOK, wantSubstr: `vanadis_chunks_active{status="running"} 1`},
+	{name: "metrics pr_opened chunks zero", method: http.MethodGet, path: "/metrics", store: routesMetrics, wantStatus: http.StatusOK, wantSubstr: `vanadis_chunks_active{status="pr_opened"} 0`},
+	{name: "metrics queue depth without stats", method: http.MethodGet, path: "/metrics", store: routesMetrics, wantStatus: http.StatusOK, wantSubstr: `vanadis_queue_depth{state="pending"} 0`},
+	{name: "nil server serves standalone metrics", method: http.MethodGet, path: "/metrics", nilServer: true, wantStatus: http.StatusOK},
+	{name: "mcp ready banner", method: http.MethodGet, path: "/mcp", store: routesSeeded, wantStatus: http.StatusOK, wantSubstr: routesMCPBanner},
+	{name: "sse ready banner", method: http.MethodGet, path: "/sse", store: routesSeeded, wantStatus: http.StatusOK, wantSubstr: routesMCPBanner},
+	{name: "nil server mcp ready banner", method: http.MethodGet, path: "/mcp", nilServer: true, wantStatus: http.StatusOK, wantSubstr: routesMCPBanner},
+	{
+		name: "nil server mcp reports missing store", method: http.MethodPost, path: "/mcp", nilServer: true, wantStatus: http.StatusOK, wantSubstr: "vanadis store not configured",
+		body: `{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"get_build","arguments":{"build_id":"build-live"}}}`,
+	},
+	{name: "coverage flush post", method: http.MethodPost, path: "/debug/coverage/flush", store: routesSeeded, wantStatus: http.StatusOK},
+	{name: "coverage flush get", method: http.MethodGet, path: "/debug/coverage/flush", store: routesSeeded, wantStatus: http.StatusOK},
+
+	// Auth middleware wiring and list builds.
+	{name: "list malformed token", method: http.MethodGet, path: "/builds", store: routesSeeded, auth: routesAllow, token: "Basic abc", wantStatus: http.StatusUnauthorized, wantSubstr: "invalid bearer token"},
+	{name: "list unauthenticated token", method: http.MethodGet, path: "/builds", store: routesSeeded, auth: routesUnauth, token: routesToken, wantStatus: http.StatusUnauthorized, wantSubstr: "token not authenticated"},
+	{name: "list forbidden", method: http.MethodGet, path: "/builds", store: routesSeeded, auth: routesDeny, token: routesToken, wantStatus: http.StatusForbidden, wantSubstr: "access denied"},
+	{name: "list allowed", method: http.MethodGet, path: "/builds", store: routesSeeded, auth: routesAllow, token: routesToken, wantStatus: http.StatusOK},
+	{name: "list nil store", method: http.MethodGet, path: "/builds", wantStatus: http.StatusInternalServerError, wantSubstr: "vanadis store not configured"},
+	{name: "list store error", method: http.MethodGet, path: "/builds", store: routesListFails, wantStatus: http.StatusInternalServerError, wantSubstr: "simulated list failure"},
+	{name: "list head not allowed", method: http.MethodHead, path: "/builds", store: routesListed, wantStatus: http.StatusMethodNotAllowed},
+	{
+		name: "list counts queue states", method: http.MethodGet, path: "/builds", store: routesListed, wantStatus: http.StatusOK,
+		wantSubstr: `"completed_count":1,"queued_count":1,"running_count":1,"status":"ok","total":3`,
+	},
+	{name: "runs alias lists builds", method: http.MethodGet, path: "/runs", store: routesListed, wantStatus: http.StatusOK, wantSubstr: `"total":3`},
+	{name: "list queue_state filter", method: http.MethodGet, path: "/builds?queue_state=running", store: routesListed, wantStatus: http.StatusOK, wantSubstr: `"builds":[{"id":"b-run"`},
+	{name: "list status filter", method: http.MethodGet, path: "/builds?status=completed", store: routesListed, wantStatus: http.StatusOK, wantSubstr: `"builds":[{"id":"b-comp"`},
+	{name: "list limit", method: http.MethodGet, path: "/builds?limit=1", store: routesListed, wantStatus: http.StatusOK, wantSubstr: `"total":1`},
+
+	// Create build.
+	{name: "create nil store", method: http.MethodPost, path: "/builds", body: `{}`, wantStatus: http.StatusInternalServerError},
+	{name: "create body read error", method: http.MethodPost, path: "/builds", errBody: true, store: routesSeeded, wantStatus: http.StatusBadRequest, wantSubstr: "failed to read request body"},
+	{name: "create invalid json", method: http.MethodPost, path: "/builds", body: `{invalid`, store: routesSeeded, wantStatus: http.StatusBadRequest, wantSubstr: "invalid json payload"},
+	{name: "create bad thread id", method: http.MethodPost, path: "/builds", body: `{"thread_id":"not-numeric"}`, store: routesSeeded, wantStatus: http.StatusBadRequest, wantSubstr: "thread_id is required"},
+	{name: "create missing objective", method: http.MethodPost, path: "/builds", body: `{"thread_id":"123","objective":""}`, store: routesSeeded, wantStatus: http.StatusBadRequest, wantSubstr: "objective is required"},
+	{name: "create no chunks", method: http.MethodPost, path: "/builds", body: `{"thread_id":"123","objective":"obj","chunks":[]}`, store: routesSeeded, wantStatus: http.StatusBadRequest, wantSubstr: "at least one chunk"},
+	{name: "create invalid chunk", method: http.MethodPost, path: "/builds", body: `{"thread_id":"123","objective":"obj","chunks":[{"repo":"aerial","title":"","instructions":"i"}]}`, store: routesSeeded, wantStatus: http.StatusBadRequest},
+	{name: "create without auth accepts", method: http.MethodPost, path: "/builds", body: routesCreateFull, store: routesSeeded, wantStatus: http.StatusAccepted, wantSubstr: `"chunk_count":2`},
+	{name: "create allowed", method: http.MethodPost, path: "/builds", body: routesCreate, store: routesSeeded, auth: routesAllow, token: routesToken, wantStatus: http.StatusAccepted, wantSubstr: `"status":"accepted"`},
+	{name: "create forbidden", method: http.MethodPost, path: "/builds", body: routesCreate, store: routesSeeded, auth: routesDeny, token: routesToken, wantStatus: http.StatusForbidden},
+	{name: "create invalid agent slug", method: http.MethodPost, path: "/builds", body: `{"agent":"BAD_SLUG!",` + routesCreate[1:], store: routesSeeded, auth: routesAllow, token: routesToken, wantStatus: http.StatusBadRequest, wantSubstr: "invalid target agent"},
+	{name: "create for another agent", method: http.MethodPost, path: "/builds", body: `{"agent":"agent-alpha",` + routesCreate[1:], store: routesSeeded, auth: routesAllow, token: routesToken, wantStatus: http.StatusAccepted},
+
+	// Attach PR and chunk by ID.
+	{
+		name: "attach pins agent caller to its own agent", method: http.MethodPost, path: "/chunks/attach-pr", body: `{"repo":"aerial","pr_number":7,"agent":"agent-alpha"}`, store: routesSeeded, auth: routesAllow, token: routesToken,
+		wantStatus: http.StatusOK, wantSubstr: `"thread_id":"thread-aerial"`,
+	},
+	{name: "chunk by id allowed", method: http.MethodGet, path: "/chunks/c1", store: routesSeeded, auth: routesAllow, token: routesToken, wantStatus: http.StatusOK, wantSubstr: `"id":"c1"`},
+	{name: "chunk by id forbidden", method: http.MethodGet, path: "/chunks/c1", store: routesSeeded, auth: routesDeny, token: routesToken, wantStatus: http.StatusForbidden},
+	{name: "chunk by id not found", method: http.MethodGet, path: "/chunks/c-missing", store: routesSeeded, auth: routesAllow, token: routesToken, wantStatus: http.StatusNotFound},
+	{name: "chunk by id store error", method: http.MethodGet, path: "/chunks/c1", store: routesGetFails, wantStatus: http.StatusInternalServerError, wantSubstr: "simulated get err"},
+
+	// Build root and path parsing.
+	{name: "build nil store", method: http.MethodGet, path: "/builds/b1", wantStatus: http.StatusInternalServerError},
+	{name: "build empty id", method: http.MethodGet, path: "/builds/", store: routesSeeded, wantStatus: http.StatusBadRequest, wantSubstr: "build id is required"},
+	{name: "build blank id", method: http.MethodPost, path: "/builds/%20/cancel", store: routesSeeded, wantStatus: http.StatusBadRequest, wantSubstr: "build id is required"},
+	{name: "get build allowed", method: http.MethodGet, path: "/builds/b1", store: routesSeeded, auth: routesAllow, token: routesToken, wantStatus: http.StatusOK, wantSubstr: `"id":"b1"`},
+	{name: "get build forbidden", method: http.MethodGet, path: "/builds/b1", store: routesSeeded, auth: routesDeny, token: routesToken, wantStatus: http.StatusForbidden},
+	{name: "get build not found", method: http.MethodGet, path: "/builds/unknown-id", store: routesSeeded, wantStatus: http.StatusNotFound},
+	{name: "get build store error", method: http.MethodGet, path: "/builds/b1", store: routesGetFails, wantStatus: http.StatusInternalServerError, wantSubstr: "simulated get err"},
+	{name: "get build summarizes entry", method: http.MethodGet, path: "/builds/b-run", store: routesListed, wantStatus: http.StatusOK, wantSubstr: `"queue_state":"running","total_chunks":1`},
+	{name: "build root method not allowed", method: http.MethodPut, path: "/builds/b1", store: routesSeeded, wantStatus: http.StatusMethodNotAllowed},
+	{name: "build unknown subpath", method: http.MethodGet, path: "/builds/b1/unknown", store: routesSeeded, wantStatus: http.StatusNotFound},
+	{name: "build three parts not chunks", method: http.MethodGet, path: "/builds/b1/notchunks/c1", store: routesSeeded, wantStatus: http.StatusNotFound},
+	{name: "build deep unknown subpath", method: http.MethodGet, path: "/builds/b1/chunks/c1/deep", store: routesSeeded, wantStatus: http.StatusNotFound},
+	{name: "build chunks list not allowed", method: http.MethodGet, path: "/builds/b1/chunks", store: routesSeeded, wantStatus: http.StatusMethodNotAllowed},
+	{name: "build chunk ref trailing slash", method: http.MethodGet, path: "/builds/b1/chunks/", store: routesSeeded, wantStatus: http.StatusBadRequest, wantSubstr: "chunk_ref is required"},
+	{name: "build chunk ref blank", method: http.MethodGet, path: "/builds/b1/chunks/%20", store: routesSeeded, wantStatus: http.StatusBadRequest, wantSubstr: "chunk_ref is required"},
+	{name: "build chunk method not allowed", method: http.MethodPost, path: "/builds/b1/chunks/c1", store: routesSeeded, wantStatus: http.StatusMethodNotAllowed},
+
+	// Cancel build.
+	{name: "cancel allowed", method: http.MethodPost, path: "/builds/b1/cancel", body: `{"reason":"cancel"}`, store: routesSeeded, auth: routesAllow, token: routesToken, wantStatus: http.StatusOK, wantSubstr: `"status":"cancelled"`},
+	{name: "cancel forbidden", method: http.MethodPost, path: "/builds/b1/cancel", body: `{"reason":"cancel"}`, store: routesSeeded, auth: routesDeny, token: routesToken, wantStatus: http.StatusForbidden},
+	{name: "cancel not found", method: http.MethodPost, path: "/builds/b-missing/cancel", store: routesSeeded, auth: routesAllow, token: routesToken, wantStatus: http.StatusNotFound},
+	{name: "cancel empty agent fallback", method: http.MethodPost, path: "/builds/b-empty/cancel", store: routesSeeded, auth: routesAllow, token: routesToken, wantStatus: http.StatusOK},
+	{name: "cancel conflict", method: http.MethodPost, path: "/builds/b-done/cancel", store: routesSeeded, wantStatus: http.StatusConflict},
+	{name: "cancel routes to runner build", method: http.MethodPost, path: "/builds/b-runner-alpha/cancel", store: routesSeeded, wantStatus: http.StatusOK},
+	{name: "cancel store error", method: http.MethodPost, path: "/builds/b1/cancel", store: routesGetFails, wantStatus: http.StatusInternalServerError},
+	{name: "cancel method not allowed", method: http.MethodGet, path: "/builds/b1/cancel", store: routesSeeded, wantStatus: http.StatusMethodNotAllowed},
+
+	// Update build.
+	{name: "update build allowed", method: http.MethodPatch, path: "/builds/b1", body: `{"title":"new"}`, store: routesSeeded, auth: routesAllow, token: routesToken, wantStatus: http.StatusOK, wantSubstr: `"status":"updated"`},
+	{name: "update build forbidden", method: http.MethodPatch, path: "/builds/b1", body: `{"title":"new"}`, store: routesSeeded, auth: routesDeny, token: routesToken, wantStatus: http.StatusForbidden},
+	{name: "update build not found", method: http.MethodPatch, path: "/builds/b-missing", body: `{"title":"new"}`, store: routesSeeded, auth: routesAllow, token: routesToken, wantStatus: http.StatusNotFound},
+	{name: "update build empty agent fallback", method: http.MethodPatch, path: "/builds/b-empty", body: `{"title":"new"}`, store: routesSeeded, auth: routesAllow, token: routesToken, wantStatus: http.StatusOK},
+	{name: "update build body read error", method: http.MethodPatch, path: "/builds/b1", errBody: true, store: routesSeeded, wantStatus: http.StatusBadRequest, wantSubstr: "failed to read request body"},
+	{name: "update build bad json", method: http.MethodPatch, path: "/builds/b1", body: `{bad json}`, store: routesSeeded, wantStatus: http.StatusBadRequest, wantSubstr: "invalid json payload"},
+	{name: "update build no fields", method: http.MethodPatch, path: "/builds/b1", body: `{"title":""}`, store: routesSeeded, wantStatus: http.StatusBadRequest, wantSubstr: "at least one of title"},
+	{name: "update build objective only", method: http.MethodPatch, path: "/builds/b1", body: `{"objective":"New Obj"}`, store: routesSeeded, wantStatus: http.StatusOK},
+	{name: "update build conflict", method: http.MethodPatch, path: "/builds/b-done", body: `{"title":"T"}`, store: routesSeeded, wantStatus: http.StatusConflict},
+	{name: "update build routes to runner build", method: http.MethodPatch, path: "/builds/b-runner-alpha", body: `{"title":"New Title"}`, store: routesSeeded, wantStatus: http.StatusOK},
+
+	// Get, update and remove a build chunk.
+	{name: "get chunk allowed", method: http.MethodGet, path: "/builds/b1/chunks/c1", store: routesSeeded, auth: routesAllow, token: routesToken, wantStatus: http.StatusOK, wantSubstr: `"id":"c1"`},
+	{name: "get chunk forbidden", method: http.MethodGet, path: "/builds/b1/chunks/c1", store: routesSeeded, auth: routesDeny, token: routesToken, wantStatus: http.StatusForbidden},
+	{name: "get chunk not found", method: http.MethodGet, path: "/builds/b1/chunks/c-missing", store: routesSeeded, auth: routesAllow, token: routesToken, wantStatus: http.StatusNotFound},
+	{name: "get chunk build not found", method: http.MethodGet, path: "/builds/b-missing/chunks/c1", store: routesSeeded, wantStatus: http.StatusNotFound},
+	{name: "get chunk by index", method: http.MethodGet, path: "/builds/b1/chunks/1", store: routesSeeded, wantStatus: http.StatusOK, wantSubstr: `"id":"c2"`},
+	{name: "update chunk allowed", method: http.MethodPatch, path: "/builds/b1/chunks/c1", body: `{"title":"new"}`, store: routesSeeded, auth: routesAllow, token: routesToken, wantStatus: http.StatusOK, wantSubstr: `"status":"updated"`},
+	{name: "update chunk forbidden", method: http.MethodPatch, path: "/builds/b1/chunks/c1", body: `{"title":"new"}`, store: routesSeeded, auth: routesDeny, token: routesToken, wantStatus: http.StatusForbidden},
+	{name: "update chunk empty agent fallback", method: http.MethodPatch, path: "/builds/b-empty/chunks/c-empty", body: `{"title":"new"}`, store: routesSeeded, auth: routesAllow, token: routesToken, wantStatus: http.StatusOK},
+	{name: "update chunk bad json", method: http.MethodPatch, path: "/builds/b1/chunks/c1", body: `{bad json}`, store: routesSeeded, wantStatus: http.StatusBadRequest, wantSubstr: "invalid json payload"},
+	{name: "update chunk no fields", method: http.MethodPatch, path: "/builds/b1/chunks/c1", body: `{}`, store: routesSeeded, wantStatus: http.StatusBadRequest, wantSubstr: "at least one updated field"},
+	{name: "update chunk not found", method: http.MethodPatch, path: "/builds/b1/chunks/c-missing", body: `{"title":"T"}`, store: routesSeeded, wantStatus: http.StatusNotFound},
+	{name: "update chunk conflict", method: http.MethodPatch, path: "/builds/b1/chunks/c-conflict", body: `{"title":"T"}`, store: routesSeeded, wantStatus: http.StatusConflict},
+	{name: "update chunk routes to runner build", method: http.MethodPatch, path: "/builds/b-runner-alpha/chunks/c-alpha-1", body: `{"title":"T"}`, store: routesSeeded, wantStatus: http.StatusOK},
+	{name: "remove chunk allowed", method: http.MethodDelete, path: "/builds/b1/chunks/c2", store: routesSeeded, auth: routesAllow, token: routesToken, wantStatus: http.StatusOK, wantSubstr: `"removed_chunk_id":"c2"`},
+	{name: "remove chunk forbidden", method: http.MethodDelete, path: "/builds/b1/chunks/c1", store: routesSeeded, auth: routesDeny, token: routesToken, wantStatus: http.StatusForbidden},
+	{name: "remove chunk build not found", method: http.MethodDelete, path: "/builds/b-missing/chunks/c1", store: routesSeeded, auth: routesAllow, token: routesToken, wantStatus: http.StatusNotFound},
+	{name: "remove chunk empty agent fallback", method: http.MethodDelete, path: "/builds/b-empty/chunks/c-empty", store: routesSeeded, auth: routesAllow, token: routesToken, wantStatus: http.StatusOK},
+	{name: "remove chunk conflict", method: http.MethodDelete, path: "/builds/b1/chunks/c-conflict", store: routesSeeded, wantStatus: http.StatusConflict},
+	{name: "remove chunk routes to runner build", method: http.MethodDelete, path: "/builds/b-runner-alpha/chunks/c-alpha-2", store: routesSeeded, wantStatus: http.StatusOK},
+
+	// Append chunks.
+	{name: "append allowed", method: http.MethodPost, path: "/builds/b1/chunks", body: routesAppend, store: routesSeeded, auth: routesAllow, token: routesToken, wantStatus: http.StatusOK, wantSubstr: `"status":"appended"`},
+	{name: "append forbidden", method: http.MethodPost, path: "/builds/b1/chunks", body: routesAppend, store: routesSeeded, auth: routesDeny, token: routesToken, wantStatus: http.StatusForbidden},
+	{name: "append empty agent fallback", method: http.MethodPost, path: "/builds/b-empty/chunks", body: routesAppend, store: routesSeeded, auth: routesAllow, token: routesToken, wantStatus: http.StatusOK},
+	{name: "append bad json", method: http.MethodPost, path: "/builds/b1/chunks", body: `{bad json}`, store: routesSeeded, wantStatus: http.StatusBadRequest, wantSubstr: "invalid json payload"},
+	{name: "append empty chunks", method: http.MethodPost, path: "/builds/b1/chunks", body: `{"chunks":[]}`, store: routesSeeded, wantStatus: http.StatusBadRequest, wantSubstr: "chunks cannot be empty"},
+	{name: "append build not found", method: http.MethodPost, path: "/builds/b-missing/chunks", body: routesAppend, store: routesSeeded, wantStatus: http.StatusNotFound},
+	{name: "append conflict", method: http.MethodPost, path: "/builds/b-done/chunks", body: routesAppend, store: routesSeeded, wantStatus: http.StatusConflict},
+	{name: "append routes to runner build", method: http.MethodPost, path: "/builds/b-runner-alpha/chunks", body: routesAppend, store: routesSeeded, wantStatus: http.StatusOK},
+
+	// Active routesStep via /chunks/active-routesStep.
+	{name: "chunks active step nil store", method: http.MethodPost, path: "/chunks/active-step", body: routesStep, wantStatus: http.StatusInternalServerError},
+	{name: "chunks active step invalid json", method: http.MethodPost, path: "/chunks/active-step", body: `{bad json`, store: routesSeeded, auth: routesAllow, token: routesToken, wantStatus: http.StatusBadRequest},
+	{name: "chunks active step missing chunk_id", method: http.MethodPost, path: "/chunks/active-step", body: `{"active_step":"step 1"}`, store: routesSeeded, auth: routesAllow, token: routesToken, wantStatus: http.StatusBadRequest},
+	{name: "chunks active step chunk not found", method: http.MethodPost, path: "/chunks/active-step", body: `{"chunk_id":"c-missing"}`, store: routesSeeded, auth: routesAllow, token: routesToken, wantStatus: http.StatusNotFound},
+	{name: "chunks active step forbidden", method: http.MethodPost, path: "/chunks/active-step", body: routesStep, store: routesSeeded, auth: routesDeny, token: routesToken, wantStatus: http.StatusForbidden},
+	{name: "chunks active step success", method: http.MethodPost, path: "/chunks/active-step", body: routesStep, store: routesSeeded, auth: routesAllow, token: routesToken, wantStatus: http.StatusOK, wantSubstr: `"status":"ok"`},
+	{name: "chunks active step empty agent fallback", method: http.MethodPost, path: "/chunks/active-step", body: `{"chunk_id":"c-empty"}`, store: routesSeeded, auth: routesAllow, token: routesToken, wantStatus: http.StatusOK},
+	{name: "chunks active step restate error", method: http.MethodPost, path: "/chunks/active-step", body: `{"chunk_id":"c-fail"}`, store: routesSeeded, auth: routesAllow, token: routesToken, wantStatus: http.StatusInternalServerError},
+
+	// Active routesStep via /builds/{id}/active-routesStep.
+	{name: "builds active step method not allowed", method: http.MethodGet, path: "/builds/b1/active-step", store: routesSeeded, auth: routesAllow, token: routesToken, wantStatus: http.StatusMethodNotAllowed},
+	{name: "builds active step invalid json", method: http.MethodPost, path: "/builds/b1/active-step", body: `{bad json`, store: routesSeeded, auth: routesAllow, token: routesToken, wantStatus: http.StatusBadRequest},
+	{name: "builds active step missing chunk_id", method: http.MethodPost, path: "/builds/b1/active-step", body: `{"active_step":"step 1"}`, store: routesSeeded, auth: routesAllow, token: routesToken, wantStatus: http.StatusBadRequest},
+	{name: "builds active step build not found", method: http.MethodPost, path: "/builds/b-missing/active-step", body: routesStep, store: routesSeeded, auth: routesAllow, token: routesToken, wantStatus: http.StatusNotFound},
+	{name: "builds active step forbidden", method: http.MethodPost, path: "/builds/b1/active-step", body: routesStep, store: routesSeeded, auth: routesDeny, token: routesToken, wantStatus: http.StatusForbidden},
+	{name: "builds active step success", method: http.MethodPost, path: "/builds/b1/active-step", body: routesStep, store: routesSeeded, auth: routesAllow, token: routesToken, wantStatus: http.StatusOK, wantSubstr: `"status":"ok"`},
+	{name: "builds active step empty agent fallback", method: http.MethodPost, path: "/builds/b-empty/active-step", body: `{"chunk_id":"c-empty"}`, store: routesSeeded, auth: routesAllow, token: routesToken, wantStatus: http.StatusOK},
+	{name: "builds active step restate error", method: http.MethodPost, path: "/builds/b-fail/active-step", body: `{"chunk_id":"c-fail"}`, store: routesSeeded, auth: routesAllow, token: routesToken, wantStatus: http.StatusInternalServerError},
+	{name: "builds active step routes to runner build", method: http.MethodPost, path: "/builds/b-runner-alpha/active-step", body: `{"chunk_id":"c-alpha-1"}`, store: routesSeeded, wantStatus: http.StatusOK},
+}
+
+// TestRoutes drives every HTTP route through SetupMux against the shared
+// Restate mock (newMockRestateServer). auth nil means auth disabled; token is
+// sent verbatim as the Authorization header. Not parallel: /metrics rows read
+// and write the global Prometheus gauges, and the coverage-flush writers are
+// package globals.
+func TestRoutes(t *testing.T) {
+	restateSrv := newMockRestateServer()
+	t.Cleanup(restateSrv.Close)
+	origMeta, origCounters := httpkit.WriteMetaDirFn, httpkit.WriteCountersDirFn
+	t.Cleanup(func() { httpkit.WriteMetaDirFn, httpkit.WriteCountersDirFn = origMeta, origCounters })
+	httpkit.WriteMetaDirFn, httpkit.WriteCountersDirFn = func(string) error { return nil }, func(string) error { return nil }
+
+	for _, tc := range routeCases {
+		t.Run(tc.name, func(t *testing.T) {
+			var srv *VanadisServer
+			if !tc.nilServer {
+				var auth []*k8sauth.Authenticator
+				if tc.auth != nil {
+					auth = append(auth, k8sauthtest.Authenticator(t, tc.auth))
+				}
+				srv = NewVanadisServer(Config{}, RestateConfig{RestateIngressURL: restateSrv.URL}, tc.store, restateSrv.Client(), auth...)
+			}
+			var body io.Reader = http.NoBody
+			switch {
+			case tc.errBody:
+				body = errorReader{}
+			case tc.body != "":
+				body = strings.NewReader(tc.body)
+			}
+			req := httptest.NewRequest(tc.method, tc.path, body)
 			if tc.body != "" {
-				bodyReader = strings.NewReader(tc.body)
-			}
-			req, err := http.NewRequest(tc.method, ts.URL+tc.path, bodyReader)
-			if err != nil {
-				t.Fatalf("failed to create request: %v", err)
-			}
-			if tc.method == http.MethodPost {
 				req.Header.Set("Content-Type", "application/json")
 			}
-			resp, err := ts.Client().Do(req)
-			if err != nil {
-				t.Fatalf("request failed: %v", err)
+			if tc.token != "" {
+				req.Header.Set("Authorization", tc.token)
 			}
-			defer resp.Body.Close()
-			body, _ := io.ReadAll(resp.Body)
-			if resp.StatusCode != tc.wantStatus {
-				t.Fatalf("status = %d, want %d (body: %s)", resp.StatusCode, tc.wantStatus, string(body))
+			rec := httptest.NewRecorder()
+			SetupMux(srv).ServeHTTP(rec, req)
+			if rec.Code != tc.wantStatus {
+				t.Fatalf("status = %d, want %d (body: %s)", rec.Code, tc.wantStatus, rec.Body.String())
 			}
-			if tc.wantSubstr != "" && !strings.Contains(string(body), tc.wantSubstr) {
-				t.Fatalf("body %q does not contain %q", string(body), tc.wantSubstr)
+			if !strings.Contains(rec.Body.String(), tc.wantSubstr) {
+				t.Fatalf("body %q missing %q", rec.Body.String(), tc.wantSubstr)
+			}
+		})
+	}
+}
+
+func TestServerIngressIdempotencyKeys(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name    string
+		method  string
+		path    string
+		body    string
+		wantKey string
+	}{
+		{
+			name:    "attach chunk pr sets deterministic key",
+			method:  http.MethodPost,
+			path:    "/chunks/attach-pr",
+			body:    `{"chunk_id":"c1","repo":"aerial","pr_number":42}`,
+			wantKey: "attach-pr:c1:aerial:42",
+		},
+		{
+			name:    "active step does not set idempotency key for latest-write streaming",
+			method:  http.MethodPost,
+			path:    "/chunks/active-step",
+			body:    `{"chunk_id":"c1","active_step":"running tests"}`,
+			wantKey: "",
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			var capturedKey string
+			restateSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				capturedKey = r.Header.Get("Idempotency-Key")
+				w.Header().Set("Content-Type", "application/json")
+				if strings.Contains(r.URL.Path, "RouteAttachPR") {
+					_ = json.NewEncoder(w).Encode(AttachChunkPRResponse{Status: "attached", BuildID: "b1", ChunkID: "c1", ThreadID: "123"})
+					return
+				}
+				w.WriteHeader(http.StatusOK)
+			}))
+			defer restateSrv.Close()
+
+			srv := NewVanadisServer(Config{}, RestateConfig{RestateIngressURL: restateSrv.URL}, routesStore(), restateSrv.Client())
+			rec := httptest.NewRecorder()
+			req := httptest.NewRequest(tc.method, tc.path, strings.NewReader(tc.body))
+			req.Header.Set("Content-Type", "application/json")
+			srv.Routes().ServeHTTP(rec, req)
+			if rec.Code != http.StatusOK {
+				t.Fatalf("status = %d, want %d: %s", rec.Code, http.StatusOK, rec.Body.String())
+			}
+			if capturedKey != tc.wantKey {
+				t.Fatalf("Idempotency-Key = %q, want %q", capturedKey, tc.wantKey)
 			}
 		})
 	}

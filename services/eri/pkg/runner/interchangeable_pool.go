@@ -15,7 +15,6 @@ import (
 	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/trace"
 
-	"github.com/azylman/aerial/pkg/tracing"
 	"github.com/azylman/aerial/services/eri/pkg/metrics"
 	"github.com/azylman/aerial/services/eri/pkg/session"
 )
@@ -271,7 +270,7 @@ func endEphemeralSpan(span trace.Span, model, targetKey string, res *TurnResult,
 	}
 	span.SetAttributes(attrs...)
 	if err != nil {
-		span.SetStatus(codes.Error, tracing.Redact(err.Error()))
+		span.SetStatus(codes.Error, err.Error())
 	}
 	span.End()
 }

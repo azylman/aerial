@@ -13,26 +13,19 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 
+	"github.com/azylman/aerial/pkg/buildplan"
 	"github.com/azylman/aerial/pkg/pubsub"
 	"github.com/azylman/aerial/services/vanadis/internal/model"
 )
 
 const jsonNull = "null"
 
-// VanadisChunkPRLookup represents the result of looking up a chunk by repository and PR number.
-type VanadisChunkPRLookup struct {
-	Matched bool   `json:"matched"`
-	ChunkID string `json:"chunk_id,omitempty"`
-	BuildID string `json:"build_id,omitempty"`
-	Effort  string `json:"effort,omitempty"`
-}
-
 // VanadisStore defines the persistence contract for Vanadis builds and chunks.
 type VanadisStore interface {
 	GetBuild(ctx context.Context, buildID string) (*model.VanadisBuild, []model.VanadisChunk, error)
 	ListBuilds(ctx context.Context, limit int) ([]model.VanadisBuildEntry, error)
 	GetChunk(ctx context.Context, chunkID string) (*model.VanadisChunk, *model.VanadisBuild, error)
-	GetChunkByPR(ctx context.Context, repo string, prNumber int) (*VanadisChunkPRLookup, error)
+	PreRecordChunkPR(ctx context.Context, chunkID, repo string, prNumber int) error
 }
 
 // QueryExecer abstracts the pgx query surface consumed by PostgresVanadisStore.
@@ -83,7 +76,7 @@ func ScanChunks(rows pgx.Rows) ([]model.VanadisChunk, error) {
 			&c.ID, &c.BuildID, &c.ChunkIndex, &c.Mode, &c.Repo, &c.Title, &c.Instructions,
 			&c.TargetFiles, &c.TargetSymbols, &c.Effort, &c.AcceptanceCriteria, &c.Status,
 			&c.PRNumber, &c.StallNudges, &c.DependsOn, &c.CIFailCount, &rawCIChecks,
-			&rawRolloutState, &c.Banner, &c.MergeAwakeableID, &c.DeployAwakeableID,
+			&rawRolloutState, &c.Banner,
 			&startedAt, &completedAt, &c.CreatedAt, &c.UpdatedAt,
 		); err != nil {
 			return nil, fmt.Errorf("failed to scan vanadis chunk: %w", err)
@@ -94,8 +87,8 @@ func ScanChunks(rows pgx.Rows) ([]model.VanadisChunk, error) {
 		if completedAt.Valid {
 			c.CompletedAt = completedAt.Time
 		}
-		c.TargetFiles, c.TargetSymbols, c.AcceptanceCriteria = model.NonNilSlice(c.TargetFiles), model.NonNilSlice(c.TargetSymbols), model.NonNilSlice(c.AcceptanceCriteria)
-		c.DependsOn = model.NonNilSlice(c.DependsOn)
+		c.TargetFiles, c.TargetSymbols, c.AcceptanceCriteria = buildplan.NonNilSlice(c.TargetFiles), buildplan.NonNilSlice(c.TargetSymbols), buildplan.NonNilSlice(c.AcceptanceCriteria)
+		c.DependsOn = buildplan.NonNilSlice(c.DependsOn)
 		c.Effort = model.CapChunkEffort(c.Effort)
 		if len(rawCIChecks) > 0 && string(rawCIChecks) != jsonNull && string(rawCIChecks) != "{}" {
 			var checks map[string]string
@@ -134,7 +127,7 @@ func (s *PostgresVanadisStore) GetBuild(ctx context.Context, buildID string) (*m
 		}
 		return nil, nil, fmt.Errorf("query build %s: %w", buildID, err)
 	}
-	const chunksQuery = `SELECT id, build_id, chunk_index, mode, repo, title, instructions, target_files, target_symbols, COALESCE(effort, 'medium'), acceptance_criteria, status, COALESCE(pr_number, 0), COALESCE(stall_nudges, 0), depends_on, ci_fail_count, ci_checks, rollout_state, banner, merge_awakeable_id, deploy_awakeable_id, started_at, completed_at, created_at, updated_at FROM vanadis_chunks WHERE build_id = $1 ORDER BY chunk_index ASC;`
+	const chunksQuery = `SELECT id, build_id, chunk_index, mode, repo, title, instructions, target_files, target_symbols, COALESCE(effort, 'medium'), acceptance_criteria, status, COALESCE(pr_number, 0), COALESCE(stall_nudges, 0), depends_on, ci_fail_count, ci_checks, rollout_state, banner, started_at, completed_at, created_at, updated_at FROM vanadis_chunks WHERE build_id = $1 ORDER BY chunk_index ASC;`
 	rows, err := s.db.Query(ctx, chunksQuery, buildID)
 	if err != nil {
 		return nil, nil, fmt.Errorf("query chunks for build %s: %w", buildID, err)
@@ -177,7 +170,7 @@ func (s *PostgresVanadisStore) ListBuilds(ctx context.Context, limit int) ([]mod
 	if len(builds) == 0 {
 		return []model.VanadisBuildEntry{}, nil
 	}
-	const chunksQuery = `SELECT id, build_id, chunk_index, mode, repo, title, instructions, target_files, target_symbols, COALESCE(effort, 'medium'), acceptance_criteria, status, COALESCE(pr_number, 0), COALESCE(stall_nudges, 0), depends_on, ci_fail_count, ci_checks, rollout_state, banner, merge_awakeable_id, deploy_awakeable_id, started_at, completed_at, created_at, updated_at FROM vanadis_chunks WHERE build_id = ANY($1) ORDER BY build_id, chunk_index ASC;`
+	const chunksQuery = `SELECT id, build_id, chunk_index, mode, repo, title, instructions, target_files, target_symbols, COALESCE(effort, 'medium'), acceptance_criteria, status, COALESCE(pr_number, 0), COALESCE(stall_nudges, 0), depends_on, ci_fail_count, ci_checks, rollout_state, banner, started_at, completed_at, created_at, updated_at FROM vanadis_chunks WHERE build_id = ANY($1) ORDER BY build_id, chunk_index ASC;`
 	cRows, err := s.db.Query(ctx, chunksQuery, buildIDs)
 	if err != nil {
 		return nil, fmt.Errorf("failed to query vanadis chunks: %w", err)
@@ -193,7 +186,7 @@ func (s *PostgresVanadisStore) ListBuilds(ctx context.Context, limit int) ([]mod
 	}
 	entries := make([]model.VanadisBuildEntry, len(builds))
 	for i, b := range builds {
-		entries[i] = model.SummarizeBuildEntry(b, model.NonNilSlice(chunksByBuild[b.ID]))
+		entries[i] = model.SummarizeBuildEntry(b, buildplan.NonNilSlice(chunksByBuild[b.ID]))
 	}
 	return entries, nil
 }
@@ -207,7 +200,7 @@ func (s *PostgresVanadisStore) GetChunk(ctx context.Context, chunkID string) (*m
 	if chunkID == "" {
 		return nil, nil, errors.New("chunk id cannot be empty")
 	}
-	const chunkQuery = `SELECT id, build_id, chunk_index, mode, repo, title, instructions, target_files, target_symbols, COALESCE(effort, 'medium'), acceptance_criteria, status, COALESCE(pr_number, 0), COALESCE(stall_nudges, 0), depends_on, ci_fail_count, ci_checks, rollout_state, banner, merge_awakeable_id, deploy_awakeable_id, started_at, completed_at, created_at, updated_at FROM vanadis_chunks WHERE id = $1;`
+	const chunkQuery = `SELECT id, build_id, chunk_index, mode, repo, title, instructions, target_files, target_symbols, COALESCE(effort, 'medium'), acceptance_criteria, status, COALESCE(pr_number, 0), COALESCE(stall_nudges, 0), depends_on, ci_fail_count, ci_checks, rollout_state, banner, started_at, completed_at, created_at, updated_at FROM vanadis_chunks WHERE id = $1;`
 	rows, err := s.db.Query(ctx, chunkQuery, chunkID)
 	if err != nil {
 		return nil, nil, fmt.Errorf("query chunk %s: %w", chunkID, err)
@@ -232,70 +225,20 @@ func (s *PostgresVanadisStore) GetChunk(ctx context.Context, chunkID string) (*m
 	return &c, &b, nil
 }
 
-const defaultRepoOwner = "azylman"
-
-// RepoMatchCandidates returns the repo spellings a PR lookup should match.
-func RepoMatchCandidates(repo string) []string {
-	repo = model.NormalizeRepo(repo)
-	if repo == "" {
+// PreRecordChunkPR records a PR number and sets status to pr_opened for an active chunk
+// before waiting on the Restate build lock.
+func (s *PostgresVanadisStore) PreRecordChunkPR(ctx context.Context, chunkID, repo string, prNumber int) error {
+	if s == nil || s.db == nil {
+		return errors.New("database connection is nil")
+	}
+	chunkID = strings.TrimSpace(chunkID)
+	repo = strings.TrimSpace(repo)
+	if chunkID == "" || prNumber <= 0 {
 		return nil
 	}
-	if !strings.Contains(repo, "/") {
-		return []string{repo, defaultRepoOwner + "/" + repo}
+	const updateQuery = `UPDATE vanadis_chunks AS c SET pr_number = $1, status = 'pr_opened', updated_at = CURRENT_TIMESTAMP FROM vanadis_builds AS b WHERE c.id = $2 AND b.id = c.build_id AND c.mode = 'pr' AND COALESCE(c.pr_number, 0) = 0 AND c.status IN ('running', 'coding') AND b.status IN ('running', 'failed') AND ($3 = '' OR c.repo = $3 OR c.repo LIKE '%/' || $3 OR $3 LIKE '%/' || c.repo);`
+	if _, err := s.db.Exec(ctx, updateQuery, prNumber, chunkID, repo); err != nil {
+		return fmt.Errorf("prerecord chunk pr %s (#%d): %w", chunkID, prNumber, err)
 	}
-	if bare, ok := strings.CutPrefix(repo, defaultRepoOwner+"/"); ok && bare != "" && !strings.Contains(bare, "/") {
-		return []string{repo, bare}
-	}
-	return []string{repo}
-}
-
-// chunkPRMatch is the newest non-cancelled chunk tied to a repo and PR number.
-type chunkPRMatch struct {
-	chunkID, buildID, effort string
-	chunkIdx                 int
-	hasRemaining             bool
-}
-
-// GetChunkByPR looks up a chunk and its parent build for a given repo and pr_number.
-func (s *PostgresVanadisStore) GetChunkByPR(ctx context.Context, repo string, prNumber int) (*VanadisChunkPRLookup, error) {
-	if s == nil || s.db == nil {
-		return nil, errors.New("database connection is nil")
-	}
-	candidates := RepoMatchCandidates(repo)
-	if len(candidates) == 0 || prNumber <= 0 {
-		return &VanadisChunkPRLookup{Matched: false}, nil
-	}
-	match, found, err := s.findChunkPRMatch(ctx, candidates, prNumber)
-	if err != nil || !found {
-		return &VanadisChunkPRLookup{Matched: false}, err
-	}
-	return &VanadisChunkPRLookup{
-		Matched: true,
-		ChunkID: match.chunkID,
-		BuildID: match.buildID,
-		Effort:  model.CapChunkEffort(match.effort),
-	}, nil
-}
-
-func (s *PostgresVanadisStore) findChunkPRMatch(ctx context.Context, candidates []string, prNumber int) (chunkPRMatch, bool, error) {
-	const query = `
-		SELECT c.id, c.build_id, c.chunk_index, COALESCE(NULLIF(c.effort, ''), 'medium'),
-		       EXISTS (
-		           SELECT 1 FROM vanadis_chunks c2
-		           WHERE c2.build_id = c.build_id AND c2.chunk_index > c.chunk_index
-		       )
-		FROM vanadis_chunks c
-		JOIN vanadis_builds b ON c.build_id = b.id
-		WHERE c.repo = ANY($1) AND c.pr_number = $2 AND b.status != 'cancelled'
-		ORDER BY c.updated_at DESC
-		LIMIT 1;`
-	var m chunkPRMatch
-	err := s.db.QueryRow(ctx, query, candidates, prNumber).Scan(&m.chunkID, &m.buildID, &m.chunkIdx, &m.effort, &m.hasRemaining)
-	if errors.Is(err, pgx.ErrNoRows) {
-		return m, false, nil
-	}
-	if err != nil {
-		return m, false, fmt.Errorf("query chunk by pr %v#%d: %w", candidates, prNumber, err)
-	}
-	return m, true, nil
+	return nil
 }

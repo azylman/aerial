@@ -3,15 +3,20 @@
 package model
 
 import (
-	"crypto/rand"
-	"encoding/hex"
 	"errors"
 	"fmt"
-	"strconv"
 	"strings"
 	"time"
 
-	"github.com/azylman/aerial/pkg/pubsub"
+	"github.com/azylman/aerial/pkg/buildplan"
+	"github.com/azylman/aerial/pkg/strutil"
+)
+
+type (
+	// VanadisBuild represents a multi-chunk autonomous engineering build run.
+	VanadisBuild = buildplan.VanadisBuild
+	// VanadisChunk represents an individual ordered task chunk within a VanadisBuild.
+	VanadisChunk = buildplan.VanadisChunk
 )
 
 const (
@@ -20,7 +25,6 @@ const (
 )
 
 const (
-	chunkModeAction = "action"
 	statusMerged    = "merged"
 	statusRunning   = "running"
 	statusPending   = "pending"
@@ -41,26 +45,8 @@ var (
 	// ErrBuildConflict indicates a VanadisBuild or chunk state conflict (e.g. not running or not pending).
 	ErrBuildConflict = errors.New("vanadis build state conflict")
 	// ErrInvalidBuildInput indicates invalid inputs for a VanadisBuild or chunk mutation.
-	ErrInvalidBuildInput = errors.New("invalid vanadis build input")
+	ErrInvalidBuildInput = buildplan.ErrInvalidBuildInput
 )
-
-// FirstNonEmpty returns the first trimmed non-empty string.
-func FirstNonEmpty(vals ...string) string {
-	for _, v := range vals {
-		if trimmed := strings.TrimSpace(v); trimmed != "" {
-			return trimmed
-		}
-	}
-	return ""
-}
-
-// NonNilSlice normalizes a nil slice to an empty slice.
-func NonNilSlice[T any](s []T) []T {
-	if s == nil {
-		return []T{}
-	}
-	return s
-}
 
 // CapChunkEffort maps legacy effort values onto low/medium.
 func CapChunkEffort(effort string) string {
@@ -68,63 +54,6 @@ func CapChunkEffort(effort string) string {
 		return effortLow
 	}
 	return effortMedium
-}
-
-// NormalizeChunkEffort validates and normalizes a chunk effort value.
-func NormalizeChunkEffort(effort string) (string, error) {
-	switch strings.ToLower(strings.TrimSpace(effort)) {
-	case "", effortMedium, "high":
-		return effortMedium, nil
-	case effortLow:
-		return effortLow, nil
-	default:
-		return "", fmt.Errorf("invalid chunk effort %q: must be 'low', 'medium', or 'high'", effort)
-	}
-}
-
-// VanadisBuild represents a multi-chunk autonomous engineering build run.
-type VanadisBuild struct {
-	ID              string    `json:"id"`
-	Agent           string    `json:"agent,omitempty"`
-	ThreadID        string    `json:"thread_id"`
-	Tier            int       `json:"tier"`
-	Title           string    `json:"title"`
-	Objective       string    `json:"objective"`
-	SharedContext   string    `json:"shared_context,omitempty"`
-	Status          string    `json:"status"`
-	StatusMessageID string    `json:"status_message_id,omitempty"`
-	Quiet           bool      `json:"quiet"`
-	CreatedAt       time.Time `json:"created_at"`
-	UpdatedAt       time.Time `json:"updated_at"`
-}
-
-// VanadisChunk represents an individual ordered task chunk within a VanadisBuild.
-type VanadisChunk struct {
-	ID                 string                 `json:"id"`
-	BuildID            string                 `json:"build_id"`
-	ChunkIndex         int                    `json:"chunk_index"`
-	Mode               string                 `json:"mode"`
-	Repo               string                 `json:"repo,omitempty"`
-	Title              string                 `json:"title"`
-	Instructions       string                 `json:"instructions"`
-	TargetFiles        []string               `json:"target_files"`
-	TargetSymbols      []string               `json:"target_symbols"`
-	Effort             string                 `json:"effort"`
-	AcceptanceCriteria []string               `json:"acceptance_criteria"`
-	Status             string                 `json:"status"`
-	PRNumber           int                    `json:"pr_number,omitempty"`
-	StallNudges        int                    `json:"stall_nudges,omitempty"`
-	DependsOn          []string               `json:"depends_on"`
-	CIFailCount        int                    `json:"ci_fail_count"`
-	CIChecks           map[string]string      `json:"ci_checks,omitempty"`
-	RolloutState       *pubsub.PRRolloutState `json:"rollout_state,omitempty"`
-	Banner             string                 `json:"banner,omitempty"`
-	MergeAwakeableID   string                 `json:"merge_awakeable_id,omitempty"`
-	DeployAwakeableID  string                 `json:"deploy_awakeable_id,omitempty"`
-	StartedAt          time.Time              `json:"started_at,omitempty"`
-	CompletedAt        time.Time              `json:"completed_at,omitempty"`
-	CreatedAt          time.Time              `json:"created_at"`
-	UpdatedAt          time.Time              `json:"updated_at"`
 }
 
 // VanadisBuildEntry represents a summarized VanadisBuild including overall queue state and chunk aggregates.
@@ -162,7 +91,7 @@ func ClassifyBuildQueueState(buildStatus string, chunks []VanadisChunk) string {
 
 // SummarizeBuildEntry constructs a VanadisBuildEntry with non-nil chunks, chunk status counts, and computed queue state.
 func SummarizeBuildEntry(build VanadisBuild, chunks []VanadisChunk) VanadisBuildEntry {
-	chunks = NonNilSlice(chunks)
+	chunks = buildplan.NonNilSlice(chunks)
 	var completed, running, pending, failed int
 	for _, c := range chunks {
 		switch strings.ToLower(strings.TrimSpace(c.Status)) {
@@ -180,63 +109,6 @@ func SummarizeBuildEntry(build VanadisBuild, chunks []VanadisChunk) VanadisBuild
 		VanadisBuild: build, QueueState: ClassifyBuildQueueState(build.Status, chunks),
 		TotalChunks: len(chunks), CompletedChunks: completed, RunningChunks: running, PendingChunks: pending, FailedChunks: failed, Chunks: chunks,
 	}
-}
-
-// NormalizeRepo trims whitespace from a repository reference.
-func NormalizeRepo(repo string) string {
-	return strings.TrimSpace(repo)
-}
-
-// NormalizeChunkMode validates and normalizes a chunk mode value.
-func NormalizeChunkMode(raw string) (string, error) {
-	switch strings.ToLower(strings.TrimSpace(raw)) {
-	case "", "pr":
-		return "pr", nil
-	case chunkModeAction:
-		return chunkModeAction, nil
-	default:
-		return "", fmt.Errorf("invalid chunk mode %q: must be 'pr' or 'action'", raw)
-	}
-}
-
-// ValidateChunkModeAndRepo validates the mode/repo/target combination for chunk idx.
-func ValidateChunkModeAndRepo(idx int, modeStr, repo string, targetFiles, targetSymbols []string) error {
-	mode, err := NormalizeChunkMode(modeStr)
-	if err != nil {
-		return fmt.Errorf("chunk[%d] %w", idx, err)
-	}
-	switch mode {
-	case "pr":
-		if NormalizeRepo(repo) == "" {
-			return fmt.Errorf("chunk[%d] repo is required for pr mode", idx)
-		}
-	case chunkModeAction:
-		if strings.TrimSpace(repo) != "" {
-			return fmt.Errorf("chunk[%d] action chunk must have empty repo", idx)
-		}
-		if len(targetFiles) > 0 {
-			return fmt.Errorf("chunk[%d] action chunk must not specify target_files", idx)
-		}
-		if len(targetSymbols) > 0 {
-			return fmt.Errorf("chunk[%d] action chunk must not specify target_symbols", idx)
-		}
-	}
-	return nil
-}
-
-// IsValidVanadisChunkID reports whether id is a valid chunk identifier.
-func IsValidVanadisChunkID(id string) bool {
-	id = strings.TrimSpace(id)
-	if len(id) < 1 || len(id) > 120 {
-		return false
-	}
-	for i := range len(id) {
-		c := id[i]
-		if (c < 'a' || c > 'z') && (c < 'A' || c > 'Z') && (c < '0' || c > '9') && c != '-' && c != '_' {
-			return false
-		}
-	}
-	return true
 }
 
 // CreateChunkInput defines a single chunk in a CreateBuildRequest.
@@ -268,35 +140,46 @@ type CreateBuildRequest struct {
 
 // UpdateActiveStepRequest carries the target chunk and active step description.
 type UpdateActiveStepRequest struct {
-	ChunkID    string `json:"chunk_id"`
-	ActiveStep string `json:"active_step,omitempty"`
-	Step       string `json:"step,omitempty"`
+	ChunkID     string            `json:"chunk_id,omitempty"`
+	ActiveStep  string            `json:"active_step,omitempty"`
+	Step        string            `json:"step,omitempty"`
+	ClearAll    bool              `json:"clear_all,omitempty"`
+	ActiveSteps map[string]string `json:"active_steps,omitempty"`
 }
 
-// GenerateBuildID generates a unique build identifier.
-func GenerateBuildID() string {
-	b := make([]byte, 4)
-	_, _ = rand.Read(b)
-	return fmt.Sprintf("build-%d-%s", time.Now().Unix(), hex.EncodeToString(b))
-}
-
-// ResolveChunkRef resolves a chunk ID or chunk index reference to a slice position.
-func ResolveChunkRef(chunks []VanadisChunk, chunkRef string) int {
-	clean := strings.TrimSpace(chunkRef)
-	if clean == "" {
-		return -1
-	}
-	for i, c := range chunks {
-		if c.ID == clean {
-			return i
+// ParseCreateBuildChunks validates raw chunk inputs and normalizes the build DAG.
+func ParseCreateBuildChunks(buildID string, now time.Time, rawChunks []CreateChunkInput) ([]VanadisChunk, error) {
+	chunks := make([]VanadisChunk, len(rawChunks))
+	for i, c := range rawChunks {
+		title, instructions := strings.TrimSpace(c.Title), strings.TrimSpace(c.Instructions)
+		if title == "" || instructions == "" {
+			return nil, fmt.Errorf("chunk[%d] title and instructions are required", i)
+		}
+		chunkID := strutil.FirstNonEmpty(c.ID, fmt.Sprintf("%s-chunk-%d", buildID, i+1))
+		if !buildplan.IsValidVanadisChunkID(chunkID) {
+			return nil, fmt.Errorf("chunks[%d].id must be 1..120 characters of [a-zA-Z0-9_-]", i)
+		}
+		mode, err := buildplan.NormalizeChunkMode(c.Mode)
+		if err != nil {
+			return nil, fmt.Errorf("chunk[%d] %w", i, err)
+		}
+		if valErr := buildplan.ValidateChunkModeAndRepo(i, c.Mode, c.Repo, c.TargetFiles, c.TargetSymbols); valErr != nil {
+			return nil, valErr
+		}
+		repo := ""
+		if mode == "pr" {
+			repo = buildplan.TrimRepo(c.Repo)
+		}
+		effort, err := buildplan.NormalizeChunkEffort(c.Effort)
+		if err != nil {
+			return nil, fmt.Errorf("chunk[%d] invalid effort: %w", i, err)
+		}
+		chunks[i] = VanadisChunk{
+			ID: chunkID, BuildID: buildID, ChunkIndex: i, Mode: mode,
+			Repo: repo, Title: title, Instructions: instructions,
+			TargetFiles: buildplan.NonNilSlice(c.TargetFiles), TargetSymbols: buildplan.NonNilSlice(c.TargetSymbols), Effort: effort,
+			AcceptanceCriteria: buildplan.NonNilSlice(c.AcceptanceCriteria), Status: statusPending, DependsOn: c.DependsOn, CreatedAt: now, UpdatedAt: now,
 		}
 	}
-	if idx, err := strconv.Atoi(clean); err == nil {
-		for i, c := range chunks {
-			if c.ChunkIndex == idx {
-				return i
-			}
-		}
-	}
-	return -1
+	return buildplan.NormalizeAndValidateBuildDAG(chunks)
 }

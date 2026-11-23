@@ -1,168 +1,159 @@
-// Package restateclient is the dark synapse-side Restate ingress invoker.
+// Package restateclient is the synapse-side Restate ingress invoker.
 //
 // It carries the frozen chunk-01 payloads (PREvent for PRObject keyed
 // repo#prNumber, RepoEvent for RepoObject keyed repo) as JSON over the
-// Restate HTTP ingress API. The client is constructed but called by no
-// production path yet; Restate-side handler implementations and consumer
-// wiring land in later chunks.
+// Restate HTTP ingress API. Lifecycle events are one-way sends
+// (POST .../<handler>/send) carrying a deterministic Idempotency-Key, so
+// synapse never waits behind a handler holding the exclusive object lock
+// while it runs effects. Request-response invocations remain only for the
+// sync APIs: Register, RetryReadiness and the read-only queries
+// (GetDeployView, GetBuildLifecycle, ListRollouts, ResolvePRBySHA).
 //
 // Unmanaged-PR guard: this package has no BuildRouter send path and
 // performs no build-ID resolution. Every event, owned or unmanaged,
 // addresses PRObject or RepoObject only; a build ID rides opaquely in
-// the payload for the Restate side to decide. pr_registry is never
-// consulted here: it stays a read-only projection.
+// the payload for the Restate side to decide.
 package restateclient
 
 import (
-	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"net/http"
 	"net/url"
 	"strings"
 	"time"
 
+	"github.com/azylman/aerial/pkg/githubapi"
+	"github.com/azylman/aerial/pkg/prwire"
+	"github.com/azylman/aerial/pkg/pubsub"
+	"github.com/azylman/aerial/pkg/restateingress"
+	"github.com/azylman/aerial/pkg/strutil"
 	"github.com/azylman/aerial/pkg/tracing"
-	"github.com/azylman/aerial/services/synapse/internal/model"
-)
-
-// Frozen Restate service defaults from the chunk-01 handler contracts.
-const (
-	DefaultPRService   = "PRObject"
-	DefaultRepoService = "RepoObject"
 )
 
 // Frozen PRObject handler surface from chunk-01. SendPREvent rejects any
 // handler outside this set without emitting a request.
 var prHandlers = map[string]bool{
-	"HandleCheckFailed":            true,
-	"HandleCheckPassed":            true,
-	"HandleCheckRerunRequested":    true,
-	"HandleCIRecovery":             true,
-	"HandleCollaboratorAlert":      true,
-	"HandleConflictDetected":       true,
-	"HandleConflictPublished":      true,
-	"HandleConflictResolved":       true,
-	"HandleMerged":                 true,
-	"HandleClosed":                 true,
-	"HandleReopened":               true,
-	"HandleReadinessRetry":         true,
-	"HandleRolloutProgress":        true,
-	"HandleDeployDispatched":       true,
-	"HandleDeploySuccessPublished": true,
-	"HandleKustomizationRequested": true,
+	prwire.PRHandlerCheckFailed:            true,
+	prwire.PRHandlerCheckPassed:            true,
+	prwire.PRHandlerCheckRerunRequested:    true,
+	prwire.PRHandlerCIRecovered:            true,
+	prwire.PRHandlerConflict:               true,
+	prwire.PRHandlerDeploySuccess:          true,
+	prwire.PRHandlerDeployAttemptFailed:    true,
+	prwire.PRHandlerCollaboratorAlert:      true,
+	prwire.PRHandlerConflictResolved:       true,
+	prwire.PRHandlerMerged:                 true,
+	prwire.PRHandlerClosed:                 true,
+	prwire.PRHandlerReopened:               true,
+	prwire.PRHandlerOpened:                 true,
+	prwire.PRHandlerSelfRegistered:         true,
+	prwire.PRHandlerReadinessRetry:         true,
+	prwire.PRHandlerRolloutProgress:        true,
+	prwire.PRHandlerKustomizationRequested: true,
+	prwire.PRHandlerDeployFailed:           true,
+	prwire.PRHandlerBuildMetadata:          true,
+	prwire.PRHandlerSynchronized:           true,
+	prwire.PRHandlerCheckStatus:            true,
+	prwire.PRHandlerConflictCheck:          true,
+	prwire.PRHandlerDeployObserved:         true,
+	prwire.PRHandlerReconcileLost:          true,
 }
 
 // Frozen RepoObject handler surface from chunk-01. SendRepoEvent rejects
 // any handler outside this set without emitting a request.
 var repoHandlers = map[string]bool{
-	"HandleMainPush":            true,
-	"HandleFanout":              true,
-	"HandleKustomizationStatus": true,
+	prwire.RepoHandlerMainPush:            true,
+	prwire.RepoHandlerFanout:              true,
+	prwire.RepoHandlerKustomizationStatus: true,
+	prwire.RepoHandlerAutoUpdate:          true,
+	prwire.RepoHandlerWorkflowRerun:       true,
+	prwire.RepoHandlerGitPush:             true,
+	prwire.RepoHandlerImagePromotion:      true,
+	prwire.RepoHandlerUntrackedReconcile:  true,
 }
 
-// PREvent is the canonical PRObject payload. Field names and JSON tags
-// mirror the frozen chunk-01 contract exactly; that package cannot be
-// imported here because it lives under another module's internal tree,
-// so TestPayloadJSONShape pins the key set against drift.
-type PREvent struct {
-	Event          string `json:"event"`
-	Repo           string `json:"repo"`
-	PRNumber       int    `json:"pr_number"`
-	HeadSHA        string `json:"head_sha"`
-	MergeSHA       string `json:"merge_sha"`
-	CheckName      string `json:"check_name"`
-	JobName        string `json:"job_name"`
-	Branch         string `json:"branch"`
-	Title          string `json:"title"`
-	GateGeneration uint64 `json:"gate_generation"`
-	ReopenEpoch    uint64 `json:"reopen_epoch"`
-	Unmanaged      bool   `json:"unmanaged"`
-	BuildID        string `json:"build_id"`
-	Agent          string `json:"agent"`
+// SHA-only RepoObject handlers: each wraps the PRObject event it would
+// deliver once RepoObject resolves the SHA from its durable index, holding
+// the event until the SHA is indexed. The wrapped PRObject handler must be
+// one RepoObject accepts for that SHA kind.
+var repoSHAHandlers = map[string]map[string]bool{
+	prwire.RepoHandlerCheckRunBySHA:    {prwire.PRHandlerCheckFailed: true, prwire.PRHandlerCheckPassed: true, prwire.PRHandlerCheckRerunRequested: true, prwire.PRHandlerCollaboratorAlert: true},
+	prwire.RepoHandlerWorkflowRunBySHA: {prwire.PRHandlerCheckFailed: true, prwire.PRHandlerCheckPassed: true, prwire.PRHandlerCheckRerunRequested: true, prwire.PRHandlerCollaboratorAlert: true, prwire.PRHandlerDeployFailed: true},
+	prwire.RepoHandlerPushBySHA:        {prwire.PRHandlerMerged: true, prwire.PRHandlerRolloutProgress: true},
 }
 
-// RepoEvent is the canonical RepoObject payload: main-push indexing,
-// dispatched-SHA tombstones, and fan-out sends only. JSON tags mirror
-// the frozen chunk-01 contract exactly.
-type RepoEvent struct {
-	Repo       string `json:"repo"`
-	MainSHA    string `json:"main_sha"`
-	Generation uint64 `json:"generation"`
-	PRNumber   int    `json:"pr_number"`
-	HeadSHA    string `json:"head_sha"`
-	Agent      string `json:"agent"`
-}
+// ErrInvalidEvent marks a payload rejected before any request: unknown
+// handlers and missing keys. No retry can fix it, so IsTerminal reports it.
+var ErrInvalidEvent = errors.New("invalid restate event")
 
-// PRObjectKey returns the Restate key for a PR object: repo#prNumber.
-// It mirrors the chunk-01 PRObjectKey normalization exactly.
-func PRObjectKey(repo string, prNumber int) string {
-	return fmt.Sprintf("%s#%d", model.NormalizeRepo(repo), prNumber)
-}
-
-// DeployDispatchDecision mirrors the Restate PRObject deploy verdict: the
-// sole authority for whether synapse publishes deploy_success when
-// restate_authoritative is on. JSON tags match the PRObject handler wire
-// format exactly; a decode failure surfaces so the caller retries.
-type DeployDispatchDecision struct {
-	Disposition   string `json:"disposition"`
-	ShouldPublish bool   `json:"should_publish"`
-	Deduped       bool   `json:"deduped"`
-	EffectKey     string `json:"effect_key"`
-}
-
-// ConflictDispatchDecision mirrors the Restate PRObject conflict verdict:
-// the sole authority for whether synapse publishes a conflict republish
-// when restate_authoritative is on. JSON tags match the PRObject handler
-// wire format exactly; a decode failure surfaces so the caller retries.
-type ConflictDispatchDecision struct {
-	Disposition   string `json:"disposition"`
-	ShouldPublish bool   `json:"should_publish"`
-	Deduped       bool   `json:"deduped"`
-}
-
-// CIRecoveryDecision mirrors the Restate PRObject CI-recovery verdict: the
-// sole authority for whether the PR is CI-failed for the event head SHA
-// when restate_authoritative is on. JSON tags match the PRObject handler
-// wire format exactly; a decode failure surfaces so the caller retries.
-type CIRecoveryDecision struct {
-	Disposition string `json:"disposition"`
-	CIFailed    bool   `json:"cifailed"`
-}
-
-// RepoObjectKey returns the Restate key for a repo object: repo.
-// It mirrors the chunk-01 RepoObjectKey normalization exactly.
-func RepoObjectKey(repo string) string {
-	return model.NormalizeRepo(repo)
+// IsTerminal reports whether err can never succeed on retry: an invalid
+// payload or a 4xx ingress rejection other than 408 Request Timeout and 429
+// Too Many Requests. Transport failures, 5xx, and an unconfigured client are
+// retryable.
+func IsTerminal(err error) bool {
+	if errors.Is(err, ErrInvalidEvent) {
+		return true
+	}
+	httpErr, ok := errors.AsType[*restateingress.HTTPError](err)
+	if !ok {
+		return false
+	}
+	switch httpErr.Status {
+	case http.StatusRequestTimeout, http.StatusTooManyRequests:
+		return false
+	default:
+		return httpErr.Status >= 400 && httpErr.Status < 500
+	}
 }
 
 type contextKey int
 
 const (
-	idempotencyKeyCtx contextKey = iota
+	eventIdentityCtx contextKey = iota
 )
 
-// WithIdempotencyKey binds an explicit Restate idempotency key into ctx.
-func WithIdempotencyKey(ctx context.Context, key string) context.Context {
-	return context.WithValue(ctx, idempotencyKeyCtx, strings.TrimSpace(key))
+// WithEventIdentity binds the identity of the inbound event (GitHub
+// delivery ID, deploy idempotency key, kustomization observation) into ctx.
+// One-way sends derive their Idempotency-Key from it.
+func WithEventIdentity(ctx context.Context, identity string) context.Context {
+	return context.WithValue(ctx, eventIdentityCtx, strings.TrimSpace(identity))
 }
 
-func idempotencyKeyFromContext(ctx context.Context) string {
+// EventIdentityFromContext returns the identity bound by WithEventIdentity.
+func EventIdentityFromContext(ctx context.Context) string {
 	if ctx == nil {
 		return ""
 	}
-	if val, ok := ctx.Value(idempotencyKeyCtx).(string); ok {
+	if val, ok := ctx.Value(eventIdentityCtx).(string); ok {
 		return strings.TrimSpace(val)
 	}
 	return ""
 }
 
+// SendIdempotencyKey derives the deterministic Idempotency-Key for one
+// one-way send: handler, event identity, and a digest of the exact payload.
+// A redelivery of the same event re-sends the same payload and dedups at
+// the Restate ingress; two distinct payloads from one event never collide.
+// Without an identity the key falls back to handler plus payload digest.
+func SendIdempotencyKey(identity, handler string, payload []byte) string {
+	sum := sha256.Sum256(payload)
+	digest := hex.EncodeToString(sum[:8])
+	identity = strings.TrimSpace(identity)
+	if identity == "" {
+		return handler + ":" + digest
+	}
+	return handler + ":" + identity + ":" + digest
+}
+
 // Client invokes Restate Virtual Object handlers over the ingress HTTP API.
 type Client struct {
 	baseURL     string
+	owner       string
 	prService   string
 	repoService string
 	httpClient  *http.Client
@@ -171,100 +162,235 @@ type Client struct {
 // NewClient constructs a Client for the Restate ingress baseURL (for
 // example http://restate.aerial:8080) with explicit Virtual Object service
 // names. Empty service names fall back to the frozen PRObject/RepoObject
-// defaults. An empty baseURL leaves the client disabled: every send fails
-// closed without emitting a request. A nil httpClient gets a default.
-func NewClient(baseURL, prService, repoService string, httpClient *http.Client) *Client {
+// defaults. owner qualifies bare repo names before they key an object; with
+// an empty owner a bare repo is rejected with ErrInvalidEvent. An empty
+// baseURL leaves the client disabled: every send fails closed without
+// emitting a request. A nil httpClient gets a default.
+func NewClient(baseURL, owner, prService, repoService string, httpClient *http.Client) *Client {
 	if httpClient == nil {
 		httpClient = &http.Client{Timeout: 15 * time.Second}
 	}
 	return &Client{
 		baseURL:     strings.TrimRight(strings.TrimSpace(baseURL), "/"),
-		prService:   model.FirstNonEmpty(strings.TrimSpace(prService), DefaultPRService),
-		repoService: model.FirstNonEmpty(strings.TrimSpace(repoService), DefaultRepoService),
+		owner:       strings.TrimSpace(owner),
+		prService:   strutil.FirstNonEmpty(strings.TrimSpace(prService), prwire.PRObjectServiceName),
+		repoService: strutil.FirstNonEmpty(strings.TrimSpace(repoService), prwire.RepoObjectServiceName),
 		httpClient:  tracing.Client(httpClient),
 	}
 }
 
-func (c *Client) prServiceForAgent(agent string) string {
-	if c.prService != DefaultPRService && c.prService != "" {
-		return c.prService
+// qualifyRepo owner-qualifies repo with the configured GitHub owner. An
+// empty repo, or one still bare because no owner is configured, cannot key
+// a Restate object and is rejected before any request.
+func (c *Client) qualifyRepo(repo string) (string, error) {
+	qualified := githubapi.QualifyRepo(c.owner, repo)
+	if qualified == "" {
+		return "", fmt.Errorf("%w: repo is required", ErrInvalidEvent)
 	}
-	clean := strings.ToLower(strings.TrimSpace(agent))
-	if clean == "" || clean == "aerial" {
-		return DefaultPRService
+	if !strings.Contains(qualified, "/") {
+		return "", fmt.Errorf("%w: repo %q has no owner and github_owner is unset", ErrInvalidEvent, qualified)
 	}
-	return "PRObject-" + clean
+	return qualified, nil
 }
 
-func (c *Client) repoServiceForAgent(agent string) string {
-	if c.repoService != DefaultRepoService && c.repoService != "" {
-		return c.repoService
-	}
-	clean := strings.ToLower(strings.TrimSpace(agent))
-	if clean == "" || clean == "aerial" {
-		return DefaultRepoService
-	}
-	return "RepoObject-" + clean
-}
-
-// SendPREvent delivers ev to one frozen PRObject handler for repo#prNumber.
+// SendPREvent enqueues ev at one frozen PRObject handler for repo#prNumber
+// as a one-way send: Restate acknowledges once the invocation is durably
+// accepted, never after the handler runs.
 // Unmanaged collaborator events and owned events alike address PRObject
 // only; the client never resolves a build ID and never signals BuildRouter.
-func (c *Client) SendPREvent(ctx context.Context, handler string, ev PREvent) error {
+// Every agent's events address the same single PRObject service: ev.Agent is
+// an ownership hint carried in the payload, never a routing input.
+func (c *Client) SendPREvent(ctx context.Context, handler string, ev prwire.PREvent) error {
 	if !prHandlers[handler] {
-		return fmt.Errorf("unknown pr handler %q", handler)
+		return fmt.Errorf("%w: unknown pr handler %q", ErrInvalidEvent, handler)
 	}
 	if strings.TrimSpace(c.baseURL) == "" {
 		return errors.New("restate is not configured")
 	}
-	ev.Repo = model.NormalizeRepo(ev.Repo)
-	if ev.Repo == "" {
-		return errors.New("repo is required")
+	repo, err := c.qualifyRepo(ev.Repo)
+	if err != nil {
+		return err
 	}
+	ev.Repo = repo
 	if ev.PRNumber <= 0 {
-		return errors.New("pr_number is required")
+		return fmt.Errorf("%w: pr_number is required", ErrInvalidEvent)
 	}
-	return c.send(ctx, c.prServiceForAgent(ev.Agent), PRObjectKey(ev.Repo, ev.PRNumber), handler, ev)
+	return c.send(ctx, c.prService, prwire.PRObjectKey(ev.Repo, ev.PRNumber), handler, ev)
 }
 
-// SendRepoEvent delivers ev to one frozen RepoObject handler for repo.
-func (c *Client) SendRepoEvent(ctx context.Context, handler string, ev RepoEvent) error {
+// SendRepoEvent enqueues ev at one frozen RepoObject handler for repo as a
+// one-way send.
+func (c *Client) SendRepoEvent(ctx context.Context, handler string, ev prwire.RepoEvent) error {
 	if !repoHandlers[handler] {
-		return fmt.Errorf("unknown repo handler %q", handler)
+		return fmt.Errorf("%w: unknown repo handler %q", ErrInvalidEvent, handler)
 	}
 	if strings.TrimSpace(c.baseURL) == "" {
 		return errors.New("restate is not configured")
 	}
-	ev.Repo = model.NormalizeRepo(ev.Repo)
-	if ev.Repo == "" {
-		return errors.New("repo is required")
+	repo, err := c.qualifyRepo(ev.Repo)
+	if err != nil {
+		return err
 	}
-	return c.send(ctx, c.repoServiceForAgent(ev.Agent), RepoObjectKey(ev.Repo), handler, ev)
+	ev.Repo = repo
+	return c.send(ctx, c.repoService, prwire.RepoObjectKey(ev.Repo), handler, ev)
 }
 
-// InvokePREvent delivers ev to one frozen PRObject handler and decodes the
-// JSON verdict into out. Unknown handlers, unconfigured clients, and invalid
-// payloads fail closed without emitting a request; transport failures and
-// undecodable bodies surface so the caller retries instead of losing the
-// signal.
-func (c *Client) InvokePREvent(ctx context.Context, handler string, ev PREvent, out any) error {
-	if !prHandlers[handler] {
-		return fmt.Errorf("unknown pr handler %q", handler)
+// SendSHAEvent enqueues one SHA-only event at a RepoObject SHA handler as a
+// one-way send. RepoObject resolves the SHA from its own durable index and
+// forwards ev.Event to ev.Handler on PRObject; synapse never resolves it.
+func (c *Client) SendSHAEvent(ctx context.Context, handler string, ev prwire.SHAEvent) error {
+	allowed, ok := repoSHAHandlers[handler]
+	if !ok {
+		return fmt.Errorf("%w: unknown repo sha handler %q", ErrInvalidEvent, handler)
+	}
+	if !allowed[ev.Handler] {
+		return fmt.Errorf("%w: pr handler %q is not routable by %s", ErrInvalidEvent, ev.Handler, handler)
 	}
 	if strings.TrimSpace(c.baseURL) == "" {
 		return errors.New("restate is not configured")
 	}
-	ev.Repo = model.NormalizeRepo(ev.Repo)
-	if ev.Repo == "" {
-		return errors.New("repo is required")
+	repo, err := c.qualifyRepo(ev.Repo)
+	if err != nil {
+		return err
 	}
-	if ev.PRNumber <= 0 {
-		return errors.New("pr_number is required")
+	ev.Repo = repo
+	ev.SHA = strings.TrimSpace(ev.SHA)
+	if ev.SHA == "" || prwire.IsZeroSHA(ev.SHA) {
+		return fmt.Errorf("%w: sha is required", ErrInvalidEvent)
 	}
-	if out == nil {
-		return errors.New("output is required")
+	ev.Event.Repo = ev.Repo
+	return c.send(ctx, c.repoService, prwire.RepoObjectKey(ev.Repo), handler, ev)
+}
+
+// ResolvePRBySHA invokes the shared, read-only RepoObject.ResolvePRBySHA
+// lookup. It records nothing.
+func (c *Client) ResolvePRBySHA(ctx context.Context, repo, sha string) (prwire.ResolveSHAResponse, error) {
+	if strings.TrimSpace(c.baseURL) == "" {
+		return prwire.ResolveSHAResponse{}, errors.New("restate is not configured")
 	}
-	body, err := c.post(ctx, c.prServiceForAgent(ev.Agent), PRObjectKey(ev.Repo, ev.PRNumber), handler, ev)
+	repo, err := c.qualifyRepo(repo)
+	if err != nil {
+		return prwire.ResolveSHAResponse{}, err
+	}
+	sha = strings.TrimSpace(sha)
+	if sha == "" {
+		return prwire.ResolveSHAResponse{}, fmt.Errorf("%w: sha is required", ErrInvalidEvent)
+	}
+	var out prwire.ResolveSHAResponse
+	if err := c.callService(ctx, c.repoService, prwire.RepoObjectKey(repo), prwire.RepoHandlerResolvePRBySHA, struct {
+		Repo string `json:"repo"`
+		SHA  string `json:"sha"`
+	}{Repo: repo, SHA: sha}, &out); err != nil {
+		return prwire.ResolveSHAResponse{}, err
+	}
+	return out, nil
+}
+
+// GetDeployView invokes the shared, read-only PRObject.GetDeployView query.
+func (c *Client) GetDeployView(ctx context.Context, repo string, prNumber int) (prwire.DeployView, error) {
+	return queryPR[prwire.DeployView](ctx, c, repo, prNumber, prwire.PRHandlerGetDeployView)
+}
+
+// queryPR invokes one shared, read-only PRObject query that takes no input.
+func queryPR[T any](ctx context.Context, c *Client, repo string, prNumber int, handler string) (T, error) {
+	var out T
+	if strings.TrimSpace(c.baseURL) == "" {
+		return out, errors.New("restate is not configured")
+	}
+	repo, err := c.qualifyRepo(repo)
+	if err != nil {
+		return out, err
+	}
+	if prNumber <= 0 {
+		return out, fmt.Errorf("%w: pr_number is required", ErrInvalidEvent)
+	}
+	if err := c.call(ctx, prwire.PRObjectKey(repo, prNumber), handler, struct{}{}, &out); err != nil {
+		var zero T
+		return zero, err
+	}
+	return out, nil
+}
+
+// RolloutIndexKey is the RepoObject key holding the cross-repo rollout
+// index; it mirrors prstate.RolloutIndexKey.
+const RolloutIndexKey = "_rollouts"
+
+// ListRollouts invokes the shared, read-only RepoObject.ListRollouts query
+// on the rollout index: every PR deploying with recorded Kustomization
+// requests, across repos.
+func (c *Client) ListRollouts(ctx context.Context) ([]prwire.RolloutRef, error) {
+	if strings.TrimSpace(c.baseURL) == "" {
+		return nil, errors.New("restate is not configured")
+	}
+	var out struct {
+		Rollouts []prwire.RolloutRef `json:"rollouts"`
+	}
+	if err := c.callService(ctx, c.repoService, RolloutIndexKey, prwire.RepoHandlerListRollouts, struct{}{}, &out); err != nil {
+		return nil, err
+	}
+	return out.Rollouts, nil
+}
+
+// Register invokes PRObject.Register (request-response, exclusive) and
+// returns the resolved target ID. Owner mismatches (409) and invalid
+// requests (400) come back as terminal *restateingress.HTTPError values.
+func (c *Client) Register(ctx context.Context, req prwire.RegisterRequest) (prwire.RegisterResponse, error) {
+	if strings.TrimSpace(c.baseURL) == "" {
+		return prwire.RegisterResponse{}, errors.New("restate is not configured")
+	}
+	repo, err := c.qualifyRepo(req.Repo)
+	if err != nil {
+		return prwire.RegisterResponse{}, err
+	}
+	req.Repo = repo
+	if req.PRNumber <= 0 {
+		return prwire.RegisterResponse{}, fmt.Errorf("%w: pr_number is required", ErrInvalidEvent)
+	}
+	var out prwire.RegisterResponse
+	if err := c.call(ctx, prwire.PRObjectKey(req.Repo, req.PRNumber), prwire.PRHandlerRegister, req, &out); err != nil {
+		return prwire.RegisterResponse{}, err
+	}
+	return out, nil
+}
+
+// GetBuildLifecycle invokes the shared, read-only PRObject.GetBuildLifecycle
+// query. A PR Restate has never seen yields the zero lifecycle.
+func (c *Client) GetBuildLifecycle(ctx context.Context, repo string, prNumber int) (prwire.BuildLifecycle, error) {
+	return queryPR[prwire.BuildLifecycle](ctx, c, repo, prNumber, prwire.PRHandlerGetBuildLifecycle)
+}
+
+// RetryReadiness invokes PRObject.RetryReadiness (request-response,
+// exclusive) and returns the 409/202 readiness decision. A missing merge
+// SHA comes back as a terminal 400 *restateingress.HTTPError, a fenced caller not
+// authorized for the stored owner as a terminal 409.
+func (c *Client) RetryReadiness(ctx context.Context, repo string, prNumber int, req prwire.RetryReadinessRequest) (prwire.RetryReadinessResponse, error) {
+	if strings.TrimSpace(c.baseURL) == "" {
+		return prwire.RetryReadinessResponse{}, errors.New("restate is not configured")
+	}
+	repo, err := c.qualifyRepo(repo)
+	if err != nil {
+		return prwire.RetryReadinessResponse{}, err
+	}
+	if prNumber <= 0 {
+		return prwire.RetryReadinessResponse{}, fmt.Errorf("%w: pr_number is required", ErrInvalidEvent)
+	}
+	var out prwire.RetryReadinessResponse
+	if err := c.call(ctx, prwire.PRObjectKey(repo, prNumber), prwire.PRHandlerRetryReadiness, req, &out); err != nil {
+		return prwire.RetryReadinessResponse{}, err
+	}
+	return out, nil
+}
+
+// call is one request-response PRObject invocation without an
+// Idempotency-Key: the result reflects current state and must not be cached.
+func (c *Client) call(ctx context.Context, key, handler string, payload, out any) error {
+	return c.callService(ctx, c.prService, key, handler, payload, out)
+}
+
+// callService is one request-response invocation on service without an
+// Idempotency-Key.
+func (c *Client) callService(ctx context.Context, service, key, handler string, payload, out any) error {
+	body, err := c.post(ctx, c.ingressURL(service, key, handler), "", payload)
 	if err != nil {
 		return err
 	}
@@ -275,39 +401,133 @@ func (c *Client) InvokePREvent(ctx context.Context, handler string, ev PREvent, 
 }
 
 func (c *Client) send(ctx context.Context, service, key, handler string, payload any) error {
-	_, err := c.post(ctx, service, key, handler, payload)
+	keyBytes, err := json.Marshal(digestShape(idempotencyPayload(payload)))
+	if err != nil {
+		return fmt.Errorf("marshal restate idempotency payload: %w", err)
+	}
+	idKey := SendIdempotencyKey(EventIdentityFromContext(ctx), handler, keyBytes)
+	_, err = c.post(ctx, c.ingressURL(service, key, handler)+"/send", idKey, payload)
 	return err
 }
 
-func (c *Client) post(ctx context.Context, service, key, handler string, payload any) ([]byte, error) {
-	bodyBytes, err := json.Marshal(payload)
-	if err != nil {
-		return nil, fmt.Errorf("marshal restate payload: %w", err)
+// idempotencyPayload strips wall-clock noise from a payload before it is
+// digested into the Idempotency-Key: kustomization requested_at stamps and
+// fact occurred_at stamps are minted per attempt, so a retried event must
+// still dedup at the ingress (the first accepted request wins). Every other
+// payload digests as sent.
+func idempotencyPayload(payload any) any {
+	ev, ok := payload.(prwire.PREvent)
+	if !ok || (len(ev.KustomizationRequests) == 0 && len(ev.Facts) == 0) {
+		return payload
 	}
-	endpoint := c.baseURL + "/" + url.PathEscape(service) + "/" + url.PathEscape(key) + "/" + handler
-	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(bodyBytes))
-	if err != nil {
-		return nil, fmt.Errorf("create restate request: %w", err)
-	}
-	httpReq.Header.Set("Content-Type", "application/json")
-	if idKey := idempotencyKeyFromContext(ctx); idKey != "" {
-		httpReq.Header.Set("Idempotency-Key", idKey)
-	}
-	resp, err := c.httpClient.Do(httpReq)
-	if err != nil {
-		return nil, fmt.Errorf("restate ingress request failed: %w", err)
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode >= 200 && resp.StatusCode < 300 {
-		respBody, readErr := io.ReadAll(io.LimitReader(resp.Body, 64<<10))
-		if readErr != nil {
-			return nil, fmt.Errorf("drain restate response: %w", readErr)
+	if len(ev.KustomizationRequests) > 0 {
+		stripped := make(map[string]prwire.KustomizationRequest, len(ev.KustomizationRequests))
+		for name, req := range ev.KustomizationRequests {
+			req.RequestedAt = ""
+			stripped[name] = req
 		}
-		return respBody, nil
+		ev.KustomizationRequests = stripped
 	}
-	respBody, readErr := io.ReadAll(io.LimitReader(resp.Body, 64<<10))
-	if readErr != nil {
-		return nil, fmt.Errorf("restate ingress returned status %d", resp.StatusCode)
+	if len(ev.Facts) > 0 {
+		facts := make([]pubsub.PRLifecycleEvent, len(ev.Facts))
+		for i, f := range ev.Facts {
+			f.OccurredAt = time.Time{}
+			facts[i] = f
+		}
+		ev.Facts = facts
 	}
-	return nil, fmt.Errorf("restate ingress returned status %d: %s", resp.StatusCode, string(respBody))
+	return ev
+}
+
+// digestPREvent is the PREvent field order synapse digested before it
+// adopted prwire (Agent after BuildID without omitempty, AutoUpdate after
+// BuildMetadata, Kustomization last). Only the Idempotency-Key digest uses
+// it; request bodies marshal prwire.PREvent as is. Keeping the digest bytes
+// stable means a JetStream redelivery that straddles a synapse rollout still
+// dedups at the Restate ingress: a duplicate HandleKustomizationRequested
+// would otherwise start a new gate generation and re-patch the Flux reconcile.
+type digestPREvent struct {
+	Event                  string                                 `json:"event"`
+	Repo                   string                                 `json:"repo"`
+	PRNumber               int                                    `json:"pr_number"`
+	HeadSHA                string                                 `json:"head_sha"`
+	MergeSHA               string                                 `json:"merge_sha"`
+	CheckName              string                                 `json:"check_name"`
+	JobName                string                                 `json:"job_name"`
+	Branch                 string                                 `json:"branch"`
+	Title                  string                                 `json:"title"`
+	GateGeneration         uint64                                 `json:"gate_generation"`
+	ReopenEpoch            uint64                                 `json:"reopen_epoch"`
+	Unmanaged              bool                                   `json:"unmanaged"`
+	BuildID                string                                 `json:"build_id"`
+	Agent                  string                                 `json:"agent"`
+	BeforeSHA              string                                 `json:"before_sha,omitempty"`
+	TargetID               string                                 `json:"target_id,omitempty"`
+	CheckState             string                                 `json:"check_state,omitempty"`
+	Jobs                   []string                               `json:"jobs,omitempty"`
+	DeployedJobs           []string                               `json:"deployed_jobs,omitempty"`
+	JobState               string                                 `json:"job_state,omitempty"`
+	KustomizationRequests  map[string]prwire.KustomizationRequest `json:"kustomization_requests,omitempty"`
+	DeployedKustomizations []string                               `json:"deployed_kustomizations,omitempty"`
+	Banner                 string                                 `json:"banner,omitempty"`
+	BuildMetadata          *prwire.BuildMetadata                  `json:"build_metadata,omitempty"`
+	AutoUpdate             *prwire.AutoUpdatePolicy               `json:"auto_update,omitempty"`
+	EriEffects             []prwire.EriEffect                     `json:"eri_effects,omitempty"`
+	Facts                  []pubsub.PRLifecycleEvent              `json:"facts,omitempty"`
+	ExpectedJobs           []string                               `json:"expected_jobs,omitempty"`
+	ObservedReconcileAt    string                                 `json:"observed_reconcile_at,omitempty"`
+	Kustomization          string                                 `json:"kustomization,omitempty"`
+}
+
+// digestSHAEvent is prwire.SHAEvent with its wrapped event in digest order.
+type digestSHAEvent struct {
+	Repo    string        `json:"repo"`
+	SHA     string        `json:"sha"`
+	Handler string        `json:"handler"`
+	Event   digestPREvent `json:"event"`
+}
+
+func toDigestPREvent(ev prwire.PREvent) digestPREvent {
+	return digestPREvent{
+		Event: ev.Event, Repo: ev.Repo, PRNumber: ev.PRNumber, HeadSHA: ev.HeadSHA, MergeSHA: ev.MergeSHA,
+		CheckName: ev.CheckName, JobName: ev.JobName, Branch: ev.Branch, Title: ev.Title,
+		GateGeneration: ev.GateGeneration, ReopenEpoch: ev.ReopenEpoch, Unmanaged: ev.Unmanaged, BuildID: ev.BuildID,
+		Agent: ev.Agent, BeforeSHA: ev.BeforeSHA, TargetID: ev.TargetID, CheckState: ev.CheckState, Jobs: ev.Jobs,
+		DeployedJobs: ev.DeployedJobs, JobState: ev.JobState, KustomizationRequests: ev.KustomizationRequests,
+		DeployedKustomizations: ev.DeployedKustomizations, Banner: ev.Banner,
+		BuildMetadata: ev.BuildMetadata, AutoUpdate: ev.AutoUpdate, EriEffects: ev.EriEffects, Facts: ev.Facts,
+		ExpectedJobs: ev.ExpectedJobs, ObservedReconcileAt: ev.ObservedReconcileAt, Kustomization: ev.Kustomization,
+	}
+}
+
+// digestShape maps a payload to the shape its Idempotency-Key digests:
+// PREvent and SHAEvent in their pre-prwire field order, every other payload
+// as is.
+func digestShape(payload any) any {
+	switch ev := payload.(type) {
+	case prwire.PREvent:
+		return toDigestPREvent(ev)
+	case prwire.SHAEvent:
+		return digestSHAEvent{Repo: ev.Repo, SHA: ev.SHA, Handler: ev.Handler, Event: toDigestPREvent(ev.Event)}
+	default:
+		return payload
+	}
+}
+
+func (c *Client) ingressURL(service, key, handler string) string {
+	return c.baseURL + "/" + url.PathEscape(service) + "/" + url.PathEscape(key) + "/" + handler
+}
+
+// post sends payload to the ingress endpoint. Non-2xx responses come back
+// as *restateingress.HTTPError; every other failure is wrapped as a failed
+// ingress request.
+func (c *Client) post(ctx context.Context, endpoint, idKey string, payload any) ([]byte, error) {
+	body, err := restateingress.Post(ctx, c.httpClient, endpoint, idKey, payload, 64<<10)
+	if err == nil {
+		return body, nil
+	}
+	if _, ok := errors.AsType[*restateingress.HTTPError](err); ok {
+		return nil, err
+	}
+	return nil, fmt.Errorf("restate ingress request failed: %w", err)
 }

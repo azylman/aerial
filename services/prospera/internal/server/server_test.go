@@ -2,15 +2,12 @@ package server
 
 import (
 	"context"
-	"crypto/hmac"
-	"crypto/sha1"
-	"encoding/base64"
 	"errors"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
-	"sort"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -18,9 +15,10 @@ import (
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
 	"github.com/azylman/aerial/pkg/httpkit"
-	"github.com/azylman/aerial/pkg/pubsub"
+	"github.com/azylman/aerial/pkg/pubsubtest"
 	"github.com/azylman/aerial/services/prospera/internal/config"
 	"github.com/azylman/aerial/services/prospera/internal/delivery"
+	"github.com/azylman/aerial/services/prospera/internal/fakes"
 	"github.com/azylman/aerial/services/prospera/internal/mediastream"
 	"github.com/azylman/aerial/services/prospera/internal/model"
 	"github.com/azylman/aerial/services/prospera/internal/tools"
@@ -29,26 +27,7 @@ import (
 
 // ---- webhook/route tests (moved from root server_test.go) ----
 
-func generateTwilioSignature(authToken, fullURL string, form url.Values) string {
-	keys := make([]string, 0, len(form))
-	for k := range form {
-		keys = append(keys, k)
-	}
-	sort.Strings(keys)
-
-	var sb strings.Builder
-	sb.WriteString(fullURL)
-	for _, k := range keys {
-		sb.WriteString(k)
-		sb.WriteString(form.Get(k))
-	}
-
-	mac := hmac.New(sha1.New, []byte(authToken))
-	mac.Write([]byte(sb.String()))
-	return base64.StdEncoding.EncodeToString(mac.Sum(nil))
-}
-
-func setupTestServer() (*Server, *mockStoreForDelivery, *config.Config) {
+func setupTestServer() (*Server, *fakes.FakeStore, *config.Config) {
 	cfg := &config.Config{
 		Port:                  "4019",
 		TwilioAuthToken:       "secret-token-123",
@@ -59,16 +38,16 @@ func setupTestServer() (*Server, *mockStoreForDelivery, *config.Config) {
 		AllowFrom:             []string{"+15105550111"},
 	}
 
-	store := newMockStoreForDelivery()
-	twilioMock := &mockTwilioForDelivery{
-		audioData:   []byte("test-audio"),
-		contentType: "audio/wav",
+	store := fakes.NewFakeStore()
+	twilioMock := &fakes.FakeTwilio{
+		AudioData:   []byte("test-audio"),
+		ContentType: "audio/wav",
 	}
-	tokenMgr := twilio.NewStreamTokenManager(time.Now)
-	sessionMgr := mediastream.NewCallSessionManager(staticConfig{cfg: cfg}, store, twilioMock, nil, tokenMgr,
+	tokenMgr := twilio.NewStreamTokenManager(time.Now, nil)
+	sessionMgr := mediastream.NewCallSessionManager(fakes.StaticConfig{Cfg: cfg}, store, twilioMock, nil, tokenMgr,
 		mediastream.WithSessionFactory(newProsperaMediaSession),
 	)
-	reporter := delivery.NewReporter(staticConfig{cfg: cfg}, store, twilioMock)
+	reporter := delivery.NewReporter(fakes.StaticConfig{Cfg: cfg}, store, twilioMock)
 
 	server := NewServer(newTestConfigSource(cfg), store, twilioMock, tokenMgr, sessionMgr, reporter)
 	return server, store, cfg
@@ -186,14 +165,14 @@ func TestTwilioVoiceWebhook_ThreeTierInbound(t *testing.T) {
 	}
 }
 
-func runThreeTierInboundCase(t *testing.T, tc threeTierInboundTestCase, cfg *config.Config, mux http.Handler, store *mockStoreForDelivery) {
+func runThreeTierInboundCase(t *testing.T, tc threeTierInboundTestCase, cfg *config.Config, mux http.Handler, store *fakes.FakeStore) {
 	t.Helper()
 	path := "/api/webhooks/twilio/voice"
 	fullURL := cfg.PublicWebhookBaseURL + path
 
 	sig := "invalid-signature"
 	if tc.validSig {
-		sig = generateTwilioSignature(cfg.TwilioAuthToken, fullURL, tc.form)
+		sig = fakes.TwilioSignature(cfg.TwilioAuthToken, fullURL, tc.form)
 	}
 
 	req := httptest.NewRequest(http.MethodPost, fullURL, strings.NewReader(tc.form.Encode()))
@@ -214,7 +193,7 @@ func runThreeTierInboundCase(t *testing.T, tc threeTierInboundTestCase, cfg *con
 	assertThreeTierCall(t, tc, store)
 }
 
-func assertThreeTierCall(t *testing.T, tc threeTierInboundTestCase, store *mockStoreForDelivery) {
+func assertThreeTierCall(t *testing.T, tc threeTierInboundTestCase, store *fakes.FakeStore) {
 	t.Helper()
 	switch tc.wantCallTier {
 	case "tier1":
@@ -277,7 +256,7 @@ func TestTwilioStatusAndVoicemailOrder(t *testing.T) {
 		"CallStatus": []string{"completed"},
 	}
 	statusURL := cfg.PublicWebhookBaseURL + "/api/webhooks/twilio/status"
-	sig := generateTwilioSignature(cfg.TwilioAuthToken, statusURL, statusForm)
+	sig := fakes.TwilioSignature(cfg.TwilioAuthToken, statusURL, statusForm)
 
 	req := httptest.NewRequest(http.MethodPost, statusURL, strings.NewReader(statusForm.Encode()))
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
@@ -306,7 +285,7 @@ func TestTwilioStatusAndVoicemailOrder(t *testing.T) {
 		"RecordingUrl": []string{"https://api.twilio.com/recordings/RE123.wav"},
 	}
 	vmURL := cfg.PublicWebhookBaseURL + "/api/webhooks/twilio/voicemail?call_id=" + callID
-	sigVM := generateTwilioSignature(cfg.TwilioAuthToken, vmURL, vmForm)
+	sigVM := fakes.TwilioSignature(cfg.TwilioAuthToken, vmURL, vmForm)
 
 	reqVM := httptest.NewRequest(http.MethodPost, vmURL, strings.NewReader(vmForm.Encode()))
 	reqVM.Header.Set("Content-Type", "application/x-www-form-urlencoded")
@@ -342,7 +321,7 @@ func TestTwilioWebhook_AMD(t *testing.T) {
 	}
 	path := "/api/webhooks/twilio/amd"
 	fullURL := cfg.PublicWebhookBaseURL + path
-	sig := generateTwilioSignature(cfg.TwilioAuthToken, fullURL, form)
+	sig := fakes.TwilioSignature(cfg.TwilioAuthToken, fullURL, form)
 
 	req := httptest.NewRequest(http.MethodPost, fullURL, strings.NewReader(form.Encode()))
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
@@ -384,7 +363,7 @@ func TestTwilioWebhook_SMS(t *testing.T) {
 	}
 	path := "/api/webhooks/twilio/sms"
 	fullURL := cfg.PublicWebhookBaseURL + path
-	sig := generateTwilioSignature(cfg.TwilioAuthToken, fullURL, form)
+	sig := fakes.TwilioSignature(cfg.TwilioAuthToken, fullURL, form)
 
 	req := httptest.NewRequest(http.MethodPost, fullURL, strings.NewReader(form.Encode()))
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
@@ -403,72 +382,6 @@ func TestTwilioWebhook_SMS(t *testing.T) {
 	}
 	if msgs[0].RelatedCallID != "call-prior-sms" {
 		t.Fatalf("expected related call ID 'call-prior-sms', got %q", msgs[0].RelatedCallID)
-	}
-}
-
-func TestServer_Health(t *testing.T) {
-	t.Parallel()
-
-	server, _, _ := setupTestServer()
-	mux := server.Routes()
-
-	req := httptest.NewRequest(http.MethodGet, "/health", http.NoBody)
-	rec := httptest.NewRecorder()
-	mux.ServeHTTP(rec, req)
-	if rec.Code != http.StatusOK {
-		t.Fatalf("health returned %d", rec.Code)
-	}
-}
-
-func TestTwilioWebhook_StatusCompletedReport(t *testing.T) {
-	t.Parallel()
-
-	server, store, cfg := setupTestServer()
-	mux := server.Routes()
-
-	_ = store.CreateOutboundCall(context.Background(), model.VoiceCall{
-		CallID:          "call-status-pending",
-		ProviderCallSID: "CA-stat-pend-1",
-		Direction:       "outbound",
-		FromNumber:      cfg.TwilioFromNumber,
-		ToNumber:        "+15105550777",
-		State:           "in-progress",
-		ReportStatus:    "pending",
-	}, 5)
-
-	form := url.Values{
-		"CallSid":    []string{"CA-stat-pend-1"},
-		"CallStatus": []string{"completed"},
-	}
-	path := "/api/webhooks/twilio/status"
-	fullURL := cfg.PublicWebhookBaseURL + path
-	sig := generateTwilioSignature(cfg.TwilioAuthToken, fullURL, form)
-
-	req := httptest.NewRequest(http.MethodPost, fullURL, strings.NewReader(form.Encode()))
-	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-	req.Header.Set("X-Twilio-Signature", sig)
-
-	rec := httptest.NewRecorder()
-	mux.ServeHTTP(rec, req)
-
-	if rec.Code != http.StatusOK {
-		t.Fatalf("status webhook returned %d, want 200", rec.Code)
-	}
-	server.Wait()
-}
-
-func TestTwilioWebhook_StreamUnauthorized(t *testing.T) {
-	t.Parallel()
-
-	server, _, _ := setupTestServer()
-	mux := server.Routes()
-
-	req := httptest.NewRequest(http.MethodGet, "/api/webhooks/twilio/stream/bad-token", http.NoBody)
-	rec := httptest.NewRecorder()
-	mux.ServeHTTP(rec, req)
-
-	if rec.Code != http.StatusUnauthorized {
-		t.Fatalf("expected status 401 for unauthorized token, got %d", rec.Code)
 	}
 }
 
@@ -524,7 +437,7 @@ func TestServer_ToWSSAndRouteGuards(t *testing.T) {
 		}
 		path := "/api/webhooks/twilio/status"
 		fullURL := cfg.PublicWebhookBaseURL + path
-		sig := generateTwilioSignature(cfg.TwilioAuthToken, fullURL, form)
+		sig := fakes.TwilioSignature(cfg.TwilioAuthToken, fullURL, form)
 
 		req := httptest.NewRequest(http.MethodPost, fullURL, strings.NewReader(form.Encode()))
 		req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
@@ -552,7 +465,7 @@ func TestServer_ToWSSAndRouteGuards(t *testing.T) {
 		}
 		path := "/api/webhooks/twilio/voicemail"
 		fullURL := cfg.PublicWebhookBaseURL + path
-		sig := generateTwilioSignature(cfg.TwilioAuthToken, fullURL, form)
+		sig := fakes.TwilioSignature(cfg.TwilioAuthToken, fullURL, form)
 
 		req := httptest.NewRequest(http.MethodPost, fullURL, strings.NewReader(form.Encode()))
 		req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
@@ -576,7 +489,7 @@ func TestServer_ToWSSAndRouteGuards(t *testing.T) {
 		}
 		path := "/api/webhooks/twilio/voice"
 		fullURL := cfg.PublicWebhookBaseURL + path
-		sig := generateTwilioSignature(cfg.TwilioAuthToken, fullURL, form)
+		sig := fakes.TwilioSignature(cfg.TwilioAuthToken, fullURL, form)
 
 		req := httptest.NewRequest(http.MethodPost, fullURL, strings.NewReader(form.Encode()))
 		req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
@@ -685,7 +598,7 @@ func TestServer_VoicemailVariations(t *testing.T) {
 		"RecordingUrl": []string{"https://api.twilio.com/rec.wav"},
 	}
 	vmURL := cfg.PublicWebhookBaseURL + "/api/webhooks/twilio/voicemail"
-	sig := generateTwilioSignature(cfg.TwilioAuthToken, vmURL, form)
+	sig := fakes.TwilioSignature(cfg.TwilioAuthToken, vmURL, form)
 	req := httptest.NewRequest(http.MethodPost, vmURL, strings.NewReader(form.Encode()))
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	req.Header.Set("X-Twilio-Signature", sig)
@@ -700,7 +613,7 @@ func TestServer_VoicemailVariations(t *testing.T) {
 	formEmpty := url.Values{
 		"RecordingUrl": []string{"https://api.twilio.com/rec.wav"},
 	}
-	sigEmpty := generateTwilioSignature(cfg.TwilioAuthToken, vmURL, formEmpty)
+	sigEmpty := fakes.TwilioSignature(cfg.TwilioAuthToken, vmURL, formEmpty)
 	reqEmpty := httptest.NewRequest(http.MethodPost, vmURL, strings.NewReader(formEmpty.Encode()))
 	reqEmpty.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	reqEmpty.Header.Set("X-Twilio-Signature", sigEmpty)
@@ -717,7 +630,7 @@ func TestServer_StoreErrorsInHandlers(t *testing.T) {
 
 	server, store, cfg := setupTestServer()
 	mux := server.Routes()
-	store.opErr = errors.New("db down")
+	store.OpErr = errors.New("db down")
 
 	// 1. Voice webhook with store error
 	form := url.Values{
@@ -726,7 +639,7 @@ func TestServer_StoreErrorsInHandlers(t *testing.T) {
 		"To":      []string{cfg.TwilioFromNumber},
 	}
 	vURL := cfg.PublicWebhookBaseURL + "/api/webhooks/twilio/voice"
-	sig := generateTwilioSignature(cfg.TwilioAuthToken, vURL, form)
+	sig := fakes.TwilioSignature(cfg.TwilioAuthToken, vURL, form)
 	req := httptest.NewRequest(http.MethodPost, vURL, strings.NewReader(form.Encode()))
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	req.Header.Set("X-Twilio-Signature", sig)
@@ -742,7 +655,7 @@ func TestServer_StoreErrorsInHandlers(t *testing.T) {
 		"AnsweredBy": []string{"human"},
 	}
 	amdURL := cfg.PublicWebhookBaseURL + "/api/webhooks/twilio/amd"
-	sigAMD := generateTwilioSignature(cfg.TwilioAuthToken, amdURL, amdForm)
+	sigAMD := fakes.TwilioSignature(cfg.TwilioAuthToken, amdURL, amdForm)
 	reqAMD := httptest.NewRequest(http.MethodPost, amdURL, strings.NewReader(amdForm.Encode()))
 	reqAMD.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	reqAMD.Header.Set("X-Twilio-Signature", sigAMD)
@@ -758,7 +671,7 @@ func TestServer_StoreErrorsInHandlers(t *testing.T) {
 		"CallStatus": []string{"completed"},
 	}
 	statURL := cfg.PublicWebhookBaseURL + "/api/webhooks/twilio/status"
-	sigStat := generateTwilioSignature(cfg.TwilioAuthToken, statURL, statForm)
+	sigStat := fakes.TwilioSignature(cfg.TwilioAuthToken, statURL, statForm)
 	reqStat := httptest.NewRequest(http.MethodPost, statURL, strings.NewReader(statForm.Encode()))
 	reqStat.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	reqStat.Header.Set("X-Twilio-Signature", sigStat)
@@ -777,7 +690,7 @@ func TestServer_StoreErrorsInHandlers(t *testing.T) {
 		"Body":       []string{"hello"},
 	}
 	smsURL := cfg.PublicWebhookBaseURL + "/api/webhooks/twilio/sms"
-	sigSMS := generateTwilioSignature(cfg.TwilioAuthToken, smsURL, smsForm)
+	sigSMS := fakes.TwilioSignature(cfg.TwilioAuthToken, smsURL, smsForm)
 	reqSMS := httptest.NewRequest(http.MethodPost, smsURL, strings.NewReader(smsForm.Encode()))
 	reqSMS.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	reqSMS.Header.Set("X-Twilio-Signature", sigSMS)
@@ -791,9 +704,9 @@ func TestServer_StoreErrorsInHandlers(t *testing.T) {
 func TestServer_TokenIssueFailures(t *testing.T) {
 	t.Parallel()
 	server, store, cfg := setupTestServer()
-	tokenMgrFail := twilio.NewStreamTokenManager(nil, twilio.WithEntropyReader(func([]byte) (int, error) {
+	tokenMgrFail := twilio.NewStreamTokenManager(nil, func([]byte) (int, error) {
 		return 0, errors.New("entropy failure")
-	}))
+	})
 	server.tokenMgr = tokenMgrFail
 	mux := server.Routes()
 
@@ -808,7 +721,7 @@ func TestServer_TokenIssueFailures(t *testing.T) {
 		"Direction": []string{"outbound-api"},
 	}
 	vURL := cfg.PublicWebhookBaseURL + "/api/webhooks/twilio/voice"
-	sigOut := generateTwilioSignature(cfg.TwilioAuthToken, vURL, formOut)
+	sigOut := fakes.TwilioSignature(cfg.TwilioAuthToken, vURL, formOut)
 	reqOut := httptest.NewRequest(http.MethodPost, vURL, strings.NewReader(formOut.Encode()))
 	reqOut.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	reqOut.Header.Set("X-Twilio-Signature", sigOut)
@@ -824,7 +737,7 @@ func TestServer_TokenIssueFailures(t *testing.T) {
 		"From":    []string{"+15105550111"},
 		"To":      []string{cfg.TwilioFromNumber},
 	}
-	sigIn := generateTwilioSignature(cfg.TwilioAuthToken, vURL, formIn)
+	sigIn := fakes.TwilioSignature(cfg.TwilioAuthToken, vURL, formIn)
 	reqIn := httptest.NewRequest(http.MethodPost, vURL, strings.NewReader(formIn.Encode()))
 	reqIn.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	reqIn.Header.Set("X-Twilio-Signature", sigIn)
@@ -852,7 +765,7 @@ func TestServer_UnnormalizedPhonesAndReporterErrors(t *testing.T) {
 		"MediaUrl1":  []string{"https://img2"},
 	}
 	smsURL := cfg.PublicWebhookBaseURL + "/api/webhooks/twilio/sms"
-	sigSMS := generateTwilioSignature(cfg.TwilioAuthToken, smsURL, smsForm)
+	sigSMS := fakes.TwilioSignature(cfg.TwilioAuthToken, smsURL, smsForm)
 	reqSMS := httptest.NewRequest(http.MethodPost, smsURL, strings.NewReader(smsForm.Encode()))
 	reqSMS.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	reqSMS.Header.Set("X-Twilio-Signature", sigSMS)
@@ -869,7 +782,7 @@ func TestServer_UnnormalizedPhonesAndReporterErrors(t *testing.T) {
 		"To":      []string{cfg.TwilioFromNumber},
 	}
 	vURL := cfg.PublicWebhookBaseURL + "/api/webhooks/twilio/voice"
-	sigV := generateTwilioSignature(cfg.TwilioAuthToken, vURL, voiceForm)
+	sigV := fakes.TwilioSignature(cfg.TwilioAuthToken, vURL, voiceForm)
 	reqV := httptest.NewRequest(http.MethodPost, vURL, strings.NewReader(voiceForm.Encode()))
 	reqV.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	reqV.Header.Set("X-Twilio-Signature", sigV)
@@ -881,7 +794,7 @@ func TestServer_UnnormalizedPhonesAndReporterErrors(t *testing.T) {
 
 	// 3. Status completed with failing reporter
 	serverFailRep, storeFail, cfgFail := setupTestServer()
-	serverFailRep.reporter = delivery.NewReporter(staticConfig{cfg: &config.Config{BrainURL: ""}}, storeFail, nil)
+	serverFailRep.reporter = delivery.NewReporter(fakes.StaticConfig{Cfg: &config.Config{BrainURL: ""}}, storeFail, nil)
 	muxFail := serverFailRep.Routes()
 	_ = storeFail.CreateOutboundCall(context.Background(), model.VoiceCall{
 		CallID:          "call-stat-failrep",
@@ -893,7 +806,7 @@ func TestServer_UnnormalizedPhonesAndReporterErrors(t *testing.T) {
 		"CallStatus": []string{"completed"},
 	}
 	statURL := cfgFail.PublicWebhookBaseURL + "/api/webhooks/twilio/status"
-	sigStat := generateTwilioSignature(cfgFail.TwilioAuthToken, statURL, statForm)
+	sigStat := fakes.TwilioSignature(cfgFail.TwilioAuthToken, statURL, statForm)
 	reqStat := httptest.NewRequest(http.MethodPost, statURL, strings.NewReader(statForm.Encode()))
 	reqStat.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	reqStat.Header.Set("X-Twilio-Signature", sigStat)
@@ -942,7 +855,7 @@ func TestTwilioVoiceWebhook_CallIDResolutionAndNotFound(t *testing.T) {
 		"Direction": []string{"outbound-api"},
 	}
 	vURL := cfg.PublicWebhookBaseURL + "/api/webhooks/twilio/voice?call_id=call-out-unbound"
-	sig := generateTwilioSignature(cfg.TwilioAuthToken, vURL, form)
+	sig := fakes.TwilioSignature(cfg.TwilioAuthToken, vURL, form)
 
 	req := httptest.NewRequest(http.MethodPost, vURL, strings.NewReader(form.Encode()))
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
@@ -981,7 +894,7 @@ func TestTwilioVoiceWebhook_CallIDResolutionAndNotFound(t *testing.T) {
 		"call_id":   []string{"call-out-unbound-form"},
 	}
 	vURLB := cfg.PublicWebhookBaseURL + "/api/webhooks/twilio/voice"
-	sigB := generateTwilioSignature(cfg.TwilioAuthToken, vURLB, formB)
+	sigB := fakes.TwilioSignature(cfg.TwilioAuthToken, vURLB, formB)
 
 	reqB := httptest.NewRequest(http.MethodPost, vURLB, strings.NewReader(formB.Encode()))
 	reqB.Header.Set("Content-Type", "application/x-www-form-urlencoded")
@@ -1000,7 +913,7 @@ func TestTwilioVoiceWebhook_CallIDResolutionAndNotFound(t *testing.T) {
 		"Direction": []string{"outbound-api"},
 	}
 	vURLNotFound := cfg.PublicWebhookBaseURL + "/api/webhooks/twilio/voice"
-	sigNotFound := generateTwilioSignature(cfg.TwilioAuthToken, vURLNotFound, formNotFound)
+	sigNotFound := fakes.TwilioSignature(cfg.TwilioAuthToken, vURLNotFound, formNotFound)
 
 	reqNotFound := httptest.NewRequest(http.MethodPost, vURLNotFound, strings.NewReader(formNotFound.Encode()))
 	reqNotFound.Header.Set("Content-Type", "application/x-www-form-urlencoded")
@@ -1035,7 +948,7 @@ func TestTwilioStatusAndAMD_CallIDResolution(t *testing.T) {
 		"CallStatus": []string{"in-progress"},
 	}
 	statURL := cfg.PublicWebhookBaseURL + "/api/webhooks/twilio/status?call_id=call-unbound-stat"
-	sigStat := generateTwilioSignature(cfg.TwilioAuthToken, statURL, statForm)
+	sigStat := fakes.TwilioSignature(cfg.TwilioAuthToken, statURL, statForm)
 
 	reqStat := httptest.NewRequest(http.MethodPost, statURL, strings.NewReader(statForm.Encode()))
 	reqStat.Header.Set("Content-Type", "application/x-www-form-urlencoded")
@@ -1076,7 +989,7 @@ func TestTwilioStatusAndAMD_CallIDResolution(t *testing.T) {
 		"AnsweredBy": []string{"human"},
 	}
 	amdURL := cfg.PublicWebhookBaseURL + "/api/webhooks/twilio/amd?call_id=call-unbound-amd"
-	sigAMD := generateTwilioSignature(cfg.TwilioAuthToken, amdURL, amdForm)
+	sigAMD := fakes.TwilioSignature(cfg.TwilioAuthToken, amdURL, amdForm)
 
 	reqAMD := httptest.NewRequest(http.MethodPost, amdURL, strings.NewReader(amdForm.Encode()))
 	reqAMD.Header.Set("Content-Type", "application/x-www-form-urlencoded")
@@ -1096,14 +1009,6 @@ func TestTwilioStatusAndAMD_CallIDResolution(t *testing.T) {
 	if boundAMDCall.AnsweredBy != "human" {
 		t.Fatalf("amd call AnsweredBy = %q, want human", boundAMDCall.AnsweredBy)
 	}
-}
-
-func TestServer_Wait(t *testing.T) {
-	t.Parallel()
-
-	server, _, _ := setupTestServer()
-	server.triggerPostCallReportIfPending(context.Background(), "call-nonexistent")
-	server.Wait()
 }
 
 func TestServer_ReloadEndpointSwapsLiveConfig(t *testing.T) {
@@ -1134,8 +1039,8 @@ func TestServer_ReloadEndpointSwapsLiveConfig(t *testing.T) {
 			t.Parallel()
 			cfgSrc := httpkit.NewReloadable(&config.Config{Port: "4019", TwilioFromNumber: "+15105550100"},
 				func() (*config.Config, error) { return tc.reloadedCfg, nil }, config.RestartRequired)
-			twilioMock := &mockTwilioForDelivery{}
-			server := NewServer(cfgSrc, newMockStoreForDelivery(), twilioMock, nil, nil, nil)
+			twilioMock := &fakes.FakeTwilio{}
+			server := NewServer(cfgSrc, fakes.NewFakeStore(), twilioMock, nil, nil, nil)
 
 			req := httptest.NewRequest(http.MethodPost, "/-/reload", http.NoBody)
 			req.RemoteAddr = "127.0.0.1:5555"
@@ -1148,8 +1053,8 @@ func TestServer_ReloadEndpointSwapsLiveConfig(t *testing.T) {
 			if _, err := server.toolHandler.SendSMS(context.Background(), tools.SendSMSArgs{To: "+15105550199", Body: "hi"}); err != nil {
 				t.Fatalf("SendSMS() error = %v", err)
 			}
-			if twilioMock.lastSendSMSFrom != tc.wantSMSFrom {
-				t.Errorf("SMS from = %q, want %q", twilioMock.lastSendSMSFrom, tc.wantSMSFrom)
+			if twilioMock.LastSendSMSFrom != tc.wantSMSFrom {
+				t.Errorf("SMS from = %q, want %q", twilioMock.LastSendSMSFrom, tc.wantSMSFrom)
 			}
 			select {
 			case <-cfgSrc.RestartRequested():
@@ -1179,15 +1084,20 @@ func TestServer_RoutesMediaStreamUpgrade(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			cfg := &config.Config{GeminiLiveModel: "gemini-3.8-live"}
-			store := newMockStoreForDelivery()
-			tokenMgr := twilio.NewStreamTokenManager(time.Now)
-			sessionMgr := mediastream.NewCallSessionManager(staticConfig{cfg: cfg}, store, nil, nil, tokenMgr,
-				mediastream.WithGeminiDialer(func(context.Context, string) (*websocket.Conn, error) {
-					return nil, errors.New("gemini unavailable")
+			store := fakes.NewFakeStore()
+			tokenMgr := twilio.NewStreamTokenManager(time.Now, nil)
+			built := make(chan struct{}, 1)
+			sessionMgr := mediastream.NewCallSessionManager(fakes.StaticConfig{Cfg: cfg}, store, nil, nil, tokenMgr,
+				mediastream.WithSessionFactory(func(sc mediastream.SessionConfig) mediastream.Session {
+					sc.GeminiDialer = func(context.Context, string) (*websocket.Conn, error) {
+						return nil, errors.New("gemini unavailable")
+					}
+					sess := newProsperaMediaSession(sc)
+					built <- struct{}{}
+					return sess
 				}),
-				mediastream.WithSessionFactory(newProsperaMediaSession),
 			)
-			server := NewServer(newTestConfigSource(cfg), store, nil, tokenMgr, sessionMgr, delivery.NewReporter(staticConfig{cfg: cfg}, store, nil))
+			server := NewServer(newTestConfigSource(cfg), store, nil, tokenMgr, sessionMgr, delivery.NewReporter(fakes.StaticConfig{Cfg: cfg}, store, nil))
 			srv := httptest.NewServer(server.Routes())
 			t.Cleanup(srv.Close)
 
@@ -1206,6 +1116,14 @@ func TestServer_RoutesMediaStreamUpgrade(t *testing.T) {
 			if resp.StatusCode != tc.wantStatus {
 				t.Errorf("handshake status = %d, want %d", resp.StatusCode, tc.wantStatus)
 			}
+			if !tc.validToken {
+				return
+			}
+			select {
+			case <-built:
+			case <-time.After(5 * time.Second):
+				t.Fatal("upgraded stream never built a prospera media session")
+			}
 		})
 	}
 }
@@ -1215,7 +1133,7 @@ func TestServer_RoutesMediaStreamUpgrade(t *testing.T) {
 func TestServerInstructions(t *testing.T) {
 	t.Parallel()
 	cfg := &config.Config{TwilioFromNumber: "+15105550100", MaxConcurrentCalls: 5}
-	ts := httptest.NewServer(NewServer(newTestConfigSource(cfg), newMockStoreForDelivery(), &mockTwilioForDelivery{}, nil, nil, nil).Routes())
+	ts := httptest.NewServer(NewServer(newTestConfigSource(cfg), fakes.NewFakeStore(), &fakes.FakeTwilio{}, nil, nil, nil).Routes())
 	t.Cleanup(ts.Close)
 
 	tests := []struct {
@@ -1250,118 +1168,300 @@ func TestServerInstructions(t *testing.T) {
 	}
 }
 
-// ---- bus setup tests (bus/consumer lifecycle) ----
+// WithServerHTTPClient configures an HTTP client for Server outbound calls in tests.
+func WithServerHTTPClient(client *http.Client) ServerOption {
+	return func(s *Server) {
+		s.httpClient = client
+	}
+}
 
-func TestSetupProsperaBus(t *testing.T) {
-	tests := []struct {
-		name       string
-		natsURL    string
-		busFactory func(context.Context, string) (pubsub.Bus, error)
-		wantNil    bool
-	}{
+type triggerPostCallReportTestCase struct {
+	name          string
+	callID        string
+	ingressStatus int
+	emptyIngress  bool
+	noReporter    bool
+	wantIngress   bool
+	wantPath      string
+	wantKey       string
+	wantDelivered bool
+	wantErr       bool
+}
+
+func runTriggerPostCallReportTest(t *testing.T, tc triggerPostCallReportTestCase) {
+	t.Helper()
+	var calledIngress bool
+	var receivedPath string
+	var receivedKey string
+	var mu sync.Mutex
+
+	ingressCode := tc.ingressStatus
+	if ingressCode == 0 {
+		ingressCode = http.StatusOK
+	}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.Contains(r.URL.Path, "ProsperaReport") {
+			mu.Lock()
+			calledIngress = true
+			receivedPath = r.URL.Path
+			receivedKey = r.Header.Get("Idempotency-Key")
+			mu.Unlock()
+			w.WriteHeader(ingressCode)
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	ingressURL := srv.URL
+	if tc.emptyIngress {
+		ingressURL = ""
+	}
+
+	cfg := &config.Config{
+		Port:                  "4019",
+		RestateIngressURL:     ingressURL,
+		DefaultDiscordChannel: "prospera",
+		BrainURL:              srv.URL,
+	}
+	st := fakes.NewFakeStore()
+	if strings.TrimSpace(tc.callID) != "" {
+		_ = st.CreateOutboundCall(context.Background(), model.VoiceCall{
+			CallID:       tc.callID,
+			ReportStatus: "pending",
+		}, 5)
+	}
+	var rep *delivery.Reporter
+	if !tc.noReporter {
+		rep = delivery.NewReporter(fakes.StaticConfig{Cfg: cfg}, st, &fakes.FakeTwilio{})
+	}
+	var serverOpts []ServerOption
+	if tc.name != "successful restate ingress invocation" {
+		serverOpts = append(serverOpts, WithServerHTTPClient(srv.Client()))
+	}
+	server := NewServer(newTestConfigSource(cfg), st, &fakes.FakeTwilio{}, nil, nil, rep, serverOpts...)
+
+	err := server.triggerPostCallReport(context.Background(), tc.callID)
+	if (err != nil) != tc.wantErr {
+		t.Fatalf("triggerPostCallReport err = %v, wantErr = %v", err, tc.wantErr)
+	}
+	server.Wait()
+
+	mu.Lock()
+	gotIngress := calledIngress
+	path := receivedPath
+	key := receivedKey
+	mu.Unlock()
+
+	if gotIngress != tc.wantIngress {
+		t.Errorf("calledIngress = %v, want %v", gotIngress, tc.wantIngress)
+	}
+	if tc.wantPath != "" && path != tc.wantPath {
+		t.Errorf("path = %q, want %q", path, tc.wantPath)
+	}
+	if tc.wantKey != "" && key != tc.wantKey {
+		t.Errorf("key = %q, want %q", key, tc.wantKey)
+	}
+
+	if tc.wantDelivered {
+		call, _ := st.GetCall(context.Background(), tc.callID)
+		if call.ReportStatus != "delivered" {
+			t.Errorf("call report status = %q, want delivered", call.ReportStatus)
+		}
+	}
+}
+
+func TestServer_TriggerPostCallReport_RestateIngress(t *testing.T) {
+	t.Parallel()
+
+	tests := []triggerPostCallReportTestCase{
 		{
-			name:    "empty url returns nil",
-			natsURL: "   ",
-			wantNil: true,
+			name:          "empty call id returns nil",
+			callID:        "   ",
+			ingressStatus: http.StatusOK,
+			wantIngress:   false,
+			wantDelivered: false,
 		},
 		{
-			name:    "bus factory error returns nil",
-			natsURL: "nats://127.0.0.1:4222",
-			busFactory: func(context.Context, string) (pubsub.Bus, error) {
-				return nil, errors.New("connection failed")
-			},
-			wantNil: true,
+			name:          "successful restate ingress invocation",
+			callID:        "call-restate-ok",
+			ingressStatus: http.StatusOK,
+			wantIngress:   true,
+			wantPath:      "/ProsperaReport/call-restate-ok/DeliverReport/send",
+			wantKey:       "prospera:report:call-restate-ok",
 		},
 		{
-			name:    "successful bus sets event bus and consumers",
-			natsURL: "nats://127.0.0.1:4222",
-			busFactory: func(context.Context, string) (pubsub.Bus, error) {
-				return pubsub.NewMemoryBus(), nil
-			},
-			wantNil: false,
+			name:          "restate ingress failure falls back to direct delivery",
+			callID:        "call-restate-fail",
+			ingressStatus: http.StatusInternalServerError,
+			wantIngress:   true,
+			wantDelivered: true,
 		},
 		{
-			name:    "consumer start failure logs and returns bus",
-			natsURL: "nats://127.0.0.1:4222",
-			busFactory: func(context.Context, string) (pubsub.Bus, error) {
-				return &failConsumeQueueBus{Bus: pubsub.NewMemoryBus(), failSubject: pubsub.SubjectProsperaReportJob}, nil
-			},
-			wantNil: false,
+			name:          "empty restate ingress url delivers directly",
+			callID:        "call-no-ingress",
+			emptyIngress:  true,
+			wantIngress:   false,
+			wantDelivered: true,
 		},
 		{
-			name:    "ensure streams failure logs and returns bus",
-			natsURL: "nats://127.0.0.1:4222",
-			busFactory: func(context.Context, string) (pubsub.Bus, error) {
-				return &failEnsureStreamsBus{Bus: pubsub.NewMemoryBus()}, nil
-			},
-			wantNil: false,
+			name:         "no delivery mechanism available returns error and logs in triggerPostCallReportIfPending",
+			callID:       "call-no-mech",
+			emptyIngress: true,
+			noReporter:   true,
+			wantIngress:  false,
+			wantErr:      true,
 		},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			origBusFn := newProsperaBusFn
-			defer func() { newProsperaBusFn = origBusFn }()
-			if tc.busFactory != nil {
-				newProsperaBusFn = tc.busFactory
-			}
-
-			server, _, _ := setupTestServer()
-			bus := setupProsperaBus(context.Background(), server, tc.natsURL)
-			if (bus == nil) != tc.wantNil {
-				t.Fatalf("setupProsperaBus() nil = %v, wantNil = %v", bus == nil, tc.wantNil)
-			}
-			if !tc.wantNil {
-				if server.EventBus() != bus {
-					t.Fatalf("server.EventBus() = %v, want %v", server.EventBus(), bus)
-				}
-			}
+			t.Parallel()
+			runTriggerPostCallReportTest(t, tc)
 		})
 	}
 }
 
-type failEnsureStreamsBus struct {
-	pubsub.Bus
+type handleReportJobTestCase struct {
+	name          string
+	callID        string
+	ingressStatus int
+	wantIngress   bool
+	wantDelivered bool
 }
 
-func (*failEnsureStreamsBus) EnsureCoreStreams(ctx context.Context) error {
-	return errors.New("ensure streams failed")
+func runHandleReportJobTest(t *testing.T, tc handleReportJobTestCase) {
+	t.Helper()
+	var calledIngress bool
+	var mu sync.Mutex
+
+	ingressCode := tc.ingressStatus
+	if ingressCode == 0 {
+		ingressCode = http.StatusOK
+	}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.Contains(r.URL.Path, "ProsperaReport") {
+			mu.Lock()
+			calledIngress = true
+			mu.Unlock()
+			w.WriteHeader(ingressCode)
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	cfg := &config.Config{
+		Port:                  "4019",
+		RestateIngressURL:     srv.URL,
+		BrainURL:              srv.URL,
+		DefaultDiscordChannel: "prospera",
+	}
+	st := fakes.NewFakeStore()
+	_ = st.CreateOutboundCall(context.Background(), model.VoiceCall{
+		CallID:       tc.callID,
+		ReportStatus: "pending",
+	}, 5)
+
+	rep := delivery.NewReporter(fakes.StaticConfig{Cfg: cfg}, st, &fakes.FakeTwilio{})
+	server := NewServer(newTestConfigSource(cfg), st, &fakes.FakeTwilio{}, nil, nil, rep, WithServerHTTPClient(srv.Client()))
+
+	msg := &pubsubtest.Message{
+		Payload: []byte(`{"call_id":"` + tc.callID + `"}`),
+	}
+	err := server.HandleReportJob(context.Background(), msg)
+	if err != nil {
+		t.Fatalf("HandleReportJob() err = %v", err)
+	}
+
+	mu.Lock()
+	gotIngress := calledIngress
+	mu.Unlock()
+	if gotIngress != tc.wantIngress {
+		t.Errorf("calledIngress = %v, want %v", gotIngress, tc.wantIngress)
+	}
+
+	call, _ := st.GetCall(context.Background(), tc.callID)
+	if (call.ReportStatus == "delivered") != tc.wantDelivered {
+		t.Errorf("call report status = %q, wantDelivered = %v", call.ReportStatus, tc.wantDelivered)
+	}
 }
 
-func TestFirstNonEmptyAndNakBackoff(t *testing.T) {
+func TestServer_HandleReportJob_RestateIngress(t *testing.T) {
 	t.Parallel()
 
-	tests := []struct {
-		input []string
-		want  string
-	}{
-		{input: []string{"", "  ", "first", "second"}, want: "first"},
-		{input: []string{"", "   "}, want: ""},
-		{input: []string{"only"}, want: "only"},
+	tests := []handleReportJobTestCase{
+		{
+			name:          "restate ingress succeeds without fallback",
+			callID:        "call-job-restate-ok",
+			ingressStatus: http.StatusOK,
+			wantIngress:   true,
+			wantDelivered: false,
+		},
+		{
+			name:          "restate ingress failure falls back to direct reporter delivery",
+			callID:        "call-job-restate-fallback",
+			ingressStatus: http.StatusInternalServerError,
+			wantIngress:   true,
+			wantDelivered: true,
+		},
 	}
 
 	for _, tc := range tests {
-		if got := firstNonEmpty(tc.input...); got != tc.want {
-			t.Errorf("firstNonEmpty(%v) = %q, want %q", tc.input, got, tc.want)
-		}
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			runHandleReportJobTest(t, tc)
+		})
+	}
+}
+
+func TestServer_HangupActiveSessions(t *testing.T) {
+	t.Parallel()
+
+	// 1. Nil server or nil session manager returns cleanly
+	var nilS *Server
+	nilS.HangupActiveSessions()
+	nilS.Drain(context.Background())
+	emptyS := &Server{}
+	emptyS.HangupActiveSessions()
+	emptyS.Drain(context.Background())
+
+	// 2. Active sessions have hangup initiated
+	server, _, _ := setupTestServer()
+	server.Drain(nil)
+	server.Drain(context.Background())
+
+	sess := &stubSession{}
+	server.sessionMgr.RegisterSession("call-hangup-1", sess)
+	if server.sessionMgr.ActiveCount() != 1 {
+		t.Fatalf("active count = %d, want 1", server.sessionMgr.ActiveCount())
+	}
+	server.HangupActiveSessions()
+	if sess.hangupCount() != 1 {
+		t.Fatalf("hangup count = %d, want 1", sess.hangupCount())
+	}
+}
+
+func TestServer_ResolveAndBindCall_ErrorBranches(t *testing.T) {
+	t.Parallel()
+
+	// 1. Nil store returns nil
+	serverNoStore := NewServer(newTestConfigSource(&config.Config{}), nil, nil, nil, nil, nil)
+	req := httptest.NewRequest(http.MethodGet, "/?call_id=c1", http.NoBody)
+	if call := serverNoStore.resolveAndBindCall(context.Background(), req, "CA1"); call != nil {
+		t.Fatalf("expected nil call with nil store, got %+v", call)
 	}
 
-	delayTests := []struct {
-		delivered uint64
-		want      time.Duration
-	}{
-		{delivered: 0, want: 1 * time.Second},
-		{delivered: 1, want: 1 * time.Second},
-		{delivered: 2, want: 2 * time.Second},
-		{delivered: 3, want: 4 * time.Second},
-		{delivered: 4, want: 8 * time.Second},
-		{delivered: 5, want: 16 * time.Second},
-		{delivered: 10, want: 16 * time.Second},
-	}
-
-	for _, dt := range delayTests {
-		if got := nakBackoffDelay(dt.delivered); got != dt.want {
-			t.Errorf("nakBackoffDelay(%d) = %v, want %v", dt.delivered, got, dt.want)
-		}
+	// 2. BindProviderCallSID error logs warning
+	st := fakes.NewFakeStore()
+	st.BindErr = errors.New("bind failure")
+	_ = st.CreateOutboundCall(context.Background(), model.VoiceCall{
+		CallID: "call-bind-err",
+	}, 5)
+	server := NewServer(newTestConfigSource(&config.Config{}), st, nil, nil, nil, nil)
+	reqBind := httptest.NewRequest(http.MethodGet, "/?call_id=call-bind-err", http.NoBody)
+	call := server.resolveAndBindCall(context.Background(), reqBind, "CA-bind-err")
+	if call == nil || call.CallID != "call-bind-err" {
+		t.Fatalf("expected call-bind-err, got %+v", call)
 	}
 }

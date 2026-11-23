@@ -12,8 +12,10 @@ import (
 	"github.com/bwmarrin/discordgo"
 	"golang.org/x/sync/singleflight"
 
+	"github.com/azylman/aerial/pkg/discordutil"
 	"github.com/azylman/aerial/services/eri/pkg/config"
 	"github.com/azylman/aerial/services/eri/pkg/db"
+	"github.com/azylman/aerial/services/eri/pkg/delivery"
 )
 
 // ChannelSnapshot holds immutable channel metadata to avoid cross-goroutine pointer races.
@@ -85,21 +87,8 @@ func GetCachedChannel(channelID string) (ChannelSnapshot, bool) {
 	return snap, ok
 }
 
-// IsNumericSnowflake returns true if id != "" and contains only ASCII digits [0-9].
-func IsNumericSnowflake(id string) bool {
-	if id == "" {
-		return false
-	}
-	for i := range len(id) {
-		if id[i] < '0' || id[i] > '9' {
-			return false
-		}
-	}
-	return true
-}
-
 func fetchAndCacheRESTChannel(s *discordgo.Session, channelID string) (ChannelSnapshot, bool) {
-	if s.Token == "" || !IsNumericSnowflake(channelID) {
+	if s.Token == "" || !discordutil.IsSnowflake(channelID) {
 		return ChannelSnapshot{}, false
 	}
 	res, err, _ := restSingleFlight.Do(channelID, func() (any, error) { return s.Channel(channelID) })
@@ -428,7 +417,9 @@ func matchesWakeIdentity(content string, mentionIDs, roleIDs []string, botID str
 }
 
 // FormatThreadTitle formats the thread title for a thread trigger, clamped to at most 100 runes.
+// Inputs are redacted before clamping so a secret straddling the limit cannot leave a fragment.
 func FormatThreadTitle(titlePrefix, prompt string, now time.Time) string {
+	titlePrefix, prompt = delivery.RedactOutbound(titlePrefix), delivery.RedactOutbound(prompt)
 	dateStr := now.Format("Jan 02, 2006")
 	trimmed := strings.TrimSpace(titlePrefix)
 	var title string
@@ -503,7 +494,7 @@ func (p *WorkerPool) redirectChannelIfNoBuildUpdatesWithSession(sess *discordgo.
 	if sysChan == "" {
 		return channelID
 	}
-	if sysChanID, err := p.ResolveChannelID(sysChan); err == nil && sysChanID != "" && IsNumericSnowflake(sysChanID) {
+	if sysChanID, err := p.ResolveChannelID(sysChan); err == nil && sysChanID != "" && discordutil.IsSnowflake(sysChanID) {
 		return sysChanID
 	}
 	return channelID
@@ -550,16 +541,10 @@ func (p *WorkerPool) ResolveTargetThread(channelID, title, prompt string, now ti
 		return channelID
 	}
 	if sess != nil && sess.Token != "" {
-		if ch, err := sess.ThreadStart(channelID, threadTitle, discordgo.ChannelTypeGuildPublicThread, 1440); err == nil && ch != nil && ch.ID != "" {
+		if ch, err := delivery.StartThread(sess, channelID, threadTitle); err == nil && ch != nil && ch.ID != "" {
 			CacheDiscordChannel(ch)
 			return ch.ID
 		}
 	}
 	return channelID
 }
-
-var _ = func() bool {
-	_ = FormatThreadTitle("", "", time.Time{})
-	_ = ShouldCreateThread(false, "")
-	return true
-}()

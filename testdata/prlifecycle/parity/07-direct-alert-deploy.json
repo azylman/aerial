@@ -1,0 +1,149 @@
+{
+  "name": "07-direct-alert-deploy",
+  "description": "A direct deploy_success alert for a repo the watcher does not track names only the merge commit and lands before pull_request.closed; it publishes deploy_success once (PRObject must not drop the merge-only SHA as stale) and leaves the row status to the later merge.",
+  "synapse": [
+    {
+      "kind": "register",
+      "register": {
+        "repo": "azylman/aerial",
+        "pr_number": 107,
+        "branch": "feat/alert",
+        "head_sha": "h107",
+        "target_id": "100000000000000001",
+        "title": "Alert PR",
+        "agent": "aerial"
+      }
+    },
+    {
+      "kind": "deploy",
+      "deploy": {
+        "event": "deploy_success",
+        "job_name": "eri",
+        "repo": "azylman/aerial",
+        "commit_sha": "m107",
+        "pr_number": 107,
+        "target_id": "100000000000000001",
+        "status": "success"
+      }
+    },
+    {
+      "kind": "github",
+      "event": "pull_request",
+      "payload": {
+        "action": "closed",
+        "number": 107,
+        "repository": {
+          "full_name": "azylman/aerial"
+        },
+        "pull_request": {
+          "number": 107,
+          "title": "Alert PR",
+          "state": "closed",
+          "merged": true,
+          "head": {
+            "ref": "feat/alert",
+            "sha": "h107"
+          },
+          "base": {
+            "ref": "main"
+          },
+          "merge_commit_sha": "m107"
+        }
+      }
+    }
+  ],
+  "restate": [
+    {
+      "object": "PRObject",
+      "handler": "Register",
+      "event": {
+        "repo": "azylman/aerial",
+        "pr_number": 107,
+        "branch": "feat/alert",
+        "head_sha": "h107",
+        "target_id": "100000000000000001",
+        "title": "Alert PR",
+        "agent": "aerial",
+        "bot_id": "aerial",
+        "metadata": {
+          "agent": "aerial",
+          "bot_id": "aerial"
+        }
+      }
+    },
+    {
+      "object": "PRObject",
+      "handler": "HandleDeploySuccess",
+      "event": {
+        "pr_number": 107,
+        "merge_sha": "m107",
+        "job_name": "eri",
+        "facts": [
+          {
+            "event": "deploy_success",
+            "repo": "azylman/aerial",
+            "pr_number": 107,
+            "merge_sha": "m107",
+            "job_name": "eri"
+          }
+        ],
+        "repo": "azylman/aerial"
+      }
+    },
+    {
+      "object": "PRObject",
+      "handler": "HandleMerged",
+      "event": {
+        "pr_number": 107,
+        "head_sha": "h107",
+        "merge_sha": "m107",
+        "branch": "feat/alert",
+        "facts": [
+          {
+            "event": "merged",
+            "repo": "azylman/aerial",
+            "pr_number": 107,
+            "head_sha": "h107",
+            "merge_sha": "m107"
+          }
+        ],
+        "repo": "azylman/aerial"
+      }
+    }
+  ],
+  "effects": [
+    {
+      "kind": "pr_fact_deploy_success",
+      "key": "azylman/aerial#107@m107:pr_fact_deploy_success:job=eri"
+    },
+    {
+      "kind": "pr_fact_merged",
+      "key": "azylman/aerial#107@h107:pr_fact_merged"
+    }
+  ],
+  "fact_rollout_states": [
+    {
+      "key": "azylman/aerial#107@m107:pr_fact_deploy_success:job=eri",
+      "rollout_state": null
+    },
+    {
+      "key": "azylman/aerial#107@h107:pr_fact_merged",
+      "rollout_state": null
+    }
+  ],
+  "rows": [
+    {
+      "repo": "azylman/aerial",
+      "pr_number": 107,
+      "branch": "feat/alert",
+      "head_sha": "h107",
+      "merge_sha": "m107",
+      "target_id": "100000000000000001",
+      "status": "merged",
+      "title": "Alert PR",
+      "metadata": {
+        "agent": "aerial"
+      }
+    }
+  ]
+}

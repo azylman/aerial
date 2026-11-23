@@ -9,6 +9,8 @@ import (
 	"slices"
 	"strings"
 	"time"
+
+	"github.com/azylman/aerial/services/eri/pkg/enginefmt"
 )
 
 type codexTranscriptEntry struct {
@@ -29,36 +31,6 @@ type codexPayloadRecord struct {
 	Error   json.RawMessage `json:"error"`
 	IsError bool            `json:"is_error"`
 	Status  string          `json:"status"`
-}
-
-func extractCodexText(content json.RawMessage, textFallback string) string {
-	if textFallback != "" {
-		return textFallback
-	}
-	if len(content) == 0 {
-		return ""
-	}
-	var text string
-	if err := json.Unmarshal(content, &text); err == nil {
-		return text
-	}
-	var blocks []struct {
-		Type string `json:"type"`
-		Text string `json:"text"`
-	}
-	if err := json.Unmarshal(content, &blocks); err == nil {
-		var parts []string
-		for _, b := range blocks {
-			switch b.Type {
-			case "text", "input_text", "output_text":
-				if strings.TrimSpace(b.Text) != "" {
-					parts = append(parts, b.Text)
-				}
-			}
-		}
-		return strings.Join(parts, "\n")
-	}
-	return ""
 }
 
 func scanCodexBaseForSession(base, cleanID string, seen map[string]bool) []string {
@@ -144,22 +116,6 @@ func (m *Manager) CodexSessionExistsOnDisk(sessionID string) bool {
 	return false
 }
 
-func isCodexSessionDir(root string) bool {
-	base := filepath.Base(root)
-	return base == "sessions" || base == ".codex" || strings.Contains(root, "codex")
-}
-
-func checkCodexSubdirsActivity(root, cleanID string, current time.Time) time.Time {
-	if !isCodexSessionDir(root) {
-		return current
-	}
-	seen := make(map[string]bool)
-	for _, p := range scanCodexBaseForSession(root, cleanID, seen) {
-		current = checkFileMtime(p, current)
-	}
-	return current
-}
-
 func isCodexStepLine(line string) bool {
 	var entry codexTranscriptEntry
 	if err := json.Unmarshal([]byte(line), &entry); err != nil || entry.Type != entryTypeResponseItem {
@@ -191,7 +147,7 @@ func isNonAmbientCodexUserLine(line string) bool {
 	if payload.Type != entryTypeMessage || payload.Role != roleUser {
 		return false
 	}
-	text := extractCodexText(payload.Content, payload.Text)
+	text := enginefmt.ExtractCodexText(payload.Content, payload.Text)
 	return !isAmbientInput("", text)
 }
 
@@ -272,7 +228,7 @@ func extractCodexResponseItemError(payload *codexPayloadRecord) string {
 	if str := extractErrorBytes(payload.Error); str != "" {
 		return str
 	}
-	return extractCodexText(payload.Content, payload.Text)
+	return enginefmt.ExtractCodexText(payload.Content, payload.Text)
 }
 
 func extractCodexErrorFromPayload(entryType string, payload *codexPayloadRecord) string {
@@ -356,7 +312,7 @@ func scanCodexLinesForResponse(ctx context.Context, lines []string, since time.T
 			continue
 		}
 		if payload.Type == entryTypeMessage && payload.Role == roleUser {
-			if !isAmbientInput("", extractCodexText(payload.Content, payload.Text)) {
+			if !isAmbientInput("", enginefmt.ExtractCodexText(payload.Content, payload.Text)) {
 				return ""
 			}
 		}
@@ -369,7 +325,7 @@ func scanCodexLinesForResponse(ctx context.Context, lines []string, since time.T
 		if strings.EqualFold(strings.TrimSpace(payload.Phase), "commentary") {
 			continue
 		}
-		text := extractCodexText(payload.Content, payload.Text)
+		text := enginefmt.ExtractCodexText(payload.Content, payload.Text)
 		trimmed := strings.TrimSpace(text)
 		if trimmed != "" && !strings.HasPrefix(trimmed, "[Tool Call Requested]:") {
 			return trimmed

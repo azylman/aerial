@@ -1,8 +1,8 @@
 import { memo, useEffect, useMemo, useState } from 'react';
 import type { CronSchedule, VanadisBuildDTO, VanadisChunkDTO } from '../../api/types';
-import { GitSyncBadge } from '../../components/GitSyncBadge';
 import { Icon } from '../../components/Icon';
 import {
+  buildsPanelState,
   compareBuilds,
   computeBuildChunkStats,
   getBuildStatusBadgeInfo,
@@ -29,6 +29,7 @@ const EMPTY_CRONS: readonly CronSchedule[] = Object.freeze([]);
 export const OverviewBuildsSection = memo(function OverviewBuildsSection() {
   const builds = useConsoleStore((s) => s.builds.list.data?.builds ?? EMPTY_BUILDS);
   const data = useConsoleStore((s) => s.builds.list.data);
+  const listError = useConsoleStore((s) => s.builds.list.error);
   const detailData = useConsoleStore((s) => s.builds.detail.data);
   const activeCount = buildsBadgeCount(data);
   const topBuilds = useMemo(
@@ -38,6 +39,7 @@ export const OverviewBuildsSection = memo(function OverviewBuildsSection() {
         .slice(0, 3),
     [builds],
   );
+  const panel = buildsPanelState(data !== null, topBuilds.length, listError);
   const [expandedId, setExpandedId] = useState<string | null>(null);
   const [failed, setFailed] = useState<{ readonly id: string; readonly error: string } | null>(null);
 
@@ -83,7 +85,18 @@ export const OverviewBuildsSection = memo(function OverviewBuildsSection() {
         </div>
       </div>
       <div className="overview-bento-body">
-        {topBuilds.length === 0 ? (
+        {panel === 'builds' && listError !== null ? (
+          <div className="overview-build-error overview-builds-stale" role="alert">
+            VANADIS UNREACHABLE // SHOWING LAST SNAPSHOT // {listError}
+          </div>
+        ) : null}
+        {panel === 'error' ? (
+          <div className="overview-build-error" role="alert">VANADIS UNREACHABLE // {listError}</div>
+        ) : panel === 'loading' ? (
+          <div className="overview-build-loading">
+            <span className="pulse-dot healthy" /> LOADING BUILDS...
+          </div>
+        ) : panel === 'idle' ? (
           <div className="overview-idle-row">ALL BUILDS IDLE // NO QUEUED RUNS</div>
         ) : (
           topBuilds.map((build, i) => {
@@ -269,7 +282,6 @@ export default function TelemetryView() {
             <h2>Deployment Pipeline</h2>
           </div>
           <div className="section-actions section-header-badges">
-            <GitSyncBadge />
             <DeployBadge />
           </div>
         </div>

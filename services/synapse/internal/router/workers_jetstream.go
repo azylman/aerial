@@ -4,27 +4,62 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log"
 	"log/slog"
+	"strings"
 	"time"
 
 	"github.com/azylman/aerial/pkg/pubsub"
 	"github.com/azylman/aerial/pkg/tracing"
 	"github.com/azylman/aerial/services/synapse/internal/metrics"
+	"github.com/azylman/aerial/services/synapse/internal/model"
+	"github.com/azylman/aerial/services/synapse/internal/restateclient"
 )
 
-func resolveJetStreamJobCoords(args any) (string, string) {
-	switch a := normalizeJobArgs(args).(type) {
-	case GitHubWebhookArgs:
-		return "aerial.jobs.synapse.github", "github:" + a.Delivery
-	case DeployWebhookArgs:
-		return "aerial.jobs.synapse.deploy", "deploy:" + a.IdempotencyKey
-	case DiscordIngressArgs:
-		return "aerial.jobs.synapse.discord_ingress", "discord:msg:" + a.MessageID
-	case DiscordInteractionArgs:
-		return "aerial.jobs.synapse.discord_interaction", "discord:ix:" + a.InteractionID
-	default:
-		return metrics.ResolveJetStreamJobCoords(args)
+// discordRoutingFor derives per-agent Discord subject routing from cfg's
+// configured bots and default owner agent. A nil cfg routes everything to the
+// default owner fallback.
+func discordRoutingFor(cfg *Config) metrics.DiscordRouting {
+	var agents []string
+	if cfg != nil {
+		for agent := range cfg.Bots {
+			agents = append(agents, agent)
+		}
 	}
+	return metrics.NewDiscordRouting(agents, cfg.DefaultOwnerAgent())
+}
+
+// discordRouting returns routing for the current config snapshot. Changing
+// bots forces a synapse restart, so the snapshot used at consumer startup and
+// at publish time agree for the lifetime of the process.
+func (s *RouterServer) discordRouting() metrics.DiscordRouting {
+	return discordRoutingFor(s.Config())
+}
+
+type consumerSpec struct {
+	subject string
+	queue   string
+	handler pubsub.Handler
+}
+
+// jobConsumerSpecs lists every AERIAL_JOBS durable synapse subscribes: github,
+// deploy, then one ingress and
+// one interaction durable per agent in sorted order. Filter subjects are exact
+// (no wildcards), so they never overlap on the WorkQueue stream.
+func (s *RouterServer) jobConsumerSpecs(routing metrics.DiscordRouting) []consumerSpec {
+	agents := routing.Agents()
+	specs := make([]consumerSpec, 0, 2+2*len(agents))
+	specs = append(specs,
+		consumerSpec{"aerial.jobs.synapse.github", "synapse-github", s.HandleGitHubJob},
+		consumerSpec{"aerial.jobs.synapse.deploy", "synapse-deploy", s.HandleDeployJob},
+	)
+	for _, agent := range agents {
+		specs = append(specs,
+			consumerSpec{metrics.DiscordIngressSubject(agent), metrics.DiscordIngressDurable(agent), s.HandleDiscordIngressJob},
+			consumerSpec{metrics.DiscordInteractionSubject(agent), metrics.DiscordInteractionDurable(agent), s.HandleDiscordInteractionJob},
+		)
+	}
+	return specs
 }
 
 const (
@@ -34,13 +69,17 @@ const (
 	maxDeliverDiscordInteraction uint64 = 1
 )
 
-func nakBackoffDelay(numDelivered uint64) time.Duration {
-	if numDelivered <= 1 {
-		return 1 * time.Second
-	}
-	shift := min(numDelivered-1, 4)
-	return time.Duration(1<<shift) * time.Second
-}
+// Restate send retry budget: prstate owns every event's effects, so a
+// Restate outage must not lose one. 45 deliveries on a backoff capped at one
+// minute span about 40 minutes (1+2+4+8+16+32 s, then 39 x 60 s), outlasting
+// a 30-minute outage. Jobs failing for any other reason keep the short
+// budget above.
+const (
+	maxDeliverRestate         uint64 = 45
+	maxRestateBackoff                = time.Minute
+	maxNakBackoff                    = 16 * time.Second
+	restateTerminalDropReason        = "restate_terminal"
+)
 
 func termJobIfExhausted(ctx context.Context, msg pubsub.Message, maxDeliver uint64, jobName string) bool {
 	if msg.NumDelivered() >= maxDeliver {
@@ -56,6 +95,7 @@ func handleJetStreamJob[T any](ctx context.Context, msg pubsub.Message, maxDeliv
 	var args T
 	if err := json.Unmarshal(msg.Data(), &args); err != nil {
 		slog.ErrorContext(ctx, "[synapse] [jetstream] error unmarshaling job", "job", jobName, "error", err)
+		metrics.RecordJobDropped(metrics.QueueDefault, jobName+"_webhook", "malformed")
 		if termErr := msg.Term(); termErr != nil {
 			slog.WarnContext(ctx, "[synapse] [jetstream] error terming job", "job", jobName, "error", termErr)
 		}
@@ -63,10 +103,24 @@ func handleJetStreamJob[T any](ctx context.Context, msg pubsub.Message, maxDeliv
 	}
 	if err := process(args); err != nil {
 		slog.ErrorContext(ctx, "[synapse] [jetstream] error processing job", "job", jobName, "error", err)
+		delay := pubsub.NakBackoff(msg.NumDelivered(), maxNakBackoff)
+		switch restateFailed, terminal := restateSendFailure(err); {
+		case terminal:
+			metrics.RecordJobDropped(metrics.QueueDefault, jobName+"_webhook", restateTerminalDropReason)
+			slog.ErrorContext(ctx, "[synapse] [jetstream] dropping job after terminal restate rejection", "job", jobName, "error", err)
+			if termErr := msg.Term(); termErr != nil {
+				slog.WarnContext(ctx, "[synapse] [jetstream] error terming job", "job", jobName, "error", termErr)
+			}
+			return nil
+		case restateFailed:
+			maxDeliver = maxDeliverRestate
+			delay = pubsub.NakBackoff(msg.NumDelivered(), maxRestateBackoff)
+		}
 		if termJobIfExhausted(ctx, msg, maxDeliver, jobName) {
+			metrics.RecordJobDropped(metrics.QueueDefault, jobName+"_webhook", "max_retries_exhausted")
 			return nil
 		}
-		if nakErr := msg.NakWithDelay(nakBackoffDelay(msg.NumDelivered())); nakErr != nil {
+		if nakErr := msg.NakWithDelay(delay); nakErr != nil {
 			slog.WarnContext(ctx, "[synapse] [jetstream] error naking job", "job", jobName, "error", nakErr)
 		}
 		return err
@@ -74,24 +128,11 @@ func handleJetStreamJob[T any](ctx context.Context, msg pubsub.Message, maxDeliv
 	return nil
 }
 
-type finalAttemptKey struct{}
-
-func withFinalAttempt(ctx context.Context, isFinal bool) context.Context {
-	return context.WithValue(ctx, finalAttemptKey{}, isFinal)
-}
-
-func isFinalAttemptFromContext(ctx context.Context) bool {
-	v, ok := ctx.Value(finalAttemptKey{}).(bool)
-	return ok && v
-}
-
-// HandleGitHubJob processes an aerial.jobs.synapse.github job message from JetStream,
-// marking final delivery attempts so terminal image promotion failures transition PRs to deploy_failed.
+// HandleGitHubJob processes an aerial.jobs.synapse.github job message from JetStream.
 func (s *RouterServer) HandleGitHubJob(ctx context.Context, msg pubsub.Message) error {
-	isFinal := msg.NumDelivered() >= maxDeliverGitHubWebhook
-	jobCtx := withFinalAttempt(ctx, isFinal)
 	return handleJetStreamJob(ctx, msg, maxDeliverGitHubWebhook, "github", func(args GitHubWebhookArgs) error {
-		slog.InfoContext(ctx, "[synapse] [jetstream] processing github job", "event", args.Event, "delivery", args.Delivery, "final", isFinal)
+		jobCtx := restateclient.WithEventIdentity(ctx, eventIdentity("github", args.Delivery))
+		slog.InfoContext(ctx, "[synapse] [jetstream] processing github job", "event", args.Event, "delivery", args.Delivery)
 		_, err := s.ProcessGitHubEvent(jobCtx, args.Event, args.Delivery, args.Body)
 		return err
 	})
@@ -101,12 +142,22 @@ func (s *RouterServer) HandleGitHubJob(ctx context.Context, msg pubsub.Message) 
 func (s *RouterServer) HandleDeployJob(ctx context.Context, msg pubsub.Message) error {
 	return handleJetStreamJob(ctx, msg, maxDeliverDeployWebhook, "deploy", func(args DeployWebhookArgs) error {
 		slog.InfoContext(ctx, "[synapse] [jetstream] processing deploy job", "event", args.Event.Event, "job_name", args.Event.JobName)
-		_, err := s.ProcessDeployEvent(ctx, args.Event)
+		_, err := s.ProcessDeployEvent(restateclient.WithEventIdentity(ctx, eventIdentity("deploy", args.IdempotencyKey)), args.Event)
 		return err
 	})
 }
 
-// HandleDiscordIngressJob processes an aerial.jobs.synapse.discord_ingress job message from JetStream.
+// eventIdentity scopes Restate idempotency keys to one inbound event of a
+// source (a GitHub delivery ID or a deploy idempotency key). An empty id
+// yields no identity, so sends fall back to payload-digest keys.
+func eventIdentity(source, id string) string {
+	if id = strings.TrimSpace(id); id == "" {
+		return ""
+	}
+	return source + ":" + id
+}
+
+// HandleDiscordIngressJob processes an aerial.jobs.synapse.discord_ingress[.<agent>] job message from JetStream.
 // ctx carries the trace context extracted from the NATS message headers; a legacy
 // traceparent key left in older job bodies is an unknown JSON field and is ignored.
 func (s *RouterServer) HandleDiscordIngressJob(ctx context.Context, msg pubsub.Message) (err error) {
@@ -124,7 +175,7 @@ func (s *RouterServer) HandleDiscordIngressJob(ctx context.Context, msg pubsub.M
 	defer func() { markDiscordJobSpan(span, err) }()
 
 	if termJobIfExhausted(ctx, msg, maxDeliverDiscordIngress, "discord ingress") {
-		RecordJobDropped(QueueDiscordIngress, "discord_ingress", "max_retries_exhausted")
+		metrics.RecordJobDropped(QueueDiscordIngress, "discord_ingress", "max_retries_exhausted")
 		return nil
 	}
 
@@ -140,6 +191,7 @@ func (s *RouterServer) HandleDiscordIngressJob(ctx context.Context, msg pubsub.M
 		maxAge = 30 * time.Minute
 	}
 
+	attempt := 0
 	for {
 		if ctx.Err() != nil {
 			return ctx.Err()
@@ -149,7 +201,8 @@ func (s *RouterServer) HandleDiscordIngressJob(ctx context.Context, msg pubsub.M
 			isStale = true
 		}
 		if isStale {
-			RecordJobDropped(QueueDiscordIngress, "discord_ingress", "ttl_expired")
+			slog.WarnContext(ctx, "[synapse] [jetstream] dropping expired discord ingress job", "message_id", args.MessageID, "agent", args.Agent, "attempts", attempt, "elapsed", time.Since(start))
+			metrics.RecordJobDropped(QueueDiscordIngress, "discord_ingress", "ttl_expired")
 			if termErr := msg.Term(); termErr != nil {
 				slog.WarnContext(ctx, "[synapse] [jetstream] error terming expired discord ingress job", "error", termErr)
 			}
@@ -159,14 +212,17 @@ func (s *RouterServer) HandleDiscordIngressJob(ctx context.Context, msg pubsub.M
 		if pErr == nil {
 			return nil
 		}
-		if is4xxClientError(pErr) {
-			RecordJobDropped(QueueDiscordIngress, "discord_ingress", "client_4xx")
+		attempt++
+		if model.Is4xxClientError(pErr) {
+			slog.WarnContext(ctx, "[synapse] [jetstream] dropping discord ingress job rejected by eri", "message_id", args.MessageID, "agent", args.Agent, "error", pErr)
+			metrics.RecordJobDropped(QueueDiscordIngress, "discord_ingress", "client_4xx")
 			if termErr := msg.Term(); termErr != nil {
 				slog.WarnContext(ctx, "[synapse] [jetstream] error terming client 4xx discord ingress job", "error", termErr)
 			}
 			return nil
 		}
-		RecordJobRetry(QueueDiscordIngress, "discord_ingress", "discord_ingress_backoff")
+		slog.WarnContext(ctx, "[synapse] [jetstream] discord ingress dispatch failed, retrying", "message_id", args.MessageID, "agent", args.Agent, "attempt", attempt, "elapsed", time.Since(start), "retry_in", delay, "error", pErr)
+		metrics.RecordJobRetry(QueueDiscordIngress, "discord_ingress", "discord_ingress_backoff")
 		select {
 		case <-time.After(delay):
 		case <-ctx.Done():
@@ -175,7 +231,7 @@ func (s *RouterServer) HandleDiscordIngressJob(ctx context.Context, msg pubsub.M
 	}
 }
 
-// HandleDiscordInteractionJob processes an aerial.jobs.synapse.discord_interaction job message from JetStream.
+// HandleDiscordInteractionJob processes an aerial.jobs.synapse.discord_interaction[.<agent>] job message from JetStream.
 // ctx carries the trace context extracted from the NATS message headers.
 func (s *RouterServer) HandleDiscordInteractionJob(ctx context.Context, msg pubsub.Message) error {
 	var args DiscordInteractionArgs
@@ -206,18 +262,7 @@ func (s *RouterServer) StartJobConsumers(ctx context.Context) error {
 	if s == nil || s.bus == nil {
 		return nil
 	}
-	type consumerSpec struct {
-		subject string
-		queue   string
-		handler pubsub.Handler
-	}
-	specs := []consumerSpec{
-		{"aerial.jobs.synapse.github", "synapse-github", s.HandleGitHubJob},
-		{"aerial.jobs.synapse.deploy", "synapse-deploy", s.HandleDeployJob},
-		{"aerial.jobs.synapse.discord_ingress", "synapse-discord-ingress", s.HandleDiscordIngressJob},
-		{"aerial.jobs.synapse.discord_interaction", "synapse-discord-interaction", s.HandleDiscordInteractionJob},
-	}
-	for _, spec := range specs {
+	for _, spec := range s.jobConsumerSpecs(s.discordRouting()) {
 		if _, err := s.bus.ConsumeQueue(ctx, spec.subject, spec.queue, spec.handler); err != nil {
 			slog.WarnContext(ctx, "[synapse] failed to subscribe", "queue", spec.queue, "error", err)
 			return fmt.Errorf("subscribe %s: %w", spec.queue, err)
@@ -225,4 +270,37 @@ func (s *RouterServer) StartJobConsumers(ctx context.Context) error {
 		slog.InfoContext(ctx, "[synapse] subscribed queue consumer", "queue", spec.queue, "subject", spec.subject)
 	}
 	return nil
+}
+
+var newBusFn = func(ctx context.Context, url string) (pubsub.Bus, error) {
+	return pubsub.NewJetStreamBus(ctx, url)
+}
+
+func initSynapseJetStream(ctx context.Context, server *RouterServer, natsURL string) (func(), error) {
+	if natsURL == "" {
+		return func() {}, nil
+	}
+	bus, busErr := newBusFn(ctx, natsURL)
+	if busErr != nil {
+		return nil, fmt.Errorf("connect to nats at %s: %w", natsURL, busErr)
+	}
+	if streamErr := pubsub.EnsureCoreStreams(ctx, bus); streamErr != nil {
+		if closeErr := bus.Close(); closeErr != nil {
+			log.Printf("[synapse] Warning closing event bus: %v", closeErr)
+		}
+		return nil, fmt.Errorf("ensure core streams: %w", streamErr)
+	}
+	server.SetEventBus(bus)
+	if err := server.StartJobConsumers(ctx); err != nil {
+		if closeErr := bus.Close(); closeErr != nil {
+			log.Printf("[synapse] Warning closing event bus: %v", closeErr)
+		}
+		server.SetEventBus(nil)
+		return nil, fmt.Errorf("start job consumers: %w", err)
+	}
+	return func() {
+		if closeErr := bus.Close(); closeErr != nil {
+			log.Printf("[synapse] Warning closing event bus: %v", closeErr)
+		}
+	}, nil
 }

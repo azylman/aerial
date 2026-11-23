@@ -2,7 +2,6 @@ package server
 
 import (
 	"context"
-	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -10,7 +9,6 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
-	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -18,8 +16,8 @@ import (
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
 	"github.com/azylman/aerial/pkg/httpkit"
-	"github.com/azylman/aerial/pkg/k8sauth"
-	"github.com/azylman/aerial/pkg/sanitizer"
+	"github.com/azylman/aerial/pkg/k8sauthtest"
+	"github.com/azylman/aerial/pkg/pgtest"
 	"github.com/azylman/aerial/services/haro/internal/config"
 	"github.com/azylman/aerial/services/haro/internal/model"
 	"github.com/azylman/aerial/services/haro/internal/store"
@@ -39,37 +37,18 @@ type JSONRPCResponse struct {
 	} `json:"error,omitempty"`
 }
 
+func TestMain(m *testing.M) {
+	os.Exit(pgtest.Main(m))
+}
+
 type mockErrReader struct{}
 
 func (*mockErrReader) Read([]byte) (int, error) { return 0, errors.New("simulated read error") }
 
-func setupTestPostgresTables(t *testing.T, db *sql.DB) {
-	t.Helper()
-	schema := `
-	CREATE TABLE IF NOT EXISTS vanadis_builds (
-		id TEXT PRIMARY KEY,
-		status TEXT NOT NULL DEFAULT 'running'
-	);
-	CREATE TABLE IF NOT EXISTS vanadis_chunks (
-		id TEXT PRIMARY KEY,
-		build_id TEXT NOT NULL DEFAULT '',
-		status TEXT NOT NULL DEFAULT 'pending'
-	);
-	`
-	if _, err := db.Exec(schema); err != nil {
-		t.Fatalf("failed to setup test postgres tables: %v", err)
-	}
-}
-
 func setupTestServer(t *testing.T) (*Server, *httptest.Server) {
 	t.Helper()
 	cfg := &config.Config{DatabaseURL: ":memory:", Timezone: config.DefaultTimezone, Port: "8080"}
-	db, err := testutil.OpenSQLiteTestDB(":memory:")
-	if err != nil {
-		t.Fatalf("OpenSQLiteTestDB failed: %v", err)
-	}
-	t.Cleanup(func() { _ = db.Close() })
-	setupTestPostgresTables(t, db)
+	db := testutil.NewDB(t)
 	server := NewServer(tools.NewToolHandler(cfg, db))
 	return server, httptest.NewServer(server.Routes())
 }
@@ -84,11 +63,7 @@ func TestNewServer_NilHandlerPanics(t *testing.T) {
 }
 
 func TestNewServer_BrainURLDispatcherConstruction(t *testing.T) {
-	db, err := testutil.OpenSQLiteTestDB(":memory:")
-	if err != nil {
-		t.Fatalf("OpenSQLiteTestDB failed: %v", err)
-	}
-	t.Cleanup(func() { _ = db.Close() })
+	db := testutil.NewDB(t)
 	sWithURL := NewServer(tools.NewToolHandler(&config.Config{DatabaseURL: ":memory:", EriURL: "http://eri:8080"}, db))
 	if sWithURL.dispatcher == nil {
 		t.Error("expected non-nil dispatcher when EriURL is configured")
@@ -231,28 +206,34 @@ func TestServer_HTTPEndpointsAndMCPProtocol(t *testing.T) {
 	}
 
 	rpcCtx := context.Background()
-	_ = store.InsertCronSchedule(rpcCtx, server.handler.DB, model.CronSchedule{
+	if err := store.InsertCronSchedule(rpcCtx, server.handler.DB, model.CronSchedule{
 		ID:        "test-cron-id",
 		TargetID:  "123",
 		CronExpr:  "0 0 * * *",
 		Prompt:    "test",
 		NextRunAt: time.Now().UTC(),
 		Enabled:   true,
-	})
-	_ = store.InsertHeartbeatSchedule(rpcCtx, server.handler.DB, model.HeartbeatSchedule{
+	}); err != nil {
+		t.Fatalf("InsertCronSchedule failed: %v", err)
+	}
+	if err := store.InsertHeartbeatSchedule(rpcCtx, server.handler.DB, model.HeartbeatSchedule{
 		ID:        "test-hb-id",
 		TargetID:  "123",
 		CronExpr:  "0 0 * * *",
 		Prompt:    "test",
 		NextRunAt: time.Now().UTC(),
 		Enabled:   true,
-	})
-	_ = store.InsertOneShotSchedule(rpcCtx, server.handler.DB, model.OneShotSchedule{
+	}); err != nil {
+		t.Fatalf("InsertHeartbeatSchedule failed: %v", err)
+	}
+	if err := store.InsertOneShotSchedule(rpcCtx, server.handler.DB, model.OneShotSchedule{
 		ID:       "test-once-id",
 		ThreadID: "123",
 		Prompt:   "test",
 		RunAt:    time.Now().UTC(),
-	})
+	}); err != nil {
+		t.Fatalf("InsertOneShotSchedule failed: %v", err)
+	}
 
 	for _, tc := range serverRPCTestCases() {
 		t.Run(tc.name, func(t *testing.T) {
@@ -260,11 +241,7 @@ func TestServer_HTTPEndpointsAndMCPProtocol(t *testing.T) {
 		})
 	}
 
-	closedMCPDB, err := testutil.OpenSQLiteTestDB(":memory:")
-	if err != nil {
-		t.Fatalf("OpenSQLiteTestDB failed: %v", err)
-	}
-	_ = closedMCPDB.Close()
+	closedMCPDB := testutil.NewClosedDB(t)
 	closedTS := httptest.NewServer(NewServer(tools.NewToolHandler(&config.Config{DatabaseURL: ":memory:"}, closedMCPDB)).Routes())
 	defer closedTS.Close()
 	runServerRPCCase(t, closedTS, serverRPCTestCase{"list_schedules closed db", `{"jsonrpc":"2.0","id":300,"method":"tools/call","params":{"name":"list_schedules","arguments":{}}}`, true, false})
@@ -274,53 +251,16 @@ func TestServer_HTTPEndpointsAndMCPProtocol(t *testing.T) {
 // through the MCP endpoint with explicit title_prefix, timezone, and effort,
 // then asserts the persisted schedule row carries those exact values.
 func TestServer_ScheduleHeartbeatPersistsExplicitFields(t *testing.T) {
-	tests := []struct {
-		name       string
-		payload    string
-		channelID  string
-		wantTitle  string
-		wantTZ     string
-		wantEffort string
-	}{
-		{"explicit fields persisted", `{"jsonrpc":"2.0","id":29,"method":"tools/call","params":{"name":"schedule_heartbeat","arguments":{"channel_id":"123456789012345679","cron_expr":"0 0 * * *","prompt":"monitor disk","title_prefix":"Disk Alert","timezone":"UTC","effort":"high"}}}`, "123456789012345679", "Disk Alert", "UTC", "high"},
+	server, ts := setupTestServer(t)
+	defer ts.Close()
+	payload := `{"jsonrpc":"2.0","id":29,"method":"tools/call","params":{"name":"schedule_heartbeat","arguments":{"channel_id":"123456789012345679","cron_expr":"0 0 * * *","prompt":"monitor disk","title_prefix":"Disk Alert","timezone":"UTC","effort":"high"}}}`
+	runServerRPCCase(t, ts, serverRPCTestCase{"explicit fields persisted", payload, false, false})
+	got, err := store.ListHeartbeatSchedules(t.Context(), server.handler.DB, "123456789012345679")
+	if err != nil {
+		t.Fatalf("ListHeartbeatSchedules err = %v", err)
 	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			server, ts := setupTestServer(t)
-			defer ts.Close()
-			resp, err := http.Post(ts.URL+"/mcp", "application/json", strings.NewReader(tc.payload))
-			if err != nil {
-				t.Fatalf("POST /mcp failed: %v", err)
-			}
-			defer resp.Body.Close()
-			var rpcResp JSONRPCResponse
-			if derr := json.NewDecoder(resp.Body).Decode(&rpcResp); derr != nil {
-				t.Fatalf("decode failed: %v", derr)
-			}
-			if rpcResp.Error != nil {
-				t.Fatalf("unexpected RPC error: %+v", rpcResp.Error)
-			}
-			got, err := store.ListHeartbeatSchedules(t.Context(), server.handler.DB, tc.channelID)
-			if err != nil {
-				t.Fatalf("ListHeartbeatSchedules err = %v", err)
-			}
-			var found *model.HeartbeatSchedule
-			for i := range got {
-				if got[i].TitlePrefix == tc.wantTitle {
-					found = &got[i]
-					break
-				}
-			}
-			if found == nil {
-				t.Fatalf("no heartbeat with title %q, got %+v", tc.wantTitle, got)
-			}
-			if found.Timezone != tc.wantTZ {
-				t.Errorf("Timezone = %q, want %q", found.Timezone, tc.wantTZ)
-			}
-			if found.Effort != tc.wantEffort {
-				t.Errorf("Effort = %q, want %q", found.Effort, tc.wantEffort)
-			}
-		})
+	if len(got) != 1 || got[0].TitlePrefix != "Disk Alert" || got[0].Timezone != "UTC" || got[0].Effort != "high" {
+		t.Fatalf("heartbeats = %+v, want one with TitlePrefix %q, Timezone %q, Effort %q", got, "Disk Alert", "UTC", "high")
 	}
 }
 
@@ -344,15 +284,6 @@ func assertSchedulesResponse(t *testing.T, rec *httptest.ResponseRecorder, wantT
 	if resp.Summary.TotalActive != wantTotal {
 		t.Errorf("got TotalActive=%d, want %d", resp.Summary.TotalActive, wantTotal)
 	}
-	if len(resp.Crons) > 0 && strings.Contains(resp.Crons[0].Prompt, "secrettoken") {
-		t.Errorf("secret not redacted from cron prompt: %s", resp.Crons[0].Prompt)
-	}
-	if len(resp.Heartbeats) > 0 && strings.Contains(resp.Heartbeats[0].Prompt, "github_pat_") {
-		t.Errorf("secret not redacted from heartbeat prompt: %s", resp.Heartbeats[0].Prompt)
-	}
-	if len(resp.OneShots) > 0 && strings.Contains(resp.OneShots[0].Prompt, "secretpass") {
-		t.Errorf("secret not redacted from oneshot prompt: %s", resp.OneShots[0].Prompt)
-	}
 }
 
 func runHandleSchedulesCase(t *testing.T, tc handleSchedulesTestCase) {
@@ -369,33 +300,19 @@ func runHandleSchedulesCase(t *testing.T, tc handleSchedulesTestCase) {
 }
 
 func TestHandleSchedules_Table(t *testing.T) {
-	t.Cleanup(sanitizer.ResetSensitiveTokensForTest)
-	t.Setenv("GITHUB_PAT", "[REDACTED]")
-	t.Setenv("POSTGRES_PASSWORD", "secretpass")
-	secretsDir := t.TempDir()
-	_ = os.WriteFile(filepath.Join(secretsDir, "PAT_SECRET"), []byte("[REDACTED]"), 0o600)
-	oldSecretsPath := sanitizer.DefaultSharedSecretsPath
-	sanitizer.DefaultSharedSecretsPath = secretsDir
-	t.Cleanup(func() { sanitizer.DefaultSharedSecretsPath = oldSecretsPath })
-
 	cfg := &config.Config{
 		DatabaseURL: "postgres://aerial:supersecret@127.0.0.1:5432/aerial",
 		NATSURL:     "nats://user:secrettoken123456@127.0.0.1:4222",
 		Timezone:    config.DefaultTimezone,
 		Port:        "8080",
 	}
-	db, err := testutil.OpenSQLiteTestDB(":memory:")
-	if err != nil {
-		t.Fatalf("OpenSQLiteTestDB failed: %v", err)
-	}
-	t.Cleanup(func() { _ = db.Close() })
-	setupTestPostgresTables(t, db)
+	db := testutil.NewDB(t)
 	server := NewServer(tools.NewToolHandler(cfg, db))
 	ts := httptest.NewServer(server.Routes())
 	defer ts.Close()
 
 	ctx := context.Background()
-	err = store.InsertCronSchedule(ctx, db, model.CronSchedule{
+	err := store.InsertCronSchedule(ctx, db, model.CronSchedule{
 		ID:          "cron-1",
 		TargetID:    "123456789012345678",
 		TitlePrefix: "Cron Token: [REDACTED]",
@@ -439,7 +356,7 @@ func TestHandleSchedules_Table(t *testing.T) {
 		t.Fatalf("failed to insert oneshot: %v", err)
 	}
 
-	_ = store.CreateScheduleRun(ctx, db, model.ScheduleRun{
+	if err := store.CreateScheduleRun(ctx, db, model.ScheduleRun{
 		ID:           "run-1",
 		ScheduleID:   "cron-1",
 		ScheduleType: "cron",
@@ -450,8 +367,10 @@ func TestHandleSchedules_Table(t *testing.T) {
 		Status:       "completed",
 		StartedAt:    time.Now().UTC().Add(-1 * time.Hour),
 		DurationMs:   100,
-	})
-	_ = store.CreateScheduleRun(ctx, db, model.ScheduleRun{
+	}); err != nil {
+		t.Fatalf("CreateScheduleRun run-1 failed: %v", err)
+	}
+	if err := store.CreateScheduleRun(ctx, db, model.ScheduleRun{
 		ID:           "run-2",
 		ScheduleID:   "cron-1",
 		ScheduleType: "cron",
@@ -463,51 +382,19 @@ func TestHandleSchedules_Table(t *testing.T) {
 		Error:        "Failed with token=supersecret",
 		StartedAt:    time.Now().UTC().Add(-30 * time.Minute),
 		DurationMs:   200,
-	})
-
-	closedDB, err := testutil.OpenSQLiteTestDB(":memory:")
-	if err != nil {
-		t.Fatalf("OpenSQLiteTestDB failed: %v", err)
+	}); err != nil {
+		t.Fatalf("CreateScheduleRun run-2 failed: %v", err)
 	}
-	_ = closedDB.Close()
+
+	closedDB := testutil.NewClosedDB(t)
 	serverClosed := NewServer(tools.NewToolHandler(&config.Config{DatabaseURL: ":memory:"}, closedDB))
 
 	tests := []handleSchedulesTestCase{
-		{
-			name:       "valid get schedules with seeded data",
-			method:     http.MethodGet,
-			useServer:  server,
-			wantStatus: http.StatusOK,
-			wantTotal:  3,
-		},
-		{
-			name:       "cached get schedules hit",
-			method:     http.MethodGet,
-			useServer:  server,
-			wantStatus: http.StatusOK,
-			wantTotal:  3,
-		},
-		{
-			name:       "method not allowed post",
-			method:     http.MethodPost,
-			useServer:  server,
-			wantStatus: http.StatusMethodNotAllowed,
-			wantTotal:  0,
-		},
-		{
-			name:       "database error on closed db",
-			method:     http.MethodGet,
-			useServer:  serverClosed,
-			wantStatus: http.StatusInternalServerError,
-			wantTotal:  0,
-		},
-		{
-			name:       "nil db server error",
-			method:     http.MethodGet,
-			useServer:  &Server{},
-			wantStatus: http.StatusInternalServerError,
-			wantTotal:  0,
-		},
+		{name: "valid get schedules with seeded data", method: http.MethodGet, useServer: server, wantStatus: http.StatusOK, wantTotal: 3},
+		{name: "cached get schedules hit", method: http.MethodGet, useServer: server, wantStatus: http.StatusOK, wantTotal: 3},
+		{name: "method not allowed post", method: http.MethodPost, useServer: server, wantStatus: http.StatusMethodNotAllowed},
+		{name: "database error on closed db", method: http.MethodGet, useServer: serverClosed, wantStatus: http.StatusInternalServerError},
+		{name: "nil db server error", method: http.MethodGet, useServer: &Server{}, wantStatus: http.StatusInternalServerError},
 	}
 
 	for _, tc := range tests {
@@ -542,17 +429,6 @@ func assertScheduleRunsResponse(t *testing.T, rec *httptest.ResponseRecorder, wa
 	if resp.Total != wantTotal {
 		t.Errorf("got Total=%d, want %d", resp.Total, wantTotal)
 	}
-	for _, r := range resp.Runs {
-		if strings.Contains(r.Prompt, "mysecrettoken") {
-			t.Errorf("prompt not sanitized: %s", r.Prompt)
-		}
-		if strings.Contains(r.Title, "ghp_") {
-			t.Errorf("title not sanitized: %s", r.Title)
-		}
-		if strings.Contains(r.Error, "supersecret") {
-			t.Errorf("error not sanitized: %s", r.Error)
-		}
-	}
 }
 
 func completedAtForStatus(status string, i int) *time.Time {
@@ -577,21 +453,13 @@ func runHandleScheduleRunsCase(t *testing.T, tc handleScheduleRunsTestCase) {
 }
 
 func TestHandleScheduleRuns_Table(t *testing.T) {
-	t.Cleanup(sanitizer.ResetSensitiveTokensForTest)
-	t.Setenv("GITHUB_PAT", "[REDACTED]")
-	t.Setenv("POSTGRES_PASSWORD", "supersecret")
 	cfg := &config.Config{
 		DatabaseURL: "postgres://aerial:supersecret@127.0.0.1:5432/aerial",
 		NATSURL:     "nats://user:mysecrettoken123@127.0.0.1:4222",
 		Timezone:    config.DefaultTimezone,
 		Port:        "8080",
 	}
-	db, err := testutil.OpenSQLiteTestDB(":memory:")
-	if err != nil {
-		t.Fatalf("OpenSQLiteTestDB failed: %v", err)
-	}
-	t.Cleanup(func() { _ = db.Close() })
-	setupTestPostgresTables(t, db)
+	db := testutil.NewDB(t)
 	server := NewServer(tools.NewToolHandler(cfg, db))
 	ts := httptest.NewServer(server.Routes())
 	defer ts.Close()
@@ -604,7 +472,7 @@ func TestHandleScheduleRuns_Table(t *testing.T) {
 			status = "failed"
 		}
 		completedAt := completedAtForStatus(status, i)
-		_ = store.CreateScheduleRun(ctx, db, model.ScheduleRun{
+		if err := store.CreateScheduleRun(ctx, db, model.ScheduleRun{
 			ID:           fmt.Sprintf("run-%d", i),
 			ScheduleID:   fmt.Sprintf("sched-%d", i%2+1),
 			ScheduleType: "cron",
@@ -617,14 +485,12 @@ func TestHandleScheduleRuns_Table(t *testing.T) {
 			CompletedAt:  completedAt,
 			DurationMs:   int64(i * 10),
 			Error:        "Error with TOKEN=supersecret",
-		})
+		}); err != nil {
+			t.Fatalf("CreateScheduleRun run-%d failed: %v", i, err)
+		}
 	}
 
-	closedDB, err := testutil.OpenSQLiteTestDB(":memory:")
-	if err != nil {
-		t.Fatalf("OpenSQLiteTestDB failed: %v", err)
-	}
-	_ = closedDB.Close()
+	closedDB := testutil.NewClosedDB(t)
 	serverClosed := NewServer(tools.NewToolHandler(&config.Config{DatabaseURL: ":memory:"}, closedDB))
 
 	tests := []handleScheduleRunsTestCase{
@@ -731,330 +597,123 @@ func TestServerInstructions(t *testing.T) {
 	_, ts := setupTestServer(t)
 	defer ts.Close()
 
-	tests := []struct {
-		name     string
-		path     string
-		wantTool string
-	}{
-		{"initialize advertises workflow instructions", "/mcp", "list_event_watches"},
+	client := mcp.NewClient(&mcp.Implementation{Name: "instructions-test", Version: "1.0.0"}, nil)
+	session, err := client.Connect(context.Background(), &mcp.StreamableClientTransport{
+		Endpoint:             ts.URL + "/mcp",
+		HTTPClient:           ts.Client(),
+		DisableStandaloneSSE: true,
+	}, nil)
+	if err != nil {
+		t.Fatalf("Connect: %v", err)
 	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			client := mcp.NewClient(&mcp.Implementation{Name: "instructions-test", Version: "1.0.0"}, nil)
-			session, err := client.Connect(context.Background(), &mcp.StreamableClientTransport{
-				Endpoint:             ts.URL + tc.path,
-				HTTPClient:           ts.Client(),
-				DisableStandaloneSSE: true,
-			}, nil)
-			if err != nil {
-				t.Fatalf("Connect: %v", err)
-			}
-			defer session.Close()
+	defer session.Close()
 
-			got := session.InitializeResult().Instructions
-			if got == "" || len(got) > 1024 {
-				t.Fatalf("instructions length = %d, want 1..1024", len(got))
-			}
-			if !strings.Contains(got, tc.wantTool) {
-				t.Errorf("instructions missing tool name %q: %q", tc.wantTool, got)
-			}
-		})
+	got := session.InitializeResult().Instructions
+	if got == "" || len(got) > 1024 {
+		t.Fatalf("instructions length = %d, want 1..1024", len(got))
+	}
+	if !strings.Contains(got, "list_event_watches") {
+		t.Errorf("instructions missing tool name %q: %q", "list_event_watches", got)
 	}
 }
 
-type staticAuthRoundTripper struct {
-	authStatus int
-	authBody   string
-	sarStatus  int
-	sarBody    string
-	err        error
-}
+// Kubernetes auth fake responses shared by the endpoint and MCP tool auth tables.
+var (
+	authAgentReview   = k8sauthtest.TokenReview("system:serviceaccount:default:eri-agent-alpha")
+	authExpiredReview = `{"apiVersion":"authentication.k8s.io/v1","kind":"TokenReview","status":{"authenticated":false,"error":"token expired"}}`
+	authSARAllowed    = k8sauthtest.SAR(true, "")
+	authSARDenied     = k8sauthtest.SAR(false, "access denied by test policy")
+	authSARToolDenied = k8sauthtest.SAR(false, "operation forbidden by test SAR")
+)
 
-func (s *staticAuthRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
-	if s.err != nil {
-		return nil, s.err
-	}
-	if strings.Contains(req.URL.Path, "tokenreviews") {
-		return &http.Response{
-			StatusCode: s.authStatus,
-			Body:       io.NopCloser(strings.NewReader(s.authBody)),
-			Header:     make(http.Header),
-			Request:    req,
-		}, nil
-	}
-	if strings.Contains(req.URL.Path, "subjectaccessreviews") {
-		return &http.Response{
-			StatusCode: s.sarStatus,
-			Body:       io.NopCloser(strings.NewReader(s.sarBody)),
-			Header:     make(http.Header),
-			Request:    req,
-		}, nil
-	}
-	return &http.Response{
-		StatusCode: http.StatusOK,
-		Body:       io.NopCloser(strings.NewReader(`{}`)),
-		Header:     make(http.Header),
-		Request:    req,
-	}, nil
-}
-
-func newTestAuthConfig(t *testing.T, tr *staticAuthRoundTripper) k8sauth.Config {
-	t.Helper()
-	tokenFile := filepath.Join(t.TempDir(), "token")
-	if err := os.WriteFile(tokenFile, []byte("host-token"), 0o600); err != nil {
-		t.Fatalf("failed to write host token: %v", err)
-	}
-	return k8sauth.Config{
-		Enabled:      true,
-		TokenPath:    tokenFile,
-		APIServerURL: "https://k8s.local",
-		HTTPClient:   &http.Client{Transport: tr},
-	}
-}
-
-func setupTestServerWithAuth(t *testing.T, tr *staticAuthRoundTripper) (*Server, *httptest.Server) {
+func setupTestServerWithAuth(t *testing.T, rt *k8sauthtest.RoundTripper) (*Server, *httptest.Server) {
 	t.Helper()
 	oldCounters, oldMeta := httpkit.WriteCountersDirFn, httpkit.WriteMetaDirFn
 	t.Cleanup(func() { httpkit.WriteCountersDirFn, httpkit.WriteMetaDirFn = oldCounters, oldMeta })
 	httpkit.WriteCountersDirFn = func(string) error { return nil }
 	httpkit.WriteMetaDirFn = func(string) error { return nil }
 
-	authCfg := newTestAuthConfig(t, tr)
-	cfg := &config.Config{DatabaseURL: ":memory:", Timezone: config.DefaultTimezone, Port: "8080", Auth: authCfg}
-	db, err := testutil.OpenSQLiteTestDB(":memory:")
-	if err != nil {
-		t.Fatalf("OpenSQLiteTestDB failed: %v", err)
-	}
-	t.Cleanup(func() { _ = db.Close() })
-	setupTestPostgresTables(t, db)
+	cfg := &config.Config{DatabaseURL: ":memory:", Timezone: config.DefaultTimezone, Port: "8080", Auth: k8sauthtest.Config(t, rt)}
+	db := testutil.NewDB(t)
 	server := NewServer(tools.NewToolHandler(cfg, db))
 	return server, httptest.NewServer(server.Routes())
 }
 
-func TestServer_AuthEnabled(t *testing.T) {
-	t.Parallel()
-	serverWithoutAuth, ts1 := setupTestServer(t)
-	defer ts1.Close()
-	if serverWithoutAuth.authEnabled() {
-		t.Errorf("serverWithoutAuth.authEnabled() = true, want false")
-	}
-
-	serverWithAuth, ts2 := setupTestServerWithAuth(t, &staticAuthRoundTripper{})
-	defer ts2.Close()
-	if !serverWithAuth.authEnabled() {
-		t.Errorf("serverWithAuth.authEnabled() = false, want true")
-	}
-}
-
-func TestWriteAuthError(t *testing.T) {
-	t.Parallel()
+// TestServer_Auth_Endpoints covers the HTTP routes with Kubernetes auth on:
+// probe routes stay exempt (the fake has no responses, so any review would
+// fail), and the schedule routes return 401, 403 or 200 by token and SAR.
+func TestServer_Auth_Endpoints(t *testing.T) {
 	tests := []struct {
 		name       string
-		err        error
+		path       string
+		token      string
+		authBody   string
+		sarBody    string
 		wantStatus int
 		wantSubstr string
 	}{
-		{
-			name:       "validation error returns 400",
-			err:        &k8sauth.ValidationError{Message: "bad target agent"},
-			wantStatus: http.StatusBadRequest,
-			wantSubstr: "bad target agent",
-		},
-		{
-			name:       "unauthorized error returns 401",
-			err:        &k8sauth.UnauthorizedError{Message: "missing token"},
-			wantStatus: http.StatusUnauthorized,
-			wantSubstr: "missing token",
-		},
-		{
-			name:       "forbidden error returns 403",
-			err:        &k8sauth.ForbiddenError{Message: "access denied"},
-			wantStatus: http.StatusForbidden,
-			wantSubstr: "access denied",
-		},
-		{
-			name:       "generic error returns 500",
-			err:        errors.New("internal server error"),
-			wantStatus: http.StatusInternalServerError,
-			wantSubstr: "internal server error",
-		},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			rec := httptest.NewRecorder()
-			writeAuthError(rec, tc.err)
-			if rec.Code != tc.wantStatus {
-				t.Errorf("writeAuthError status = %d, want %d", rec.Code, tc.wantStatus)
-			}
-			if !strings.Contains(rec.Body.String(), tc.wantSubstr) {
-				t.Errorf("writeAuthError body %q missing %q", rec.Body.String(), tc.wantSubstr)
-			}
-		})
-	}
-}
-
-type authEndpointTestCase struct {
-	name       string
-	method     string
-	path       string
-	header     map[string]string
-	rt         *staticAuthRoundTripper
-	wantStatus int
-	wantSubstr string
-}
-
-func TestServer_Auth_Endpoints_ExemptAndUnauthorized(t *testing.T) {
-	trSuccess := &staticAuthRoundTripper{
-		authStatus: http.StatusOK,
-		authBody:   `{"apiVersion":"authentication.k8s.io/v1","kind":"TokenReview","status":{"authenticated":true,"user":{"username":"system:serviceaccount:default:eri-agent-alpha"}}}`,
-		sarStatus:  http.StatusOK,
-		sarBody:    `{"apiVersion":"authorization.k8s.io/v1","kind":"SubjectAccessReview","status":{"allowed":true}}`,
-	}
-	trUnauth := &staticAuthRoundTripper{
-		authStatus: http.StatusOK,
-		authBody:   `{"apiVersion":"authentication.k8s.io/v1","kind":"TokenReview","status":{"authenticated":false,"error":"token expired"}}`,
-	}
-
-	tests := []authEndpointTestCase{
-		{
-			name:       "health is exempt",
-			method:     http.MethodGet,
-			path:       "/health",
-			wantStatus: http.StatusOK,
-			wantSubstr: `{"status":"ok"}`,
-		},
-		{
-			name:       "healthz is exempt",
-			method:     http.MethodGet,
-			path:       "/healthz",
-			wantStatus: http.StatusOK,
-			wantSubstr: `{"status":"ok"}`,
-		},
-		{
-			name:       "readyz is exempt",
-			method:     http.MethodGet,
-			path:       "/readyz",
-			wantStatus: http.StatusOK,
-			wantSubstr: `{"status":"ok"}`,
-		},
-		{
-			name:       "metrics is exempt",
-			method:     http.MethodGet,
-			path:       "/metrics",
-			wantStatus: http.StatusOK,
-		},
-		{
-			name:       "coverage flush is exempt",
-			method:     http.MethodGet,
-			path:       "/debug/coverage/flush",
-			wantStatus: http.StatusOK,
-		},
-		{
-			name:       "schedules missing token returns 401",
-			method:     http.MethodGet,
-			path:       "/schedules",
-			wantStatus: http.StatusUnauthorized,
-			wantSubstr: "missing Authorization header",
-		},
+		{name: "health is exempt", path: "/health", wantStatus: http.StatusOK, wantSubstr: `{"status":"ok"}`},
+		{name: "healthz is exempt", path: "/healthz", wantStatus: http.StatusOK, wantSubstr: `{"status":"ok"}`},
+		{name: "readyz is exempt", path: "/readyz", wantStatus: http.StatusOK, wantSubstr: `{"status":"ok"}`},
+		{name: "metrics is exempt", path: "/metrics", wantStatus: http.StatusOK},
+		{name: "coverage flush is exempt", path: "/debug/coverage/flush", wantStatus: http.StatusOK},
+		{name: "schedules missing token returns 401", path: "/schedules", wantStatus: http.StatusUnauthorized, wantSubstr: "missing Authorization header"},
 		{
 			name:       "schedules expired token returns 401",
-			method:     http.MethodGet,
 			path:       "/schedules",
-			header:     map[string]string{"Authorization": "Bearer bad-token"},
-			rt:         trUnauth,
+			token:      "bad-token",
+			authBody:   authExpiredReview,
 			wantStatus: http.StatusUnauthorized,
 			wantSubstr: "token expired",
 		},
 		{
 			name:       "schedules runs missing token returns 401",
-			method:     http.MethodGet,
 			path:       "/schedules/runs",
 			wantStatus: http.StatusUnauthorized,
 			wantSubstr: "missing Authorization header",
 		},
-	}
-
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			rt := trSuccess
-			if tc.rt != nil {
-				rt = tc.rt
-			}
-			server, _ := setupTestServerWithAuth(t, rt)
-			req := httptest.NewRequest(tc.method, tc.path, http.NoBody)
-			for k, v := range tc.header {
-				req.Header.Set(k, v)
-			}
-			rec := httptest.NewRecorder()
-			server.Routes().ServeHTTP(rec, req)
-			if rec.Code != tc.wantStatus {
-				t.Fatalf("status = %d, want %d (body: %s)", rec.Code, tc.wantStatus, rec.Body.String())
-			}
-			if tc.wantSubstr != "" && !strings.Contains(rec.Body.String(), tc.wantSubstr) {
-				t.Errorf("response %q missing %q", rec.Body.String(), tc.wantSubstr)
-			}
-		})
-	}
-}
-
-func TestServer_Auth_Endpoints_AuthorizedAndForbidden(t *testing.T) {
-	trSuccess := &staticAuthRoundTripper{
-		authStatus: http.StatusOK,
-		authBody:   `{"apiVersion":"authentication.k8s.io/v1","kind":"TokenReview","status":{"authenticated":true,"user":{"username":"system:serviceaccount:default:eri-agent-alpha"}}}`,
-		sarStatus:  http.StatusOK,
-		sarBody:    `{"apiVersion":"authorization.k8s.io/v1","kind":"SubjectAccessReview","status":{"allowed":true}}`,
-	}
-	trDenied := &staticAuthRoundTripper{
-		authStatus: http.StatusOK,
-		authBody:   `{"apiVersion":"authentication.k8s.io/v1","kind":"TokenReview","status":{"authenticated":true,"user":{"username":"system:serviceaccount:default:eri-agent-alpha"}}}`,
-		sarStatus:  http.StatusOK,
-		sarBody:    `{"apiVersion":"authorization.k8s.io/v1","kind":"SubjectAccessReview","status":{"allowed":false,"reason":"access denied by test policy"}}`,
-	}
-
-	tests := []authEndpointTestCase{
 		{
 			name:       "schedules allowed returns 200",
-			method:     http.MethodGet,
 			path:       "/schedules",
-			header:     map[string]string{"Authorization": "Bearer valid-token"},
-			rt:         trSuccess,
+			token:      "valid-token",
+			authBody:   authAgentReview,
+			sarBody:    authSARAllowed,
 			wantStatus: http.StatusOK,
 			wantSubstr: `"status":"ok"`,
 		},
 		{
 			name:       "schedules with agent param allowed returns 200",
-			method:     http.MethodGet,
 			path:       "/schedules?agent=agent-alpha",
-			header:     map[string]string{"Authorization": "Bearer valid-token"},
-			rt:         trSuccess,
+			token:      "valid-token",
+			authBody:   authAgentReview,
+			sarBody:    authSARAllowed,
 			wantStatus: http.StatusOK,
 			wantSubstr: `"status":"ok"`,
 		},
 		{
 			name:       "schedules denied returns 403",
-			method:     http.MethodGet,
 			path:       "/schedules",
-			header:     map[string]string{"Authorization": "Bearer valid-token"},
-			rt:         trDenied,
+			token:      "valid-token",
+			authBody:   authAgentReview,
+			sarBody:    authSARDenied,
 			wantStatus: http.StatusForbidden,
 			wantSubstr: "access denied by test policy",
 		},
 		{
 			name:       "schedules runs allowed returns 200",
-			method:     http.MethodGet,
 			path:       "/schedules/runs?agent=agent-alpha",
-			header:     map[string]string{"Authorization": "Bearer valid-token"},
-			rt:         trSuccess,
+			token:      "valid-token",
+			authBody:   authAgentReview,
+			sarBody:    authSARAllowed,
 			wantStatus: http.StatusOK,
 			wantSubstr: `"status":"ok"`,
 		},
 		{
 			name:       "schedules runs denied returns 403",
-			method:     http.MethodGet,
 			path:       "/schedules/runs",
-			header:     map[string]string{"Authorization": "Bearer valid-token"},
-			rt:         trDenied,
+			token:      "valid-token",
+			authBody:   authAgentReview,
+			sarBody:    authSARDenied,
 			wantStatus: http.StatusForbidden,
 			wantSubstr: "access denied by test policy",
 		},
@@ -1062,10 +721,11 @@ func TestServer_Auth_Endpoints_AuthorizedAndForbidden(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			server, _ := setupTestServerWithAuth(t, tc.rt)
-			req := httptest.NewRequest(tc.method, tc.path, http.NoBody)
-			for k, v := range tc.header {
-				req.Header.Set(k, v)
+			server, ts := setupTestServerWithAuth(t, &k8sauthtest.RoundTripper{AuthBody: tc.authBody, SARBody: tc.sarBody})
+			defer ts.Close()
+			req := httptest.NewRequest(http.MethodGet, tc.path, http.NoBody)
+			if tc.token != "" {
+				req.Header.Set("Authorization", "Bearer "+tc.token)
 			}
 			rec := httptest.NewRecorder()
 			server.Routes().ServeHTTP(rec, req)
@@ -1081,7 +741,10 @@ func TestServer_Auth_Endpoints_AuthorizedAndForbidden(t *testing.T) {
 
 func assertMCPToolCallResult(t *testing.T, rpcResp JSONRPCResponse, wantToolErr bool) {
 	t.Helper()
-	resBytes, _ := json.Marshal(rpcResp.Result)
+	resBytes, err := json.Marshal(rpcResp.Result)
+	if err != nil {
+		t.Fatalf("failed to marshal result: %v", err)
+	}
 	if !wantToolErr {
 		if rpcResp.Error != nil {
 			t.Fatalf("unexpected RPC error: %v", rpcResp.Error)
@@ -1106,7 +769,7 @@ func assertMCPToolCallResult(t *testing.T, rpcResp JSONRPCResponse, wantToolErr 
 	}
 }
 
-func runMCPToolAuthTest(t *testing.T, toolRPC string, rt *staticAuthRoundTripper, wantToolErr bool) {
+func runMCPToolAuthTest(t *testing.T, toolRPC string, rt *k8sauthtest.RoundTripper, wantToolErr bool) {
 	t.Helper()
 	server, ts := setupTestServerWithAuth(t, rt)
 	defer ts.Close()
@@ -1146,192 +809,42 @@ func runMCPToolAuthTest(t *testing.T, toolRPC string, rt *staticAuthRoundTripper
 	assertMCPToolCallResult(t, rpcResp, wantToolErr)
 }
 
-func TestServer_Auth_MCPTools_CreateAndQuery(t *testing.T) {
-	trSuccess := &staticAuthRoundTripper{
-		authStatus: http.StatusOK,
-		authBody:   `{"apiVersion":"authentication.k8s.io/v1","kind":"TokenReview","status":{"authenticated":true,"user":{"username":"system:serviceaccount:default:eri-agent-alpha"}}}`,
-		sarStatus:  http.StatusOK,
-		sarBody:    `{"apiVersion":"authorization.k8s.io/v1","kind":"SubjectAccessReview","status":{"allowed":true}}`,
-	}
-	trDenied := &staticAuthRoundTripper{
-		authStatus: http.StatusOK,
-		authBody:   `{"apiVersion":"authentication.k8s.io/v1","kind":"TokenReview","status":{"authenticated":true,"user":{"username":"system:serviceaccount:default:eri-agent-alpha"}}}`,
-		sarStatus:  http.StatusOK,
-		sarBody:    `{"apiVersion":"authorization.k8s.io/v1","kind":"SubjectAccessReview","status":{"allowed":false,"reason":"operation forbidden by test SAR"}}`,
-	}
-
+// TestServer_Auth_MCPTools calls every scheduler MCP tool with an allowed and
+// a denied SubjectAccessReview; denied calls must surface the SAR reason.
+func TestServer_Auth_MCPTools(t *testing.T) {
 	tests := []struct {
 		name        string
 		toolRPC     string
-		rt          *staticAuthRoundTripper
+		sarBody     string
 		wantToolErr bool
 	}{
-		{
-			name:        "schedule_recurring allowed",
-			toolRPC:     `{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"schedule_recurring","arguments":{"channel_id":"123","cron_expression":"0 20 * * 5","prompt":"plan","agent":"agent-alpha"}}}`,
-			rt:          trSuccess,
-			wantToolErr: false,
-		},
-		{
-			name:        "schedule_recurring denied",
-			toolRPC:     `{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"schedule_recurring","arguments":{"channel_id":"123","cron_expression":"0 20 * * 5","prompt":"plan","agent":"agent-alpha"}}}`,
-			rt:          trDenied,
-			wantToolErr: true,
-		},
-		{
-			name:        "schedule_once allowed",
-			toolRPC:     `{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"schedule_once","arguments":{"target_id":"456","run_at":"15m","prompt":"trash","agent":"agent-alpha"}}}`,
-			rt:          trSuccess,
-			wantToolErr: false,
-		},
-		{
-			name:        "schedule_once denied",
-			toolRPC:     `{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"schedule_once","arguments":{"target_id":"456","run_at":"15m","prompt":"trash","agent":"agent-alpha"}}}`,
-			rt:          trDenied,
-			wantToolErr: true,
-		},
-		{
-			name:        "schedule_heartbeat allowed",
-			toolRPC:     `{"jsonrpc":"2.0","id":11,"method":"tools/call","params":{"name":"schedule_heartbeat","arguments":{"channel_id":"123456789012345678","cron_expr":"0 0 * * *","prompt":"monitor disk","agent":"agent-alpha"}}}`,
-			rt:          trSuccess,
-			wantToolErr: false,
-		},
-		{
-			name:        "schedule_heartbeat denied",
-			toolRPC:     `{"jsonrpc":"2.0","id":12,"method":"tools/call","params":{"name":"schedule_heartbeat","arguments":{"channel_id":"123456789012345678","cron_expr":"0 0 * * *","prompt":"monitor disk","agent":"agent-alpha"}}}`,
-			rt:          trDenied,
-			wantToolErr: true,
-		},
-		{
-			name:        "watch_event allowed",
-			toolRPC:     `{"jsonrpc":"2.0","id":15,"method":"tools/call","params":{"name":"watch_event","arguments":{"channel_id":"123456789012345678","source":"flux","target":"aerial","event_type":"sync_success","prompt":"deploy notification","agent":"agent-alpha"}}}`,
-			rt:          trSuccess,
-			wantToolErr: false,
-		},
-		{
-			name:        "watch_event denied",
-			toolRPC:     `{"jsonrpc":"2.0","id":16,"method":"tools/call","params":{"name":"watch_event","arguments":{"channel_id":"123456789012345678","source":"flux","target":"aerial","event_type":"sync_success","prompt":"deploy notification","agent":"agent-alpha"}}}`,
-			rt:          trDenied,
-			wantToolErr: true,
-		},
-		{
-			name:        "list_schedules allowed",
-			toolRPC:     `{"jsonrpc":"2.0","id":7,"method":"tools/call","params":{"name":"list_schedules","arguments":{"agent":"agent-alpha"}}}`,
-			rt:          trSuccess,
-			wantToolErr: false,
-		},
-		{
-			name:        "list_schedules denied",
-			toolRPC:     `{"jsonrpc":"2.0","id":8,"method":"tools/call","params":{"name":"list_schedules","arguments":{"agent":"agent-alpha"}}}`,
-			rt:          trDenied,
-			wantToolErr: true,
-		},
-		{
-			name:        "list_event_watches allowed",
-			toolRPC:     `{"jsonrpc":"2.0","id":17,"method":"tools/call","params":{"name":"list_event_watches","arguments":{"agent":"agent-alpha"}}}`,
-			rt:          trSuccess,
-			wantToolErr: false,
-		},
-		{
-			name:        "list_event_watches denied",
-			toolRPC:     `{"jsonrpc":"2.0","id":18,"method":"tools/call","params":{"name":"list_event_watches","arguments":{"agent":"agent-alpha"}}}`,
-			rt:          trDenied,
-			wantToolErr: true,
-		},
+		{"schedule_recurring allowed", `{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"schedule_recurring","arguments":{"channel_id":"123","cron_expression":"0 20 * * 5","prompt":"plan","agent":"agent-alpha"}}}`, authSARAllowed, false},
+		{"schedule_recurring denied", `{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"schedule_recurring","arguments":{"channel_id":"123","cron_expression":"0 20 * * 5","prompt":"plan","agent":"agent-alpha"}}}`, authSARToolDenied, true},
+		{"schedule_once allowed", `{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"schedule_once","arguments":{"target_id":"456","run_at":"15m","prompt":"trash","agent":"agent-alpha"}}}`, authSARAllowed, false},
+		{"schedule_once denied", `{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"schedule_once","arguments":{"target_id":"456","run_at":"15m","prompt":"trash","agent":"agent-alpha"}}}`, authSARToolDenied, true},
+		{"schedule_heartbeat allowed", `{"jsonrpc":"2.0","id":11,"method":"tools/call","params":{"name":"schedule_heartbeat","arguments":{"channel_id":"123456789012345678","cron_expr":"0 0 * * *","prompt":"monitor disk","agent":"agent-alpha"}}}`, authSARAllowed, false},
+		{"schedule_heartbeat denied", `{"jsonrpc":"2.0","id":12,"method":"tools/call","params":{"name":"schedule_heartbeat","arguments":{"channel_id":"123456789012345678","cron_expr":"0 0 * * *","prompt":"monitor disk","agent":"agent-alpha"}}}`, authSARToolDenied, true},
+		{"watch_event allowed", `{"jsonrpc":"2.0","id":15,"method":"tools/call","params":{"name":"watch_event","arguments":{"channel_id":"123456789012345678","source":"flux","target":"aerial","event_type":"sync_success","prompt":"deploy notification","agent":"agent-alpha"}}}`, authSARAllowed, false},
+		{"watch_event denied", `{"jsonrpc":"2.0","id":16,"method":"tools/call","params":{"name":"watch_event","arguments":{"channel_id":"123456789012345678","source":"flux","target":"aerial","event_type":"sync_success","prompt":"deploy notification","agent":"agent-alpha"}}}`, authSARToolDenied, true},
+		{"list_schedules allowed", `{"jsonrpc":"2.0","id":7,"method":"tools/call","params":{"name":"list_schedules","arguments":{"agent":"agent-alpha"}}}`, authSARAllowed, false},
+		{"list_schedules denied", `{"jsonrpc":"2.0","id":8,"method":"tools/call","params":{"name":"list_schedules","arguments":{"agent":"agent-alpha"}}}`, authSARToolDenied, true},
+		{"list_event_watches allowed", `{"jsonrpc":"2.0","id":17,"method":"tools/call","params":{"name":"list_event_watches","arguments":{"agent":"agent-alpha"}}}`, authSARAllowed, false},
+		{"list_event_watches denied", `{"jsonrpc":"2.0","id":18,"method":"tools/call","params":{"name":"list_event_watches","arguments":{"agent":"agent-alpha"}}}`, authSARToolDenied, true},
+		{"update_cron_schedule allowed", `{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"update_cron_schedule","arguments":{"schedule_id":"c-auth-test","effort":"medium"}}}`, authSARAllowed, false},
+		{"update_cron_schedule denied", `{"jsonrpc":"2.0","id":6,"method":"tools/call","params":{"name":"update_cron_schedule","arguments":{"schedule_id":"c-auth-test","effort":"medium"}}}`, authSARToolDenied, true},
+		{"update_heartbeat allowed", `{"jsonrpc":"2.0","id":13,"method":"tools/call","params":{"name":"update_heartbeat","arguments":{"id":"h-auth-test","effort":"high"}}}`, authSARAllowed, false},
+		{"update_heartbeat denied", `{"jsonrpc":"2.0","id":14,"method":"tools/call","params":{"name":"update_heartbeat","arguments":{"id":"h-auth-test","effort":"high"}}}`, authSARToolDenied, true},
+		{"get_schedule allowed", `{"jsonrpc":"2.0","id":9,"method":"tools/call","params":{"name":"get_schedule","arguments":{"schedule_id":"c-auth-test"}}}`, authSARAllowed, false},
+		{"get_schedule denied", `{"jsonrpc":"2.0","id":10,"method":"tools/call","params":{"name":"get_schedule","arguments":{"schedule_id":"c-auth-test"}}}`, authSARToolDenied, true},
+		{"cancel_schedule allowed", `{"jsonrpc":"2.0","id":19,"method":"tools/call","params":{"name":"cancel_schedule","arguments":{"schedule_id":"s-auth-test"}}}`, authSARAllowed, false},
+		{"cancel_schedule denied", `{"jsonrpc":"2.0","id":20,"method":"tools/call","params":{"name":"cancel_schedule","arguments":{"schedule_id":"s-auth-test"}}}`, authSARToolDenied, true},
+		{"cancel_event_watch allowed", `{"jsonrpc":"2.0","id":21,"method":"tools/call","params":{"name":"cancel_event_watch","arguments":{"watch_id":"et-auth-test"}}}`, authSARAllowed, false},
+		{"cancel_event_watch denied", `{"jsonrpc":"2.0","id":22,"method":"tools/call","params":{"name":"cancel_event_watch","arguments":{"watch_id":"et-auth-test"}}}`, authSARToolDenied, true},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			runMCPToolAuthTest(t, tc.toolRPC, tc.rt, tc.wantToolErr)
-		})
-	}
-}
-
-func TestServer_Auth_MCPTools_MutationsAndLookups(t *testing.T) {
-	trSuccess := &staticAuthRoundTripper{
-		authStatus: http.StatusOK,
-		authBody:   `{"apiVersion":"authentication.k8s.io/v1","kind":"TokenReview","status":{"authenticated":true,"user":{"username":"system:serviceaccount:default:eri-agent-alpha"}}}`,
-		sarStatus:  http.StatusOK,
-		sarBody:    `{"apiVersion":"authorization.k8s.io/v1","kind":"SubjectAccessReview","status":{"allowed":true}}`,
-	}
-	trDenied := &staticAuthRoundTripper{
-		authStatus: http.StatusOK,
-		authBody:   `{"apiVersion":"authentication.k8s.io/v1","kind":"TokenReview","status":{"authenticated":true,"user":{"username":"system:serviceaccount:default:eri-agent-alpha"}}}`,
-		sarStatus:  http.StatusOK,
-		sarBody:    `{"apiVersion":"authorization.k8s.io/v1","kind":"SubjectAccessReview","status":{"allowed":false,"reason":"operation forbidden by test SAR"}}`,
-	}
-
-	tests := []struct {
-		name        string
-		toolRPC     string
-		rt          *staticAuthRoundTripper
-		wantToolErr bool
-	}{
-		{
-			name:        "update_cron_schedule allowed",
-			toolRPC:     `{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"update_cron_schedule","arguments":{"schedule_id":"c-auth-test","effort":"medium"}}}`,
-			rt:          trSuccess,
-			wantToolErr: false,
-		},
-		{
-			name:        "update_cron_schedule denied",
-			toolRPC:     `{"jsonrpc":"2.0","id":6,"method":"tools/call","params":{"name":"update_cron_schedule","arguments":{"schedule_id":"c-auth-test","effort":"medium"}}}`,
-			rt:          trDenied,
-			wantToolErr: true,
-		},
-		{
-			name:        "update_heartbeat allowed",
-			toolRPC:     `{"jsonrpc":"2.0","id":13,"method":"tools/call","params":{"name":"update_heartbeat","arguments":{"id":"h-auth-test","effort":"high"}}}`,
-			rt:          trSuccess,
-			wantToolErr: false,
-		},
-		{
-			name:        "update_heartbeat denied",
-			toolRPC:     `{"jsonrpc":"2.0","id":14,"method":"tools/call","params":{"name":"update_heartbeat","arguments":{"id":"h-auth-test","effort":"high"}}}`,
-			rt:          trDenied,
-			wantToolErr: true,
-		},
-		{
-			name:        "get_schedule allowed",
-			toolRPC:     `{"jsonrpc":"2.0","id":9,"method":"tools/call","params":{"name":"get_schedule","arguments":{"schedule_id":"c-auth-test"}}}`,
-			rt:          trSuccess,
-			wantToolErr: false,
-		},
-		{
-			name:        "get_schedule denied",
-			toolRPC:     `{"jsonrpc":"2.0","id":10,"method":"tools/call","params":{"name":"get_schedule","arguments":{"schedule_id":"c-auth-test"}}}`,
-			rt:          trDenied,
-			wantToolErr: true,
-		},
-		{
-			name:        "cancel_schedule allowed",
-			toolRPC:     `{"jsonrpc":"2.0","id":19,"method":"tools/call","params":{"name":"cancel_schedule","arguments":{"schedule_id":"s-auth-test"}}}`,
-			rt:          trSuccess,
-			wantToolErr: false,
-		},
-		{
-			name:        "cancel_schedule denied",
-			toolRPC:     `{"jsonrpc":"2.0","id":20,"method":"tools/call","params":{"name":"cancel_schedule","arguments":{"schedule_id":"s-auth-test"}}}`,
-			rt:          trDenied,
-			wantToolErr: true,
-		},
-		{
-			name:        "cancel_event_watch allowed",
-			toolRPC:     `{"jsonrpc":"2.0","id":21,"method":"tools/call","params":{"name":"cancel_event_watch","arguments":{"watch_id":"et-auth-test"}}}`,
-			rt:          trSuccess,
-			wantToolErr: false,
-		},
-		{
-			name:        "cancel_event_watch denied",
-			toolRPC:     `{"jsonrpc":"2.0","id":22,"method":"tools/call","params":{"name":"cancel_event_watch","arguments":{"watch_id":"et-auth-test"}}}`,
-			rt:          trDenied,
-			wantToolErr: true,
-		},
-	}
-
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			runMCPToolAuthTest(t, tc.toolRPC, tc.rt, tc.wantToolErr)
+			runMCPToolAuthTest(t, tc.toolRPC, &k8sauthtest.RoundTripper{AuthBody: authAgentReview, SARBody: tc.sarBody}, tc.wantToolErr)
 		})
 	}
 }

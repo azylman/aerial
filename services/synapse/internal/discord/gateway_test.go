@@ -110,89 +110,116 @@ func TestMain(m *testing.M) {
 	}))
 }
 
+// gatewayBots builds a bot map from agent/token pairs; the first agent is the default owner.
+func gatewayBots(pairs ...string) map[string]config.BotConfig {
+	bots := make(map[string]config.BotConfig, len(pairs)/2)
+	for i := 0; i+1 < len(pairs); i += 2 {
+		bots[pairs[i]] = config.BotConfig{DiscordToken: pairs[i+1], DefaultOwner: i == 0}
+	}
+	return bots
+}
+
+func gatewayServer(bots map[string]config.BotConfig) *testIngressServer {
+	return &testIngressServer{cfg: &config.Config{Bots: bots}}
+}
+
+func TestDefaultGatewayOpener(t *testing.T) {
+	sess, err := discordgo.New("Bot dummy")
+	if err != nil {
+		t.Fatalf("discordgo.New() err = %v", err)
+	}
+	sess.Client = &http.Client{Transport: &zeroCallTransport{}}
+	gatewayOpenerMu.RLock()
+	opener := gatewayOpener
+	gatewayOpenerMu.RUnlock()
+	if err := opener(sess); err == nil || !strings.Contains(err.Error(), "unexpected outbound HTTP call") {
+		t.Errorf("default opener err = %v, want the blocked REST gateway lookup error", err)
+	}
+}
+
 func TestStartDiscordGateway(t *testing.T) {
 	ctx := context.Background()
-
-	// Exercise default opener code path hermetically
-	sess, err := discordgo.New("Bot dummy")
-	if err == nil {
-		sess.Client = &http.Client{Transport: &zeroCallTransport{}}
-		gatewayOpenerMu.RLock()
-		defaultOpener := gatewayOpener
-		gatewayOpenerMu.RUnlock()
-		_ = defaultOpener(sess)
-	}
+	errRefused := errors.New("gateway connection refused")
+	const refused = "gateway connection refused"
+	wantIntents := discordgo.IntentsGuilds | discordgo.IntentsGuildMessages | discordgo.IntentsDirectMessages | discordgo.IntentMessageContent
 
 	tests := []struct {
-		name       string
-		token      string
-		openerErr  error
-		wantErr    bool
-		wantSubstr string
+		name        string
+		srv         *testIngressServer
+		failToken   string
+		wantErr     string
+		wantTokens  []string
+		wantLatency bool
 	}{
+		{name: "nil server returns no-op"},
+		{name: "nil config returns no-op", srv: &testIngressServer{}},
+		{name: "empty bots returns no-op", srv: gatewayServer(map[string]config.BotConfig{})},
+		{name: "empty token skipped", srv: gatewayServer(gatewayBots("alpha", ""))},
+		{name: "whitespace token skipped", srv: gatewayServer(gatewayBots("alpha", "   \t  "))},
 		{
-			name:  "empty token returns no-op cleanup and no error",
-			token: "",
+			name: "opener failure returns error", srv: gatewayServer(gatewayBots("alpha", "alpha-tok")), failToken: "Bot alpha-tok",
+			wantErr: `open discord gateway for agent "alpha": ` + refused, wantTokens: []string{"Bot alpha-tok"},
 		},
 		{
-			name:  "whitespace only token returns no-op cleanup",
-			token: "   \t  ",
+			name: "second bot opener failure closes the first", srv: gatewayServer(gatewayBots("beta", "beta-tok", "alpha", "alpha-tok")),
+			failToken: "Bot beta-tok", wantErr: `open discord gateway for agent "beta": ` + refused, wantTokens: []string{"Bot alpha-tok", "Bot beta-tok"},
+			wantLatency: true,
 		},
 		{
-			name:       "opener failure returns error",
-			token:      "my-test-token",
-			openerErr:  errors.New("gateway connection refused"),
-			wantErr:    true,
-			wantSubstr: "open discord gateway",
+			name: "Bot prefix kept", srv: gatewayServer(gatewayBots("alpha", "Bot secret-token-123")), wantTokens: []string{"Bot secret-token-123"},
+			wantLatency: true,
 		},
 		{
-			name:  "valid token with opener success configures session and cleanup is idempotent",
-			token: "Bot secret-token-123",
+			name: "raw token gains Bot prefix", srv: gatewayServer(gatewayBots("alpha", "secret-token-raw")), wantTokens: []string{"Bot secret-token-raw"},
+			wantLatency: true,
 		},
 		{
-			name:  "token without Bot prefix adds Bot prefix and succeeds",
-			token: "secret-token-raw",
+			name: "multiple bots open in sorted order", srv: gatewayServer(gatewayBots("beta", "Bot beta-token", "alpha", "alpha-token")),
+			wantTokens: []string{"Bot alpha-token", "Bot beta-token"}, wantLatency: true,
 		},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
+			var openedTokens []string
 			cleanup := SetGatewayOpenerForTest(func(dg *discordgo.Session) error {
-				if tc.openerErr != nil {
-					return tc.openerErr
-				}
-				expectedIntents := discordgo.IntentsGuilds | discordgo.IntentsGuildMessages | discordgo.IntentsDirectMessages | discordgo.IntentMessageContent
-				if dg.Identify.Intents != expectedIntents {
-					t.Errorf("Intents = %v, want %v", dg.Identify.Intents, expectedIntents)
+				openedTokens = append(openedTokens, dg.Token)
+				if dg.Identify.Intents != wantIntents {
+					t.Errorf("Intents = %v, want %v", dg.Identify.Intents, wantIntents)
 				}
 				if dg.SyncEvents {
 					t.Errorf("SyncEvents = true, want false")
+				}
+				if dg.Token == tc.failToken {
+					return errRefused
 				}
 				return nil
 			})
 			t.Cleanup(cleanup)
 
-			srv := &testIngressServer{
-				cfg: &config.Config{
-					Bots: map[string]config.BotConfig{
-						"aerial": {DiscordToken: tc.token},
-					},
-				},
+			stopFn, err := StartDiscordGateway(ctx, tc.srv)
+			if gotErr := errString(err); gotErr != tc.wantErr {
+				t.Fatalf("StartDiscordGateway() err = %q, want %q", gotErr, tc.wantErr)
 			}
-			stopFn, err := StartDiscordGateway(ctx, srv)
-			if (err != nil) != tc.wantErr {
-				t.Fatalf("StartDiscordGateway() err = %v, wantErr = %v", err, tc.wantErr)
+			if !slices.Equal(openedTokens, tc.wantTokens) {
+				t.Errorf("openedTokens = %v, want %v", openedTokens, tc.wantTokens)
 			}
-			if tc.wantSubstr != "" && (err == nil || !strings.Contains(err.Error(), tc.wantSubstr)) {
-				t.Errorf("err = %v, want substr %q", err, tc.wantSubstr)
+			if gotLatency := tc.srv != nil && tc.srv.latencyFn != nil; gotLatency != tc.wantLatency {
+				t.Errorf("latency fn set = %v, want %v", gotLatency, tc.wantLatency)
 			}
 			if stopFn != nil {
-				// verify idempotency
 				stopFn()
-				stopFn()
+				stopFn() // idempotent
 			}
 		})
 	}
+}
+
+func errString(err error) string {
+	if err == nil {
+		return ""
+	}
+	return err.Error()
 }
 
 type gatewayMessageCreateCase struct {
@@ -269,17 +296,19 @@ func runGatewayMessageCreateCase(ctx context.Context, t *testing.T, tc gatewayMe
 		session.State.User = &discordgo.User{ID: tc.botUserID}
 	}
 	if tc.hasRolesInState {
-		_ = session.State.GuildAdd(&discordgo.Guild{
+		if err := session.State.GuildAdd(&discordgo.Guild{
 			ID: "guild-1",
 			Roles: []*discordgo.Role{
 				{ID: "role-a", Name: "AdminRole"},
 				{ID: "role-b", Name: "ReviewerRole"},
 			},
-		})
+		}); err != nil {
+			t.Fatalf("session.State.GuildAdd() err = %v", err)
+		}
 	}
 
 	mc := buildGatewayMessage(tc)
-	HandleGatewayMessageCreateForAgent(ctx, srv, session, mc, "")
+	NewDiscordGatewayMessageCreateHandlerForAgent(ctx, srv, "")(session, mc)
 
 	if tc.hasBus {
 		if len(bus.insertedJobs) != tc.wantEnqueued {
@@ -300,64 +329,20 @@ func TestHandleGatewayMessageCreate(t *testing.T) {
 	ctx := context.Background()
 
 	tests := []gatewayMessageCreateCase{
+		{name: "nil server ignored", nilServer: true},
+		{name: "nil message ignored", nilMsg: true},
+		{name: "nil author ignored", nilAuthor: true},
+		{name: "author is bot self ignored", botUserID: "bot-id-123", authorID: "bot-id-123"},
 		{
-			name:      "nil server ignored",
-			nilServer: true,
+			name: "direct dispatch fallback when bus is nil", botUserID: "bot-id-123", authorID: "user-456", msgGuildID: "guild-1",
+			mentionRoles: []string{"role-a"}, wantProcessed: 1,
 		},
+		{name: "bus enqueue when bus is configured", botUserID: "bot-id-123", authorID: "user-456", hasBus: true, wantEnqueued: 1},
+		{name: "bus insert error handled cleanly", botUserID: "bot-id-123", authorID: "user-456", hasBus: true, busErr: true},
+		{name: "direct dispatch error handled cleanly", botUserID: "bot-id-123", authorID: "user-456", directErr: true, wantProcessed: 1},
 		{
-			name:   "nil message ignored",
-			nilMsg: true,
-		},
-		{
-			name:      "nil author ignored",
-			nilAuthor: true,
-		},
-		{
-			name:      "author is bot self ignored",
-			botUserID: "bot-id-123",
-			authorID:  "bot-id-123",
-		},
-		{
-			name:          "direct dispatch fallback when bus is nil",
-			botUserID:     "bot-id-123",
-			authorID:      "user-456",
-			msgGuildID:    "guild-1",
-			refGuildID:    "",
-			mentionRoles:  []string{"role-a"},
-			wantProcessed: 1,
-		},
-		{
-			name:         "bus enqueue when bus is configured",
-			botUserID:    "bot-id-123",
-			authorID:     "user-456",
-			hasBus:       true,
-			wantEnqueued: 1,
-		},
-		{
-			name:         "bus insert error handled cleanly",
-			botUserID:    "bot-id-123",
-			authorID:     "user-456",
-			hasBus:       true,
-			busErr:       true,
-			wantEnqueued: 0,
-		},
-		{
-			name:          "direct dispatch error handled cleanly",
-			botUserID:     "bot-id-123",
-			authorID:      "user-456",
-			directErr:     true,
-			wantProcessed: 1,
-		},
-		{
-			name:            "mention roles and referenced roles resolved via session state",
-			botUserID:       "bot-id-123",
-			authorID:        "user-456",
-			msgGuildID:      "guild-1",
-			refGuildID:      "",
-			mentionRoles:    []string{"role-a"},
-			refRoles:        []string{"role-b"},
-			hasRolesInState: true,
-			wantProcessed:   1,
+			name: "mention roles and referenced roles resolved via session state", botUserID: "bot-id-123", authorID: "user-456", msgGuildID: "guild-1",
+			mentionRoles: []string{"role-a"}, refRoles: []string{"role-b"}, hasRolesInState: true, wantProcessed: 1,
 		},
 	}
 
@@ -412,7 +397,7 @@ func runGatewayInteractionCreateCase(ctx context.Context, t *testing.T, tc gatew
 		}
 	}
 
-	HandleGatewayInteractionCreateForAgent(ctx, srv, ic, "")
+	NewDiscordGatewayInteractionCreateHandlerForAgent(ctx, srv, "")(nil, ic)
 
 	if tc.hasBus {
 		if len(bus.insertedJobs) != tc.wantEnqueued {
@@ -431,44 +416,16 @@ func runGatewayInteractionCreateCase(ctx context.Context, t *testing.T, tc gatew
 func TestHandleGatewayInteractionCreate(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
+	const command = discordgo.InteractionApplicationCommand
 
 	tests := []gatewayInteractionCreateCase{
-		{
-			name:      "nil server ignored",
-			nilServer: true,
-		},
-		{
-			name:           "nil interaction ignored",
-			nilInteraction: true,
-		},
-		{
-			name:            "non-command interaction ignored",
-			interactionType: discordgo.InteractionMessageComponent,
-		},
-		{
-			name:            "direct dispatch fallback when bus is nil",
-			interactionType: discordgo.InteractionApplicationCommand,
-			wantProcessed:   1,
-		},
-		{
-			name:            "bus enqueue when bus is configured",
-			interactionType: discordgo.InteractionApplicationCommand,
-			hasBus:          true,
-			wantEnqueued:    1,
-		},
-		{
-			name:            "bus insert error handled cleanly",
-			interactionType: discordgo.InteractionApplicationCommand,
-			hasBus:          true,
-			busErr:          true,
-			wantEnqueued:    0,
-		},
-		{
-			name:            "direct dispatch error handled cleanly",
-			interactionType: discordgo.InteractionApplicationCommand,
-			directErr:       true,
-			wantProcessed:   1,
-		},
+		{name: "nil server ignored", nilServer: true},
+		{name: "nil interaction ignored", nilInteraction: true},
+		{name: "non-command interaction ignored", interactionType: discordgo.InteractionMessageComponent},
+		{name: "direct dispatch fallback when bus is nil", interactionType: command, wantProcessed: 1},
+		{name: "bus enqueue when bus is configured", interactionType: command, hasBus: true, wantEnqueued: 1},
+		{name: "bus insert error handled cleanly", interactionType: command, hasBus: true, busErr: true},
+		{name: "direct dispatch error handled cleanly", interactionType: command, directErr: true, wantProcessed: 1},
 	}
 
 	for _, tc := range tests {
@@ -479,136 +436,69 @@ func TestHandleGatewayInteractionCreate(t *testing.T) {
 	}
 }
 
-func TestDiscordGatewayHandlerClosures(t *testing.T) {
+func TestHandleGatewayReady(t *testing.T) {
 	t.Parallel()
-	ctx := context.Background()
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel() // canceled so the background sweep exits immediately
 
 	tests := []struct {
-		name          string
-		isInteraction bool
-		isReady       bool
+		name      string
+		wg        *sync.WaitGroup
+		agent     string
+		stateUser string
+		readyUser string
+		wantUser  string
 	}{
-		{
-			name: "message create handler closure",
-		},
-		{
-			name:          "interaction create handler closure",
-			isInteraction: true,
-		},
-		{
-			name:    "ready handler closure",
-			isReady: true,
-		},
+		{name: "sweep tracked by wait group", wg: &sync.WaitGroup{}, agent: "ready-wg", readyUser: "bot-wg-1", wantUser: "bot-wg-1"},
+		{name: "untracked sweep without wait group", agent: "ready-nowg", readyUser: "bot-ready-1", wantUser: "bot-ready-1"},
+		{name: "existing state user kept", wg: &sync.WaitGroup{}, agent: "ready-kept", stateUser: "bot-old", readyUser: "bot-new", wantUser: "bot-old"},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			srv := &testIngressServer{}
+			sess, err := discordgo.New("Bot dummy")
+			if err != nil {
+				t.Fatalf("discordgo.New: %v", err)
+			}
+			sess.Client = &http.Client{Transport: &mockDiscordTransport{}}
+			if tc.stateUser != "" {
+				sess.State.User = &discordgo.User{ID: tc.stateUser}
+			}
 
-			switch {
-			case tc.isReady:
-				canceledCtx, cancel := context.WithCancel(ctx)
-				cancel()
-				session, err := discordgo.New("Bot dummy-ready")
-				if err != nil {
-					t.Fatalf("discordgo.New() err = %v", err)
-				}
-				session.Client = &http.Client{Transport: &mockDiscordTransport{}}
-				h := NewDiscordGatewayReadyHandlerForAgent(canceledCtx, srv, nil, "")
-				h(session, &discordgo.Ready{
-					User: &discordgo.User{ID: "bot-ready-1"},
-				})
-				if session.State.User == nil || session.State.User.ID != "bot-ready-1" {
-					t.Errorf("User = %v, want bot-ready-1", session.State.User)
-				}
-			case tc.isInteraction:
-				h := NewDiscordGatewayInteractionCreateHandlerForAgent(ctx, srv, "")
-				h(nil, &discordgo.InteractionCreate{
-					Interaction: &discordgo.Interaction{
-						ID:   "inter-closure-1",
-						Type: discordgo.InteractionApplicationCommand,
-					},
-				})
-				if len(srv.processedInteractions) != 1 {
-					t.Errorf("expected 1 interaction call, got %d", len(srv.processedInteractions))
-				}
-			default:
-				h := NewDiscordGatewayMessageCreateHandlerForAgent(ctx, srv, "")
-				h(nil, &discordgo.MessageCreate{
-					Message: &discordgo.Message{
-						ID:      "msg-closure-1",
-						Content: "closure test",
-						Author:  &discordgo.User{ID: "author-closure-1"},
-					},
-				})
-				if len(srv.processedIngress) != 1 {
-					t.Errorf("expected 1 message call, got %d", len(srv.processedIngress))
-				}
+			NewDiscordGatewayReadyHandlerForAgent(ctx, &testIngressServer{}, tc.wg, tc.agent)(sess, &discordgo.Ready{User: &discordgo.User{ID: tc.readyUser}})
+			if tc.wg != nil {
+				tc.wg.Wait()
+			}
+
+			sess.State.RLock()
+			defer sess.State.RUnlock()
+			if sess.State.User == nil || sess.State.User.ID != tc.wantUser {
+				t.Errorf("User = %v, want %s", sess.State.User, tc.wantUser)
 			}
 		})
 	}
 }
 
-func TestSessionBotUserID_And_RoleNames(t *testing.T) {
+func TestSessionBotUserID(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
-		name         string
-		session      *discordgo.Session
-		guildID      string
-		roles        [][]string
-		wantBotID    string
-		wantRoleLens int
+		name    string
+		session *discordgo.Session
+		want    string
 	}{
-		{
-			name:      "nil session returns empty",
-			session:   nil,
-			wantBotID: "",
-		},
-		{
-			name:      "session with nil state returns empty",
-			session:   &discordgo.Session{},
-			wantBotID: "",
-		},
-		{
-			name:      "session with nil user returns empty",
-			session:   &discordgo.Session{State: &discordgo.State{}},
-			wantBotID: "",
-		},
-		{
-			name: "session with user returns bot id",
-			session: &discordgo.Session{
-				State: &discordgo.State{
-					User: &discordgo.User{ID: "bot-999"},
-				},
-			},
-			wantBotID: "bot-999",
-		},
-		{
-			name: "extractMentionRoleNames empty guildID returns nil",
-			session: &discordgo.Session{
-				State: &discordgo.State{},
-			},
-			guildID: "",
-		},
-		{
-			name:    "extractMentionRoleNames nil state returns nil",
-			session: &discordgo.Session{},
-			guildID: "guild-1",
-		},
+		{"nil session returns empty", nil, ""},
+		{"nil state returns empty", &discordgo.Session{}, ""},
+		{"nil user returns empty", &discordgo.Session{State: &discordgo.State{}}, ""},
+		{"state user returns bot id", &discordgo.Session{State: &discordgo.State{User: &discordgo.User{ID: "bot-999"}}}, "bot-999"},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			gotID := SessionBotUserID(tc.session)
-			if gotID != tc.wantBotID {
-				t.Errorf("SessionBotUserID() = %q, want %q", gotID, tc.wantBotID)
-			}
-			gotRoles := ExtractMentionRoleNames(tc.session, tc.guildID, tc.roles...)
-			if len(gotRoles) != tc.wantRoleLens {
-				t.Errorf("ExtractMentionRoleNames() len = %d, want %d", len(gotRoles), tc.wantRoleLens)
+			if got := SessionBotUserID(tc.session); got != tc.want {
+				t.Errorf("SessionBotUserID() = %q, want %q", got, tc.want)
 			}
 		})
 	}
@@ -618,43 +508,22 @@ func TestDiscordSnowflakeFromTime(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
-		name     string
-		input    time.Time
-		wantSnow string
+		name  string
+		input time.Time
+		want  string
 	}{
-		{
-			name:     "zero time returns 0",
-			input:    time.Time{},
-			wantSnow: "0",
-		},
-		{
-			name:     "before discord epoch returns 0",
-			input:    time.Date(2014, 12, 31, 23, 59, 59, 0, time.UTC),
-			wantSnow: "0",
-		},
-		{
-			name:     "exact discord epoch returns 0",
-			input:    time.Date(2015, 1, 1, 0, 0, 0, 0, time.UTC),
-			wantSnow: "0",
-		},
-		{
-			name:     "1000ms after epoch computes shifted snowflake",
-			input:    time.Date(2015, 1, 1, 0, 0, 1, 0, time.UTC),
-			wantSnow: "4194304000",
-		},
-		{
-			name:     "known 2026 timestamp",
-			input:    time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC),
-			wantSnow: "1456074443980800000",
-		},
+		{"zero time returns 0", time.Time{}, "0"},
+		{"before discord epoch returns 0", time.Date(2014, 12, 31, 23, 59, 59, 0, time.UTC), "0"},
+		{"exact discord epoch returns 0", time.Date(2015, 1, 1, 0, 0, 0, 0, time.UTC), "0"},
+		{"1000ms after epoch computes shifted snowflake", time.Date(2015, 1, 1, 0, 0, 1, 0, time.UTC), "4194304000"},
+		{"known 2026 timestamp", time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC), "1456074443980800000"},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			got := DiscordSnowflakeFromTime(tc.input)
-			if got != tc.wantSnow {
-				t.Errorf("DiscordSnowflakeFromTime(%v) = %q, want %q", tc.input, got, tc.wantSnow)
+			if got := DiscordSnowflakeFromTime(tc.input); got != tc.want {
+				t.Errorf("DiscordSnowflakeFromTime(%v) = %q, want %q", tc.input, got, tc.want)
 			}
 		})
 	}
@@ -735,116 +604,4 @@ func TestGatewaySpanOptions_And_Tracing(t *testing.T) {
 	// Test MarkDiscordJobSpan with nil and error
 	MarkDiscordJobSpan(trace.SpanFromContext(context.Background()), nil)
 	MarkDiscordJobSpan(trace.SpanFromContext(context.Background()), errors.New("dispatch failed"))
-}
-
-func TestHandleGatewayReadyWithWG(t *testing.T) {
-	t.Parallel()
-	ctx, cancel := context.WithCancel(context.Background())
-	cancel() // canceled so sweep exits immediately
-
-	sess, err := discordgo.New("Bot dummy")
-	if err != nil {
-		t.Fatalf("discordgo.New: %v", err)
-	}
-	sess.Client = &http.Client{Transport: &mockDiscordTransport{}}
-	srv := &testIngressServer{}
-
-	var wg sync.WaitGroup
-	HandleGatewayReadyForAgent(ctx, srv, sess, &discordgo.Ready{User: &discordgo.User{ID: "bot-wg-1"}}, &wg, "")
-	wg.Wait()
-
-	if sess.State.User == nil || sess.State.User.ID != "bot-wg-1" {
-		t.Errorf("User = %v, want bot-wg-1", sess.State.User)
-	}
-}
-
-func TestStartDiscordGateway_MultiBot(t *testing.T) {
-	ctx := context.Background()
-
-	tests := []struct {
-		name       string
-		nilServer  bool
-		nilConfig  bool
-		bots       map[string]config.BotConfig
-		openerErr  error
-		wantErr    bool
-		wantSubstr string
-		wantTokens []string
-	}{
-		{
-			name:      "nil server returns no-op",
-			nilServer: true,
-		},
-		{
-			name:      "nil config returns no-op",
-			nilConfig: true,
-		},
-		{
-			name: "empty bots returns no-op",
-			bots: map[string]config.BotConfig{},
-		},
-		{
-			name: "empty token in bot skipped",
-			bots: map[string]config.BotConfig{
-				"empty": {TokenEnv: "EMPTY_TOKEN", DiscordToken: "   "},
-			},
-		},
-		{
-			name: "opener error returns error",
-			bots: map[string]config.BotConfig{
-				"aerial": {DiscordToken: "aerial-tok", DefaultOwner: true},
-			},
-			openerErr:  errors.New("gateway conn refused"),
-			wantErr:    true,
-			wantSubstr: "open discord gateway for agent",
-			wantTokens: []string{"Bot aerial-tok"},
-		},
-		{
-			name: "multiple bots started in sorted order and cleaned up idempotently",
-			bots: map[string]config.BotConfig{
-				"aerial":      {DiscordToken: "Bot aerial-token", DefaultOwner: true},
-				"agent-alpha": {DiscordToken: "agent-alpha-token", DefaultOwner: false},
-			},
-			wantTokens: []string{"Bot aerial-token", "Bot agent-alpha-token"},
-		},
-	}
-
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			var openedTokens []string
-			cleanup := SetGatewayOpenerForTest(func(dg *discordgo.Session) error {
-				openedTokens = append(openedTokens, dg.Token)
-				if tc.openerErr != nil {
-					return tc.openerErr
-				}
-				return nil
-			})
-			t.Cleanup(cleanup)
-
-			var srv *testIngressServer
-			if !tc.nilServer {
-				srv = &testIngressServer{}
-				if !tc.nilConfig {
-					srv.cfg = &config.Config{
-						Bots: tc.bots,
-					}
-				}
-			}
-
-			stopFn, err := StartDiscordGateway(ctx, srv)
-			if (err != nil) != tc.wantErr {
-				t.Fatalf("StartDiscordGateway() err = %v, wantErr = %v", err, tc.wantErr)
-			}
-			if tc.wantSubstr != "" && (err == nil || !strings.Contains(err.Error(), tc.wantSubstr)) {
-				t.Errorf("err = %v, want substr %q", err, tc.wantSubstr)
-			}
-			if !slices.Equal(openedTokens, tc.wantTokens) {
-				t.Errorf("openedTokens = %v, want %v", openedTokens, tc.wantTokens)
-			}
-			if stopFn != nil {
-				stopFn()
-				stopFn() // idempotent
-			}
-		})
-	}
 }

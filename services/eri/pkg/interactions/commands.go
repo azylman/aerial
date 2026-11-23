@@ -28,40 +28,8 @@ func CommandDefinitions() []*discordgo.ApplicationCommand {
 			Description: "Show remaining model quota and reset windows",
 		},
 		{
-			Name:        "rotate",
-			Description: "Rotate session lifecycle and start a fresh context window",
-			Options: []*discordgo.ApplicationCommandOption{
-				{
-					Type:        discordgo.ApplicationCommandOptionBoolean,
-					Name:        "bare",
-					Description: "Clean wipe with zero history or summaries carried over (default false)",
-					Required:    false,
-				},
-				{
-					Type:        discordgo.ApplicationCommandOptionString,
-					Name:        "topic",
-					Description: "Seed the fresh session with an explicit objective or topic",
-					Required:    false,
-				},
-			},
-		},
-		{
 			Name:        "interrupt",
 			Description: "Interrupt active turn execution, terminate process group, and clear queue",
-			Options: []*discordgo.ApplicationCommandOption{
-				{
-					Type:        discordgo.ApplicationCommandOptionBoolean,
-					Name:        "drain_queue",
-					Description: "Purge pending unhandled messages for this thread in queue (default true)",
-					Required:    false,
-				},
-				{
-					Type:        discordgo.ApplicationCommandOptionBoolean,
-					Name:        "reset",
-					Description: "Rotate session immediately after aborting turn (default false)",
-					Required:    false,
-				},
-			},
 		},
 		{
 			Name:        optionMode,

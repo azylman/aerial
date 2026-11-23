@@ -120,8 +120,6 @@ spec:
                   name: nats-eri-aerial-client
             - name: NATS_URL
               value: nats://nats.aerial:4222
-            - name: AERIAL_INTERNAL_ERI_URL
-              value: http://127.0.0.1:8080
             - name: GIT_TERMINAL_PROMPT
               value: "0"
             - name: DISCORD_BOT_TOKEN
@@ -334,6 +332,10 @@ spec:
 apiVersion: v1
 kind: Service
 metadata:
+  annotations:
+    prometheus.io/job: eri
+    prometheus.io/port: "4028"
+    prometheus.io/scrape: "true"
   labels:
     app.kubernetes.io/name: eri-restate
   name: eri-restate-health
@@ -410,8 +412,6 @@ spec:
                   name: nats-eri-aerial-client
             - name: NATS_URL
               value: nats://nats.aerial:4222
-            - name: AERIAL_INTERNAL_ERI_URL
-              value: http://eri.aerial
             - name: RESTATE_INGRESS_URL
               value: http://restate.aerial:8080
             - name: RESTATE_ADMIN_URL
@@ -781,6 +781,13 @@ spec:
               value: aerial
             - name: K8S_AUTH_ENABLED
               value: "true"
+            - name: NATS_AERIAL_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  key: NATS_AERIAL_PASSWORD
+                  name: nats-aerial-client
+            - name: NATS_URL
+              value: nats://aerial:$(NATS_AERIAL_PASSWORD)@nats.aerial:4222
             - name: POSTGRES_PASSWORD
               valueFrom:
                 secretKeyRef:
@@ -1069,6 +1076,12 @@ spec:
               value: /share/aerial-config/services/coven/coven.yaml
             - name: K8S_AUTH_ENABLED
               value: "true"
+            - name: RESTATE_PORT
+              value: "9080"
+            - name: RESTATE_INGRESS_URL
+              value: http://restate.aerial:8080
+            - name: RESTATE_ADMIN_URL
+              value: http://restate.aerial:9070
             - name: NATS_AERIAL_PASSWORD
               valueFrom:
                 secretKeyRef:
@@ -1090,6 +1103,9 @@ spec:
           ports:
             - containerPort: 4008
               name: http
+              protocol: TCP
+            - containerPort: 9080
+              name: restate
               protocol: TCP
           resources:
             limits:
@@ -1198,6 +1214,11 @@ spec:
       port: 80
       protocol: TCP
       targetPort: 4008
+    - appProtocol: kubernetes.io/h2c
+      name: restate
+      port: 9080
+      protocol: TCP
+      targetPort: 9080
   selector:
     app.kubernetes.io/name: coven
   type: ClusterIP
@@ -1643,6 +1664,12 @@ spec:
               value: http://eri.aerial
             - name: VANADIS_URL
               value: http://vanadis.aerial
+            - name: RESTATE_PORT
+              value: "9080"
+            - name: RESTATE_INGRESS_URL
+              value: http://restate.aerial:8080
+            - name: RESTATE_ADMIN_URL
+              value: http://restate.aerial:9070
             - name: NATS_AERIAL_PASSWORD
               valueFrom:
                 secretKeyRef:
@@ -1661,6 +1688,9 @@ spec:
           ports:
             - containerPort: 4005
               name: http
+              protocol: TCP
+            - containerPort: 9080
+              name: restate
               protocol: TCP
           resources:
             limits:
@@ -1775,6 +1805,11 @@ spec:
       port: 80
       protocol: TCP
       targetPort: 4005
+    - appProtocol: kubernetes.io/h2c
+      name: restate
+      port: 9080
+      protocol: TCP
+      targetPort: 9080
   selector:
     app.kubernetes.io/name: haro
   type: ClusterIP
@@ -1794,22 +1829,6 @@ metadata:
   namespace: flux-system
 rules:
   - apiGroups:
-      - ""
-    resourceNames:
-      - aerial-image-tags
-    resources:
-      - configmaps
-    verbs:
-      - get
-      - update
-      - patch
-  - apiGroups:
-      - ""
-    resources:
-      - configmaps
-    verbs:
-      - create
-  - apiGroups:
       - kustomize.toolkit.fluxcd.io
     resources:
       - kustomizations
@@ -1817,7 +1836,6 @@ rules:
       - get
       - list
       - watch
-      - patch
   - apiGroups:
       - source.toolkit.fluxcd.io
     resources:
@@ -1959,23 +1977,6 @@ spec:
                   key: DISCORD_BOT_TOKEN
                   name: synapse-secret
                   optional: true
-            - name: DISCORD_TOKEN_MIORINE
-              valueFrom:
-                secretKeyRef:
-                  key: DISCORD_TOKEN
-                  name: miorine-secrets
-                  optional: true
-            - name: DISCORD_TOKEN_SULETTA
-              valueFrom:
-                secretKeyRef:
-                  key: DISCORD_TOKEN
-                  name: suletta-secrets
-                  optional: true
-            - name: POSTGRES_PASSWORD
-              valueFrom:
-                secretKeyRef:
-                  key: password
-                  name: postgres-aerial-role
           envFrom:
             - secretRef:
                 name: synapse-secret
@@ -2608,7 +2609,7 @@ spec:
     spec:
       containers:
         - name: nats
-          image: nats:2.15.3-alpine@sha256:558394a23dd3c36f2d3a64b51865fd09908010e80a542cea5e75c2af543ed62a
+          image: mirror.gcr.io/library/nats:2.15.3-alpine@sha256:558394a23dd3c36f2d3a64b51865fd09908010e80a542cea5e75c2af543ed62a
           args:
             - "-c"
             - "/etc/nats/nats.conf"
@@ -2672,9 +2673,59 @@ spec:
     app.kubernetes.io/name: nats
   type: ClusterIP
 ---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  labels:
+    app.kubernetes.io/name: nats-exporter
+  name: nats-exporter
+  namespace: default
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: nats-exporter
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: nats-exporter
+    spec:
+      containers:
+        - name: metrics
+          image: mirror.gcr.io/natsio/prometheus-nats-exporter:0.20.3@sha256:4b8ddc1c86fec360b5cd3d5e1fbc6fb52bdafd5805bba3901cc52926538af255
+          args:
+            - "-p"
+            - "7777"
+            - "-varz"
+            - "-connz"
+            - "-healthz"
+            - "-accstatz"
+            - "-jsz=all"
+            - "http://nats.aerial:8222"
+          ports:
+            - containerPort: 7777
+              name: metrics
+              protocol: TCP
+          readinessProbe:
+            httpGet:
+              path: /metrics
+              port: 7777
+            initialDelaySeconds: 2
+            periodSeconds: 10
+          resources:
+            limits:
+              memory: 64Mi
+            requests:
+              cpu: 10m
+              memory: 16Mi
+---
 apiVersion: v1
 kind: Service
 metadata:
+  annotations:
+    prometheus.io/job: vanadis-restate
+    prometheus.io/port: "4026"
+    prometheus.io/scrape: "true"
   labels:
     app.kubernetes.io/name: vanadis-restate
   name: vanadis-restate-health
@@ -2688,6 +2739,47 @@ spec:
   selector:
     app.kubernetes.io/name: vanadis-restate
   type: ClusterIP
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: vanadis-restate-flux-effects
+  namespace: flux-system
+rules:
+  - apiGroups:
+      - ""
+    resourceNames:
+      - aerial-image-tags
+    resources:
+      - configmaps
+    verbs:
+      - patch
+  - apiGroups:
+      - ""
+    resources:
+      - configmaps
+    verbs:
+      - create
+  - apiGroups:
+      - kustomize.toolkit.fluxcd.io
+    resources:
+      - kustomizations
+    verbs:
+      - patch
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: vanadis-restate-flux-effects-binding
+  namespace: flux-system
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: vanadis-restate-flux-effects
+subjects:
+  - kind: ServiceAccount
+    name: vanadis-restate
+    namespace: default
 ---
 apiVersion: restate.dev/v1beta1
 kind: RestateDeployment
@@ -2744,18 +2836,6 @@ spec:
                   key: DISCORD_BOT_TOKEN
                   name: synapse-secret
                   optional: true
-            - name: DISCORD_TOKEN_MIORINE
-              valueFrom:
-                secretKeyRef:
-                  key: DISCORD_TOKEN
-                  name: miorine-secrets
-                  optional: true
-            - name: DISCORD_TOKEN_SULETTA
-              valueFrom:
-                secretKeyRef:
-                  key: DISCORD_TOKEN
-                  name: suletta-secrets
-                  optional: true
             - name: NATS_AERIAL_PASSWORD
               valueFrom:
                 secretKeyRef:
@@ -2768,6 +2848,12 @@ spec:
                 secretKeyRef:
                   key: GITHUB_PAT
                   name: vanadis-secret
+            - name: FLUX_RECEIVER_URL
+              valueFrom:
+                secretKeyRef:
+                  key: FLUX_RECEIVER_URL
+                  name: synapse-secret
+                  optional: true
             - name: POSTGRES_PASSWORD
               valueFrom:
                 secretKeyRef:
@@ -2791,11 +2877,11 @@ spec:
             periodSeconds: 5
           resources:
             limits:
-              cpu: 500m
-              memory: 256Mi
+              cpu: 1000m
+              memory: 2Gi
             requests:
-              cpu: 25m
-              memory: 64Mi
+              cpu: 100m
+              memory: 512Mi
           volumeMounts:
             - mountPath: /var/run/secrets/kubernetes.io/serviceaccount
               name: kube-api-access

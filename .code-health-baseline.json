@@ -1,1 +1,265 @@
-{}
+{
+  "files": {
+    "services/eri/cmd/hook-guard/trace_test.go": {
+      "blank_assigns": 1
+    },
+    "services/eri/cmd/transcript-search/main_test.go": {
+      "blank_assigns": 3
+    },
+    "services/eri/internal/restateclient/client_test.go": {
+      "blank_assigns": 1
+    },
+    "services/eri/internal/server/app_test.go": {
+      "blank_assigns": 3
+    },
+    "services/eri/internal/server/funnel_test.go": {
+      "blank_assigns": 22
+    },
+    "services/eri/internal/server/handlers_test.go": {
+      "blank_assigns": 12
+    },
+    "services/eri/internal/server/handlers_voice_internal_test.go": {
+      "blank_assigns": 2
+    },
+    "services/eri/internal/server/restate_handlers_test.go": {
+      "blank_assigns": 8
+    },
+    "services/eri/pkg/bootstrap/reload_test.go": {
+      "blank_assigns": 1
+    },
+    "services/eri/pkg/classifier/classifier_test.go": {
+      "blank_assigns": 7
+    },
+    "services/eri/pkg/config/config_features_test.go": {
+      "blank_assigns": 8
+    },
+    "services/eri/pkg/config/config_test.go": {
+      "blank_assigns": 6
+    },
+    "services/eri/pkg/db/db_test.go": {
+      "blank_assigns": 23
+    },
+    "services/eri/pkg/db/dbtest/fakestore_test.go": {
+      "blank_assigns": 49
+    },
+    "services/eri/pkg/db/store_test.go": {
+      "blank_assigns": 1
+    },
+    "services/eri/pkg/db/transcripts_test.go": {
+      "blank_assigns": 7
+    },
+    "services/eri/pkg/delivery/delivery_test.go": {
+      "blank_assigns": 4
+    },
+    "services/eri/pkg/delivery/media_test.go": {
+      "blank_assigns": 17
+    },
+    "services/eri/pkg/env/credential_sources_test.go": {
+      "blank_assigns": 1
+    },
+    "services/eri/pkg/env/env_provisioning_test.go": {
+      "blank_assigns": 14
+    },
+    "services/eri/pkg/env/env_test.go": {
+      "blank_assigns": 12
+    },
+    "services/eri/pkg/env/rules_test.go": {
+      "blank_assigns": 12
+    },
+    "services/eri/pkg/githubproxy/proxy_test.go": {
+      "blank_assigns": 4
+    },
+    "services/eri/pkg/guard/batch_test.go": {
+      "blank_assigns": 6
+    },
+    "services/eri/pkg/guard/pushscan_test.go": {
+      "blank_assigns": 4
+    },
+    "services/eri/pkg/interactions/interactions_test.go": {
+      "blank_assigns": 3
+    },
+    "services/eri/pkg/mcp/otellogs_test.go": {
+      "blank_assigns": 2
+    },
+    "services/eri/pkg/mcp/traceproxy_test.go": {
+      "blank_assigns": 3
+    },
+    "services/eri/pkg/queue/channel_resolution_test.go": {
+      "blank_assigns": 2
+    },
+    "services/eri/pkg/queue/coordinator_thread_test.go": {
+      "blank_assigns": 1
+    },
+    "services/eri/pkg/queue/history_test.go": {
+      "blank_assigns": 7
+    },
+    "services/eri/pkg/queue/pool_test.go": {
+      "blank_assigns": 1
+    },
+    "services/eri/pkg/queue/queue_dispatch_test.go": {
+      "blank_assigns": 4
+    },
+    "services/eri/pkg/queue/queue_hooks_test.go": {
+      "blank_assigns": 30
+    },
+    "services/eri/pkg/queue/queue_sessions_test.go": {
+      "blank_assigns": 9
+    },
+    "services/eri/pkg/queue/queue_test.go": {
+      "blank_assigns": 22
+    },
+    "services/eri/pkg/queue/restate_actors_voice_test.go": {
+      "blank_assigns": 1
+    },
+    "services/eri/pkg/queue/test_helpers_test.go": {
+      "blank_assigns": 40
+    },
+    "services/eri/pkg/queue/test_leased_pool_test.go": {
+      "blank_assigns": 3
+    },
+    "services/eri/pkg/queue/transcript_publish_test.go": {
+      "blank_assigns": 6
+    },
+    "services/eri/pkg/queue/turn_attempt_test.go": {
+      "blank_assigns": 2
+    },
+    "services/eri/pkg/queue/turn_outcome_test.go": {
+      "blank_assigns": 23
+    },
+    "services/eri/pkg/queue/turn_prompt_test.go": {
+      "blank_assigns": 28
+    },
+    "services/eri/pkg/queue/turn_runner_integration_test.go": {
+      "blank_assigns": 2
+    },
+    "services/eri/pkg/queue/turn_runner_test.go": {
+      "blank_assigns": 2
+    },
+    "services/eri/pkg/queue/turn_steps_test.go": {
+      "blank_assigns": 7
+    },
+    "services/eri/pkg/queue/vanadis_test.go": {
+      "blank_assigns": 1
+    },
+    "services/eri/pkg/queue/voice_test.go": {
+      "blank_assigns": 46
+    },
+    "services/eri/pkg/queue/worker_test.go": {
+      "blank_assigns": 41
+    },
+    "services/eri/pkg/queue/worker_turn_test.go": {
+      "blank_assigns": 14
+    },
+    "services/eri/pkg/runner/active_turn_owner_test.go": {
+      "blank_assigns": 2
+    },
+    "services/eri/pkg/runner/codex_protocol_test.go": {
+      "blank_assigns": 3
+    },
+    "services/eri/pkg/runner/env_format_test.go": {
+      "blank_assigns": 6
+    },
+    "services/eri/pkg/runner/gemini_api_pool_test.go": {
+      "blank_assigns": 19
+    },
+    "services/eri/pkg/runner/interchangeable_pool_test.go": {
+      "blank_assigns": 52
+    },
+    "services/eri/pkg/runner/mcp_dispatcher_test.go": {
+      "blank_assigns": 12
+    },
+    "services/eri/pkg/runner/sink_test.go": {
+      "blank_assigns": 2
+    },
+    "services/eri/pkg/runner/spawner_test.go": {
+      "blank_assigns": 5
+    },
+    "services/eri/pkg/runner/startup_trace_test.go": {
+      "blank_assigns": 1
+    },
+    "services/eri/pkg/runner/streaming_daemon_test.go": {
+      "blank_assigns": 2
+    },
+    "services/eri/pkg/runner/tracing_sink_test.go": {
+      "blank_assigns": 2
+    },
+    "services/eri/pkg/runner/unified_pool_lease_test.go": {
+      "blank_assigns": 6
+    },
+    "services/eri/pkg/runner/unified_pool_test.go": {
+      "blank_assigns": 20
+    },
+    "services/eri/pkg/runner/usage_test.go": {
+      "blank_assigns": 1
+    },
+    "services/eri/pkg/session/codex_session_test.go": {
+      "blank_assigns": 5
+    },
+    "services/eri/pkg/session/muse_session_test.go": {
+      "blank_assigns": 2
+    },
+    "services/eri/pkg/session/session_test.go": {
+      "blank_assigns": 20
+    },
+    "services/eri/pkg/session/terminal_rescue_test.go": {
+      "blank_assigns": 6
+    },
+    "services/eri/pkg/transcript/codex_worker_test.go": {
+      "blank_assigns": 5
+    },
+    "services/eri/pkg/transcript/muse_worker_test.go": {
+      "blank_assigns": 7
+    },
+    "services/eri/pkg/transcript/ollama_test.go": {
+      "blank_assigns": 1
+    },
+    "services/eri/pkg/transcript/tool_test.go": {
+      "blank_assigns": 9
+    },
+    "services/eri/pkg/transcript/worker_test.go": {
+      "blank_assigns": 4
+    },
+    "services/prospera/internal/config/config_test.go": {
+      "blank_assigns": 3
+    },
+    "services/prospera/internal/delivery/delivery_test.go": {
+      "blank_assigns": 21
+    },
+    "services/prospera/internal/delivery/reporter_test.go": {
+      "blank_assigns": 4
+    },
+    "services/prospera/internal/gemini/gemini_test.go": {
+      "blank_assigns": 1
+    },
+    "services/prospera/internal/mediastream/manager_test.go": {
+      "blank_assigns": 5
+    },
+    "services/prospera/internal/mediastream/session_test.go": {
+      "blank_assigns": 28
+    },
+    "services/prospera/internal/mediastream/tools_bridge_test.go": {
+      "blank_assigns": 1
+    },
+    "services/prospera/internal/server/app_test.go": {
+      "blank_assigns": 3
+    },
+    "services/prospera/internal/server/jobs_test.go": {
+      "blank_assigns": 13
+    },
+    "services/prospera/internal/server/server_test.go": {
+      "blank_assigns": 23
+    },
+    "services/prospera/internal/store/store_test.go": {
+      "blank_assigns": 21
+    },
+    "services/prospera/internal/tools/tools_test.go": {
+      "blank_assigns": 16
+    },
+    "services/prospera/internal/twilio/twilio_test.go": {
+      "blank_assigns": 6
+    },
+    "services/prospera/main_test.go": {
+      "blank_assigns": 1
+    }
+  }
+}

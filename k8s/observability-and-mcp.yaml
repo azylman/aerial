@@ -696,6 +696,72 @@ spec:
             severity: warning
           annotations:
             summary: VictoriaTraces has ingested no spans for 15 minutes
+    - name: pr_lifecycle_restate
+      interval: 1m
+      rules:
+        - alert: SynapseRestateSendErrors
+          expr: |
+            sum by (handler) (increase(synapse_restate_sends_total{status="error"}[15m])) > 5
+          for: 10m
+          labels:
+            severity: warning
+          annotations:
+            summary: synapse Restate sends to {{ $labels.handler }} keep failing; PR lifecycle events are retrying
+        - alert: SynapseRestateSendRejected
+          expr: |
+            sum by (handler) (increase(synapse_restate_sends_total{status="terminal"}[15m])) > 0
+          labels:
+            severity: critical
+          annotations:
+            summary: Restate rejected synapse {{ $labels.handler }} sends terminally; the jobs were dropped
+        - alert: SynapseLifecycleJobsDropped
+          expr: |
+            sum by (kind, reason) (increase(synapse_jobs_dropped_total{kind=~"github_webhook|deploy_webhook"}[15m])) > 0
+          labels:
+            severity: critical
+          annotations:
+            summary: synapse dropped {{ $labels.kind }} jobs ({{ $labels.reason }}); those PR lifecycle events never reached Restate
+        - alert: PrstateEffectErrors
+          expr: |
+            sum by (kind, result) (increase(prstate_effects_total{result=~"error|dropped|unconfigured"}[15m])) > 0
+          for: 5m
+          labels:
+            severity: warning
+          annotations:
+            summary: prstate {{ $labels.kind }} effects are failing ({{ $labels.result }})
+    - name: nats_health
+      interval: 1m
+      rules:
+        - alert: NatsMetricsMissing
+          expr: absent(gnatsd_varz_mem{job="default/nats"})
+          for: 10m
+          labels:
+            severity: warning
+          annotations:
+            summary: NATS metrics have not been scraped for 10 minutes
+        - alert: NatsMemoryHigh
+          expr: max(container_memory_working_set_bytes{container="nats", pod=~"nats-.*"}) > 600 * 1024 * 1024
+          for: 15m
+          labels:
+            severity: warning
+          annotations:
+            summary: NATS memory has been above 600 MiB (of its 1 GiB limit) for 15 minutes
+        - alert: NatsStreamNearFull
+          expr: |
+            max by (account, stream_name) (jetstream_stream_total_bytes{job="default/nats"})
+              / max by (account, stream_name) (jetstream_stream_limit_bytes{job="default/nats"} > 0) > 0.8
+          for: 10m
+          labels:
+            severity: warning
+          annotations:
+            summary: "NATS stream {{ $labels.account }}/{{ $labels.stream_name }} is above 80% of its byte limit"
+        - alert: NatsHealthzFailing
+          expr: max(gnatsd_healthz_status{job="default/nats"}) > 0
+          for: 5m
+          labels:
+            severity: warning
+          annotations:
+            summary: NATS /healthz is failing
     - name: vanadis_restate_health
       interval: 30s
       rules:
@@ -707,6 +773,23 @@ spec:
             severity: critical
           annotations:
             summary: vanadis-restate reconcile or handler errors detected (Restate invocation backing off)
+    - name: github_credential_health
+      interval: 1m
+      rules:
+        # A service configured for the GitHub App (github_credential: app)
+        # keeps sending PAT-authenticated requests: App env missing or token
+        # mint failing. A deliberate move to pat sets
+        # github_credential_configured{credential="app"} to 0 and never pages.
+        - alert: GitHubPATTrafficOnAppCredential
+          expr: |
+            sum by (namespace, job) (rate(github_requests_by_source_total{source="pat"}[5m])) > 0
+            and on (namespace, job)
+            max by (namespace, job) (github_credential_configured{credential="app"}) == 1
+          for: 15m
+          labels:
+            severity: warning
+          annotations:
+            summary: "{{ $labels.job }} is configured for the GitHub App but has sent PAT-authenticated GitHub requests for 15 minutes"
     - name: eri_session_health
       interval: 30s
       rules:
@@ -718,6 +801,14 @@ spec:
             severity: warning
           annotations:
             summary: Eri processed turns on a session exceeding the unrotated turn threshold without rotation
+        - alert: EriTurnCapHit
+          expr: |
+            sum by (job) (increase(aerial_brain_turn_timeouts_total{reason="turn_cap"}[30m])) > 0
+          for: 0m
+          labels:
+            severity: warning
+          annotations:
+            summary: "{{ $labels.job }}: a turn hit the turn_timeout_minutes cap and was retried"
 ---
 apiVersion: v1
 kind: ServiceAccount
@@ -802,7 +893,16 @@ metadata:
   name: kubernetes-services
   namespace: default
 spec:
-  discoveryRole: service
+  # Generic opt-in scrape for any Service in default carrying prometheus.io/*
+  # annotations. Discovery is per endpoint, so every backing pod is its own
+  # target at podIP:<prometheus.io/port> (a draining pod and its replacement
+  # are separate series instead of one load-balanced, flapping target).
+  # prometheus.io/port names the pod's target (container) port, not the
+  # Service port. Services that expose the same target port under several
+  # Service ports produce identical targets that vmagent collapses into one
+  # (see promscrape.suppressDuplicateScrapeTargetErrors on the VMSingle).
+  # job = prometheus.io/job if set, else the Service name; instance = pod name.
+  discoveryRole: endpointslices
   namespaceSelector:
     matchNames:
       - default
@@ -816,7 +916,7 @@ spec:
             - __meta_kubernetes_service_annotation_prometheus_io_scrape
         - action: keep_if_equal
           sourceLabels:
-            - __meta_kubernetes_service_port_number
+            - __meta_kubernetes_endpointslice_port
             - __meta_kubernetes_service_annotation_prometheus_io_port
         - action: replace
           regex: (.+)
@@ -824,19 +924,18 @@ spec:
             - __meta_kubernetes_service_annotation_prometheus_io_path
           targetLabel: __metrics_path__
         - action: replace
-          regex: (.+);(.+)
-          replacement: $1:$2
-          sourceLabels:
-            - __meta_kubernetes_service_name
-            - __meta_kubernetes_service_annotation_prometheus_io_port
-          targetLabel: __address__
-        - action: replace
           sourceLabels:
             - __meta_kubernetes_service_name
           targetLabel: job
         - action: replace
+          regex: (.+)
           sourceLabels:
-            - __meta_kubernetes_service_name
+            - __meta_kubernetes_service_annotation_prometheus_io_job
+          targetLabel: job
+        - action: replace
+          regex: (.+)
+          sourceLabels:
+            - __meta_kubernetes_pod_name
           targetLabel: instance
         - action: labelmap
           regex: __meta_kubernetes_service_annotation_prometheus_io_label_(.+)
@@ -871,30 +970,16 @@ spec:
 apiVersion: operator.victoriametrics.com/v1beta1
 kind: VMPodScrape
 metadata:
-  name: vanadis-restate
+  name: nats
   namespace: default
 spec:
   selector:
     matchLabels:
-      app.kubernetes.io/name: vanadis-restate
+      app.kubernetes.io/name: nats-exporter
   podMetricsEndpoints:
-    - port: http
+    - port: metrics
       path: /metrics
-      interval: 15s
----
-apiVersion: operator.victoriametrics.com/v1beta1
-kind: VMPodScrape
-metadata:
-  name: eri-restate
-  namespace: default
-spec:
-  selector:
-    matchLabels:
-      app.kubernetes.io/name: eri-restate
-  podMetricsEndpoints:
-    - port: http
-      path: /metrics
-      interval: 15s
+      interval: 30s
 ---
 apiVersion: operator.victoriametrics.com/v1beta1
 kind: VMPodScrape
@@ -916,6 +1001,25 @@ spec:
     - port: metrics
       path: /metrics
       interval: 15s
+---
+# Scrapes the Restate server (not the SDK runner pods) on its metrics port.
+# Discovery is label-based across all namespaces so a blue/green RestateCluster
+# rename keeps being scraped without editing this object.
+apiVersion: operator.victoriametrics.com/v1beta1
+kind: VMPodScrape
+metadata:
+  name: restate
+  namespace: default
+spec:
+  namespaceSelector:
+    any: true
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: restate
+  podMetricsEndpoints:
+    - port: metrics
+      path: /metrics
+      interval: 30s
 ---
 apiVersion: operator.victoriametrics.com/v1beta1
 kind: VMSingle
@@ -954,6 +1058,10 @@ spec:
       memory: 256Mi
   extraArgs:
     loggerFormat: json
+    # kubernetes-services discovers per endpoint port; Services aliasing one
+    # target port under several Service ports (e.g. 8080 and 80 -> 8080) yield
+    # identical targets that vmagent scrapes once. Silence the per-refresh log.
+    promscrape.suppressDuplicateScrapeTargetErrors: "true"
     promscrape.config.strictParse: "false"
     vmalert.proxyURL: http://vmalert:8880
 ---
@@ -1220,6 +1328,254 @@ spec:
       targetPort: 4317
   selector:
     app.kubernetes.io/name: victoriatraces
+  type: ClusterIP
+---
+# otel-collector: the single trace-redaction checkpoint in front of VictoriaTraces.
+# Every OTLP span is masked here: registered secret values (plus their base64,
+# URL-encoded and git basic-auth variants) are replaced with [REDACTED] in resource,
+# scope, span and span-event fields. Matching is value-only (no regexes). At pod start
+# the redact-pattern initContainer (its own image, so eri releases never roll this
+# Deployment) reads shared-secrets plus the non-secret canary below and writes the
+# complete transform/redact trace_statements list to /redact/statements.yaml: values
+# are packed longest-first into groups whose OTTL literal stays under
+# -max-pattern-bytes, one statement per group per field. OTTL parse time grows
+# super-linearly with literal size, so many small literals start in seconds where one
+# huge pattern took minutes on a 1-core limit. Secret rotation needs a pod restart:
+# Stakater Reloader (reloader.stakater.com/auto) rolls the Deployment when
+# shared-secrets, otel-collector-config or otel-collector-canary change, same as
+# fluent-bit. Flux substitution is disabled on this ConfigMap so ${file:...} reaches
+# the collector.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  annotations:
+    kustomize.toolkit.fluxcd.io/substitute: disabled
+  name: otel-collector-config
+  namespace: default
+data:
+  config.yaml: |
+    extensions:
+      health_check:
+        endpoint: 0.0.0.0:13133
+    receivers:
+      otlp:
+        protocols:
+          grpc:
+            endpoint: 0.0.0.0:4317
+          http:
+            endpoint: 0.0.0.0:4318
+    processors:
+      memory_limiter:
+        check_interval: 1s
+        limit_percentage: 80
+        spike_limit_percentage: 20
+      # trace_statements is a whole-value ${file:...} reference, so confmap parses the
+      # generated file as YAML (a list of context blocks). Its paths carry explicit
+      # context prefixes: unprefixed paths make OTTL log every rewritten statement at
+      # startup, which would print the secret pattern. error_mode silent keeps ignore
+      # semantics (a failing statement never drops a batch) without logging the
+      # failing statement text, which embeds the pattern.
+      transform/redact:
+        error_mode: silent
+        trace_statements: ${file:/redact/statements.yaml}
+      batch:
+        send_batch_size: 1024
+        timeout: 2s
+    exporters:
+      otlphttp/victoriatraces:
+        traces_endpoint: http://victoriatraces.default.svc.cluster.local:10428/insert/opentelemetry/v1/traces
+        compression: gzip
+    service:
+      extensions: [health_check]
+      telemetry:
+        logs:
+          encoding: json
+        metrics:
+          level: normal
+          readers:
+            - pull:
+                exporter:
+                  prometheus:
+                    host: 0.0.0.0
+                    port: 8888
+      pipelines:
+        traces:
+          receivers: [otlp]
+          processors: [memory_limiter, transform/redact, batch]
+          exporters: [otlphttp/victoriatraces]
+---
+# Non-secret canary value registered only in the collector pattern. Verification
+# sends spans carrying it (raw and base64) and checks VictoriaTraces shows [REDACTED].
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: otel-collector-canary
+  namespace: default
+data:
+  values: |
+    aerial-redaction-canary-5e1f9b
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  annotations:
+    reloader.stakater.com/auto: "true"
+  labels:
+    app.kubernetes.io/name: otel-collector
+  name: otel-collector
+  namespace: default
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: otel-collector
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: otel-collector
+    spec:
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        fsGroup: 10001
+        seccompProfile:
+          type: RuntimeDefault
+      initContainers:
+        - name: redact-pattern
+          image: ghcr.io/azylman/aerial-redact-pattern:${TAG_AERIAL_REDACT_PATTERN:=latest}
+          imagePullPolicy: IfNotPresent
+          args:
+            - -secrets-dir=/secrets
+            - -extra-file=/canary/values
+            - -statements-out=/redact/statements.yaml
+            - -max-pattern-bytes=1024
+          resources:
+            limits:
+              cpu: 200m
+              memory: 64Mi
+            requests:
+              cpu: 10m
+              memory: 16Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop:
+                - ALL
+          volumeMounts:
+            - mountPath: /secrets
+              name: shared-secrets
+              readOnly: true
+            - mountPath: /canary
+              name: canary
+              readOnly: true
+            - mountPath: /redact
+              name: redact-pattern
+      containers:
+        - name: otel-collector
+          image: otel/opentelemetry-collector-contrib:0.165.0@sha256:e40d61f10c9a617cca1ffd1be4d7e2b3a4b0f0001798ff07e58cabe82e618cea
+          args:
+            - --config=/etc/otelcol/config.yaml
+          env:
+            - name: GOMEMLIMIT
+              value: 400MiB
+          ports:
+            - containerPort: 4317
+              name: otlp-grpc
+              protocol: TCP
+            - containerPort: 4318
+              name: otlp-http
+              protocol: TCP
+            - containerPort: 8888
+              name: metrics
+              protocol: TCP
+            - containerPort: 13133
+              name: health
+              protocol: TCP
+          # Config parse (redaction statements) can be slow on a 1-core node; the
+          # startupProbe allows ~5 min before liveness takes over, so a slow start
+          # is never killed mid-parse.
+          startupProbe:
+            httpGet:
+              path: /
+              port: health
+            periodSeconds: 5
+            failureThreshold: 60
+          readinessProbe:
+            httpGet:
+              path: /
+              port: health
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /
+              port: health
+            periodSeconds: 30
+            failureThreshold: 5
+          resources:
+            limits:
+              cpu: "1"
+              memory: 512Mi
+            requests:
+              cpu: 50m
+              memory: 96Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop:
+                - ALL
+          volumeMounts:
+            - mountPath: /etc/otelcol
+              name: config
+              readOnly: true
+            - mountPath: /redact
+              name: redact-pattern
+              readOnly: true
+      volumes:
+        - configMap:
+            name: otel-collector-config
+          name: config
+        - configMap:
+            name: otel-collector-canary
+          name: canary
+        - name: shared-secrets
+          secret:
+            secretName: shared-secrets
+        - emptyDir:
+            medium: Memory
+            sizeLimit: 8Mi
+          name: redact-pattern
+---
+# Collector self-metrics are scraped by the kubernetes-services VMServiceScrape via
+# the prometheus.io annotations (port must match a Service port number).
+apiVersion: v1
+kind: Service
+metadata:
+  annotations:
+    prometheus.io/port: "8888"
+    prometheus.io/scrape: "true"
+  name: otel-collector
+  namespace: default
+spec:
+  ports:
+    - appProtocol: grpc
+      name: otlp-grpc
+      port: 4317
+      protocol: TCP
+      targetPort: otlp-grpc
+    - name: otlp-http
+      port: 4318
+      protocol: TCP
+      targetPort: otlp-http
+    - name: metrics
+      port: 8888
+      protocol: TCP
+      targetPort: metrics
+  selector:
+    app.kubernetes.io/name: otel-collector
   type: ClusterIP
 ---
 apiVersion: apps/v1
@@ -2407,6 +2763,12 @@ spec:
               value: k8s.pod.name=$(POD_NAME),k8s.namespace.name=$(POD_NAMESPACE),k8s.node.name=$(NODE_NAME),service.version=${TAG_AERIAL_PROSPERA:=latest}
             - name: CONFIG_PATH
               value: /share/aerial-config/services/prospera/prospera.yaml
+            - name: RESTATE_PORT
+              value: "9080"
+            - name: RESTATE_INGRESS_URL
+              value: http://restate.aerial:8080
+            - name: RESTATE_ADMIN_URL
+              value: http://restate.aerial:9070
             - name: NATS_AERIAL_PASSWORD
               valueFrom:
                 secretKeyRef:
@@ -2429,6 +2791,9 @@ spec:
           ports:
             - containerPort: 8080
               name: http
+              protocol: TCP
+            - containerPort: 9080
+              name: restate
               protocol: TCP
           readinessProbe:
             failureThreshold: 3
@@ -2520,6 +2885,11 @@ spec:
       port: 80
       protocol: TCP
       targetPort: 8080
+    - appProtocol: kubernetes.io/h2c
+      name: restate
+      port: 9080
+      protocol: TCP
+      targetPort: 9080
   selector:
     app.kubernetes.io/name: prospera
   type: ClusterIP

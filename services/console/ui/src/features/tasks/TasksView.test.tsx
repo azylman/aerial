@@ -4,34 +4,15 @@ import type { ActiveTaskStatus, ClusterResponse } from '../../api/types';
 import { useConsoleStore } from '../../store/store';
 import { QueueBadge, TaskQueue } from './TaskQueue';
 import TasksView from './TasksView';
+import { task } from '../../test/fixtures';
+import { iconRenders } from '../../test/icon';
 
 // Every Icon render is recorded by name, which pins down exactly which components re-rendered:
 // only the elapsed-ticker leaf renders the `timer` glyph, rows render trigger/status/chat glyphs.
-const iconRenders = vi.hoisted((): string[] => []);
-vi.mock('../../components/Icon', () => ({
-  Icon: ({ name }: { name: string }) => {
-    iconRenders.push(name);
-    return <svg data-icon={name} />;
-  },
-}));
-
-const task = (id: string, over: Partial<ActiveTaskStatus>): ActiveTaskStatus => ({
-  id,
-  thread_id: `10000000000000000${id}`,
-  session_id: `session-${id}`,
-  author_name: 'pilot',
-  prompt: `Task ${id}`,
-  summary: 'working',
-  status: 'PROCESSING',
-  retry_count: 0,
-  trigger_type: 'discord',
-  created_at: '2026-11-08T11:58:00Z',
-  started_at: '2026-11-08T11:59:00Z',
-  ...over,
-});
+vi.mock('../../components/Icon', () => import('../../test/icon'));
 
 const TASKS: readonly ActiveTaskStatus[] = [
-  task('1', {}),
+  task('1'),
   task('2', { author_name: 'scheduler', trigger_type: 'cron', started_at: '2026-11-08T11:58:00Z' }),
   task('3', { retry_count: 1, trigger_type: 'reminder' }),
   task('4', { status: 'PENDING', summary: 'queued', trigger_type: 'http', session_id: '' }),

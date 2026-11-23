@@ -17,7 +17,6 @@ import (
 
 	"github.com/azylman/aerial/pkg/httpkit"
 	"github.com/azylman/aerial/pkg/sanitizer"
-	"github.com/azylman/aerial/pkg/transcriptwire"
 )
 
 // Channel effort tiers returned by ChannelPolicy.GetEffort.
@@ -288,15 +287,6 @@ func (c *TranscriptsConfig) UnmarshalJSON(b []byte) error {
 	return nil
 }
 
-// EffectiveMaxBatchBytes returns the configured per-batch byte budget, falling
-// back to the shared wire budget when unset or non-positive.
-func (c TranscriptsConfig) EffectiveMaxBatchBytes() int {
-	if c.MaxBatchBytes > 0 {
-		return c.MaxBatchBytes
-	}
-	return transcriptwire.MaxBatchBytes
-}
-
 // CredentialSource selects an explicit credential file or disables provisioning.
 type CredentialSource struct {
 	Path     string `yaml:"path"     json:"path"`
@@ -371,6 +361,101 @@ type ConfigData struct {
 	CovenURL                  string                   `yaml:"coven_url"                              json:"coven_url"`
 	NATSURL                   string                   `yaml:"nats_url"                               json:"nats_url"`
 	Transcripts               TranscriptsConfig        `yaml:"transcripts,omitempty"                  json:"transcripts,omitempty"`
+	PushScan                  PushScanConfig           `yaml:"push_scan,omitempty"                    json:"push_scan,omitempty"`
+	EgressScan                EgressScanConfig         `yaml:"egress_scan,omitempty"                  json:"egress_scan,omitempty"`
+	// TurnTimeoutMinutes caps one turn attempt; 0 (unset) resolves to DefaultTurnTimeoutMinutes.
+	// Read it through TurnTimeout, never directly.
+	TurnTimeoutMinutes int `yaml:"turn_timeout_minutes,omitempty" json:"turn_timeout_minutes,omitempty"`
+}
+
+// Turn attempt cap bounds for ConfigData.TurnTimeoutMinutes. Restate service timeouts that can
+// bound a running turn derive from MaxTurnTimeoutMinutes, because service options are fixed at
+// registration and cannot follow the live value.
+const (
+	DefaultTurnTimeoutMinutes = 120
+	MaxTurnTimeoutMinutes     = 240
+)
+
+// ParseTurnTimeoutMinutes validates a turn_timeout_minutes value: 0 means unset, negative or
+// above MaxTurnTimeoutMinutes is rejected.
+func ParseTurnTimeoutMinutes(v int) error {
+	if v < 0 || v > MaxTurnTimeoutMinutes {
+		return fmt.Errorf("invalid turn_timeout_minutes %d: want 0 (default %d) to %d", v, DefaultTurnTimeoutMinutes, MaxTurnTimeoutMinutes)
+	}
+	return nil
+}
+
+// TurnTimeout returns the per-attempt turn cap in minutes, resolving unset to
+// DefaultTurnTimeoutMinutes. A nil receiver also resolves to the default.
+func (c *ConfigData) TurnTimeout() int {
+	if c == nil || c.TurnTimeoutMinutes <= 0 {
+		return DefaultTurnTimeoutMinutes
+	}
+	return min(c.TurnTimeoutMinutes, MaxTurnTimeoutMinutes)
+}
+
+// PushScanConfig tunes the GitHub egress proxy secret scan.
+type PushScanConfig struct {
+	// RegexAllowlist entries are "owner/repo:path/prefix/"; token and private-IP
+	// regex hits under a listed prefix are dropped. Registered secret values are
+	// never allowlisted.
+	RegexAllowlist []string `yaml:"regex_allowlist,omitempty" json:"regex_allowlist,omitempty"`
+}
+
+// PrefixesFor returns the allowlisted path prefixes for owner/repo, matching
+// owner and repo case-insensitively.
+func (p PushScanConfig) PrefixesFor(owner, repo string) []string {
+	want := strings.ToLower(owner + "/" + repo)
+	var out []string
+	for _, entry := range p.RegexAllowlist {
+		target, prefix, ok := strings.Cut(strings.TrimSpace(entry), ":")
+		prefix = strings.TrimPrefix(strings.TrimSpace(prefix), "/")
+		if ok && prefix != "" && strings.ToLower(strings.TrimSpace(target)) == want {
+			out = append(out, prefix)
+		}
+	}
+	return out
+}
+
+// EgressScanConfig lists MCP destinations that are never a legitimate place
+// for a secret. Tool arguments bound for a listed destination are scanned for
+// registered secret values and token patterns; every other MCP call is not.
+type EgressScanConfig struct {
+	// BlockedMCP entries are either "server" (every tool on that server) or
+	// "server/tool" (one tool), matched case-insensitively.
+	BlockedMCP []string `yaml:"blocked_mcp,omitempty" json:"blocked_mcp,omitempty"`
+}
+
+// Blocks reports whether the MCP call server/tool is on the blocklist.
+func (e EgressScanConfig) Blocks(server, tool string) bool {
+	server = strings.TrimSpace(server)
+	tool = strings.TrimSpace(tool)
+	if server == "" {
+		return false
+	}
+	for _, entry := range e.BlockedMCP {
+		entryServer, entryTool, hasTool := strings.Cut(strings.TrimSpace(entry), "/")
+		entryServer = strings.TrimSpace(entryServer)
+		entryTool = strings.TrimSpace(entryTool)
+		if entryServer == "" || !strings.EqualFold(entryServer, server) {
+			continue
+		}
+		if !hasTool || entryTool == "" || strings.EqualFold(entryTool, tool) {
+			return true
+		}
+	}
+	return false
+}
+
+// normalizeBlockedMCP trims entries and drops empty ones.
+func normalizeBlockedMCP(entries []string) []string {
+	var out []string
+	for _, entry := range entries {
+		if trimmed := strings.TrimSpace(entry); trimmed != "" {
+			out = append(out, trimmed)
+		}
+	}
+	return out
 }
 
 func normalizePrewarmedTargets(targets []string) []string {
@@ -508,6 +593,9 @@ func (c *ConfigData) UnmarshalYAML(value *yaml.Node) error {
 		CovenURL                  string                   `yaml:"coven_url"`
 		NATSURL                   string                   `yaml:"nats_url"`
 		Transcripts               TranscriptsConfig        `yaml:"transcripts"`
+		PushScan                  PushScanConfig           `yaml:"push_scan"`
+		EgressScan                EgressScanConfig         `yaml:"egress_scan"`
+		TurnTimeoutMinutes        int                      `yaml:"turn_timeout_minutes"`
 	}
 
 	var raw rawConfigHelper
@@ -542,6 +630,12 @@ func (c *ConfigData) UnmarshalYAML(value *yaml.Node) error {
 		IndexerURL:    strings.TrimRight(strings.TrimSpace(raw.Transcripts.IndexerURL), "/"),
 		MaxBatchBytes: raw.Transcripts.MaxBatchBytes,
 	}
+	c.PushScan = PushScanConfig{RegexAllowlist: cloneStringSlice(raw.PushScan.RegexAllowlist)}
+	c.EgressScan = EgressScanConfig{BlockedMCP: normalizeBlockedMCP(raw.EgressScan.BlockedMCP)}
+	if err := ParseTurnTimeoutMinutes(raw.TurnTimeoutMinutes); err != nil {
+		return err
+	}
+	c.TurnTimeoutMinutes = raw.TurnTimeoutMinutes
 	c.APIKey = raw.APIKey
 	c.HarnessAPIKey = raw.HarnessAPIKey
 	c.SystemPrompt = raw.SystemPrompt
@@ -670,6 +764,8 @@ func cloneConfigData(src *ConfigData) *ConfigData {
 	}
 	dst := *src
 	dst.AdminUsers = cloneStringSlice(src.AdminUsers)
+	dst.PushScan.RegexAllowlist = cloneStringSlice(src.PushScan.RegexAllowlist)
+	dst.EgressScan.BlockedMCP = cloneStringSlice(src.EgressScan.BlockedMCP)
 	if src.Channels != nil {
 		dst.Channels = make(map[string]ChannelPolicy, len(src.Channels))
 		for k, v := range src.Channels {
@@ -741,7 +837,7 @@ func DefaultConfigData() *ConfigData {
 		GeminiHomeDir:      "",
 		Ollama: OllamaConfig{
 			BaseURL:     "",
-			Model:       "all-minilm",
+			Model:       "bge-small-en-v1.5",
 			QueryPrefix: "Represent this sentence for searching relevant passages: ",
 			NumCtx:      512,
 		},
@@ -1036,14 +1132,6 @@ func ActiveConfig() *Config {
 
 func GetRuntimeConfig() ConfigData {
 	return *activeGlobalConfig.Current()
-}
-
-func GetTimezone() string {
-	cfg := activeGlobalConfig.Current()
-	if cfg != nil && strings.TrimSpace(cfg.Timezone) != "" {
-		return cfg.Timezone
-	}
-	return "America/Los_Angeles"
 }
 
 func isContainerColdBoot(paths ...string) bool {

@@ -1,0 +1,150 @@
+{
+  "name": "09-deploy-failed-exhaustion",
+  "description": "An image promotion that keeps failing on the merged PR exhausts its retries: deploy_failed publishes once and is acknowledged, with no banner (legacy never writes one on this path).",
+  "synapse": [
+    {
+      "kind": "register",
+      "register": {
+        "repo": "azylman/aerial",
+        "pr_number": 109,
+        "branch": "feat/fail",
+        "head_sha": "h109",
+        "target_id": "100000000000000001",
+        "title": "Fail PR",
+        "agent": "aerial"
+      }
+    },
+    {
+      "kind": "github",
+      "event": "pull_request",
+      "payload": {
+        "action": "closed",
+        "number": 109,
+        "repository": {
+          "full_name": "azylman/aerial"
+        },
+        "pull_request": {
+          "number": 109,
+          "title": "Fail PR",
+          "state": "closed",
+          "merged": true,
+          "head": {
+            "ref": "feat/fail",
+            "sha": "h109"
+          },
+          "base": {
+            "ref": "main"
+          },
+          "merge_commit_sha": "m109"
+        }
+      }
+    },
+    {
+      "kind": "deploy_attempt_failed",
+      "failure": {
+        "repo": "azylman/aerial",
+        "pr_number": 109,
+        "head_sha": "m109",
+        "branch": "main",
+        "target_id": "100000000000000001",
+        "error": "promote ghcr.io/azylman/aerial-eri: boom"
+      }
+    }
+  ],
+  "restate": [
+    {
+      "object": "PRObject",
+      "handler": "Register",
+      "event": {
+        "repo": "azylman/aerial",
+        "pr_number": 109,
+        "branch": "feat/fail",
+        "head_sha": "h109",
+        "target_id": "100000000000000001",
+        "title": "Fail PR",
+        "agent": "aerial",
+        "bot_id": "aerial",
+        "metadata": {
+          "agent": "aerial",
+          "bot_id": "aerial"
+        }
+      }
+    },
+    {
+      "object": "PRObject",
+      "handler": "HandleMerged",
+      "event": {
+        "pr_number": 109,
+        "head_sha": "h109",
+        "merge_sha": "m109",
+        "branch": "feat/fail",
+        "facts": [
+          {
+            "event": "merged",
+            "repo": "azylman/aerial",
+            "pr_number": 109,
+            "head_sha": "h109",
+            "merge_sha": "m109"
+          }
+        ],
+        "repo": "azylman/aerial"
+      }
+    },
+    {
+      "object": "PRObject",
+      "handler": "HandleDeployAttemptFailed",
+      "event": {
+        "pr_number": 109,
+        "head_sha": "m109",
+        "merge_sha": "m109",
+        "banner": "promote ghcr.io/azylman/aerial-eri: boom",
+        "facts": [
+          {
+            "event": "deploy_failed",
+            "repo": "azylman/aerial",
+            "pr_number": 109,
+            "head_sha": "m109",
+            "merge_sha": "m109"
+          }
+        ],
+        "repo": "azylman/aerial"
+      }
+    }
+  ],
+  "effects": [
+    {
+      "kind": "pr_fact_merged",
+      "key": "azylman/aerial#109@h109:pr_fact_merged"
+    },
+    {
+      "kind": "pr_fact_deploy_failed",
+      "key": "azylman/aerial#109@m109:pr_fact_deploy_failed"
+    }
+  ],
+  "fact_rollout_states": [
+    {
+      "key": "azylman/aerial#109@h109:pr_fact_merged",
+      "rollout_state": null
+    },
+    {
+      "key": "azylman/aerial#109@m109:pr_fact_deploy_failed",
+      "rollout_state": null
+    }
+  ],
+  "rows": [
+    {
+      "repo": "azylman/aerial",
+      "pr_number": 109,
+      "branch": "feat/fail",
+      "head_sha": "h109",
+      "merge_sha": "m109",
+      "target_id": "100000000000000001",
+      "status": "deploy_failed",
+      "title": "Fail PR",
+      "metadata": {
+        "agent": "aerial",
+        "deploy_failed_published": true
+      }
+    }
+  ]
+}

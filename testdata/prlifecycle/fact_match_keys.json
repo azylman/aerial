@@ -1,0 +1,49 @@
+{
+  "description": "Generation-free lifecycle-fact match keys. synapse restateclient.FactMatchKey and prstate FactEffectKey(...).MatchKey must render want for the same fact; shadow gates join [synapse-effect] and [prstate-shadow] lines on it.",
+  "cases": [
+    {
+      "name": "conflict keyed on the head sha",
+      "repo": "azylman/aerial",
+      "pr_number": 101,
+      "fact": {
+        "event": "conflict",
+        "repo": "azylman/aerial",
+        "pr_number": 101,
+        "head_sha": "h1",
+        "status": "conflict",
+        "occurred_at": "2026-11-20T00:00:00Z"
+      },
+      "want": "azylman/aerial#101@h1:pr_fact_conflict"
+    },
+    {
+      "name": "deploy_success falls back to the merge sha and carries the job",
+      "repo": "azylman/mirrormere",
+      "pr_number": 1010,
+      "fact": {
+        "event": "deploy_success",
+        "repo": "azylman/mirrormere",
+        "pr_number": 1010,
+        "merge_sha": "m1",
+        "job_name": "git-sync",
+        "status": "deployed",
+        "occurred_at": "2026-11-20T00:00:00Z"
+      },
+      "want": "azylman/mirrormere#1010@m1:pr_fact_deploy_success:job=git-sync"
+    },
+    {
+      "name": "event name is trimmed and lowercased and the check canonicalized",
+      "repo": "azylman/aerial",
+      "pr_number": 7,
+      "fact": {
+        "event": " CI_Failed ",
+        "repo": "azylman/aerial",
+        "pr_number": 7,
+        "head_sha": " h7 ",
+        "merge_sha": "m7",
+        "check_name": "RoboRev Code Review",
+        "occurred_at": "2026-11-20T00:00:00Z"
+      },
+      "want": "azylman/aerial#7@h7:pr_fact_ci_failed:check=roborev"
+    }
+  ]
+}

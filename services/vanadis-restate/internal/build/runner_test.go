@@ -1,0 +1,239 @@
+package build
+
+import (
+	"context"
+	"errors"
+	"testing"
+	"time"
+
+	restate "github.com/restatedev/sdk-go"
+	"github.com/restatedev/sdk-go/x/mocks"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+
+	"github.com/azylman/aerial/pkg/pubsub"
+	"github.com/azylman/aerial/services/vanadis-restate/internal/ericlient"
+	"github.com/azylman/aerial/services/vanadis-restate/internal/executor"
+	"github.com/azylman/aerial/services/vanadis-restate/internal/model"
+	"github.com/azylman/aerial/services/vanadis-restate/internal/store"
+)
+
+func TestBuildObject_CreateAcceptsAllOwners(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name      string
+		ownAgent  string
+		reqAgent  string
+		wantAgent string
+	}{
+		{name: "sibling object accepts unowned build", ownAgent: "agent-alpha", wantAgent: "aerial"},
+		{name: "sibling object accepts default-owned build", ownAgent: "agent-alpha", reqAgent: "aerial", wantAgent: "aerial"},
+		{name: "sibling object accepts other sibling build", ownAgent: "agent-alpha", reqAgent: "agent-beta", wantAgent: "agent-beta"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			st := &fakeStore{}
+			rt := newFakeObjectRuntime("b1")
+			bo := NewBuildObjectWithAgent("", tc.ownAgent, nil, func(restate.ObjectContext) objectRuntime { return rt }).WithAuthority(st, nil)
+			req := CreateBuildRequest{Agent: tc.reqAgent, ThreadID: "t1", Objective: "o", Chunks: []store.CreateChunkInput{{ID: "c1", Title: "c", Mode: "action", Instructions: "i", DependsOn: []string{}}}}
+			created, err := bo.Create(makeObjectMockContext(t, "b1"), req)
+			require.NoError(t, err)
+			assert.Equal(t, "b1", created.ID)
+			assert.Equal(t, tc.wantAgent, created.Agent)
+			assert.Equal(t, tc.wantAgent, st.buildSnapshot("b1").Agent)
+			require.NotNil(t, rt.state)
+			assert.Equal(t, tc.wantAgent, rt.state.Build.Agent)
+		})
+	}
+}
+
+func TestWithBuildOwner(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name      string
+		ctxAgent  string
+		build     *model.VanadisBuild
+		wantAgent string
+	}{
+		{name: "nil build keeps context agent", ctxAgent: "aerial", wantAgent: "aerial"},
+		{name: "unowned build keeps context agent", ctxAgent: "aerial", build: &model.VanadisBuild{Agent: " "}, wantAgent: "aerial"},
+		{name: "owner overrides context agent", ctxAgent: "aerial", build: &model.VanadisBuild{Agent: "agent-alpha"}, wantAgent: "agent-alpha"},
+		{name: "owner set on bare context", build: &model.VanadisBuild{Agent: "agent-beta"}, wantAgent: "agent-beta"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			ctx := context.Background()
+			if tc.ctxAgent != "" {
+				ctx = ericlient.WithAgent(ctx, tc.ctxAgent)
+			}
+			assert.Equal(t, tc.wantAgent, ericlient.AgentFromContext(withBuildOwner(ctx, tc.build)))
+		})
+	}
+}
+
+func TestBuildObject_ChunkRemovalCancelsOnOwnerSessions(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name      string
+		owner     string
+		wantAgent string
+	}{
+		{name: "pinned sibling build cancels on owner", owner: "agent-alpha", wantAgent: "agent-alpha"},
+		{name: "default build cancels on default agent", owner: "aerial", wantAgent: "aerial"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			eri := &mockEriClient{}
+			exec := executor.NewExecutor("", eri, pubsub.NewMemoryBus(), "test-token", "example-owner", nil)
+			rt := newFakeObjectRuntime("b1")
+			rt.runStepErr = errors.New("stop after removal")
+			bo := NewBuildObject("", nil, func(restate.ObjectContext) objectRuntime { return rt }).WithAuthority(&fakeStore{builds: []model.VanadisBuild{{ID: "b1", Agent: tc.owner}}, chunks: []model.VanadisChunk{{ID: "c1", BuildID: "b1"}}}, exec)
+			assert.Error(t, bo.executeChunkRemoval(makeObjectMockContext(t, "b1"), rt, "b1", "c1"))
+			assert.Equal(t, "c1", eri.LastCancel)
+			assert.Equal(t, tc.wantAgent, eri.CancelAgent)
+		})
+	}
+}
+
+// TestBuildObject_CrossBuildReconcileSends drives a deploy_success mutation
+// through the object transition and asserts every swept foreign build gets a
+// one-way Mutate(chunk_deploy_success) on its own runner's Build service.
+func TestBuildObject_CrossBuildReconcileSends(t *testing.T) {
+	t.Parallel()
+	mergeLater := time.Date(2026, 5, 1, 14, 0, 0, 0, time.UTC)
+	tests := []struct {
+		name     string
+		swept    []store.SweptChunk
+		wantSent []sentCrossBuildDeploySuccess
+	}{
+		{name: "no sweep sends nothing"},
+		{name: "default runner build", swept: []store.SweptChunk{{ChunkID: "f1", BuildID: "b2"}}, wantSent: []sentCrossBuildDeploySuccess{{Service: "Build", BuildID: "b2", ChunkID: "f1"}}},
+		{name: "sibling runner build", swept: []store.SweptChunk{{ChunkID: "f1", BuildID: "b2"}}, wantSent: []sentCrossBuildDeploySuccess{{Service: "Build", BuildID: "b2", ChunkID: "f1"}}},
+		{name: "one send per swept chunk", swept: []store.SweptChunk{{ChunkID: "f1", BuildID: "b2"}, {ChunkID: "f2", BuildID: "b2"}, {ChunkID: "g1", BuildID: "b3"}}, wantSent: []sentCrossBuildDeploySuccess{{Service: "Build", BuildID: "b2", ChunkID: "f1"}, {Service: "Build", BuildID: "b2", ChunkID: "f2"}, {Service: "Build", BuildID: "b3", ChunkID: "g1"}}},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			spy := &fakeStore{
+				builds: []model.VanadisBuild{{ID: "b1", Status: statusRunning}},
+				chunks: []model.VanadisChunk{{ID: "deploying", BuildID: "b1", Mode: "pr", Repo: "aerial", Status: statusDeploying, PRNumber: 7, CompletedAt: mergeLater}},
+				swept:  tc.swept,
+			}
+			rt := newFakeObjectRuntime("b1")
+			bo := NewBuildObject("", nil).WithAuthority(spy, nil)
+			_, err := bo.executeObjectTransition(rt, labelMutateBuild, &BuildMutationRequest{Action: mutationChunkDeploySuccess, ChunkID: "deploying"})
+			require.NoError(t, err)
+			assert.Equal(t, tc.wantSent, rt.reconcilesSent)
+			assert.Empty(t, spy.foreignReads("b1"))
+		})
+	}
+}
+
+func TestRestateObjectRuntime_RunnerOperations(t *testing.T) {
+	t.Parallel()
+	mc := mocks.NewMockContext(t)
+	mClient := mocks.NewMockClient(t)
+	mInv := mocks.NewMockInvocation(t)
+	mc.EXPECT().Object("Build", "b2", "Mutate").Return(mClient).Once()
+	mClient.EXPECT().Send(BuildMutationRequest{Action: mutationChunkDeploySuccess, ChunkID: "f1"}).Return(mInv).Once()
+	rt := restateObjectRuntime{ctx: restate.WithMockContext(mc)}
+	sendCrossBuildReconciles(rt, []store.SweptChunk{{ChunkID: "f1", BuildID: "b2"}})
+}
+
+func TestRecordCrossBuildReconcile(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name      string
+		collector bool
+		targets   []store.SweptChunk
+		want      []store.SweptChunk
+	}{
+		{name: "no collector drops", targets: []store.SweptChunk{{ChunkID: "f1", BuildID: "b2"}}},
+		{name: "blank build ignored", collector: true, targets: []store.SweptChunk{{ChunkID: "f1", BuildID: " "}}},
+		{name: "blank chunk ignored", collector: true, targets: []store.SweptChunk{{ChunkID: " ", BuildID: "b2"}}},
+		{name: "deduplicated by build and chunk", collector: true, targets: []store.SweptChunk{{ChunkID: "f1", BuildID: "b2"}, {ChunkID: "f2", BuildID: "b3"}, {ChunkID: "f1", BuildID: "b2"}}, want: []store.SweptChunk{{ChunkID: "f1", BuildID: "b2"}, {ChunkID: "f2", BuildID: "b3"}}},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			ctx := context.Background()
+			var collector *crossBuildReconciles
+			if tc.collector {
+				ctx, collector = withCrossBuildReconciles(ctx)
+			}
+			for _, target := range tc.targets {
+				recordCrossBuildReconcile(ctx, target)
+			}
+			assert.Equal(t, tc.want, collector.list())
+		})
+	}
+}
+
+// TestBuildObject_ReconcileWidgetSyncFailedBuild covers the explicit widget
+// sync: a failed build refreshes its card only for the widget_sync reason.
+func TestBuildObject_ReconcileWidgetSyncFailedBuild(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name        string
+		reason      string
+		buildStatus string
+		wantStatus  string
+	}{
+		{name: "widget sync refreshes failed build", reason: ReconcileReasonWidgetSync, buildStatus: statusFailed, wantStatus: statusFailed},
+		{name: "plain reconcile leaves failed build", reason: "active dispatch recovery", buildStatus: statusFailed, wantStatus: statusFailed},
+		{name: "widget sync on running build reconciles normally", reason: ReconcileReasonWidgetSync, buildStatus: statusRunning, wantStatus: statusRunning},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			spy := &fakeStore{
+				builds: []model.VanadisBuild{{ID: "b1", Status: tc.buildStatus}},
+				chunks: []model.VanadisChunk{{ID: "c1", BuildID: "b1", Mode: "pr", Repo: "aerial", Status: "pr_opened", PRNumber: 3}},
+			}
+			rt := newFakeObjectRuntime("b1")
+			exec := executor.NewExecutor("", &mockEriClient{}, &recordingChunkBus{}, "token", "example-owner", nil)
+			bo := NewBuildObject("", nil, func(restate.ObjectContext) objectRuntime { return rt }).WithAuthority(spy, exec)
+			res, err := bo.Reconcile(makeObjectMockContext(t, "b1"), ReconcileBuildRequest{Reason: tc.reason})
+			require.NoError(t, err)
+			assert.Equal(t, tc.wantStatus, res.Status)
+			assert.Empty(t, spy.foreignReads("b1"))
+		})
+	}
+}
+
+// TestRouterFacingHelpers pins the build-package helpers the BuildRouter uses
+// to resolve a build route before it picks the runner.
+func TestRouterFacingHelpers(t *testing.T) {
+	t.Parallel()
+	assert.Equal(t, "chunk-1-router", ExtractChunkIDFromBranch("aerial", "feat/aerial-pr-vanadis-chunk-1-router-a1b2c3"))
+	assert.True(t, CanFallbackThreadRepoLookup(pubsub.PRLifecycleEvent{Repo: "aerial", PRNumber: 1, Event: "opened", Branch: "feat/aerial-pr-20261116-123456", TargetID: "thread-1"}))
+}
+
+// TestBuildObject_AttachPRPreservesOwner proves a standalone build created
+// by AttachPR preserves the agent owner from the request.
+func TestBuildObject_AttachPRPreservesOwner(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name      string
+		reqAgent  string
+		wantAgent string
+	}{
+		{name: "default agent preserved", reqAgent: "aerial", wantAgent: "aerial"},
+		{name: "sibling agent preserved", reqAgent: "agent-alpha", wantAgent: "agent-alpha"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			spy := &fakeStore{}
+			rt := newFakeObjectRuntime("b1")
+			rt.runStepErr = errors.New("stop after attach")
+			bo := NewBuildObject("", nil, func(restate.ObjectContext) objectRuntime { return rt }).WithAuthority(spy, nil)
+			_, err := bo.AttachPR(makeObjectMockContext(t, "b1"), store.AttachChunkPRRequest{Repo: "aerial", PRNumber: 7, Agent: tc.reqAgent})
+			require.Error(t, err)
+			assert.Equal(t, []string{tc.wantAgent}, pickCalls(spy.attemptedCalls(), "AttachChunkPR", "", 3))
+		})
+	}
+}

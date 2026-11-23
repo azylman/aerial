@@ -325,7 +325,7 @@ spec:
               - mountPath: /etc/gha-listener
                 name: listener-config
                 readOnly: true
-    maxRunners: 6
+    maxRunners: 4
     minRunners: 0
     runnerScaleSetName: roborev-runner-aerial
     scaleSetLabels:
@@ -348,6 +348,11 @@ spec:
                     name: roborev-runner-secret
             image: ghcr.io/azylman/aerial-github-runner:${TAG_AERIAL_GITHUB_RUNNER:=latest}
             name: runner
+            resources:
+              limits:
+                cpu: "2"
+              requests:
+                cpu: 250m
             volumeMounts:
               - mountPath: /cache
                 name: ci-cache
@@ -552,7 +557,7 @@ spec:
               - mountPath: /etc/gha-listener
                 name: listener-config
                 readOnly: true
-    maxRunners: 16
+    maxRunners: 6
     minRunners: 0
     runnerScaleSetName: ci-runner-aerial
     scaleSetLabels:
@@ -570,6 +575,183 @@ spec:
                 value: self-hosted,ci
             image: ghcr.io/azylman/aerial-github-runner:${TAG_AERIAL_GITHUB_RUNNER:=latest}
             name: runner
+            resources:
+              limits:
+                cpu: "2"
+              requests:
+                cpu: 250m
+            volumeMounts:
+              - mountPath: /var/run/docker.sock
+                name: docker-sock
+              - mountPath: /cache
+                name: ci-cache
+              - mountPath: /tmp
+                name: tmp
+              - mountPath: /actions-runner/_work
+                name: work
+        volumes:
+          - hostPath:
+              path: /var/run/docker.sock
+            name: docker-sock
+          - hostPath:
+              path: /var/lib/aerial/ci-cache
+              type: DirectoryOrCreate
+            name: ci-cache
+          - emptyDir:
+              medium: Memory
+              sizeLimit: 2Gi
+            name: tmp
+          - emptyDir:
+              medium: Memory
+              sizeLimit: 4Gi
+            name: work
+  valuesFrom:
+    - kind: Secret
+      name: git-sync-secret
+      optional: true
+      targetPath: githubConfigSecret.github_token
+      valuesKey: GITHUB_PAT
+---
+apiVersion: helm.toolkit.fluxcd.io/v2
+kind: HelmRelease
+metadata:
+  name: deploy-runner-aerial
+  namespace: default
+spec:
+  chart:
+    spec:
+      chart: gha-runner-scale-set
+      sourceRef:
+        kind: HelmRepository
+        name: actions-runner-controller
+        namespace: flux-system
+      version: 0.15.1
+  dependsOn:
+    - name: arc-controller
+      namespace: arc-systems
+  interval: 5m
+  values:
+    controllerServiceAccount:
+      name: arc-controller
+      namespace: arc-systems
+    githubConfigUrl: ${AERIAL_REPO_URL:=https://github.com/azylman/aerial}
+    listenerTemplate:
+      spec:
+        containers:
+          - name: listener
+            resources:
+              limits:
+                cpu: 100m
+                memory: 128Mi
+              requests:
+                cpu: 10m
+                memory: 32Mi
+          - name: patch-unblocker
+            image: ghcr.io/azylman/aerial-github-runner:${TAG_AERIAL_GITHUB_RUNNER:=latest}
+            imagePullPolicy: IfNotPresent
+            command:
+              - node
+              - -e
+              - |
+                const fs = require('node:fs');
+                const https = require('node:https');
+                const cfg = JSON.parse(fs.readFileSync('/etc/gha-listener/config.json', 'utf8'));
+                const ns = cfg.ephemeral_runner_set_namespace;
+                const name = cfg.ephemeral_runner_set_name;
+                const ca = fs.readFileSync('/var/run/secrets/kubernetes.io/serviceaccount/ca.crt');
+                const agent = new https.Agent({ ca, keepAlive: true });
+                const path = '/apis/actions.github.com/v1alpha1/namespaces/' + ns + '/ephemeralrunnersets/' + name;
+                function patch(body) {
+                  const token = fs.readFileSync('/var/run/secrets/kubernetes.io/serviceaccount/token', 'utf8').trim();
+                  return new Promise((resolve, reject) => {
+                    const req = https.request({
+                      hostname: process.env.KUBERNETES_SERVICE_HOST || 'kubernetes.default.svc',
+                      port: process.env.KUBERNETES_SERVICE_PORT || 443,
+                      path,
+                      method: 'PATCH',
+                      agent,
+                      headers: {
+                        Authorization: 'Bearer ' + token,
+                        'Content-Type': 'application/merge-patch+json',
+                        Accept: 'application/json',
+                        'Content-Length': Buffer.byteLength(body),
+                      },
+                    }, (res) => {
+                      let data = '';
+                      res.on('data', (c) => (data += c));
+                      res.on('end', () => {
+                        if (res.statusCode >= 200 && res.statusCode < 300) resolve(JSON.parse(data));
+                        else reject(new Error('HTTP ' + res.statusCode + ': ' + data));
+                      });
+                    });
+                    req.on('error', reject);
+                    req.write(body);
+                    req.end();
+                  });
+                }
+                let seenPatchID = 0;
+                let seenCount = 0;
+                setInterval(async () => {
+                  try {
+                    const ers = await patch('{}');
+                    const pid = ers?.spec?.patchID || 0;
+                    const reps = ers?.spec?.replicas || 0;
+                    const cpid = ers?.status?.finishedRunnerCleanupPatchID || 0;
+                    if (pid > 0 && reps > 0 && cpid === pid) {
+                      if (seenPatchID === pid) {
+                        seenCount++;
+                        if (seenCount >= 2) {
+                          await patch('{"spec":{"patchID":0}}');
+                          console.log('Unblocked suppressed scale-up for ' + ns + '/' + name + ' (patchID=' + pid + ', replicas=' + reps + ')');
+                          seenPatchID = 0;
+                          seenCount = 0;
+                        }
+                      } else {
+                        seenPatchID = pid;
+                        seenCount = 1;
+                      }
+                    } else {
+                      seenPatchID = 0;
+                      seenCount = 0;
+                    }
+                  } catch (e) {
+                    console.error(e.message);
+                  }
+                }, 1000);
+            resources:
+              limits:
+                cpu: 50m
+                memory: 64Mi
+              requests:
+                cpu: 5m
+                memory: 16Mi
+            volumeMounts:
+              - mountPath: /etc/gha-listener
+                name: listener-config
+                readOnly: true
+    maxRunners: 3
+    minRunners: 0
+    runnerScaleSetName: deploy-runner-aerial
+    scaleSetLabels:
+      - self-hosted
+      - deploy
+    template:
+      spec:
+        containers:
+          - command:
+              - /entrypoint.sh
+            env:
+              - name: TARGET_REPO
+                value: ${AERIAL_GITHUB_REPO:=azylman/aerial}
+              - name: RUNNER_LABELS
+                value: self-hosted,deploy
+            image: ghcr.io/azylman/aerial-github-runner:${TAG_AERIAL_GITHUB_RUNNER:=latest}
+            name: runner
+            resources:
+              limits:
+                cpu: "2"
+              requests:
+                cpu: 250m
             volumeMounts:
               - mountPath: /var/run/docker.sock
                 name: docker-sock
@@ -617,7 +799,7 @@ spec:
       - name: RESTATE_ROCKSDB_TOTAL_MEMORY_SIZE
         value: 256 MiB
       - name: RESTATE_TRACING_ENDPOINT
-        value: http://victoriatraces.default.svc.cluster.local:4317
+        value: http://otel-collector.default.svc.cluster.local:4317
     image: docker.io/restatedev/restate:1.8.1-hotfix.2@sha256:e3a11e7c694cfe0c134eca1652992c068bef0bcba3caeec9d2a3b3bc50daa62e
     nodeSelector:
       storage-tier: nvme
@@ -625,7 +807,7 @@ spec:
     resources:
       limits:
         cpu: "1"
-        memory: 1Gi
+        memory: 2Gi
       requests:
         cpu: 50m
         memory: 128Mi
@@ -719,6 +901,9 @@ spec:
     - remoteRef:
         key: GITHUB_PAT
       secretKey: GITHUB_PAT
+    - remoteRef:
+        key: GITHUB_APP_PRIVATE_KEY
+      secretKey: GITHUB_APP_PRIVATE_KEY
   refreshInterval: 1m
   secretStoreRef:
     kind: SecretStore
@@ -742,6 +927,9 @@ spec:
     - remoteRef:
         key: GITHUB_WEBHOOK_SECRET
       secretKey: GITHUB_WEBHOOK_SECRET
+    - remoteRef:
+        key: GITHUB_APP_PRIVATE_KEY
+      secretKey: GITHUB_APP_PRIVATE_KEY
   refreshInterval: 1m
   secretStoreRef:
     kind: SecretStore
@@ -1044,11 +1232,7 @@ spec:
   noUpper: true
   secretKeys:
     - NATS_AERIAL_PASSWORD
-    - NATS_MIORINE_PASSWORD
-    - NATS_SULETTA_PASSWORD
     - NATS_ERI_AERIAL_PASSWORD
-    - NATS_ERI_MIORINE_PASSWORD
-    - NATS_ERI_SULETTA_PASSWORD
   symbols: 0
 ---
 apiVersion: external-secrets.io/v1alpha1
@@ -1064,24 +1248,8 @@ spec:
         secretKey: NATS_AERIAL_PASSWORD
     - match:
         remoteRef:
-          remoteKey: NATS_MIORINE_PASSWORD
-        secretKey: NATS_MIORINE_PASSWORD
-    - match:
-        remoteRef:
-          remoteKey: NATS_SULETTA_PASSWORD
-        secretKey: NATS_SULETTA_PASSWORD
-    - match:
-        remoteRef:
           remoteKey: NATS_ERI_AERIAL_PASSWORD
         secretKey: NATS_ERI_AERIAL_PASSWORD
-    - match:
-        remoteRef:
-          remoteKey: NATS_ERI_MIORINE_PASSWORD
-        secretKey: NATS_ERI_MIORINE_PASSWORD
-    - match:
-        remoteRef:
-          remoteKey: NATS_ERI_SULETTA_PASSWORD
-        secretKey: NATS_ERI_SULETTA_PASSWORD
   deletionPolicy: None
   refreshInterval: 1h
   secretStoreRefs:
@@ -1251,20 +1419,8 @@ spec:
         key: NATS_AERIAL_PASSWORD
       secretKey: aerial_password
     - remoteRef:
-        key: NATS_MIORINE_PASSWORD
-      secretKey: miorine_password
-    - remoteRef:
-        key: NATS_SULETTA_PASSWORD
-      secretKey: suletta_password
-    - remoteRef:
         key: NATS_ERI_AERIAL_PASSWORD
       secretKey: eri_aerial_password
-    - remoteRef:
-        key: NATS_ERI_MIORINE_PASSWORD
-      secretKey: eri_miorine_password
-    - remoteRef:
-        key: NATS_ERI_SULETTA_PASSWORD
-      secretKey: eri_suletta_password
   refreshInterval: 1m
   secretStoreRef:
     kind: SecretStore
@@ -1306,70 +1462,8 @@ spec:
                       ]
                     }
                   }
-                },
-                {
-                  user: "eri-miorine",
-                  password: "{{ .eri_miorine_password }}",
-                  permissions: {
-                    publish: {
-                      allow: [
-                        "aerial.transcripts.steps.miorine.>",
-                        "aerial.events.>",
-                        "aerial.turn.>",
-                        "aerial.dispatch.>",
-                        "aerial.coalesced.widget_sync.>",
-                        "voice.stream.>",
-                        "_INBOX.>",
-                        "$JS.API.INFO",
-                        "$JS.API.STREAM.INFO.>",
-                        "$JS.API.STREAM.CREATE.>",
-                        "$JS.API.STREAM.UPDATE.>"
-                      ]
-                    },
-                    subscribe: {
-                      allow: [
-                        "voice.stream.>",
-                        "_INBOX.>"
-                      ]
-                    }
-                  }
-                },
-                {
-                  user: "eri-suletta",
-                  password: "{{ .eri_suletta_password }}",
-                  permissions: {
-                    publish: {
-                      allow: [
-                        "aerial.transcripts.steps.suletta.>",
-                        "aerial.events.>",
-                        "aerial.turn.>",
-                        "aerial.dispatch.>",
-                        "aerial.coalesced.widget_sync.>",
-                        "voice.stream.>",
-                        "_INBOX.>",
-                        "$JS.API.INFO",
-                        "$JS.API.STREAM.INFO.>",
-                        "$JS.API.STREAM.CREATE.>",
-                        "$JS.API.STREAM.UPDATE.>"
-                      ]
-                    },
-                    subscribe: {
-                      allow: [
-                        "voice.stream.>",
-                        "_INBOX.>"
-                      ]
-                    }
-                  }
                 }
               ]
-            }
-            miorine: {
-              jetstream: enabled
-              users: [{ user: "miorine", password: "{{ .miorine_password }}" }]
-            }
-            suletta: {
-              jetstream: enabled
-              users: [{ user: "suletta", password: "{{ .suletta_password }}" }]
             }
           }
 ---

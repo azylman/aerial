@@ -1,0 +1,614 @@
+package runner
+
+import (
+	"context"
+	"encoding/json"
+	"log"
+	"log/slog"
+	"path/filepath"
+	"regexp"
+	"slices"
+	"strings"
+	"time"
+
+	"go.opentelemetry.io/otel/codes"
+	"go.opentelemetry.io/otel/propagation"
+	"go.opentelemetry.io/otel/trace"
+
+	"github.com/azylman/aerial/pkg/strutil"
+	"github.com/azylman/aerial/services/eri/pkg/session"
+)
+
+// defaultDaemonTargetKey replaces a daemon target key that sanitizes to empty.
+const defaultDaemonTargetKey = "default"
+
+// mcpServerNative labels tool calls that are not routed through an MCP server.
+const mcpServerNative = "native"
+
+// mcpServerUnknown and toolNameUnknown label tool calls whose server or name cannot be resolved.
+const (
+	mcpServerUnknown = "unknown"
+	toolNameUnknown  = "unknown"
+)
+
+// AgyEnvInput holds environment configuration parameters.
+type AgyEnvInput struct {
+	BaseEnv        []string
+	HomeDir        string
+	Engine         string
+	APIKey         string
+	TargetID       string
+	VanadisChunkID string
+	TurnEnvFile    string
+	SATokenPath    string
+	Timezone       string
+	// DaemonID is exported as ERI_DAEMON_ID when MCPProxyPort is set; it keys the daemon's
+	// turns in ActiveTurnRegistry.
+	DaemonID string
+	// MCPProxyPort is eri's HTTP port when MCP tracing is enabled ("" disables it). It adds
+	// ERI_DAEMON_ID and the loopback ERI_HOOK_ENDPOINT used by `hook-guard trace`.
+	MCPProxyPort string
+	// TraceEnv is the W3C propagation state for the child process (TRACEPARENT, TRACESTATE,
+	// BAGGAGE), per the OpenTelemetry environment-variable carrier spec. Keys are uppercased;
+	// entries with empty values are skipped. Inherited copies are always stripped first.
+	TraceEnv map[string]string
+	ExtraEnv []string
+}
+
+func filterEnvKeys(env []string, excluded ...string) []string {
+	excludeMap := make(map[string]struct{}, len(excluded))
+	for _, k := range excluded {
+		excludeMap[strings.ToUpper(strings.TrimSpace(k))] = struct{}{}
+	}
+	filtered := make([]string, 0, len(env))
+	for _, e := range env {
+		if k, _, ok := strings.Cut(e, "="); ok {
+			if _, skip := excludeMap[strings.ToUpper(strings.TrimSpace(k))]; skip {
+				continue
+			}
+		}
+		filtered = append(filtered, e)
+	}
+	return filtered
+}
+
+var exactSecretKeys = map[string]struct{}{
+	"GEMINI_API_KEY":                  {},
+	"ANTIGRAVITY_API_KEY":             {},
+	"GOOGLE_GENAI_API_KEY":            {},
+	"GEMINI_HARNESS_API_KEY":          {},
+	"AGY_GEMINI_API_KEY":              {},
+	"GITHUB_PAT":                      {},
+	"DISCORD_TOKEN":                   {},
+	"DISCORD_BOT_TOKEN":               {},
+	"DATABASE_URL":                    {},
+	"POSTGRES_PASSWORD":               {},
+	"HA_TOKEN":                        {},
+	"UNIFI_PASS":                      {},
+	"UNIFI_PASSWORD":                  {},
+	"OP_SERVICE_ACCOUNT_TOKEN":        {},
+	"1PASSWORD_SERVICE_ACCOUNT_TOKEN": {},
+	"QNAP_PASS":                       {},
+	"INFISICAL_CLIENT_SECRET":         {},
+	"CLOUDFLARE_MCP_TOKEN":            {},
+	"UBEREATS_MCP_TOKEN":              {},
+	"OPENAI_API_KEY":                  {},
+	"CODEX_API_KEY":                   {},
+	"META_API_KEY":                    {},
+	"MODEL_API_KEY":                   {},
+	"NATS_URL":                        {},
+	"RESTATE_INGRESS_URL":             {},
+	"RESTATE_ADMIN_URL":               {},
+}
+
+var secretSuffixes = []string{
+	"_SECRET",
+	"_TOKEN",
+	"_PASSWORD",
+	"_PASS",
+	"_PAT",
+	"_API_KEY",
+	"_PRIVATE_KEY",
+}
+
+// agentPassthroughKeys are secret-shaped keys deliberately passed to agent turns.
+// ATLAS_DEV_PASSWORD only creates and drops throwaway Atlas dev databases.
+var agentPassthroughKeys = map[string]struct{}{
+	"CLAUDE_CODE_OAUTH_TOKEN": {},
+	"ATLAS_DEV_PASSWORD":      {},
+}
+
+func isSecretEnvKey(key string) bool {
+	upper := strings.ToUpper(strings.TrimSpace(key))
+	if _, ok := agentPassthroughKeys[upper]; ok {
+		return false
+	}
+	if upper == "DATABASE_URL" {
+		return true
+	}
+	if _, ok := exactSecretKeys[upper]; ok {
+		return true
+	}
+	for _, suffix := range secretSuffixes {
+		if strings.HasSuffix(upper, suffix) {
+			return true
+		}
+	}
+	return false
+}
+
+func FilterAgyBaseEnv(env []string) []string {
+	filtered := make([]string, 0, len(env))
+	for _, e := range env {
+		if k, _, ok := strings.Cut(e, "="); ok {
+			if isSecretEnvKey(k) {
+				continue
+			}
+		}
+		filtered = append(filtered, e)
+	}
+	return filtered
+}
+
+func filterHomeEnv(env []string) []string {
+	return filterEnvKeys(env, "HOME", "USERPROFILE", "GEMINI_CLI_HOME", "CLAUDE_CONFIG_DIR", "CODEX_HOME", "XDG_CONFIG_HOME", "XDG_DATA_HOME", "MUSE_AUTH_PATH")
+}
+
+// traceCarrierEnvKeys are the OpenTelemetry env-carrier keys a child process reads its parent
+// context from; inherited copies are stale (eri's own process context), never the spawn's.
+var traceCarrierEnvKeys = []string{"TRACEPARENT", "TRACESTATE", "BAGGAGE"}
+
+func filterTraceEnv(env []string) []string {
+	return filterEnvKeys(env, traceCarrierEnvKeys...)
+}
+
+// TraceCarrierEnv injects ctx's propagation state with prop into env-carrier form: the
+// propagator's header keys uppercased per the OpenTelemetry environment-variable carrier spec
+// (traceparent becomes TRACEPARENT). It is empty when ctx carries no valid span context.
+func TraceCarrierEnv(ctx context.Context, prop propagation.TextMapPropagator) map[string]string {
+	carrier := propagation.MapCarrier{}
+	if prop != nil {
+		prop.Inject(ctx, carrier)
+	}
+	out := make(map[string]string, len(carrier))
+	for k, v := range carrier {
+		out[strings.ToUpper(k)] = v
+	}
+	return out
+}
+
+// appendTraceEnv appends traceEnv's non-empty entries as KEY=value in sorted key order.
+func appendTraceEnv(env []string, traceEnv map[string]string) []string {
+	keys := make([]string, 0, len(traceEnv))
+	for k, v := range traceEnv {
+		if strings.TrimSpace(k) != "" && v != "" {
+			keys = append(keys, k)
+		}
+	}
+	slices.Sort(keys)
+	for _, k := range keys {
+		env = append(env, strings.ToUpper(strings.TrimSpace(k))+"="+traceEnv[k])
+	}
+	return env
+}
+
+func filterVanadisChunkEnv(env []string) []string {
+	return filterEnvKeys(env, "AERIAL_VANADIS_CHUNK_ID", "VANADIS_CHUNK_ID", "AERIAL_TARGET_ID")
+}
+
+// NormalizeEnvTargetID normalizes a daemon target key for the AERIAL_TARGET_ID
+// environment variable. It strips "discord-" (and optional pool prefixes like
+// "stateful_medium:discord-") for Discord targets, and returns "" for headless
+// or pooled worker keys ("heartbeat-*", "dispatch-*", "worker-*", "vanadis-*", or colon-scoped
+// pool keys like "discord:worker-0" and "ephemeral:worker-0").
+func NormalizeEnvTargetID(id string) string {
+	return session.NormalizeEnvTargetID(id)
+}
+
+// BuildAgyEnv constructs the process environment slice for agy execution.
+func BuildAgyEnv(input AgyEnvInput) []string {
+	var cmdEnv []string
+	if len(input.BaseEnv) > 0 {
+		base := filterTraceEnv(filterVanadisChunkEnv(input.BaseEnv))
+		base = FilterAgyBaseEnv(base)
+		if strings.TrimSpace(input.HomeDir) != "" {
+			base = filterHomeEnv(base)
+		}
+		cmdEnv = append(cmdEnv, base...)
+	}
+
+	cmdEnv = append(cmdEnv, "GIT_TERMINAL_PROMPT=0", "AGY_LOG_LEVEL=debug", "ANTIGRAVITY_LOG_LEVEL=debug")
+	if h := strings.TrimSpace(input.HomeDir); h != "" {
+		cmdEnv = append(cmdEnv,
+			"HOME="+h,
+			"USERPROFILE="+h,
+			"GEMINI_CLI_HOME="+h,
+			"CLAUDE_CONFIG_DIR="+filepath.Join(h, ".claude"),
+			"CODEX_HOME="+filepath.Join(h, ".codex"),
+			"XDG_CONFIG_HOME="+filepath.Join(h, ".config"),
+			"XDG_DATA_HOME="+filepath.Join(h, ".local", "share"),
+			"MUSE_AUTH_PATH="+filepath.Join(h, ".config", "muse", "auth.json"),
+		)
+	}
+	if k := strings.TrimSpace(input.APIKey); k != "" {
+		cmdEnv = append(cmdEnv, "GEMINI_API_KEY="+k, "ANTIGRAVITY_API_KEY="+k, "GOOGLE_GENAI_API_KEY="+k)
+	}
+	if t := NormalizeEnvTargetID(input.TargetID); t != "" {
+		cmdEnv = append(cmdEnv, "AERIAL_TARGET_ID="+t)
+	}
+	if chunkID := strings.TrimSpace(input.VanadisChunkID); chunkID != "" {
+		cmdEnv = append(cmdEnv, "AERIAL_VANADIS_CHUNK_ID="+chunkID)
+	}
+	if turnEnvFile := strings.TrimSpace(input.TurnEnvFile); turnEnvFile != "" {
+		cmdEnv = append(cmdEnv, "BASH_ENV="+turnEnvFile)
+	}
+	if saTokenPath := strings.TrimSpace(input.SATokenPath); saTokenPath != "" {
+		cmdEnv = append(cmdEnv, "AERIAL_SA_TOKEN_PATH="+saTokenPath)
+	}
+	if tz := strings.TrimSpace(input.Timezone); tz != "" {
+		cmdEnv = append(cmdEnv, "TZ="+tz)
+	}
+	cmdEnv = append(cmdEnv, mcpTraceEnv(input.MCPProxyPort, input.DaemonID)...)
+	cmdEnv = append(cmdEnv, claudeOTelEnv(input.Engine, input.MCPProxyPort, input.DaemonID)...)
+	cmdEnv = appendTraceEnv(cmdEnv, input.TraceEnv)
+	return append(cmdEnv, input.ExtraEnv...)
+}
+
+func claudeOTelEnv(engine, port, daemonID string) []string {
+	if !strings.EqualFold(strings.TrimSpace(engine), "claude") {
+		return nil
+	}
+	port = strings.TrimSpace(port)
+	if port == "" {
+		return nil
+	}
+	daemonID = strings.TrimSpace(daemonID)
+	envList := []string{
+		"CLAUDE_CODE_ENABLE_TELEMETRY=1",
+		"OTEL_LOGS_EXPORTER=otlp",
+		"OTEL_METRICS_EXPORTER=none",
+		"OTEL_TRACES_EXPORTER=none",
+		"OTEL_EXPORTER_OTLP_LOGS_PROTOCOL=http/json",
+		"OTEL_EXPORTER_OTLP_LOGS_ENDPOINT=http://127.0.0.1:" + port + "/internal/otel/v1/logs",
+		"OTEL_LOG_USER_PROMPTS=0",
+		"OTEL_LOG_ASSISTANT_RESPONSES=0",
+		"OTEL_LOG_TOOL_CONTENT=0",
+		"OTEL_LOG_TOOL_DETAILS=0",
+		"OTEL_LOG_RAW_API_BODIES=0",
+		"OTEL_LOG_MANAGED_SETTINGS=0",
+	}
+	if daemonID != "" {
+		envList = append(envList, "OTEL_EXPORTER_OTLP_LOGS_HEADERS=X-Eri-Daemon="+daemonID)
+	}
+	return envList
+}
+
+// MCPProxyAnnouncePath is the loopback route `hook-guard trace` posts MCP call announcements to.
+const MCPProxyAnnouncePath = "/internal/mcp-proxy/announce"
+
+// mcpTraceEnv returns the daemon env that lets the loopback MCP proxy attribute MCP calls to
+// this daemon's turn; empty when tracing is disabled (no proxy port) or the daemon has no ID.
+func mcpTraceEnv(port, daemonID string) []string {
+	port, daemonID = strings.TrimSpace(port), strings.TrimSpace(daemonID)
+	if port == "" || daemonID == "" {
+		return nil
+	}
+	return []string{
+		"ERI_DAEMON_ID=" + daemonID,
+		"ERI_HOOK_ENDPOINT=http://127.0.0.1:" + port + MCPProxyAnnouncePath,
+	}
+}
+
+// SanitizeDaemonTargetKey replaces any rune not in [a-zA-Z0-9._-] with '_',
+// defaulting empty strings to "default".
+func SanitizeDaemonTargetKey(targetKey string) string {
+	trimmed := strings.TrimSpace(targetKey)
+	if trimmed == "" {
+		return defaultDaemonTargetKey
+	}
+	var sb strings.Builder
+	for _, r := range trimmed {
+		if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') || r == '.' || r == '_' || r == '-' {
+			sb.WriteRune(r)
+		} else {
+			sb.WriteRune('_')
+		}
+	}
+	out := sb.String()
+	if out == "" {
+		return defaultDaemonTargetKey
+	}
+	return out
+}
+
+// ParseInitEvent extracts conversation ID from an NDJSON line containing {"event":"init"}.
+// Note: agy --output-format stream-json emits strict NDJSON lines on stdout (diagnostics go to stderr),
+// so ParseInitEvent intentionally uses direct json.Unmarshal without manual '{' prefix-scanning.
+func ParseInitEvent(line string) (string, bool) {
+	trimmed := strings.TrimSpace(line)
+	if trimmed == "" {
+		return "", false
+	}
+	var probe sessionProbe
+	if json.Unmarshal([]byte(trimmed), &probe) == nil && (probe.Event == eventInit || probe.Type == eventInit) && probe.extractUUID() != "" {
+		return probe.extractUUID(), true
+	}
+	return "", false
+}
+
+// CleanUnescapedString strips surrounding quotes and whitespace from an unmarshaled string.
+func CleanUnescapedString(s string) string {
+	s = strings.TrimSpace(s)
+	for len(s) >= 2 && (s[0] == '"' || s[0] == '\\') {
+		s = strings.Trim(s, "\\\" \t\r\n")
+	}
+	return s
+}
+
+func extractCallMCPToolInfo(params map[string]any) (string, string) {
+	if params == nil {
+		return toolCallMCPTool, mcpServerUnknown
+	}
+	var sName, tName string
+	if s, ok := params["ServerName"].(string); ok {
+		sName = CleanUnescapedString(s)
+	}
+	if t, ok := params["ToolName"].(string); ok {
+		tName = CleanUnescapedString(t)
+	}
+	if tName != "" && sName != "" {
+		return tName, sName
+	}
+	if tName != "" {
+		return tName, mcpServerUnknown
+	}
+	if sName != "" {
+		return toolCallMCPTool, sName
+	}
+	return toolCallMCPTool, mcpServerUnknown
+}
+
+// ExtractMCPToolInfo extracts the canonical tool name and MCP server namespace.
+func ExtractMCPToolInfo(toolName string, params map[string]any) (string, string) {
+	if toolName = strings.TrimSpace(toolName); toolName == "" {
+		return toolNameUnknown, mcpServerNative
+	}
+	if toolName == toolCallMCPTool {
+		return extractCallMCPToolInfo(params)
+	}
+	if strings.HasPrefix(toolName, "mcp__") {
+		parts := strings.SplitN(toolName[5:], "__", 2)
+		if len(parts) == 2 && parts[0] != "" && parts[1] != "" {
+			return parts[1], parts[0]
+		}
+		if len(parts) == 1 && parts[0] != "" {
+			return parts[0], mcpServerUnknown
+		}
+	}
+	if strings.HasPrefix(toolName, "mcp_") {
+		parts := strings.SplitN(toolName[4:], "_", 2)
+		if len(parts) == 2 && parts[0] != "" && parts[1] != "" {
+			return parts[1], parts[0]
+		}
+		if len(parts) == 1 && parts[0] != "" {
+			return parts[0], mcpServerUnknown
+		}
+	}
+	return toolName, mcpServerNative
+}
+
+// mcpCallTarget maps ExtractMCPToolInfo's result to the MCP server and tool of an MCP call,
+// or "", "" for native tools and calls whose server is unknown.
+func mcpCallTarget(canonicalTool, mcpServer string) (server, tool string) {
+	if mcpServer == mcpServerNative || mcpServer == mcpServerUnknown {
+		return "", ""
+	}
+	return mcpServer, canonicalTool
+}
+
+func isSkillNameChar(c byte) bool {
+	return (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '-' || c == '_'
+}
+
+func isReservedSkillDir(name string) bool {
+	switch name {
+	case "skills", "custom-skills", "common", "discord", "voice", "ephemeral", "builtin":
+		return true
+	default:
+		return false
+	}
+}
+
+func isValidSkillName(name string) bool {
+	if name == "" || len(name) > 64 || isReservedSkillDir(name) || name[0] == '-' || name[0] == '_' || name[len(name)-1] == '-' || name[len(name)-1] == '_' {
+		return false
+	}
+	for i := range len(name) {
+		if !isSkillNameChar(name[i]) {
+			return false
+		}
+	}
+	return true
+}
+
+// ExtractSkillFromTarget extracts a skill name from a file path or command string referencing <skill>/SKILL.md.
+func ExtractSkillFromTarget(target string) (string, bool) {
+	const marker = "SKILL.md"
+	s := strings.ReplaceAll(strings.TrimSpace(target), `\"`, `"`)
+	for {
+		idx := strings.Index(s, marker)
+		if idx == -1 {
+			return "", false
+		}
+		afterIdx := idx + len(marker)
+		validAfter := afterIdx == len(s) || (!isSkillNameChar(s[afterIdx]) && s[afterIdx] != '.' && s[afterIdx] != '/' && s[afterIdx] != '\\')
+		if idx > 0 && (s[idx-1] == '/' || s[idx-1] == '\\') && validAfter {
+			prefix := s[:idx-1]
+			segStart := strings.LastIndexAny(prefix, "/\\ \t\n\r\"'`=:")
+			skill := strings.TrimSuffix(prefix[segStart+1:], ".tmp")
+			if isValidSkillName(skill) {
+				return skill, true
+			}
+		}
+		s = s[afterIdx:]
+	}
+}
+
+func appendSection(p, tag, content string) string {
+	if c := strings.TrimSpace(content); c != "" && !strings.Contains(p, "<"+tag+">") {
+		return "<" + tag + ">\n" + c + "\n</" + tag + ">\n\n" + p
+	}
+	return p
+}
+
+// compileLeasePrompt compiles cold-start guidelines, session info, and coordination context into the turn prompt.
+func compileLeasePrompt(turn *TurnContext, isCold bool, prevSessID string) string {
+	if turn == nil {
+		return ""
+	}
+	p := turn.Prompt
+	if isCold {
+		scope := strings.TrimSpace(strutil.FirstNonEmpty(turn.ScopeInstructions, turn.ChannelInstructions))
+		if scope != "" && !strings.Contains(p, "<SCOPE_INSTRUCTIONS>") && !strings.Contains(p, "<CHANNEL_INSTRUCTIONS>") {
+			p = "<SCOPE_INSTRUCTIONS>\nScope-specific guidelines for this conversation:\n\n" + scope + "\n</SCOPE_INSTRUCTIONS>\n\n" + p
+		}
+		if prevSessID != "" {
+			p = appendSection(p, "PREVIOUS_SESSION", "Previous Session ID: "+prevSessID)
+		}
+		p = appendSection(p, "THREAD_SUMMARY", turn.ThreadSummary)
+	}
+	return appendSection(p, "COORDINATION_CONTEXT", turn.CoordinationContext)
+}
+
+// injectRetrievedContext retrieves ambient context and memory within specified timeouts and prepends them to prompt.
+func injectRetrievedContext(ctx context.Context, prompt, memQuery string, amb AmbientContextRetriever, ambTimeout time.Duration, mem MemoryRetriever, memTimeout time.Duration, logPrefix string) string {
+	payloadPrompt := prompt
+	tracer := trace.SpanFromContext(ctx).TracerProvider().Tracer(TracerScope)
+	fetch := func(tag, name, spanName string, to time.Duration, run func(context.Context) (string, error)) {
+		if run == nil || strings.Contains(prompt, tag) {
+			return
+		}
+		c, cancel := context.WithTimeout(ctx, to)
+		defer cancel()
+		c, span := tracer.Start(c, spanName)
+		defer span.End()
+		if block, err := run(c); err != nil {
+			span.SetStatus(codes.Error, err.Error())
+			log.Printf("%s Warning: %s failed: %v", logPrefix, name, err)
+		} else if b := strings.TrimSpace(block); b != "" {
+			payloadPrompt = b + "\n\n" + payloadPrompt
+		}
+	}
+	if amb != nil {
+		fetch("<ambient_context>", "AmbientContextRetriever", "ambient_context.retrieve", ambTimeout, amb)
+	}
+	if mem != nil {
+		q := strings.TrimSpace(memQuery)
+		if q == "" {
+			q = prompt
+		}
+		fetch("<retrieved_memory>", "MemoryRetriever", "memory.retrieve", memTimeout, func(c context.Context) (string, error) { return mem(c, q) })
+	}
+	return payloadPrompt
+}
+
+func extractMemoryLineID(line string) string {
+	trimmed := strings.TrimSpace(line)
+	if !strings.HasPrefix(trimmed, "- [id:") {
+		return ""
+	}
+	rest := trimmed[len("- [id:"):]
+	if end := strings.IndexByte(rest, ']'); end > 0 {
+		return rest[:end]
+	}
+	return ""
+}
+
+func deduplicateRetrievedMemory(prompt string, seen map[string]bool) string {
+	const openTag, closeTag = "<retrieved_memory>", "</retrieved_memory>"
+	startIdx := strings.Index(prompt, openTag)
+	if startIdx < 0 || seen == nil {
+		return prompt
+	}
+	endRel := strings.Index(prompt[startIdx:], closeTag)
+	if endRel < 0 {
+		return prompt
+	}
+	blockStart := startIdx + len(openTag)
+	blockEnd := startIdx + endRel
+	inner := strings.Trim(prompt[blockStart:blockEnd], "\r\n")
+	if inner == "" {
+		return prompt
+	}
+	lines := strings.Split(inner, "\n")
+	kept := make([]string, 0, len(lines))
+	for _, line := range lines {
+		if id := extractMemoryLineID(line); id != "" {
+			if seen[id] {
+				continue
+			}
+			seen[id] = true
+		}
+		kept = append(kept, line)
+	}
+	if len(kept) == len(lines) {
+		return prompt
+	}
+	if len(kept) == 0 {
+		after := strings.TrimPrefix(strings.TrimPrefix(prompt[blockEnd+len(closeTag):], "\r\n"), "\n")
+		after = strings.TrimPrefix(strings.TrimPrefix(after, "\r\n"), "\n")
+		return strings.TrimSpace(prompt[:startIdx] + after)
+	}
+	replacement := openTag + "\n" + strings.Join(kept, "\n") + "\n" + closeTag
+	return prompt[:startIdx] + replacement + prompt[blockEnd+len(closeTag):]
+}
+
+var glogHeaderRegexp = regexp.MustCompile(`^([IWEF])\d{4}\s+\d{2}:\d{2}:\d{2}\.\d+\s+\d+\s+([^:\s]+:\d+)\]\s*(.*)$`)
+
+// ParseAndFilterStderrLine parses a single line of agent stderr, mapping glog
+// severities to slog levels, filtering benign authentication noise, and detecting warnings.
+func ParseAndFilterStderrLine(engine, rawLine string) (level slog.Level, msg, sourceFile string, keep bool) {
+	_ = engine
+	trimmed := strings.TrimRight(rawLine, "\r\n")
+	if strings.TrimSpace(trimmed) == "" {
+		return slog.LevelInfo, "", "", false
+	}
+	line := strings.TrimSpace(trimmed)
+	if line == "" {
+		return slog.LevelInfo, "", "", false
+	}
+
+	if submatches := glogHeaderRegexp.FindStringSubmatch(line); len(submatches) == 4 {
+		severity := submatches[1]
+		sourceFile = submatches[2]
+		msg = strings.TrimSpace(submatches[3])
+		if msg == "" {
+			return slog.LevelInfo, "", "", false
+		}
+		if strings.Contains(msg, "You are not logged into Antigravity.") || strings.Contains(msg, "Auth mode is unspecified, skipping fetchAvailableModels") {
+			return slog.LevelInfo, "", "", false
+		}
+		switch severity {
+		case "I":
+			level = slog.LevelInfo
+		case "W":
+			level = slog.LevelWarn
+		case "E", "F":
+			level = slog.LevelError
+		default:
+			level = slog.LevelInfo
+		}
+		return level, msg, sourceFile, true
+	}
+
+	msg = line
+	if strings.Contains(msg, "You are not logged into Antigravity.") || strings.Contains(msg, "Auth mode is unspecified, skipping fetchAvailableModels") {
+		return slog.LevelInfo, "", "", false
+	}
+	level = slog.LevelInfo
+	lower := strings.ToLower(msg)
+	if strings.Contains(lower, "error") || strings.Contains(lower, "warn") || strings.Contains(lower, "fatal") || strings.Contains(lower, "panic") {
+		level = slog.LevelWarn
+	}
+	return level, msg, "", true
+}

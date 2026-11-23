@@ -1,20 +1,15 @@
 import { act, cleanup, fireEvent, render, screen, within } from '@testing-library/react';
 import { Profiler, type ProfilerOnRenderCallback } from 'react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import type { BuildsAPIResponse, ClusterResponse, DeploymentStatus, SchedulesAPIResponse, ServiceStatus } from '../../api/types';
+import type { BuildsAPIResponse, ClusterResponse, DeploymentStatus, SchedulesAPIResponse, ServiceStatus, VanadisChunkDTO } from '../../api/types';
 import { useConsoleStore } from '../../store/store';
 import { Deployments, DeployBadge } from './Deployments';
 import { openServiceDrawer } from './openService';
 import { ServiceDiagnostics } from './ServiceDiagnostics';
 import { HealthyCount, ServiceCard, ServicesGrid } from './ServicesGrid';
 import TelemetryView, { OverviewBuildsSection, OverviewSchedulesSection } from './TelemetryView';
-
-const svc = (name: string, status: string, uptime: number): ServiceStatus => ({
-  name,
-  status,
-  uptime_seconds: uptime,
-  last_check_time: '2026-11-08T12:00:00Z',
-});
+import { type FetchMock, json, pending, stubFetch } from '../../test/fetch';
+import { build, chunk, svc } from '../../test/fixtures';
 
 const SERVICES: readonly ServiceStatus[] = [
   svc('aerial-eri', 'healthy', 3600),
@@ -27,7 +22,7 @@ const DEPLOYS: readonly DeploymentStatus[] = [
   {
     id: 'dep-console',
     service: 'console',
-    repository: 'azylman/aerial',
+    repository: 'acme/aerial',
     commit: 'a1b2c3d',
     commit_msg: 'feat: shell',
     stage: 'swapping',
@@ -54,7 +49,6 @@ const cluster = (over: Partial<ClusterResponse> = {}): ClusterResponse => ({
   services: SERVICES,
   deployments: DEPLOYS,
   quick_launch_links: [],
-  git_sync: { status: 'synced', max_lag_seconds: 0, last_sync_time: '2026-11-08T12:00:00Z' },
   ongoing_deploy: '',
   is_deploying: true,
   ...over,
@@ -62,14 +56,11 @@ const cluster = (over: Partial<ClusterResponse> = {}): ClusterResponse => ({
 
 const seed = (data: ClusterResponse): void => act(() => useConsoleStore.getState().setCluster(data));
 
-const fetchMock = vi.fn<(url: string, init?: RequestInit) => Promise<Response>>();
-const pending = (): Promise<Response> => new Promise(() => undefined);
+let fetchMock: FetchMock;
 
 beforeEach(() => {
   useConsoleStore.setState(useConsoleStore.getInitialState(), true);
-  fetchMock.mockReset();
-  fetchMock.mockImplementation(pending);
-  vi.stubGlobal('fetch', fetchMock);
+  fetchMock = stubFetch();
   vi.useFakeTimers({ now: Date.parse('2026-11-08T12:00:00Z'), toFake: ['setInterval', 'clearInterval', 'Date'] });
 });
 afterEach(() => {
@@ -80,11 +71,11 @@ afterEach(() => {
 
 describe('ServiceCard states', () => {
   it.each([
-    { name: 'aerial-eri', wantDot: 'pulse-dot healthy', wantBadge: 'badge healthy', wantText: 'HEALTHY', wantUptime: '1h 0m' },
+    { name: 'aerial-eri', wantDot: 'pulse-dot healthy', wantBadge: undefined, wantText: undefined, wantUptime: '1h 0m' },
     { name: 'aerial-vision', wantDot: 'pulse-dot degraded', wantBadge: 'badge degraded', wantText: 'DEGRADED', wantUptime: '12h 11m' },
     { name: 'aerial-kernel-mcp', wantDot: 'pulse-dot down', wantBadge: 'badge down', wantText: 'DOWN', wantUptime: '0s' },
-    { name: 'aerial-console', wantDot: 'pulse-dot healthy', wantBadge: 'badge healthy', wantText: 'HEALTHY', wantUptime: '2m 5s' },
-  ])('$name renders $wantText', ({ name, wantDot, wantBadge, wantText, wantUptime }) => {
+    { name: 'aerial-console', wantDot: 'pulse-dot healthy', wantBadge: undefined, wantText: undefined, wantUptime: '2m 5s' },
+  ])('$name renders badge $wantText', ({ name, wantDot, wantBadge, wantText, wantUptime }) => {
     render(<ServicesGrid />);
     seed(cluster());
     const card = screen.getByRole('button', { name: `${name} diagnostics` });
@@ -264,8 +255,8 @@ describe('Deployments', () => {
     const card = container.querySelector('.deploy-card') as HTMLElement;
     expect(card.className).toBe('deploy-card stage-swapping');
     expect(card.querySelector('.deploy-card-laser')).toBeNull();
-    expect(card.querySelector('.deploy-repo-badge')?.textContent?.trim()).toBe('azylman/aerial');
-    expect(within(card).getByRole('link', { name: 'a1b2c3d ↗' }).getAttribute('href')).toBe('https://github.com/azylman/aerial/commit/a1b2c3d');
+    expect(card.querySelector('.deploy-repo-badge')?.textContent?.trim()).toBe('acme/aerial');
+    expect(within(card).getByRole('link', { name: 'a1b2c3d ↗' }).getAttribute('href')).toBe('https://github.com/acme/aerial/commit/a1b2c3d');
     expect(card.querySelector('.timer-text')?.textContent?.trim()).toBe('03:00s');
     expect(card.querySelector('.deploy-stage-badge')?.textContent?.trim()).toBe('SWAPPING');
     expect([...card.querySelectorAll('.step-name')].map((e) => e.textContent)).toEqual(['CI Build & GHCR', 'Container Swap']);
@@ -293,6 +284,19 @@ describe('Deployments', () => {
   });
 });
 
+const T0 = '2026-11-08T12:00:00Z';
+const T5 = '2026-11-08T12:05:00Z';
+const progress = (total: number, completed: number, running: number, pendingCount: number) => ({
+  total_chunks: total,
+  completed_chunks: completed,
+  running_chunks: running,
+  pending_chunks: pendingCount,
+  failed_chunks: 0,
+});
+const UTC_TIMES = { created_at: T0, updated_at: T0 };
+const bentoChunk = (id: string, index: number, status: string, over: Partial<VanadisChunkDTO>): VanadisChunkDTO =>
+  chunk(id, index, status, { build_id: 'build-01', created_at: T0, updated_at: T5, ...over });
+
 const sampleBuilds = (over: Partial<BuildsAPIResponse> = {}): BuildsAPIResponse => ({
   status: 'ok',
   total: 3,
@@ -300,88 +304,19 @@ const sampleBuilds = (over: Partial<BuildsAPIResponse> = {}): BuildsAPIResponse 
   queued_count: 1,
   completed_count: 0,
   builds: [
-    {
-      id: 'build-01',
-      thread_id: '1',
-      tier: 1,
-      title: 'Console Bento View',
-      objective: 'Ship Bento',
-      status: 'running',
-      created_at: '2026-11-08T12:00:00Z',
-      updated_at: '2026-11-08T12:00:00Z',
-      total_chunks: 3,
-      completed_chunks: 1,
-      running_chunks: 1,
-      pending_chunks: 1,
-      failed_chunks: 0,
-      chunks: [
-        {
-          id: 'chunk-1',
-          build_id: 'build-01',
-          chunk_index: 0,
-          title: 'Wire Contract',
-          status: 'completed',
-          started_at: '2026-11-08T12:00:00Z',
-          completed_at: '2026-11-08T12:05:00Z',
-          created_at: '2026-11-08T12:00:00Z',
-          updated_at: '2026-11-08T12:05:00Z',
-        },
-        {
-          id: 'chunk-2',
-          build_id: 'build-01',
-          chunk_index: 1,
-          title: 'Inline Build DAG',
-          status: 'in_progress',
-          depends_on: ['chunk-1'],
-          started_at: '2026-11-08T12:05:00Z',
-          completed_at: '',
-          created_at: '2026-11-08T12:00:00Z',
-          updated_at: '2026-11-08T12:05:00Z',
-        },
-        {
-          id: 'chunk-3',
-          build_id: 'build-01',
-          chunk_index: 2,
-          title: 'Unit Tests',
-          status: 'pending',
-          depends_on: ['chunk-2'],
-          started_at: '',
-          completed_at: '',
-          created_at: '2026-11-08T12:00:00Z',
-          updated_at: '2026-11-08T12:05:00Z',
-        },
+    build(
+      'build-01',
+      'running',
+      'Console Bento View',
+      [
+        bentoChunk('chunk-1', 0, 'completed', { title: 'Wire Contract', started_at: T0, completed_at: T5 }),
+        bentoChunk('chunk-2', 1, 'in_progress', { title: 'Inline Build DAG', depends_on: ['chunk-1'], started_at: T5, completed_at: '' }),
+        bentoChunk('chunk-3', 2, 'pending', { title: 'Unit Tests', depends_on: ['chunk-2'], started_at: '', completed_at: '' }),
       ],
-    },
-    {
-      id: 'build-02',
-      thread_id: '2',
-      tier: 2,
-      title: 'Scheduler Jitter',
-      objective: 'Fix jitter',
-      status: 'queued',
-      created_at: '2026-11-08T12:00:00Z',
-      updated_at: '2026-11-08T12:00:00Z',
-      total_chunks: 2,
-      completed_chunks: 0,
-      running_chunks: 0,
-      pending_chunks: 2,
-      failed_chunks: 0,
-    },
-    {
-      id: 'build-03',
-      thread_id: '3',
-      tier: 1,
-      title: '',
-      objective: 'Build without title',
-      status: 'completed',
-      created_at: '2026-11-08T12:00:00Z',
-      updated_at: '2026-11-08T12:00:00Z',
-      total_chunks: 1,
-      completed_chunks: 1,
-      running_chunks: 0,
-      pending_chunks: 0,
-      failed_chunks: 0,
-    },
+      { thread_id: '1', tier: 1, objective: 'Ship Bento', ...UTC_TIMES, ...progress(3, 1, 1, 1) },
+    ),
+    build('build-02', 'queued', 'Scheduler Jitter', undefined, { thread_id: '2', objective: 'Fix jitter', ...UTC_TIMES, ...progress(2, 0, 0, 2) }),
+    build('build-03', 'completed', '', undefined, { thread_id: '3', tier: 1, objective: 'Build without title', ...UTC_TIMES, ...progress(1, 1, 0, 0) }),
   ],
   ...over,
 });
@@ -454,11 +389,22 @@ const seedBuilds = (data: BuildsAPIResponse): void => act(() => useConsoleStore.
 const seedSchedules = (data: SchedulesAPIResponse): void => act(() => useConsoleStore.getState().setSchedules(data));
 
 describe('OverviewBuildsSection', () => {
-  it('renders idle empty state when no builds exist', () => {
+  it.each([
+    { name: 'before the first poll shows loading', data: null, error: null, wantText: 'LOADING BUILDS...', wantRows: 0, wantAlert: null },
+    { name: 'an empty healthy queue is idle', data: sampleBuilds({ builds: [], running_count: 0, queued_count: 0, total: 0 }), error: null, wantText: 'ALL BUILDS IDLE // NO QUEUED RUNS', wantRows: 0, wantAlert: null },
+    { name: 'a failed first poll is an error, never idle', data: null, error: 'Upstream vanadis error occurred', wantText: null, wantRows: 0, wantAlert: 'VANADIS UNREACHABLE // Upstream vanadis error occurred' },
+    { name: 'an in-band error payload is an error, never idle', data: sampleBuilds({ status: 'error', error: 'Upstream vanadis error occurred', builds: [], running_count: 0, queued_count: 0, total: 0 }), error: null, wantText: null, wantRows: 0, wantAlert: 'VANADIS UNREACHABLE // Upstream vanadis error occurred' },
+    { name: 'a failed poll over a snapshot keeps stale rows with a notice', data: sampleBuilds(), error: 'HTTP 401', wantText: null, wantRows: 3, wantAlert: 'VANADIS UNREACHABLE // SHOWING LAST SNAPSHOT // HTTP 401' },
+  ])('$name', ({ data, error, wantText, wantRows, wantAlert }) => {
+    act(() => {
+      if (data !== null) useConsoleStore.getState().setBuilds(data);
+      if (error !== null) useConsoleStore.getState().failBuilds(error);
+    });
     const { container } = render(<OverviewBuildsSection />);
-    expect(screen.getByText('ALL BUILDS IDLE // NO QUEUED RUNS')).toBeTruthy();
-    expect(container.querySelector('.section-badge')?.textContent).toBe('0 ACTIVE');
-    expect(container.querySelectorAll('.overview-build-row')).toHaveLength(0);
+    expect(screen.queryByText('ALL BUILDS IDLE // NO QUEUED RUNS') !== null).toBe(wantText === 'ALL BUILDS IDLE // NO QUEUED RUNS');
+    if (wantText !== null) expect(container.querySelector('.overview-bento-body')?.textContent).toContain(wantText);
+    expect(screen.queryByRole('alert')?.textContent?.replace(/\s+/g, ' ').trim() ?? null).toBe(wantAlert);
+    expect(container.querySelectorAll('.overview-build-row')).toHaveLength(wantRows);
   });
 
   it('renders populated build rows with active builds prioritized first, toggles inline DAG expansion on click, and navigates to builds tab', () => {
@@ -466,22 +412,15 @@ describe('OverviewBuildsSection', () => {
     seedBuilds(
       sampleBuilds({
         builds: [
-          {
-            id: 'build-completed-newest',
+          build('build-completed-newest', 'completed', 'Recent Completed Build', undefined, {
             thread_id: 'th-0',
             tier: 1,
-            title: 'Recent Completed Build',
             objective: 'Done',
-            status: 'completed',
             queue_state: 'completed',
-            total_chunks: 2,
-            completed_chunks: 2,
-            running_chunks: 0,
-            pending_chunks: 0,
-            failed_chunks: 0,
-            created_at: '2026-11-08T12:05:00Z',
+            ...progress(2, 2, 0, 0),
+            created_at: T5,
             updated_at: '2026-11-08T12:10:00Z',
-          },
+          }),
           ...sampleBuilds().builds,
         ],
       }),
@@ -575,34 +514,15 @@ describe('OverviewBuildsSection', () => {
     expect(fetchMock).toHaveBeenCalledWith('/api/builds/build-03', expect.any(Object));
 
     // B resolves first with chunk B
+    const resultChunk = (id: string, buildId: string, title: string) =>
+      chunk(id, 0, 'completed', { build_id: buildId, title, started_at: T0, completed_at: T5, created_at: T0, updated_at: T5 });
     await act(async () => {
       resolveB?.(
         new Response(
           JSON.stringify({
             status: 'ok',
-            build: {
-              id: 'build-03',
-              thread_id: '3',
-              tier: 1,
-              title: 'Build 3',
-              objective: 'Build without title',
-              status: 'completed',
-              created_at: '2026-11-08T12:00:00Z',
-              updated_at: '2026-11-08T12:00:00Z',
-            },
-            chunks: [
-              {
-                id: 'chunk-b',
-                build_id: 'build-03',
-                chunk_index: 0,
-                title: 'Chunk B Result',
-                status: 'completed',
-                started_at: '2026-11-08T12:00:00Z',
-                completed_at: '2026-11-08T12:05:00Z',
-                created_at: '2026-11-08T12:00:00Z',
-                updated_at: '2026-11-08T12:05:00Z',
-              },
-            ],
+            build: build('build-03', 'completed', 'Build 3', undefined, { thread_id: '3', tier: 1, objective: 'Build without title', ...UTC_TIMES }),
+            chunks: [resultChunk('chunk-b', 'build-03', 'Chunk B Result')],
           }),
         ),
       );
@@ -615,29 +535,8 @@ describe('OverviewBuildsSection', () => {
         new Response(
           JSON.stringify({
             status: 'ok',
-            build: {
-              id: 'build-02',
-              thread_id: '2',
-              tier: 2,
-              title: 'Build 2',
-              objective: 'Fix jitter',
-              status: 'queued',
-              created_at: '2026-11-08T12:00:00Z',
-              updated_at: '2026-11-08T12:00:00Z',
-            },
-            chunks: [
-              {
-                id: 'chunk-a',
-                build_id: 'build-02',
-                chunk_index: 0,
-                title: 'Chunk A Result',
-                status: 'completed',
-                started_at: '2026-11-08T12:00:00Z',
-                completed_at: '2026-11-08T12:05:00Z',
-                created_at: '2026-11-08T12:00:00Z',
-                updated_at: '2026-11-08T12:05:00Z',
-              },
-            ],
+            build: build('build-02', 'queued', 'Build 2', undefined, { thread_id: '2', objective: 'Fix jitter', ...UTC_TIMES }),
+            chunks: [resultChunk('chunk-a', 'build-02', 'Chunk A Result')],
           }),
         ),
       );
@@ -647,97 +546,34 @@ describe('OverviewBuildsSection', () => {
     expect(within(rows[2] as HTMLElement).getByText('Chunk B Result')).toBeTruthy();
   });
 
-  it('displays error state when fallback fetch fails and empty state when build has zero chunks', async () => {
-    fetchMock.mockImplementation(() => Promise.reject(new Error('vanadis unavailable')));
-
+  // A chunk-less list entry (build-02) and one with an empty chunks array both fetch their detail:
+  // in flight it shows loading, a failure shows the error (never the empty state) and only a detail
+  // with zero chunks shows the empty state.
+  const DETAIL_STATES = ['LOADING BUILD CHUNKS...', 'FAILED TO LOAD BUILD CHUNKS // vanadis unavailable', 'NO CHUNKS REGISTERED'];
+  const DETAIL_OUTCOMES = {
+    pending: () => pending(),
+    rejected: () => Promise.reject(new Error('vanadis unavailable')),
+    zeroChunks: (url: string) =>
+      json(200, { status: 'ok', build: build(url.slice('/api/builds/'.length), 'queued', 'Detail', undefined, UTC_TIMES), chunks: [] }),
+  } as const;
+  it.each([
+    { name: 'chunk-less build in flight', chunks: undefined, outcome: 'pending', want: 'LOADING BUILD CHUNKS...' },
+    { name: 'chunk-less build fetch failure', chunks: undefined, outcome: 'rejected', want: 'FAILED TO LOAD BUILD CHUNKS // vanadis unavailable' },
+    { name: 'chunk-less build with zero chunks', chunks: undefined, outcome: 'zeroChunks', want: 'NO CHUNKS REGISTERED' },
+    { name: 'empty chunks array in flight', chunks: [], outcome: 'pending', want: 'LOADING BUILD CHUNKS...' },
+    { name: 'empty chunks array fetch failure', chunks: [], outcome: 'rejected', want: 'FAILED TO LOAD BUILD CHUNKS // vanadis unavailable' },
+    { name: 'empty chunks array with zero chunks', chunks: [], outcome: 'zeroChunks', want: 'NO CHUNKS REGISTERED' },
+  ] as const)('$name shows "$want"', async ({ chunks, outcome, want }) => {
+    fetchMock.mockImplementation(DETAIL_OUTCOMES[outcome]);
     const { container } = render(<OverviewBuildsSection />);
-    seedBuilds(sampleBuilds());
-    const rows = container.querySelectorAll('.overview-build-row');
-    const header2 = rows[1]?.querySelector('.overview-build-header') as HTMLElement;
-
-    // Expand build-02: fetch fails
-    await act(async () => {
-      header2.click();
-    });
-    expect(within(rows[1] as HTMLElement).getByText('FAILED TO LOAD BUILD CHUNKS // vanadis unavailable')).toBeTruthy();
-
-    // Resolve with legitimate 0 chunks
-    act(() =>
-      useConsoleStore.getState().setBuildDetail({
-        status: 'ok',
-        build: {
-          id: 'build-02',
-          thread_id: '2',
-          tier: 2,
-          title: 'Scheduler Jitter',
-          objective: 'Fix jitter',
-          status: 'queued',
-          created_at: '2026-11-08T12:00:00Z',
-          updated_at: '2026-11-08T12:00:00Z',
-        },
-        chunks: [],
-      }),
-    );
-    expect(within(rows[1] as HTMLElement).getByText('NO CHUNKS REGISTERED')).toBeTruthy();
-  });
-
-  it('handles builds with empty chunk arrays by showing loading while fetching, error on failure, and empty state on success', async () => {
-    let rejectFetch: ((err: Error) => void) | null = null;
-    fetchMock.mockImplementation(
-      () =>
-        new Promise<Response>((_resolve, reject) => {
-          rejectFetch = reject;
-        }),
-    );
-
-    const { container } = render(<OverviewBuildsSection />);
-    const baseBuild = sampleBuilds().builds[0] as NonNullable<typeof sampleBuilds.prototype>;
-    seedBuilds(
-      sampleBuilds({
-        builds: [
-          {
-            ...baseBuild,
-            id: 'build-empty-chunks',
-            title: 'Build With Empty Chunks Array',
-            chunks: [],
-          },
-        ],
-      }),
-    );
+    seedBuilds(sampleBuilds({ builds: [build('build-detail', 'running', 'Detail Build', chunks, UTC_TIMES)] }));
     const row = container.querySelector('.overview-build-row') as HTMLElement;
-    const header = row.querySelector('.overview-build-header') as HTMLElement;
 
-    // Expand build with chunks: []
-    act(() => header.click());
-    expect(header.getAttribute('aria-expanded')).toBe('true');
-    expect(within(row).getByText('LOADING BUILD CHUNKS...')).toBeTruthy();
-    expect(within(row).queryByText('NO CHUNKS REGISTERED')).toBeNull();
-
-    // Reject the fetch -> shows error state, never empty state
     await act(async () => {
-      rejectFetch?.(new Error('chunk fetch failed'));
+      (row.querySelector('.overview-build-header') as HTMLElement).click();
     });
-    expect(within(row).getByText('FAILED TO LOAD BUILD CHUNKS // chunk fetch failed')).toBeTruthy();
-    expect(within(row).queryByText('NO CHUNKS REGISTERED')).toBeNull();
-
-    // Re-resolve with empty chunks detail response -> now shows legitimate empty state
-    act(() =>
-      useConsoleStore.getState().setBuildDetail({
-        status: 'ok',
-        build: {
-          id: 'build-empty-chunks',
-          thread_id: '1',
-          tier: 1,
-          title: 'Build With Empty Chunks Array',
-          objective: 'Test',
-          status: 'running',
-          created_at: '2026-11-08T12:00:00Z',
-          updated_at: '2026-11-08T12:00:00Z',
-        },
-        chunks: [],
-      }),
-    );
-    expect(within(row).getByText('NO CHUNKS REGISTERED')).toBeTruthy();
+    expect(fetchMock.mock.calls.map(([url]) => url)).toEqual(['/api/builds/build-detail']);
+    expect(DETAIL_STATES.map((s) => within(row).queryByText(s) !== null)).toEqual(DETAIL_STATES.map((s) => s === want));
   });
 
   it('isolates detail errors from earlier failures when expanding an unrelated chunk-less build', async () => {
@@ -802,7 +638,7 @@ describe('TelemetryView', () => {
       'Cluster Service Matrix',
       'Deployment Pipeline',
     ]);
-    expect(screen.getByText('GIT SYNC: IN SYNC (Δ 0s)')).toBeTruthy();
+    expect(screen.queryByText(/GIT SYNC/)).toBeNull();
     expect(screen.getByText('ALL WORKERS IDLE // NO PENDING TURNS')).toBeTruthy();
     act(() => screen.getByRole('button', { name: 'Tasks ↗' }).click());
     expect(useConsoleStore.getState().ui.activeTab).toBe('tasks');

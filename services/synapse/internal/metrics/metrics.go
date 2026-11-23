@@ -5,6 +5,8 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"slices"
+	"strings"
 
 	"github.com/prometheus/client_golang/prometheus"
 
@@ -15,6 +17,7 @@ import (
 const (
 	unknownLabel = "unknown"
 	labelQueue   = "queue"
+	labelAgent   = "agent"
 	fieldKind    = "kind"
 	fieldStatus  = "status"
 	fieldReason  = "reason"
@@ -77,6 +80,17 @@ var (
 		[]string{labelQueue, "state"},
 	)
 
+	// DiscordAgentQueueDepth breaks the Discord queues down per bot. The
+	// aggregate stays on QueueDepth so existing dashboards and alerts are
+	// unchanged.
+	DiscordAgentQueueDepth = prometheus.NewGaugeVec(
+		prometheus.GaugeOpts{
+			Name: "synapse_discord_agent_queue_depth",
+			Help: "Current depth of per-agent Discord queues partitioned by state.",
+		},
+		[]string{labelQueue, labelAgent, "state"},
+	)
+
 	DiscordGatewayLatencySeconds = prometheus.NewGauge(
 		prometheus.GaugeOpts{
 			Name: "synapse_discord_gateway_latency_seconds",
@@ -84,28 +98,96 @@ var (
 		},
 	)
 
-	// RestateShadowSendsTotal counts dark shadow requests mirrored at the
-	// Restate PRObject/RepoObject ingress, partitioned by handler and outcome.
-	// Shadow failures always fail closed; the legacy path stays authoritative.
-	RestateShadowSendsTotal = prometheus.NewCounterVec(
+	// RestateSendsTotal counts every synapse request to the Restate
+	// PRObject/RepoObject ingress (one-way sends and the few
+	// request-response calls), partitioned by handler and outcome: sent,
+	// error (retried) or terminal (job dropped).
+	RestateSendsTotal = prometheus.NewCounterVec(
 		prometheus.CounterOpts{
-			Name: "synapse_restate_shadow_sends_total",
-			Help: "Total number of dark shadow requests mirrored at Restate ingress by outcome.",
+			Name: "synapse_restate_sends_total",
+			Help: "Total number of synapse requests to Restate PRObject/RepoObject ingress by handler and outcome.",
 		},
 		[]string{"handler", fieldStatus},
 	)
-
-	// RestateShadowDivergenceTotal counts first-touch hydration mismatches
-	// between live events and the pr_registry projection. The cutover gate
-	// requires this to stay zero.
-	RestateShadowDivergenceTotal = prometheus.NewCounterVec(
+	// RestateMergeRecoveredTotal counts merges synapse recovered for PRObject
+	// from a deploy-path commit lookup that fell back to GitHub, because the
+	// PR's closed and main-push webhooks never reached Restate.
+	RestateMergeRecoveredTotal = prometheus.NewCounterVec(
 		prometheus.CounterOpts{
-			Name: "synapse_restate_shadow_divergence_total",
-			Help: "Total number of dark shadow hydration divergences from the registry projection by reason.",
+			Name: "synapse_restate_merge_recovered_total",
+			Help: "Total number of PR merges recovered into PRObject from a deploy-path GitHub commit lookup, by path.",
 		},
-		[]string{fieldReason},
+		[]string{"path"},
+	)
+	// GitHubRequestsBySource counts GitHub REST requests by the credential
+	// the githubauth transport attached ("app" or "pat").
+	GitHubRequestsBySource = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "github_requests_by_source_total",
+			Help: "GitHub REST requests sent, by credential source (app or pat).",
+		},
+		[]string{"source"},
+	)
+	// GitHubRateLimitRemaining is the last X-RateLimit-Remaining per source.
+	GitHubRateLimitRemaining = prometheus.NewGaugeVec(
+		prometheus.GaugeOpts{
+			Name: "github_rate_limit_remaining",
+			Help: "Last X-RateLimit-Remaining GitHub returned, by credential source.",
+		},
+		[]string{"source"},
+	)
+	// GitHubTokenMints counts GitHub App installation token mints by result.
+	GitHubTokenMints = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "github_token_mint_total",
+			Help: "GitHub App installation token mints, by result.",
+		},
+		[]string{"result"},
+	)
+	// GitHubCredentialConfigured is 1 for the configured github_credential.
+	GitHubCredentialConfigured = prometheus.NewGaugeVec(
+		prometheus.GaugeOpts{
+			Name: "github_credential_configured",
+			Help: "1 for the github_credential choice currently configured (app or pat), 0 otherwise.",
+		},
+		[]string{"credential"},
 	)
 )
+
+// GitHubAuthMetrics backs githubauth.Metrics with the synapse collectors.
+type GitHubAuthMetrics struct{}
+
+// IncRequest counts one GitHub request sent with source's credential.
+func (GitHubAuthMetrics) IncRequest(source string) {
+	GitHubRequestsBySource.WithLabelValues(source).Inc()
+}
+
+// SetRateLimitRemaining records the last rate-limit headroom for source.
+func (GitHubAuthMetrics) SetRateLimitRemaining(source string, remaining float64) {
+	GitHubRateLimitRemaining.WithLabelValues(source).Set(remaining)
+}
+
+// IncTokenMint counts one App token mint attempt by result.
+func (GitHubAuthMetrics) IncTokenMint(result string) {
+	GitHubTokenMints.WithLabelValues(result).Inc()
+}
+
+// SetGitHubCredentialConfigured exports 1 for the active credential and 0
+// for the other. Like githubauth.NewSelectingTokenSource, only "pat" selects
+// the PAT; anything else (including unset) is app.
+func SetGitHubCredentialConfigured(credential string) {
+	active := "app"
+	if strings.EqualFold(strings.TrimSpace(credential), "pat") {
+		active = "pat"
+	}
+	for _, c := range []string{"app", "pat"} {
+		v := 0.0
+		if c == active {
+			v = 1
+		}
+		GitHubCredentialConfigured.WithLabelValues(c).Set(v)
+	}
+}
 
 var (
 	knownQueues = []string{
@@ -125,14 +207,19 @@ func registerCollector(c prometheus.Collector) {
 }
 
 func init() {
-	registerCollector(RestateShadowSendsTotal)
-	registerCollector(RestateShadowDivergenceTotal)
+	registerCollector(RestateSendsTotal)
+	registerCollector(RestateMergeRecoveredTotal)
+	registerCollector(GitHubRequestsBySource)
+	registerCollector(GitHubRateLimitRemaining)
+	registerCollector(GitHubTokenMints)
+	registerCollector(GitHubCredentialConfigured)
 	registerCollector(JobsEnqueuedTotal)
 	registerCollector(JobsProcessedTotal)
 	registerCollector(JobDurationSeconds)
 	registerCollector(JobRetriesTotal)
 	registerCollector(JobsDroppedTotal)
 	registerCollector(QueueDepth)
+	registerCollector(DiscordAgentQueueDepth)
 	registerCollector(DiscordGatewayLatencySeconds)
 
 	for _, q := range knownQueues {
@@ -185,25 +272,25 @@ func RecordJobDropped(queue, kind, reason string) {
 	JobsDroppedTotal.WithLabelValues(queue, kind, reason).Inc()
 }
 
-// RecordRestateShadowSend increments the RestateShadowSendsTotal counter for
-// the specified frozen handler and outcome ("sent" or "error").
-func RecordRestateShadowSend(handler, status string) {
+// RecordRestateSend increments the RestateSendsTotal counter for the
+// specified Restate handler and outcome ("sent", "error" or "terminal").
+func RecordRestateSend(handler, status string) {
 	if handler == "" {
 		handler = unknownLabel
 	}
 	if status == "" {
 		status = unknownLabel
 	}
-	RestateShadowSendsTotal.WithLabelValues(handler, status).Inc()
+	RestateSendsTotal.WithLabelValues(handler, status).Inc()
 }
 
-// RecordRestateShadowDivergence increments the RestateShadowDivergenceTotal
-// counter for the specified mismatch reason.
-func RecordRestateShadowDivergence(reason string) {
-	if reason == "" {
-		reason = unknownLabel
+// RecordRestateMergeRecovered increments the RestateMergeRecoveredTotal
+// counter for path.
+func RecordRestateMergeRecovered(path string) {
+	if path == "" {
+		path = unknownLabel
 	}
-	RestateShadowDivergenceTotal.WithLabelValues(reason).Inc()
+	RestateMergeRecoveredTotal.WithLabelValues(path).Inc()
 }
 
 // SetDiscordGatewayLatency sets the DiscordGatewayLatencySeconds gauge.
@@ -220,21 +307,36 @@ type synapseConsumerTarget struct {
 	stream   string
 	consumer string
 	queue    string
+	agent    string
 }
 
 var synapseConsumerTargets = []synapseConsumerTarget{
 	{stream: pubsub.StreamAerialJobs, consumer: "synapse-github", queue: QueueDefault},
 	{stream: pubsub.StreamAerialJobs, consumer: "synapse-deploy", queue: QueueDefault},
-	{stream: pubsub.StreamAerialJobs, consumer: "synapse-discord-ingress", queue: QueueDiscordIngress},
-	{stream: pubsub.StreamAerialJobs, consumer: "synapse-discord-interaction", queue: QueueDiscordInteraction},
 }
 
-// CollectJetStreamQueueMetrics reads consumer pending and in-flight counts and updates QueueDepth gauges.
-func CollectJetStreamQueueMetrics(ctx context.Context, q ConsumerStatsQuerier) error {
+// consumerTargetsFor returns the static targets followed by one ingress and
+// one interaction durable per Discord agent, in routing order.
+func consumerTargetsFor(routing DiscordRouting) []synapseConsumerTarget {
+	targets := slices.Clone(synapseConsumerTargets)
+	for _, agent := range routing.Agents() {
+		targets = append(targets,
+			synapseConsumerTarget{stream: pubsub.StreamAerialJobs, consumer: DiscordIngressDurable(agent), queue: QueueDiscordIngress, agent: agent},
+			synapseConsumerTarget{stream: pubsub.StreamAerialJobs, consumer: DiscordInteractionDurable(agent), queue: QueueDiscordInteraction, agent: agent},
+		)
+	}
+	return targets
+}
+
+// CollectJetStreamQueueMetrics reads consumer pending and in-flight counts and
+// updates QueueDepth (summed per queue across every durable, including the
+// per-agent Discord ones) and DiscordAgentQueueDepth (per agent).
+func CollectJetStreamQueueMetrics(ctx context.Context, q ConsumerStatsQuerier, routing DiscordRouting) error {
 	for _, queue := range knownQueues {
 		QueueDepth.WithLabelValues(queue, "pending").Set(0)
 		QueueDepth.WithLabelValues(queue, "in_flight").Set(0)
 	}
+	DiscordAgentQueueDepth.Reset()
 	if q == nil {
 		return nil
 	}
@@ -242,7 +344,7 @@ func CollectJetStreamQueueMetrics(ctx context.Context, q ConsumerStatsQuerier) e
 	queuePending := make(map[string]int64)
 	queueInFlight := make(map[string]int64)
 	var firstErr error
-	for _, target := range synapseConsumerTargets {
+	for _, target := range consumerTargetsFor(routing) {
 		pending, inFlight, err := q.ConsumerStats(ctx, target.stream, target.consumer)
 		if err != nil {
 			if firstErr == nil {
@@ -253,6 +355,10 @@ func CollectJetStreamQueueMetrics(ctx context.Context, q ConsumerStatsQuerier) e
 		}
 		queuePending[target.queue] += pending
 		queueInFlight[target.queue] += inFlight
+		if target.agent != "" {
+			DiscordAgentQueueDepth.WithLabelValues(target.queue, target.agent, "pending").Set(float64(pending))
+			DiscordAgentQueueDepth.WithLabelValues(target.queue, target.agent, "in_flight").Set(float64(inFlight))
+		}
 	}
 	for queue, p := range queuePending {
 		QueueDepth.WithLabelValues(queue, "pending").Set(float64(p))
@@ -302,17 +408,117 @@ func ResolveJobQueueAndKind(args any) (string, string) {
 	}
 }
 
+func discordDedupID(prefix, agent, id string) string {
+	agent = strings.TrimSpace(agent)
+	if agent != "" {
+		return prefix + agent + ":" + id
+	}
+	return prefix + id
+}
+
+// Base subject and durable prefixes for the per-agent Discord builders.
+const (
+	discordBaseIngressSubject     = "aerial.jobs.synapse.discord_ingress"
+	discordBaseInteractionSubject = "aerial.jobs.synapse.discord_interaction"
+	discordBaseIngressDurable     = "synapse-discord-ingress"
+	discordBaseInteractionDurable = "synapse-discord-interaction"
+)
+
+// SanitizeDiscordAgent lowercases and trims agent and maps it to a single
+// NATS subject token that is also a valid durable name suffix: every rune
+// outside [a-z0-9_-] becomes '_'. Blank input returns "".
+func SanitizeDiscordAgent(agent string) string {
+	agent = strings.ToLower(strings.TrimSpace(agent))
+	return strings.Map(func(r rune) rune {
+		if (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') || r == '_' || r == '-' {
+			return r
+		}
+		return '_'
+	}, agent)
+}
+
+// DiscordIngressSubject returns the per-agent Discord message job subject.
+func DiscordIngressSubject(agent string) string {
+	return discordBaseIngressSubject + "." + agentToken(agent)
+}
+
+// DiscordInteractionSubject returns the per-agent Discord interaction job subject.
+func DiscordInteractionSubject(agent string) string {
+	return discordBaseInteractionSubject + "." + agentToken(agent)
+}
+
+// DiscordIngressDurable returns the per-agent Discord message consumer durable.
+func DiscordIngressDurable(agent string) string {
+	return discordBaseIngressDurable + "-" + agentToken(agent)
+}
+
+// DiscordInteractionDurable returns the per-agent Discord interaction consumer durable.
+func DiscordInteractionDurable(agent string) string {
+	return discordBaseInteractionDurable + "-" + agentToken(agent)
+}
+
+func agentToken(agent string) string {
+	if token := SanitizeDiscordAgent(agent); token != "" {
+		return token
+	}
+	return unknownLabel
+}
+
+// DiscordRouting maps Discord job agents onto the per-agent subjects that
+// synapse actually consumes. Publish, consume and metrics paths all derive
+// from the same routing so a published job always has a durable.
+type DiscordRouting struct {
+	defaultAgent string
+	agents       []string
+}
+
+// NewDiscordRouting builds routing for the configured bot names and default
+// owner agent. Agents are sanitized, deduplicated and sorted; the default
+// owner is always included so its subject is consumed even with no bots.
+func NewDiscordRouting(configured []string, defaultAgent string) DiscordRouting {
+	def := agentToken(defaultAgent)
+	agents := []string{def}
+	for _, a := range configured {
+		if token := SanitizeDiscordAgent(a); token != "" {
+			agents = append(agents, token)
+		}
+	}
+	slices.Sort(agents)
+	return DiscordRouting{defaultAgent: def, agents: slices.Compact(agents)}
+}
+
+// Agents returns the sorted agent tokens that get their own durables.
+func (r DiscordRouting) Agents() []string {
+	if len(r.agents) == 0 {
+		return []string{agentToken(r.defaultAgent)}
+	}
+	return slices.Clone(r.agents)
+}
+
+// Resolve returns the agent token a job for agent is routed to. Blank agents
+// and agents without a configured durable fall back to the default owner, so
+// no job lands on a subject nobody consumes. The job payload keeps its
+// original Agent field; only the subject changes.
+func (r DiscordRouting) Resolve(agent string) string {
+	token := SanitizeDiscordAgent(agent)
+	if token != "" && slices.Contains(r.agents, token) {
+		return token
+	}
+	return agentToken(r.defaultAgent)
+}
+
 // ResolveJetStreamJobCoords returns the JetStream subject and deduplication message ID for a job payload.
-func ResolveJetStreamJobCoords(args any) (string, string) {
+// Discord jobs are routed to their per-agent subject via routing.
+func ResolveJetStreamJobCoords(args any, routing DiscordRouting) (string, string) {
 	switch a := NormalizeJobArgs(args).(type) {
 	case model.GitHubWebhookArgs:
 		return "aerial.jobs.synapse.github", "github:" + a.Delivery
 	case model.DeployWebhookArgs:
 		return "aerial.jobs.synapse.deploy", "deploy:" + a.IdempotencyKey
 	case model.DiscordIngressArgs:
-		return "aerial.jobs.synapse.discord_ingress", "discord:msg:" + a.MessageID
+		return DiscordIngressSubject(routing.Resolve(a.Agent)), discordDedupID("discord:msg:", a.Agent, a.MessageID)
 	case model.DiscordInteractionArgs:
-		return "aerial.jobs.synapse.discord_interaction", "discord:ix:" + a.InteractionID
+		return DiscordInteractionSubject(routing.Resolve(a.Agent)), discordDedupID("discord:ix:", a.Agent, a.InteractionID)
 	default:
 		return "", ""
 	}

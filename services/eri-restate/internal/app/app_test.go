@@ -5,21 +5,20 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
-	"os"
 	"path/filepath"
 	"strings"
-	"sync"
 	"testing"
 	"time"
 
-	"github.com/bwmarrin/discordgo"
+	restate "github.com/restatedev/sdk-go"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/azylman/aerial/pkg/pubsub"
+	"github.com/azylman/aerial/services/eri/pkg/bootstrap"
 	"github.com/azylman/aerial/services/eri/pkg/config"
 	"github.com/azylman/aerial/services/eri/pkg/db"
 	"github.com/azylman/aerial/services/eri/pkg/db/dbtest"
@@ -54,14 +53,10 @@ func WithAppConfig(cfg *config.Config) AppOption {
 	}
 }
 
-func (t *ReloadTrigger) Done() <-chan struct{} {
-	return t.done
-}
-
 func TestNewEriRestateServer(t *testing.T) {
 	t.Parallel()
 
-	srv := NewEriRestateServer(nil, "aerial")
+	srv := NewEriRestateServer(nil, "aerial", nil)
 	require.NotNil(t, srv)
 	h, err := srv.Handler()
 	require.NoError(t, err)
@@ -71,41 +66,78 @@ func TestNewEriRestateServer(t *testing.T) {
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
 	assert.Equal(t, http.StatusOK, rec.Code)
-	assert.Contains(t, rec.Body.String(), "ThreadSession")
-	assert.Contains(t, rec.Body.String(), "DispatchSession")
-	assert.Contains(t, rec.Body.String(), "VoiceSession")
-	assert.Contains(t, rec.Body.String(), "SessionManager")
+	for _, svc := range []string{`"ThreadSession"`, `"DispatchSession"`, `"VoiceSession"`, `"SessionManager"`, `"TurnRunner"`, `"LLM"`} {
+		assert.Contains(t, rec.Body.String(), svc)
+	}
 }
 
-func TestDiscoveryTimeoutReconciliationAndH2C(t *testing.T) {
+// boundHandlers maps "<service> <service type>" to each handler name and kind of defs.
+func boundHandlers(defs []restate.ServiceDefinition) map[string]map[string]string {
+	out := map[string]map[string]string{}
+	for _, def := range defs {
+		handlers := map[string]string{}
+		for name, h := range def.Handlers() {
+			kind := "-"
+			if ht := h.HandlerType(); ht != nil {
+				kind = fmt.Sprint(*ht)
+			}
+			handlers[name] = kind
+		}
+		out[def.Name()+" "+fmt.Sprint(def.Type())] = handlers
+	}
+	return out
+}
+
+func TestEriRestateDefinitions(t *testing.T) {
 	t.Parallel()
 
-	var mu sync.Mutex
-	reconcileCount := 0
-	adminServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		mu.Lock()
-		reconcileCount++
-		mu.Unlock()
-		w.WriteHeader(http.StatusOK)
-		_, _ = w.Write([]byte(`{"status":"ok"}`))
-	}))
-	defer adminServer.Close()
+	// Every revision binds exactly this set, so a deploy never drops a service or changes a
+	// handler's name or kind on a deployment with in-flight invocations.
+	want := func(suffix string) map[string]map[string]string {
+		return map[string]map[string]string{
+			"ThreadSession" + suffix + " VIRTUAL_OBJECT": {
+				"Enqueue": "SHARED", "Append": "EXCLUSIVE", "OnTurnDone": "EXCLUSIVE", "Kick": "EXCLUSIVE",
+				"CancelTurn": "SHARED", "ClearPending": "EXCLUSIVE", "Status": "SHARED",
+			},
+			"DispatchSession" + suffix + " VIRTUAL_OBJECT": {
+				"Enqueue": "SHARED", "Append": "EXCLUSIVE", "OnTurnDone": "EXCLUSIVE", "Cancel": "SHARED",
+				"ClearPending": "EXCLUSIVE", "Status": "SHARED",
+			},
+			"VoiceSession" + suffix + " VIRTUAL_OBJECT": {"Ask": "EXCLUSIVE"},
+			"SessionManager" + suffix + " SERVICE":      {"CancelDispatch": "-"},
+			"TurnRunner" + suffix + " SERVICE":          {"RunBurst": "-", "RunDispatch": "-"},
+			"LLM" + suffix + " SERVICE":                 {"Complete": "-"},
+		}
+	}
+
+	tests := []struct {
+		name  string
+		agent string
+		want  map[string]map[string]string
+	}{
+		{name: "aerial", agent: "aerial", want: want("")},
+		{name: "miorine", agent: "miorine", want: want("-miorine")},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			assert.Equal(t, tc.want, boundHandlers(eriRestateDefinitions(nil, tc.agent, nil)))
+		})
+	}
+}
+
+func TestDiscoveryManifestTimeoutsAndH2C(t *testing.T) {
+	t.Parallel()
 
 	var h2cProtocols http.Protocols
 	h2cProtocols.SetHTTP1(true)
 	h2cProtocols.SetUnencryptedHTTP2(true)
 
-	srv := NewEriRestateServer(nil, "aerial")
+	srv := NewEriRestateServer(nil, "aerial", nil)
 	rawHandler, err := srv.Handler()
 	require.NoError(t, err)
 
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-
-	trigger := startDiscoveryTimeoutReconciler(ctx, adminServer.URL, "aerial", adminServer.Client(), 3, 50*time.Millisecond)
-	wrappedHandler := wrapDiscoveryTimeoutReconciler(rawHandler, trigger.Trigger)
-
-	server := httptest.NewUnstartedServer(wrappedHandler)
+	server := httptest.NewUnstartedServer(rawHandler)
 	server.Config.Protocols = &h2cProtocols
 	server.Start()
 	defer server.Close()
@@ -117,7 +149,7 @@ func TestDiscoveryTimeoutReconciliationAndH2C(t *testing.T) {
 		tr.Protocols = &clientProtocols
 	}
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, server.URL+"/discover", http.NoBody)
+	req, err := http.NewRequestWithContext(t.Context(), http.MethodGet, server.URL+"/discover", http.NoBody)
 	require.NoError(t, err)
 	req.Header.Set("Accept", "application/vnd.restate.endpointmanifest.v3+json")
 
@@ -128,144 +160,36 @@ func TestDiscoveryTimeoutReconciliationAndH2C(t *testing.T) {
 	assert.Equal(t, http.StatusOK, resp.StatusCode)
 	assert.Equal(t, "HTTP/2.0", resp.Proto)
 
-	// Verify that the /discover request triggered timeout reconciliation against adminServer
-	require.Eventually(t, func() bool {
-		mu.Lock()
-		defer mu.Unlock()
-		return reconcileCount >= 3 // 3 services reconciled
-	}, 3*time.Second, 50*time.Millisecond)
-}
-
-type errRoundTripper struct {
-	err error
-}
-
-func (e *errRoundTripper) RoundTrip(*http.Request) (*http.Response, error) {
-	return nil, e.err
-}
-
-type timeoutReconcileCase struct {
-	name           string
-	agent          string
-	adminURL       string
-	statusCode     int
-	returnBody     string
-	transportError bool
-	wantErrorSub   string
-	wantCallCount  int
-	wantPaths      []string
-}
-
-func runTimeoutReconcileCase(t *testing.T, tc timeoutReconcileCase) {
-	t.Helper()
-	t.Parallel()
-
-	var mu sync.Mutex
-	recordedPaths := make([]string, 0)
-	recordedBodies := make([]string, 0)
-	recordedMethods := make([]string, 0)
-
-	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		mu.Lock()
-		recordedPaths = append(recordedPaths, r.URL.Path)
-		recordedMethods = append(recordedMethods, r.Method)
-		bodyBytes, _ := io.ReadAll(r.Body)
-		recordedBodies = append(recordedBodies, string(bodyBytes))
-		mu.Unlock()
-
-		w.WriteHeader(tc.statusCode)
-		_, _ = w.Write([]byte(tc.returnBody))
-	}))
-	defer ts.Close()
-
-	targetURL := ts.URL
-	if tc.adminURL != "" {
-		targetURL = tc.adminURL
+	var manifest struct {
+		Services []struct {
+			Name              string `json:"name"`
+			InactivityTimeout int64  `json:"inactivityTimeout"`
+			AbortTimeout      int64  `json:"abortTimeout"`
+		} `json:"services"`
 	}
-	client := ts.Client()
-	if tc.transportError {
-		client = &http.Client{
-			Transport: &errRoundTripper{err: assert.AnError},
-		}
+	require.NoError(t, json.NewDecoder(resp.Body).Decode(&manifest))
+
+	type timeouts struct {
+		inactivity int64
+		abort      int64
+	}
+	got := make(map[string]timeouts, len(manifest.Services))
+	for _, s := range manifest.Services {
+		got[s.Name] = timeouts{inactivity: s.InactivityTimeout, abort: s.AbortTimeout}
 	}
 
-	err := ReconcileRestateServiceTimeouts(context.Background(), targetURL, tc.agent, client)
-	if tc.wantErrorSub != "" {
-		require.Error(t, err)
-		assert.Contains(t, err.Error(), tc.wantErrorSub)
-		return
-	}
+	wantTurnHoldMs := queue.TurnHoldTimeout.Milliseconds()
+	wantHourMs := time.Hour.Milliseconds()
 
-	require.NoError(t, err)
-	mu.Lock()
-	defer mu.Unlock()
-	assert.Equal(t, tc.wantCallCount, len(recordedPaths))
-	if len(tc.wantPaths) > 0 {
-		assert.Equal(t, tc.wantPaths, recordedPaths)
+	wantTimeouts := map[string]timeouts{
+		"ThreadSession":   {inactivity: wantHourMs, abort: wantHourMs},
+		"DispatchSession": {inactivity: wantHourMs, abort: wantHourMs},
+		"VoiceSession":    {inactivity: wantHourMs, abort: wantHourMs},
+		"SessionManager":  {inactivity: wantHourMs, abort: wantHourMs},
+		"TurnRunner":      {inactivity: wantTurnHoldMs, abort: wantTurnHoldMs},
+		"LLM":             {inactivity: wantHourMs, abort: wantHourMs},
 	}
-	for i := range recordedPaths {
-		assert.Equal(t, http.MethodPatch, recordedMethods[i])
-		var p struct {
-			InactivityTimeout string `json:"inactivity_timeout"`
-			AbortTimeout      string `json:"abort_timeout"`
-		}
-		uErr := json.Unmarshal([]byte(recordedBodies[i]), &p)
-		require.NoError(t, uErr)
-		assert.Equal(t, "1h", p.InactivityTimeout)
-		assert.Equal(t, "1h", p.AbortTimeout)
-	}
-}
-
-func TestReconcileRestateServiceTimeouts(t *testing.T) {
-	t.Parallel()
-
-	tests := []timeoutReconcileCase{
-		{
-			name:          "successful timeout reconciliation for all 3 services",
-			agent:         "aerial",
-			statusCode:    http.StatusOK,
-			returnBody:    `{"status":"ok"}`,
-			wantCallCount: 3,
-			wantPaths: []string{
-				"/services/ThreadSession",
-				"/services/DispatchSession",
-				"/services/VoiceSession",
-			},
-		},
-		{
-			name:          "successful timeout reconciliation with namespaced agent",
-			agent:         "miorine",
-			statusCode:    http.StatusOK,
-			returnBody:    `{"status":"ok"}`,
-			wantCallCount: 3,
-			wantPaths: []string{
-				"/services/ThreadSession-miorine",
-				"/services/DispatchSession-miorine",
-				"/services/VoiceSession-miorine",
-			},
-		},
-		{
-			name:          "admin returns 500 error",
-			agent:         "aerial",
-			statusCode:    http.StatusInternalServerError,
-			returnBody:    `{"error":"internal"}`,
-			wantErrorSub:  "failed with status 500",
-			wantCallCount: 1,
-		},
-		{
-			name:           "http transport error",
-			agent:          "aerial",
-			transportError: true,
-			wantErrorSub:   "patch service",
-			wantCallCount:  1,
-		},
-	}
-
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			runTimeoutReconcileCase(t, tc)
-		})
-	}
+	assert.Equal(t, wantTimeouts, got)
 }
 
 type configEnvCase struct {
@@ -273,7 +197,6 @@ type configEnvCase struct {
 	env             map[string]string
 	wantRestatePort string
 	wantHealthPort  string
-	wantAdminURL    string
 	wantAgentName   string
 }
 
@@ -285,7 +208,6 @@ func runConfigEnvCase(t *testing.T, tc configEnvCase) {
 	cfg := LoadConfigFromEnv()
 	assert.Equal(t, tc.wantRestatePort, cfg.RestatePort)
 	assert.Equal(t, tc.wantHealthPort, cfg.HealthPort)
-	assert.Equal(t, tc.wantAdminURL, cfg.AdminURL)
 	assert.Equal(t, tc.wantAgentName, cfg.AgentName)
 }
 
@@ -293,27 +215,24 @@ func TestLoadConfigFromEnv(t *testing.T) {
 	tests := []configEnvCase{
 		{
 			name:            "default values",
-			env:             map[string]string{"RESTATE_PORT": "", "PORT": "", "HEALTH_PORT": "", "RESTATE_ADMIN_URL": "", "AGENT_NAME": ""},
+			env:             map[string]string{"RESTATE_PORT": "", "PORT": "", "HEALTH_PORT": "", "AGENT_NAME": ""},
 			wantRestatePort: "9080",
 			wantHealthPort:  "4028",
-			wantAdminURL:    "http://restate.aerial:9070",
 			wantAgentName:   "aerial",
 		},
 		{
 			name:            "PORT fallback for restate port",
-			env:             map[string]string{"RESTATE_PORT": "", "PORT": "9081", "HEALTH_PORT": "4029", "RESTATE_ADMIN_URL": "http://admin:9070/", "AGENT_NAME": "miorine"},
+			env:             map[string]string{"RESTATE_PORT": "", "PORT": "9081", "HEALTH_PORT": "4029", "AGENT_NAME": "agent-alpha"},
 			wantRestatePort: "9081",
 			wantHealthPort:  "4029",
-			wantAdminURL:    "http://admin:9070",
-			wantAgentName:   "miorine",
+			wantAgentName:   "agent-alpha",
 		},
 		{
 			name:            "explicit environment overrides",
-			env:             map[string]string{"RESTATE_PORT": "9090", "HEALTH_PORT": "4030", "RESTATE_ADMIN_URL": "http://restate-custom:9070", "AGENT_NAME": "suletta"},
+			env:             map[string]string{"RESTATE_PORT": "9090", "HEALTH_PORT": "4030", "AGENT_NAME": "agent-beta"},
 			wantRestatePort: "9090",
 			wantHealthPort:  "4030",
-			wantAdminURL:    "http://restate-custom:9070",
-			wantAgentName:   "suletta",
+			wantAgentName:   "agent-beta",
 		},
 	}
 
@@ -329,10 +248,8 @@ type healthEndpointCase struct {
 	method        string
 	path          string
 	body          string
-	llmResponse   string
-	llmError      error
-	withNilLLM    bool
 	withUsage     bool
+	remoteAddr    string
 	wantStatus    int
 	wantBodySub   string
 	wantHeaderKey string
@@ -347,26 +264,18 @@ func runHealthEndpointCase(t *testing.T, tc healthEndpointCase) {
 		metrics.RecordClaudeUsageJSON([]byte(`{"five_hour":{"utilization":50,"resets_at":"2026-11-20T12:00:00Z"}}`))
 	}
 
-	var llmFn runner.LLMFunc
-	if !tc.withNilLLM {
-		llmFn = func(ctx context.Context, model, prompt string) (string, error) {
-			if tc.llmError != nil {
-				return "", tc.llmError
-			}
-			return tc.llmResponse, nil
-		}
-	}
-
-	reloadTrigger := NewReloadTrigger(context.Background(), func(source string) {})
+	reloadTrigger := bootstrap.NewReloadTrigger(context.Background(), func(source string) {})
 	mux := SetupHealthMux(HealthMuxOptions{
 		AgentName:     "aerial",
-		LLMFunc:       llmFn,
 		ReloadTrigger: reloadTrigger,
 	})
 
 	req := httptest.NewRequest(tc.method, tc.path, strings.NewReader(tc.body))
 	if tc.body != "" {
 		req.Header.Set("Content-Type", "application/json")
+	}
+	if tc.remoteAddr != "" {
+		req.RemoteAddr = tc.remoteAddr
 	}
 	rec := httptest.NewRecorder()
 	mux.ServeHTTP(rec, req)
@@ -399,11 +308,11 @@ func TestSetupHealthMux(t *testing.T) {
 			wantBodySub: `{"status":"ok"}`,
 		},
 		{
-			name:        "GET /internal/quota returns 200 array",
+			name:        "GET /internal/quota returns 200 snapshot object",
 			method:      http.MethodGet,
 			path:        "/internal/quota",
 			wantStatus:  http.StatusOK,
-			wantBodySub: `[`,
+			wantBodySub: `"groups":[`,
 		},
 		{
 			name:        "GET /internal/quota with usage populated",
@@ -414,6 +323,13 @@ func TestSetupHealthMux(t *testing.T) {
 			wantBodySub: `Claude`,
 		},
 		{
+			name:        "GET /metrics serves the eri application registry",
+			method:      http.MethodGet,
+			path:        "/metrics",
+			wantStatus:  http.StatusOK,
+			wantBodySub: "aerial_brain_discord_typing_sessions_active",
+		},
+		{
 			name:          "POST /internal/quota returns 405",
 			method:        http.MethodPost,
 			path:          "/internal/quota",
@@ -422,63 +338,36 @@ func TestSetupHealthMux(t *testing.T) {
 			wantHeaderVal: "GET",
 		},
 		{
-			name:        "POST /internal/llm generates response",
-			method:      http.MethodPost,
-			path:        "/internal/llm",
-			body:        `{"prompt":"summarize text"}`,
-			llmResponse: "summary result",
-			wantStatus:  http.StatusOK,
-			wantBodySub: `{"response":"summary result"}`,
-		},
-		{
-			name:          "GET /internal/llm returns 405",
-			method:        http.MethodGet,
-			path:          "/internal/llm",
-			wantStatus:    http.StatusMethodNotAllowed,
-			wantHeaderKey: "Allow",
-			wantHeaderVal: "POST",
-		},
-		{
-			name:        "POST /internal/llm empty prompt returns 400",
-			method:      http.MethodPost,
-			path:        "/internal/llm",
-			body:        `{"prompt":"   "}`,
-			wantStatus:  http.StatusBadRequest,
-			wantBodySub: "prompt is required",
-		},
-		{
-			name:        "POST /internal/llm invalid json returns 400",
-			method:      http.MethodPost,
-			path:        "/internal/llm",
-			body:        `not-json`,
-			wantStatus:  http.StatusBadRequest,
-			wantBodySub: "invalid json payload",
-		},
-		{
-			name:        "POST /internal/llm nil llm returns 503",
-			method:      http.MethodPost,
-			path:        "/internal/llm",
-			body:        `{"prompt":"summarize"}`,
-			withNilLLM:  true,
+			name:        "loopback GET /internal/github-api/ reaches proxy without PAT",
+			method:      http.MethodGet,
+			path:        "/internal/github-api/user",
+			remoteAddr:  "127.0.0.1:41000",
 			wantStatus:  http.StatusServiceUnavailable,
-			wantBodySub: "llm function not available",
+			wantBodySub: "GitHub PAT not configured",
 		},
 		{
-			name:        "POST /internal/llm execution error returns 500",
+			name:        "loopback POST /internal/github-git/ reaches proxy without PAT",
 			method:      http.MethodPost,
-			path:        "/internal/llm",
-			body:        `{"prompt":"summarize"}`,
-			llmError:    errors.New("backend timeout"),
-			wantStatus:  http.StatusInternalServerError,
-			wantBodySub: "backend timeout",
+			path:        "/internal/github-git/org/repo.git/git-receive-pack",
+			remoteAddr:  "127.0.0.1:41000",
+			wantStatus:  http.StatusServiceUnavailable,
+			wantBodySub: "GitHub PAT not configured",
 		},
 		{
-			name:        "POST /internal/llm body too large returns 413",
+			name:        "pod-network GET /internal/github-api/ is forbidden",
+			method:      http.MethodGet,
+			path:        "/internal/github-api/user",
+			remoteAddr:  "192.0.2.20:41000",
+			wantStatus:  http.StatusForbidden,
+			wantBodySub: "forbidden",
+		},
+		{
+			name:        "pod-network POST /internal/github-git/ is forbidden",
 			method:      http.MethodPost,
-			path:        "/internal/llm",
-			body:        strings.Repeat("a", (1<<20)+1024),
-			wantStatus:  http.StatusRequestEntityTooLarge,
-			wantBodySub: "request body too large",
+			path:        "/internal/github-git/org/repo.git/git-receive-pack",
+			remoteAddr:  "192.0.2.20:41000",
+			wantStatus:  http.StatusForbidden,
+			wantBodySub: "forbidden",
 		},
 	}
 
@@ -552,7 +441,6 @@ func TestRunApp_CanceledContext(t *testing.T) {
 	cfg := Config{
 		RestatePort: "19080",
 		HealthPort:  "14028",
-		AdminURL:    "http://127.0.0.1:19070",
 		AgentName:   "aerial-test",
 	}
 
@@ -563,18 +451,6 @@ func TestRunApp_CanceledContext(t *testing.T) {
 		WithLLMFunc(func(ctx context.Context, model, prompt string) (string, error) {
 			return "test", nil
 		}),
-	)
-	assert.NoError(t, err)
-
-	// Test DiscordSession and EventBus injection in RunApp
-	bus := pubsub.NewMemoryBus()
-	t.Cleanup(func() { _ = bus.Close() })
-	err = RunApp(ctx, cfg,
-		WithStore(fakeStore, nil),
-		WithAppConfig(appCfg),
-		WithDaemonSpawner(&dummySpawner{}),
-		WithDiscordSession(&discordgo.Session{}),
-		WithEventBus(bus),
 	)
 	assert.NoError(t, err)
 
@@ -599,11 +475,37 @@ func TestRunApp_CanceledContext(t *testing.T) {
 	)
 	assert.NoError(t, err)
 
+	// Test provisioner sync error branch in RunApp
+	appCfgBadSync := config.NewFromData(&config.ConfigData{
+		DatabaseURL:   "sqlite://" + tmpDir + "/test.db",
+		GeminiHomeDir: tmpDir + "/home",
+		DataDir:       "/proc/nonexistent-sync-dir/data",
+		Port:          "4028",
+		CredentialSources: config.CredentialSources{
+			OAuth: config.CredentialSource{Disabled: true},
+			Codex: config.CredentialSource{Disabled: true},
+			Muse:  config.CredentialSource{Disabled: true},
+		},
+	})
+	err = RunApp(ctx, cfg,
+		WithStore(fakeStore, nil),
+		WithAppConfig(appCfgBadSync),
+		WithDaemonSpawner(&dummySpawner{}),
+	)
+	assert.NoError(t, err)
+
+	// Test nil Current() config fallback
+	err = RunApp(ctx, cfg,
+		WithStore(fakeStore, nil),
+		WithAppConfig(config.NewFromData(nil)),
+		WithDaemonSpawner(&dummySpawner{}),
+	)
+	assert.NoError(t, err)
+
 	// Test database error branch when store is not injected
 	cfgBadDB := Config{
 		RestatePort: "19080",
 		HealthPort:  "14028",
-		AdminURL:    "http://127.0.0.1:19070",
 		AgentName:   "aerial-test",
 	}
 	err = RunApp(ctx, cfgBadDB,
@@ -612,42 +514,12 @@ func TestRunApp_CanceledContext(t *testing.T) {
 	)
 	assert.Error(t, err)
 	assert.Contains(t, err.Error(), "failed to initialize database")
-
-	defaultReloadLogger("test")
 }
 
 type dummySpawner struct{}
 
 func (*dummySpawner) Spawn(ctx context.Context, cfg runner.DaemonConfig) (io.WriteCloser, io.ReadCloser, io.ReadCloser, runner.ProcessHandle, error) {
 	return nil, nil, nil, nil, errors.New("dummy spawn")
-}
-
-func TestReloadTrigger(t *testing.T) {
-	t.Parallel()
-
-	called := make(chan string, 1)
-	ctx, cancel := context.WithCancel(context.Background())
-
-	trig := NewReloadTrigger(ctx, func(s string) {
-		called <- s
-	})
-	require.NotNil(t, trig)
-	assert.NotNil(t, trig.Done())
-
-	trig.Trigger()
-	select {
-	case s := <-called:
-		assert.Equal(t, "git-sync webhook", s)
-	case <-time.After(2 * time.Second):
-		t.Fatal("reload trigger did not fire")
-	}
-
-	cancel()
-	trig.Trigger()
-	<-trig.Done()
-
-	var nilTrig *ReloadTrigger
-	nilTrig.Trigger() // safe no-op
 }
 
 type usagePollerCase struct {
@@ -721,33 +593,14 @@ func TestStartUsagePoller(t *testing.T) {
 	}
 }
 
-func TestReconcileRestateServiceTimeouts_DefaultAndInvalidURL(t *testing.T) {
-	t.Parallel()
-
-	// 1. Default URL (adminURL == "")
-	client := &http.Client{Transport: &errRoundTripper{err: assert.AnError}}
-	err := ReconcileRestateServiceTimeouts(context.Background(), "", "aerial", client)
-	require.Error(t, err)
-
-	// 2. Invalid URL path leading to request creation error
-	err = ReconcileRestateServiceTimeouts(context.Background(), "http://localhost\x7f", "aerial", client)
-	require.Error(t, err)
-}
-
-type errReader struct{}
-
-func (errReader) Read([]byte) (int, error) {
-	return 0, errors.New("read error")
-}
-
-func TestSetupHealthMux_LoopbackReloadAndLLMFallback(t *testing.T) {
+func TestSetupHealthMux_LoopbackReload(t *testing.T) {
 	t.Parallel()
 
 	activeTurns := runner.NewActiveTurnRegistry()
 	mcpRoutes := &env.MCPProxyRoutes{}
 
 	reloadCalled := make(chan bool, 1)
-	reloadTrigger := NewReloadTrigger(context.Background(), func(source string) {
+	reloadTrigger := bootstrap.NewReloadTrigger(context.Background(), func(source string) {
 		reloadCalled <- true
 	})
 
@@ -756,9 +609,6 @@ func TestSetupHealthMux_LoopbackReloadAndLLMFallback(t *testing.T) {
 		MCPRoutes:     mcpRoutes,
 		ActiveTurns:   activeTurns,
 		ReloadTrigger: reloadTrigger,
-		LLMFunc: func(ctx context.Context, model, prompt string) (string, error) {
-			return "ok", nil
-		},
 	})
 
 	// Test POST /-/reload from 127.0.0.1
@@ -768,31 +618,11 @@ func TestSetupHealthMux_LoopbackReloadAndLLMFallback(t *testing.T) {
 	mux.ServeHTTP(rec, req)
 	assert.Equal(t, http.StatusOK, rec.Code)
 	assert.Contains(t, rec.Body.String(), `"status":"queued"`)
-
-	// Test POST /internal/llm with errReader
-	reqErr := httptest.NewRequest(http.MethodPost, "/internal/llm", errReader{})
-	recErr := httptest.NewRecorder()
-	mux.ServeHTTP(recErr, reqErr)
-	assert.Equal(t, http.StatusBadRequest, recErr.Code)
-
-	// Test with pool LLMFunc fallback
-	pool := queue.New(nil, queue.WorkerPoolConfig{
-		LLMFunc: func(ctx context.Context, model, prompt string) (string, error) {
-			return "from-pool", nil
-		},
-	})
-	muxWithPool := SetupHealthMux(HealthMuxOptions{
-		AgentName: "aerial",
-		Pool:      pool,
-	})
-	reqPool := httptest.NewRequest(http.MethodPost, "/internal/llm", strings.NewReader(`{"prompt":"test"}`))
-	recPool := httptest.NewRecorder()
-	muxWithPool.ServeHTTP(recPool, reqPool)
-	assert.Equal(t, http.StatusOK, recPool.Code)
-	assert.Contains(t, recPool.Body.String(), "from-pool")
 }
 
 func TestRunApp_ConfigLoadError(t *testing.T) {
+	// ResolveConfigSearchPaths prepends CONFIG_PATH; clear it so the real config never loads.
+	t.Setenv("CONFIG_PATH", "")
 	oldPaths := config.ConfigSearchPaths
 	config.ConfigSearchPaths = []string{filepath.Join(t.TempDir(), "nonexistent.yaml")}
 	t.Cleanup(func() { config.ConfigSearchPaths = oldPaths })
@@ -832,7 +662,6 @@ func TestRunApp_ListenFailures(t *testing.T) {
 	cfgInvalidRestate := Config{
 		RestatePort: "-1",
 		HealthPort:  "14028",
-		AdminURL:    "http://127.0.0.1:19070",
 		AgentName:   "aerial-test",
 	}
 	err := RunApp(ctx, cfgInvalidRestate, WithStore(fakeStore, nil), WithAppConfig(appCfg), WithDaemonSpawner(&dummySpawner{}))
@@ -843,71 +672,11 @@ func TestRunApp_ListenFailures(t *testing.T) {
 	cfgInvalidHealth := Config{
 		RestatePort: "0",
 		HealthPort:  "-1",
-		AdminURL:    "http://127.0.0.1:19070",
 		AgentName:   "aerial-test",
 	}
 	err = RunApp(ctx, cfgInvalidHealth, WithStore(fakeStore, nil), WithAppConfig(appCfg), WithDaemonSpawner(&dummySpawner{}))
 	assert.Error(t, err)
 	assert.Contains(t, err.Error(), "listen on health port")
-}
-
-func TestInitDatabaseAndStores(t *testing.T) {
-	tests := []struct {
-		name       string
-		dbURL      string
-		stack      string
-		openFn     func(*config.Config) (*sql.DB, error)
-		wantErrSub string
-	}{
-		{
-			name:       "DBOpenError",
-			dbURL:      "",
-			wantErrSub: "failed to initialize database",
-		},
-		{
-			name:  "ResolveTranscriptStackError",
-			dbURL: "",
-			stack: "",
-			openFn: func(*config.Config) (*sql.DB, error) {
-				return sql.Open("pgx", "postgres://localhost/test")
-			},
-			wantErrSub: "failed to resolve transcript stack",
-		},
-		{
-			name:  "Success",
-			dbURL: "postgres://localhost/test",
-			stack: "aerial-test",
-			openFn: func(*config.Config) (*sql.DB, error) {
-				return sql.Open("pgx", "postgres://localhost/test")
-			},
-		},
-	}
-
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			if tc.openFn != nil {
-				oldOpen := openDefaultDB
-				openDefaultDB = tc.openFn
-				defer func() { openDefaultDB = oldOpen }()
-			}
-			appCfg := config.NewFromData(&config.ConfigData{
-				DatabaseURL: tc.dbURL,
-				Transcripts: config.TranscriptsConfig{Stack: tc.stack},
-			})
-			cur := appCfg.Current()
-			dbConn, s, tx, err := initDatabaseAndStores(context.Background(), appCfg, cur, "")
-			if tc.wantErrSub != "" {
-				require.Error(t, err)
-				assert.Contains(t, err.Error(), tc.wantErrSub)
-				return
-			}
-			require.NoError(t, err)
-			assert.NotNil(t, dbConn)
-			assert.NotNil(t, s)
-			assert.NotNil(t, tx)
-			_ = dbConn.Close()
-		})
-	}
 }
 
 func TestRunApp_DefaultDatabaseInitializationAndShutdown(t *testing.T) {
@@ -956,7 +725,6 @@ func TestRunApp_DefaultDatabaseInitializationAndShutdown(t *testing.T) {
 		cfg := Config{
 			RestatePort: "0",
 			HealthPort:  "0",
-			AdminURL:    "http://127.0.0.1:19070",
 			AgentName:   "aerial-test",
 		}
 
@@ -977,198 +745,29 @@ func TestRunApp_DefaultDatabaseInitializationAndShutdown(t *testing.T) {
 	})
 }
 
-func TestReloadTrigger_ContextCanceledEarly(t *testing.T) {
-	t.Parallel()
-
-	ctx, cancel := context.WithCancel(t.Context())
-	trigger := NewReloadTrigger(ctx, func(string) {})
-	cancel()
-	trigger.Trigger()
-	select {
-	case <-trigger.Done():
-	case <-time.After(time.Second):
-		t.Fatal("timed out waiting for trigger.Done()")
-	}
-}
-
-func TestWrapDiscoveryTimeoutReconciler_NonDiscoverPath(t *testing.T) {
-	t.Parallel()
-	called := false
-	trigger := func() { called = true }
-	handler := wrapDiscoveryTimeoutReconciler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusOK)
-	}), trigger)
-
-	req := httptest.NewRequest(http.MethodGet, "/other", http.NoBody)
-	rec := httptest.NewRecorder()
-	handler.ServeHTTP(rec, req)
-	assert.Equal(t, http.StatusOK, rec.Code)
-	assert.False(t, called)
-
-	nilWrapped := wrapDiscoveryTimeoutReconciler(handler, nil)
-	assert.NotNil(t, nilWrapped)
-}
-
 func TestWireOutboundIntegrations(t *testing.T) {
 	t.Parallel()
 
-	pool := queue.New(nil, queue.WorkerPoolConfig{})
-	cur := &config.ConfigData{
-		DiscordToken: "token-1",
-		NATSURL:      "nats://127.0.0.1:65530",
+	tests := []struct {
+		name        string
+		cur         *config.ConfigData
+		wantSession bool
+	}{
+		{name: "token and nats url", cur: &config.ConfigData{DiscordToken: "token-1", NATSURL: "nats://127.0.0.1:65530"}, wantSession: true},
+		{name: "no token and no nats url", cur: &config.ConfigData{}},
+		{name: "malformed nats url skips event bus", cur: &config.ConfigData{NATSURL: "nats://bad\x7fhost:4222"}},
 	}
-
-	// 1. With explicit discord session and bus
-	s := &discordgo.Session{}
-	bus := pubsub.NewMemoryBus()
-	t.Cleanup(func() { _ = bus.Close() })
-	closeFn := wireOutboundIntegrations(context.Background(), cur, pool, appOptions{
-		discordSession: s,
-		eventBus:       bus,
-	})
-	assert.Nil(t, closeFn)
-	assert.Equal(t, s, pool.DiscordSession())
-	assert.Equal(t, bus, pool.EventBus())
-
-	// 2. With token and NATS URL
-	pool2 := queue.New(nil, queue.WorkerPoolConfig{})
-	closeFn2 := wireOutboundIntegrations(context.Background(), cur, pool2, appOptions{})
-	assert.NotNil(t, pool2.DiscordSession())
-	if closeFn2 != nil {
-		assert.NotNil(t, pool2.EventBus())
-		closeFn2()
-	}
-}
-
-type reloadFuncTestCase struct {
-	name          string
-	withAppCfg    bool
-	corruptConfig bool
-	withProv      bool
-	provSyncError bool
-	withEphem     bool
-	withWorker    bool
-}
-
-func TestCreateReloadFunc(t *testing.T) {
-	tests := []reloadFuncTestCase{
-		{
-			name: "all nil components is safe no-op",
-		},
-		{
-			name:          "corrupt config fails and returns early",
-			withAppCfg:    true,
-			corruptConfig: true,
-			withEphem:     true,
-			withWorker:    true,
-		},
-		{
-			name:       "successful reload marks pools dirty",
-			withAppCfg: true,
-			withProv:   true,
-			withEphem:  true,
-			withWorker: true,
-		},
-		{
-			name:          "provisioner sync error logs warning and continues",
-			withAppCfg:    true,
-			withProv:      true,
-			provSyncError: true,
-			withEphem:     true,
-			withWorker:    true,
-		},
-	}
-
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			ctx := t.Context()
-			tmpDir := t.TempDir()
-
-			var appCfg *config.Config
-			if tc.withAppCfg {
-				cfgPath := filepath.Join(tmpDir, "config.yaml")
-				switch {
-				case tc.corruptConfig:
-					_ = os.WriteFile(cfgPath, []byte("invalid: yaml: ["), 0o644)
-				case tc.provSyncError:
-					invalidCredYAML := "model: test-model\ntimezone: UTC\nchannels:\n  default:\n    mode: threads\ncredential_sources:\n  oauth:\n    path: /fake/oauth\n    disabled: true\n  codex:\n    disabled: true\n  muse:\n    disabled: true\n"
-					_ = os.WriteFile(cfgPath, []byte(invalidCredYAML), 0o644)
-				default:
-					validYAML := "model: test-model\ntimezone: UTC\nchannels:\n  default:\n    mode: threads\ncredential_sources:\n  oauth:\n    disabled: true\n  codex:\n    disabled: true\n  muse:\n    disabled: true\n"
-					_ = os.WriteFile(cfgPath, []byte(validYAML), 0o644)
-				}
-				t.Setenv("CONFIG_PATH", cfgPath)
-
-				appCfg = config.NewFromData(&config.ConfigData{
-					DataDir:       tmpDir,
-					GeminiHomeDir: tmpDir,
-					CredentialSources: config.CredentialSources{
-						OAuth: config.CredentialSource{Disabled: true},
-						Codex: config.CredentialSource{Disabled: true},
-						Muse:  config.CredentialSource{Disabled: true},
-					},
-				})
-			}
-
-			var prov *env.Provisioner
-			if tc.withProv && appCfg != nil {
-				prov, _ = env.NewFromConfig(appCfg)
-			}
-
-			var ephemPool *runner.InterchangeablePool
-			if tc.withEphem {
-				underlying := runner.NewUnifiedProcessPool(runner.PoolConfig{
-					GeminiHomeDir: tmpDir,
-					Cwd:           tmpDir,
-				}, &dummySpawner{})
-				ephemPool = runner.NewInterchangeablePool(underlying, runner.InterchangeablePoolConfig{
-					WorkerCount: 1,
-					KeyPrefix:   "ephem:test",
-				})
-				t.Cleanup(func() { _ = ephemPool.Close() })
-			}
-
-			var workerPool *queue.WorkerPool
-			if tc.withWorker {
-				workerPool = queue.New(appCfg, queue.WorkerPoolConfig{
-					ParentContext: ctx,
-					Store:         dbtest.NewFakeStore(),
-				})
-			}
-
-			fn := createReloadFunc(ctx, appCfg, prov, ephemPool, workerPool)
-			require.NotNil(t, fn)
-			fn("test-source")
-
-			if tc.withAppCfg && !tc.corruptConfig {
-				assert.Equal(t, "test-model", appCfg.Current().Model)
+			t.Parallel()
+			pool := queue.New(nil, queue.WorkerPoolConfig{})
+			dg, closeFn := wireOutboundIntegrations(context.Background(), tc.cur, pool)
+			assert.Equal(t, tc.wantSession, dg != nil)
+			assert.Same(t, dg, pool.DiscordSession())
+			assert.Equal(t, closeFn != nil, pool.EventBus() != nil)
+			if closeFn != nil {
+				closeFn()
 			}
 		})
-	}
-}
-
-func TestStartDiscoveryTimeoutReconciler_ContextCanceledDuringRetry(t *testing.T) {
-	t.Parallel()
-
-	ctx, cancel := context.WithCancel(t.Context())
-	called := make(chan struct{})
-	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusInternalServerError)
-		select {
-		case <-called:
-		default:
-			close(called)
-		}
-	}))
-	defer ts.Close()
-
-	trigger := startDiscoveryTimeoutReconciler(ctx, ts.URL, "aerial", ts.Client(), 3, 500*time.Millisecond)
-	trigger.Trigger()
-	<-called
-	cancel() // cancel during retry delay
-	select {
-	case <-trigger.Done():
-	case <-time.After(time.Second):
-		t.Fatal("timed out waiting for trigger.Done()")
 	}
 }

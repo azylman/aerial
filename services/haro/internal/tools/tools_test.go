@@ -3,24 +3,27 @@ package tools
 import (
 	"context"
 	"database/sql"
+	"net/http"
+	"net/http/httptest"
+	"os"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/azylman/aerial/pkg/pgtest"
 	"github.com/azylman/aerial/services/haro/internal/config"
 	"github.com/azylman/aerial/services/haro/internal/model"
 	"github.com/azylman/aerial/services/haro/internal/store"
 	"github.com/azylman/aerial/services/haro/internal/testutil"
 )
 
+func TestMain(m *testing.M) {
+	os.Exit(pgtest.Main(m))
+}
+
 func openToolsTestDB(t *testing.T) *sql.DB {
 	t.Helper()
-	db, err := testutil.OpenSQLiteTestDB(":memory:")
-	if err != nil {
-		t.Fatalf("OpenSQLiteTestDB failed: %v", err)
-	}
-	t.Cleanup(func() { _ = db.Close() })
-	return db
+	return testutil.NewDB(t)
 }
 
 // newMemoryToolHandler opens a hermetic in-memory haro DB and returns a
@@ -104,13 +107,36 @@ func TestResolveTimezone_Table(t *testing.T) {
 }
 
 func TestNewToolHandler_Table(t *testing.T) {
-	cfg := &config.Config{DatabaseURL: ":memory:", Timezone: "UTC", VanadisURL: "http://vanadis.tools-test"}
 	oldVanadis := store.GetVanadisURL()
 	defer store.SetVanadisURL(oldVanadis)
-	db := openToolsTestDB(t)
-	NewToolHandler(cfg, db)
-	if store.GetVanadisURL() != cfg.VanadisURL {
-		t.Errorf("VanadisURL = %q, want %q", store.GetVanadisURL(), cfg.VanadisURL)
+	tests := []struct {
+		name        string
+		cfg         *config.Config
+		wantPanic   bool
+		wantVanadis string
+	}{
+		{name: "nil config and db panic", wantPanic: true},
+		{
+			name: "config vanadis URL applied",
+			cfg:  &config.Config{DatabaseURL: ":memory:", Timezone: "UTC", VanadisURL: "http://vanadis.tools-test"}, wantVanadis: "http://vanadis.tools-test",
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			defer func() {
+				if r := recover(); (r != nil) != tc.wantPanic {
+					t.Errorf("recover() = %v, wantPanic %v", r, tc.wantPanic)
+				}
+			}()
+			var db *sql.DB
+			if tc.cfg != nil {
+				db = openToolsTestDB(t)
+			}
+			NewToolHandler(tc.cfg, db)
+			if got := store.GetVanadisURL(); got != tc.wantVanadis {
+				t.Errorf("VanadisURL = %q, want %q", got, tc.wantVanadis)
+			}
+		})
 	}
 }
 
@@ -152,215 +178,258 @@ func TestFormatSchedulesSummary_Table(t *testing.T) {
 	}
 }
 
-type scheduleRecurringErrTestCase struct {
-	name       string
-	args       ScheduleRecurringArgs
-	wantErrMsg string
-}
-
-type scheduleOnceErrTestCase struct {
-	name       string
-	args       ScheduleOnceArgs
-	wantErrMsg string
-}
-
-type scheduleRecurringSuccessTestCase struct {
-	name       string
-	args       ScheduleRecurringArgs
-	wantEffort string
-}
-
-type scheduleOnceSuccessTestCase struct {
-	name       string
-	args       ScheduleOnceArgs
-	wantEffort string
-}
-
-func runScheduleRecurringErrCase(ctx context.Context, t *testing.T, h *ToolHandler, tc scheduleRecurringErrTestCase) {
+// newClosedToolHandler returns a handler over an already-closed database.
+func newClosedToolHandler(t *testing.T) *ToolHandler {
 	t.Helper()
-	_, err := h.ScheduleRecurring(ctx, tc.args)
-	if err == nil || !strings.Contains(err.Error(), tc.wantErrMsg) {
-		t.Fatalf("expected error containing %q, got %v", tc.wantErrMsg, err)
+	db := testutil.NewClosedDB(t)
+	return NewToolHandler(&config.Config{DatabaseURL: ":memory:", Timezone: "America/Los_Angeles"}, db)
+}
+
+// pickToolHandler returns closed for closedDB rows, else open.
+func pickToolHandler(open, closed *ToolHandler, closedDB bool) *ToolHandler {
+	if closedDB {
+		return closed
+	}
+	return open
+}
+
+// assertScheduleCreated checks a Schedule* result: wantErr substring, or success with wantEffort.
+func assertScheduleCreated(t *testing.T, status, effort string, err error, wantErr, wantEffort string) {
+	t.Helper()
+	if wantErr != "" {
+		if err == nil || !strings.Contains(err.Error(), wantErr) {
+			t.Fatalf("expected error containing %q, got %v", wantErr, err)
+		}
+		return
+	}
+	if err != nil || status != "success" || effort != wantEffort {
+		t.Fatalf("status %q effort %q err %v; want success with effort %q", status, effort, err, wantEffort)
 	}
 }
 
-func runScheduleOnceErrCase(ctx context.Context, t *testing.T, h *ToolHandler, tc scheduleOnceErrTestCase) {
-	t.Helper()
-	_, err := h.ScheduleOnce(ctx, tc.args)
-	if err == nil || !strings.Contains(err.Error(), tc.wantErrMsg) {
-		t.Fatalf("expected error containing %q, got %v", tc.wantErrMsg, err)
+func TestToolHandler_ScheduleRecurring(t *testing.T) {
+	closed := newClosedToolHandler(t)
+	h, db := newMemoryToolHandler(t)
+	if db == nil {
+		t.Fatal("expected non-nil db")
+	}
+	ctx := context.Background()
+	tests := []struct {
+		name       string
+		args       ScheduleRecurringArgs
+		closedDB   bool
+		wantErr    string
+		wantEffort string
+	}{
+		{name: "missing channel_id", args: ScheduleRecurringArgs{CronExpression: "0 9 * * *", Prompt: "p"}, wantErr: "'channel_id' is required"},
+		{name: "missing cron_expression", args: ScheduleRecurringArgs{ChannelID: "c1", Prompt: "p"}, wantErr: "'cron_expression' is required"},
+		{name: "missing prompt", args: ScheduleRecurringArgs{ChannelID: "c1", CronExpression: "0 9 * * *"}, wantErr: "'prompt' is required"},
+		{name: "invalid cron", args: ScheduleRecurringArgs{ChannelID: "c1", CronExpression: "not-a-cron", Prompt: "p"}, wantErr: "invalid cron expression"},
+		{
+			name: "closed db",
+			args: ScheduleRecurringArgs{ChannelID: "c", CronExpression: "0 9 * * *", Prompt: "p"}, closedDB: true, wantErr: "database is closed",
+		},
+		{name: "default tz and effort", args: ScheduleRecurringArgs{ChannelID: "ch-1", CronExpression: "0 9 * * *", Prompt: "p1"}, wantEffort: "medium"},
+		{
+			name:       "explicit tz and high effort",
+			args:       ScheduleRecurringArgs{ChannelID: "ch-2", CronExpression: "0 20 * * 5", Prompt: "p2", Timezone: "America/New_York", Effort: "high", TitlePrefix: "Weekly"},
+			wantEffort: "high",
+		},
+		{
+			name: "untrimmed lower effort",
+			args: ScheduleRecurringArgs{ChannelID: "ch-3", CronExpression: "0 9 * * *", Prompt: "p3", Effort: "  LOW  "}, wantEffort: "low",
+		},
+		{
+			name: "invalid effort fallback",
+			args: ScheduleRecurringArgs{ChannelID: "ch-4", CronExpression: "0 9 * * *", Prompt: "p4", Effort: "unknown"}, wantEffort: "medium",
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			res, err := pickToolHandler(h, closed, tc.closedDB).ScheduleRecurring(ctx, tc.args)
+			assertScheduleCreated(t, res.Status, res.Effort, err, tc.wantErr, tc.wantEffort)
+		})
 	}
 }
 
-func runScheduleRecurringSuccessCase(ctx context.Context, t *testing.T, h *ToolHandler, tc scheduleRecurringSuccessTestCase) {
-	t.Helper()
-	res, err := h.ScheduleRecurring(ctx, tc.args)
-	if err != nil || res.Status != "success" || res.Effort != tc.wantEffort {
-		t.Fatalf("unexpected ScheduleRecurring result: %+v, err: %v", res, err)
+func TestToolHandler_ScheduleOnce(t *testing.T) {
+	closed := newClosedToolHandler(t)
+	h, db := newMemoryToolHandler(t)
+	if db == nil {
+		t.Fatal("expected non-nil db")
+	}
+	ctx := context.Background()
+	tests := []struct {
+		name       string
+		args       ScheduleOnceArgs
+		closedDB   bool
+		wantErr    string
+		wantEffort string
+	}{
+		{name: "missing target_id", args: ScheduleOnceArgs{RunAt: "15m", Prompt: "p"}, wantErr: "'target_id' is required"},
+		{name: "missing run_at", args: ScheduleOnceArgs{TargetID: "t1", Prompt: "p"}, wantErr: "'run_at' is required"},
+		{name: "missing prompt", args: ScheduleOnceArgs{TargetID: "t1", RunAt: "15m"}, wantErr: "'prompt' is required"},
+		{name: "invalid run_at", args: ScheduleOnceArgs{TargetID: "t1", RunAt: "bad-time", Prompt: "p"}, wantErr: "unrecognized run_at format"},
+		{name: "closed db", args: ScheduleOnceArgs{TargetID: "t", RunAt: "15m", Prompt: "p"}, closedDB: true, wantErr: "database is closed"},
+		{name: "target_id relative medium effort", args: ScheduleOnceArgs{TargetID: "t-1", RunAt: "10m", Prompt: "p1"}, wantEffort: "medium"},
+		{name: "thread_id explicit high effort", args: ScheduleOnceArgs{ThreadID: "t-2", RunAt: "15m", Prompt: "p2", Effort: "high"}, wantEffort: "high"},
+		{
+			name:       "untrimmed effort and absolute tz",
+			args:       ScheduleOnceArgs{TargetID: "t-3", RunAt: "2026-08-28 20:00:00", Timezone: "America/Los_Angeles", Prompt: "p3", Effort: "  LOW  "},
+			wantEffort: "low",
+		},
+		{name: "invalid effort fallback", args: ScheduleOnceArgs{TargetID: "t-4", RunAt: "1h", Prompt: "p4", Effort: "invalid"}, wantEffort: "medium"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			res, err := pickToolHandler(h, closed, tc.closedDB).ScheduleOnce(ctx, tc.args)
+			assertScheduleCreated(t, res.Status, res.Effort, err, tc.wantErr, tc.wantEffort)
+		})
 	}
 }
 
-func runScheduleOnceSuccessCase(ctx context.Context, t *testing.T, h *ToolHandler, tc scheduleOnceSuccessTestCase) {
+// seedToolSchedules stores rows with empty effort (read back as medium) for target ch-raw, a one-shot
+// inserted with a nil context for t-zero, and heartbeats for ch-hb-list and ch-raw.
+func seedToolSchedules(t *testing.T, db *sql.DB) {
 	t.Helper()
-	res, err := h.ScheduleOnce(ctx, tc.args)
-	if err != nil || res.Status != "success" || res.Effort != tc.wantEffort {
-		t.Fatalf("unexpected ScheduleOnce result: %+v, err: %v", res, err)
-	}
-}
-
-func testToolHandlerGuardsAndNilDB(t *testing.T) {
-	t.Helper()
-	func() {
-		defer func() {
-			if r := recover(); r == nil {
-				t.Error("expected NewToolHandler(nil, nil) to panic")
-			}
-		}()
-		NewToolHandler(nil, nil)
-	}()
-}
-
-func testToolHandlerClosedDB(ctx context.Context, t *testing.T, cfg *config.Config) {
-	t.Helper()
-	closedDB, _ := sql.Open("sqlite", ":memory:")
-	_ = closedDB.Close()
-	hClosed := NewToolHandler(cfg, closedDB)
-
-	if _, err := hClosed.ScheduleRecurring(ctx, ScheduleRecurringArgs{ChannelID: "c", CronExpression: "0 9 * * *", Prompt: "p"}); err == nil {
-		t.Error("expected error with closed db in ScheduleRecurring")
-	}
-	if _, err := hClosed.ScheduleOnce(ctx, ScheduleOnceArgs{TargetID: "t", RunAt: "15m", Prompt: "p"}); err == nil {
-		t.Error("expected error with closed db in ScheduleOnce")
-	}
-	if _, err := hClosed.ListSchedules(ctx, ListSchedulesArgs{TargetID: "t"}); err == nil {
-		t.Error("expected error with closed db in ListSchedules")
-	}
-	if _, err := hClosed.GetSchedule(ctx, GetScheduleArgs{ScheduleID: "c1"}); err == nil {
-		t.Error("expected error with closed db in GetSchedule")
-	}
-	effHigh := "high"
-	if _, err := hClosed.UpdateCronSchedule(ctx, UpdateCronScheduleArgs{ScheduleID: "c1", Effort: &effHigh}); err == nil {
-		t.Error("expected error updating cron with closed db")
-	}
-	if _, err := hClosed.CancelSchedule(ctx, CancelScheduleArgs{ScheduleID: "s1"}); err == nil {
-		t.Error("expected error canceling schedule with closed db")
-	}
-}
-
-func testToolHandlerList(ctx context.Context, t *testing.T, h *ToolHandler, db *sql.DB, now time.Time) {
-	t.Helper()
+	now := time.Now().UTC()
 	sZero := model.OneShotSchedule{ID: "s-zero", ThreadID: "t-zero", Prompt: "p", RunAt: now.Add(time.Hour)}
-	if err := store.InsertOneShotSchedule(nil, db, sZero); err != nil { //nolint:contextcheck // exercises nil-ctx tolerance
+	if err := store.InsertOneShotSchedule(nil, db, sZero); err != nil {
 		t.Fatalf("InsertOneShotSchedule nil ctx error: %v", err)
 	}
-	listZero, err := store.ListOneShotSchedules(ctx, db, "t-zero")
+	listZero, err := store.ListOneShotSchedules(context.Background(), db, "t-zero")
 	if err != nil || len(listZero) != 1 || listZero[0].CreatedAt.IsZero() {
 		t.Fatalf("expected non-zero CreatedAt, got %+v, err: %v", listZero, err)
 	}
-
-	_, _ = db.Exec("INSERT INTO cron_schedules (id, target_id, title_prefix, cron_expr, prompt, timezone, next_run_at, enabled, created_at, effort) VALUES ('c-empty', 'ch-raw', '', '0 0 * * *', 'p', 'UTC', ?, TRUE, ?, '')", now, now)
-	_, _ = db.Exec("INSERT INTO one_shot_schedules (id, thread_id, prompt, run_at, created_at, effort) VALUES ('o-empty', 'ch-raw', 'p', ?, ?, '')", now, now)
-
-	listAll, err := h.ListSchedules(ctx, ListSchedulesArgs{})
-	if err != nil || len(listAll.Recurring) == 0 || len(listAll.OneShot) == 0 {
-		t.Fatalf("expected non-empty lists, got %+v, err: %v", listAll, err)
+	for _, stmt := range []string{
+		"INSERT INTO cron_schedules (id, target_id, title_prefix, cron_expr, prompt, timezone, next_run_at, enabled, created_at, effort) VALUES ('c-empty', 'ch-raw', '', '0 0 * * *', 'p', 'UTC', $1, TRUE, $2, '')",
+		"INSERT INTO one_shot_schedules (id, thread_id, prompt, run_at, created_at, effort) VALUES ('o-empty', 'ch-raw', 'p', $1, $2, '')",
+	} {
+		if _, err := db.Exec(stmt, now, now); err != nil {
+			t.Fatalf("raw insert err = %v", err)
+		}
 	}
-
-	listFiltered, err := h.ListSchedules(ctx, ListSchedulesArgs{TargetID: "ch-raw"})
-	if err != nil || len(listFiltered.Recurring) != 1 || listFiltered.Recurring[0].Effort != "medium" || len(listFiltered.OneShot) != 1 || listFiltered.OneShot[0].Effort != "medium" {
-		t.Fatalf("expected medium effort on empty string, got %+v, err: %v", listFiltered, err)
-	}
-	if listFiltered.Recurring[0].Prompt != "" || listFiltered.OneShot[0].Prompt != "" || strings.Contains(listFiltered.Summary, "Prompt:") {
-		t.Fatalf("expected ListSchedules to omit prompt from structs and summary, got %+v", listFiltered)
-	}
-}
-
-func testToolHandlerGet(ctx context.Context, t *testing.T, h *ToolHandler, db *sql.DB, now time.Time) {
-	t.Helper()
-	gotCron, err := h.GetSchedule(ctx, GetScheduleArgs{ScheduleID: "c-empty"})
-	if err != nil || gotCron.Type != "recurring" || gotCron.Recurring == nil || gotCron.Recurring.Prompt != "p" {
-		t.Fatalf("expected GetSchedule recurring with prompt 'p', got %+v, err: %v", gotCron, err)
-	}
-	gotOnce, err := h.GetSchedule(ctx, GetScheduleArgs{ScheduleID: "o-empty"})
-	if err != nil || gotOnce.Type != "one_shot" || gotOnce.OneShot == nil || gotOnce.OneShot.Prompt != "p" {
-		t.Fatalf("expected GetSchedule one_shot with prompt 'p', got %+v, err: %v", gotOnce, err)
-	}
-	_ = store.InsertHeartbeatSchedule(ctx, db, model.HeartbeatSchedule{ID: "hb-get", TargetID: "ch-raw", CronExpr: "0 0 * * *", Prompt: "hb-p", NextRunAt: now, Enabled: true})
-	gotHB, err := h.GetSchedule(ctx, GetScheduleArgs{ScheduleID: "hb-get"})
-	if err != nil || gotHB.Type != "heartbeat" || gotHB.Heartbeat == nil || gotHB.Heartbeat.Prompt != "hb-p" {
-		t.Fatalf("expected GetSchedule heartbeat with prompt 'hb-p', got %+v, err: %v", gotHB, err)
-	}
-	if _, err := h.GetSchedule(ctx, GetScheduleArgs{ScheduleID: "  "}); err == nil {
-		t.Error("expected error for empty schedule_id in GetSchedule")
-	}
-	if _, err := h.GetSchedule(ctx, GetScheduleArgs{ScheduleID: "missing-id"}); err == nil {
-		t.Error("expected error for non-existent schedule_id in GetSchedule")
+	for _, hb := range []model.HeartbeatSchedule{
+		{ID: "hb-list", TargetID: "ch-hb-list", CronExpr: "0 0 * * *", Prompt: "hb-p", NextRunAt: now, Enabled: true},
+		{ID: "hb-get", TargetID: "ch-hb-get", CronExpr: "0 0 * * *", Prompt: "hb-p", NextRunAt: now, Enabled: true},
+	} {
+		if err := store.InsertHeartbeatSchedule(context.Background(), db, hb); err != nil {
+			t.Fatalf("InsertHeartbeatSchedule err = %v", err)
+		}
 	}
 }
 
-func TestToolHandler_ScheduleAndList(t *testing.T) {
-	testToolHandlerGuardsAndNilDB(t)
-
-	cfg := &config.Config{DatabaseURL: ":memory:", Timezone: "America/Los_Angeles"}
-	db := openToolsTestDB(t)
-	h := NewToolHandler(cfg, db)
+func TestToolHandler_ListSchedules(t *testing.T) {
+	closed := newClosedToolHandler(t)
+	h, db := newMemoryToolHandler(t)
+	seedToolSchedules(t, db)
 	ctx := context.Background()
-
-	recErrTests := []scheduleRecurringErrTestCase{
-		{"missing channel_id", ScheduleRecurringArgs{CronExpression: "0 9 * * *", Prompt: "p"}, "'channel_id' is required"},
-		{"missing cron_expression", ScheduleRecurringArgs{ChannelID: "c1", Prompt: "p"}, "'cron_expression' is required"},
-		{"missing prompt", ScheduleRecurringArgs{ChannelID: "c1", CronExpression: "0 9 * * *"}, "'prompt' is required"},
-		{"invalid cron", ScheduleRecurringArgs{ChannelID: "c1", CronExpression: "not-a-cron", Prompt: "p"}, "invalid cron expression"},
+	tests := []struct {
+		name           string
+		args           ListSchedulesArgs
+		closedDB       bool
+		wantRecurring  int
+		wantOneShot    int
+		wantHeartbeats int
+		wantEffort     string
+		wantErr        string
+	}{
+		{name: "unfiltered lists all", wantRecurring: 1, wantOneShot: 2, wantHeartbeats: 2},
+		{name: "empty stored effort reads medium", args: ListSchedulesArgs{TargetID: "ch-raw"}, wantRecurring: 1, wantOneShot: 1, wantEffort: "medium"},
+		{name: "heartbeat target", args: ListSchedulesArgs{TargetID: "ch-hb-list"}, wantHeartbeats: 1},
+		{name: "closed db", args: ListSchedulesArgs{TargetID: "t"}, closedDB: true, wantErr: "failed to query recurring schedules"},
 	}
-	for _, tc := range recErrTests {
+	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			runScheduleRecurringErrCase(ctx, t, h, tc)
+			out, err := pickToolHandler(h, closed, tc.closedDB).ListSchedules(ctx, tc.args)
+			if tc.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+					t.Fatalf("expected error containing %q, got %v", tc.wantErr, err)
+				}
+				return
+			}
+			if err != nil || len(out.Recurring) != tc.wantRecurring || len(out.OneShot) != tc.wantOneShot || len(out.Heartbeats) != tc.wantHeartbeats {
+				t.Fatalf("ListSchedules = %+v, err: %v; want %d recurring, %d one-shot, %d heartbeats", out, err, tc.wantRecurring, tc.wantOneShot, tc.wantHeartbeats)
+			}
+			assertListedWithoutPrompts(t, out, tc.wantEffort)
 		})
 	}
+}
 
-	onceErrTests := []scheduleOnceErrTestCase{
-		{"missing target_id", ScheduleOnceArgs{RunAt: "15m", Prompt: "p"}, "'target_id' is required"},
-		{"missing run_at", ScheduleOnceArgs{TargetID: "t1", Prompt: "p"}, "'run_at' is required"},
-		{"missing prompt", ScheduleOnceArgs{TargetID: "t1", RunAt: "15m"}, "'prompt' is required"},
-		{"invalid run_at", ScheduleOnceArgs{TargetID: "t1", RunAt: "bad-time", Prompt: "p"}, "unrecognized run_at format"},
+// assertListedWithoutPrompts checks ListSchedules omits prompts everywhere and, when wantEffort is set,
+// reports it on every recurring and one-shot row.
+func assertListedWithoutPrompts(t *testing.T, out ListSchedulesOutput, wantEffort string) {
+	t.Helper()
+	if strings.Contains(out.Summary, "Prompt:") {
+		t.Errorf("summary includes prompts: %q", out.Summary)
 	}
-	for _, tc := range onceErrTests {
+	for _, r := range out.Recurring {
+		if r.Prompt != "" || (wantEffort != "" && r.Effort != wantEffort) {
+			t.Errorf("recurring %+v, want no prompt and effort %q", r, wantEffort)
+		}
+	}
+	for _, o := range out.OneShot {
+		if o.Prompt != "" || (wantEffort != "" && o.Effort != wantEffort) {
+			t.Errorf("one-shot %+v, want no prompt and effort %q", o, wantEffort)
+		}
+	}
+	for _, hb := range out.Heartbeats {
+		if hb.Prompt != "" {
+			t.Errorf("heartbeat %+v, want no prompt", hb)
+		}
+	}
+}
+
+func TestToolHandler_GetSchedule(t *testing.T) {
+	closed := newClosedToolHandler(t)
+	h, db := newMemoryToolHandler(t)
+	seedToolSchedules(t, db)
+	ctx := context.Background()
+	tests := []struct {
+		name       string
+		id         string
+		closedDB   bool
+		wantType   string
+		wantPrompt string
+		wantErr    string
+	}{
+		{name: "recurring", id: "c-empty", wantType: "recurring", wantPrompt: "p"},
+		{name: "one-shot", id: "o-empty", wantType: "one_shot", wantPrompt: "p"},
+		{name: "heartbeat", id: "hb-get", wantType: "heartbeat", wantPrompt: "hb-p"},
+		{name: "empty schedule_id", id: "  ", wantErr: "'schedule_id' is required"},
+		{name: "missing schedule", id: "missing-id", wantErr: `schedule with ID "missing-id" not found`},
+		{name: "closed db", id: "c1", closedDB: true, wantErr: "failed to query recurring schedule c1"},
+	}
+	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			runScheduleOnceErrCase(ctx, t, h, tc)
+			out, err := pickToolHandler(h, closed, tc.closedDB).GetSchedule(ctx, GetScheduleArgs{ScheduleID: tc.id})
+			if tc.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+					t.Fatalf("expected error containing %q, got %v", tc.wantErr, err)
+				}
+				return
+			}
+			if err != nil || out.Type != tc.wantType {
+				t.Fatalf("GetSchedule = %+v, err: %v; want type %q", out, err, tc.wantType)
+			}
+			var prompt string
+			switch {
+			case out.Recurring != nil:
+				prompt = out.Recurring.Prompt
+			case out.OneShot != nil:
+				prompt = out.OneShot.Prompt
+			case out.Heartbeat != nil:
+				prompt = out.Heartbeat.Prompt
+			}
+			if prompt != tc.wantPrompt {
+				t.Errorf("prompt = %q, want %q", prompt, tc.wantPrompt)
+			}
 		})
 	}
-
-	recSuccessTests := []scheduleRecurringSuccessTestCase{
-		{"default tz and effort", ScheduleRecurringArgs{ChannelID: "ch-1", CronExpression: "0 9 * * *", Prompt: "p1"}, "medium"},
-		{"explicit tz and high effort", ScheduleRecurringArgs{ChannelID: "ch-2", CronExpression: "0 20 * * 5", Prompt: "p2", Timezone: "America/New_York", Effort: "high", TitlePrefix: "Weekly"}, "high"},
-		{"untrimmed lower effort", ScheduleRecurringArgs{ChannelID: "ch-3", CronExpression: "0 9 * * *", Prompt: "p3", Effort: "  LOW  "}, "low"},
-		{"invalid effort fallback", ScheduleRecurringArgs{ChannelID: "ch-4", CronExpression: "0 9 * * *", Prompt: "p4", Effort: "unknown"}, "medium"},
-	}
-	for _, tc := range recSuccessTests {
-		t.Run(tc.name, func(t *testing.T) {
-			runScheduleRecurringSuccessCase(ctx, t, h, tc)
-		})
-	}
-
-	now := time.Now().UTC()
-	onceSuccessTests := []scheduleOnceSuccessTestCase{
-		{"target_id relative medium effort", ScheduleOnceArgs{TargetID: "t-1", RunAt: "10m", Prompt: "p1"}, "medium"},
-		{"thread_id explicit high effort", ScheduleOnceArgs{ThreadID: "t-2", RunAt: "15m", Prompt: "p2", Effort: "high"}, "high"},
-		{"untrimmed effort and absolute tz", ScheduleOnceArgs{TargetID: "t-3", RunAt: "2026-08-28 20:00:00", Timezone: "America/Los_Angeles", Prompt: "p3", Effort: "  LOW  "}, "low"},
-		{"invalid effort fallback", ScheduleOnceArgs{TargetID: "t-4", RunAt: "1h", Prompt: "p4", Effort: "invalid"}, "medium"},
-	}
-	for _, tc := range onceSuccessTests {
-		t.Run(tc.name, func(t *testing.T) {
-			runScheduleOnceSuccessCase(ctx, t, h, tc)
-		})
-	}
-
-	testToolHandlerList(ctx, t, h, db, now)
-	testToolHandlerGet(ctx, t, h, db, now)
-	testToolHandlerClosedDB(ctx, t, cfg)
 }
 
 func TestToolHandler_UpdateCronSchedule(t *testing.T) {
+	closed := newClosedToolHandler(t)
 	h, db := newMemoryToolHandler(t)
 	ctx := context.Background()
 
@@ -384,20 +453,22 @@ func TestToolHandler_UpdateCronSchedule(t *testing.T) {
 		wantEffort string
 		wantTZ     string
 		wantClock  string
+		closedDB   bool
 	}{
-		{"full update recomputes next run", UpdateCronScheduleArgs{ScheduleID: "c1", Effort: &eff, CronExpression: &expr, Prompt: &prompt, TitlePrefix: &prefix, Timezone: &tzUTC}, "", "high", "UTC", "12:00"},
-		{"cron-only update uses stored timezone", UpdateCronScheduleArgs{ScheduleID: "c-tokyo", CronExpression: &cron9}, "", "", "Asia/Tokyo", "09:00"},
-		{"timezone-only update recomputes with stored cron", UpdateCronScheduleArgs{ScheduleID: "c-tokyo", Timezone: &tzNY}, "", "", "America/New_York", "09:00"},
-		{"cron-only update after timezone change uses new stored timezone", UpdateCronScheduleArgs{ScheduleID: "c-tokyo", CronExpression: &cron1730}, "", "", "America/New_York", "17:30"},
-		{"content-only update leaves next_run_at untouched", UpdateCronScheduleArgs{ScheduleID: "c-tokyo", Prompt: &prompt}, "", "", "", ""},
-		{"missing schedule_id", UpdateCronScheduleArgs{ScheduleID: "  "}, "'schedule_id' is required", "", "", ""},
-		{"invalid cron expression", UpdateCronScheduleArgs{ScheduleID: "c1", CronExpression: &badExpr}, "invalid cron expression", "", "", ""},
-		{"non-existent schedule", UpdateCronScheduleArgs{ScheduleID: "missing-id", Effort: &eff}, "failed to update recurring schedule", "", "", ""},
-		{"non-existent schedule with cron change", UpdateCronScheduleArgs{ScheduleID: "missing-id", CronExpression: &cron9}, "failed to update recurring schedule", "", "", ""},
+		{"full update recomputes next run", UpdateCronScheduleArgs{ScheduleID: "c1", Effort: &eff, CronExpression: &expr, Prompt: &prompt, TitlePrefix: &prefix, Timezone: &tzUTC}, "", "high", "UTC", "12:00", false},
+		{"cron-only update uses stored timezone", UpdateCronScheduleArgs{ScheduleID: "c-tokyo", CronExpression: &cron9}, "", "", "Asia/Tokyo", "09:00", false},
+		{"timezone-only update recomputes with stored cron", UpdateCronScheduleArgs{ScheduleID: "c-tokyo", Timezone: &tzNY}, "", "", "America/New_York", "09:00", false},
+		{"cron-only update after timezone change uses new stored timezone", UpdateCronScheduleArgs{ScheduleID: "c-tokyo", CronExpression: &cron1730}, "", "", "America/New_York", "17:30", false},
+		{"content-only update leaves next_run_at untouched", UpdateCronScheduleArgs{ScheduleID: "c-tokyo", Prompt: &prompt}, "", "", "", "", false},
+		{"missing schedule_id", UpdateCronScheduleArgs{ScheduleID: "  "}, "'schedule_id' is required", "", "", "", false},
+		{"invalid cron expression", UpdateCronScheduleArgs{ScheduleID: "c1", CronExpression: &badExpr}, "invalid cron expression", "", "", "", false},
+		{"non-existent schedule", UpdateCronScheduleArgs{ScheduleID: "missing-id", Effort: &eff}, "failed to update recurring schedule", "", "", "", false},
+		{"non-existent schedule with cron change", UpdateCronScheduleArgs{ScheduleID: "missing-id", CronExpression: &cron9}, "failed to update recurring schedule", "", "", "", false},
+		{"closed db", UpdateCronScheduleArgs{ScheduleID: "c1", Effort: &eff}, "failed to update recurring schedule", "", "", "", true},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			out, err := h.UpdateCronSchedule(ctx, tc.args)
+			out, err := pickToolHandler(h, closed, tc.closedDB).UpdateCronSchedule(ctx, tc.args)
 			if tc.wantErrMsg != "" {
 				if err == nil || !strings.Contains(err.Error(), tc.wantErrMsg) {
 					t.Fatalf("expected error containing %q, got %v", tc.wantErrMsg, err)
@@ -442,6 +513,7 @@ func assertNextRunClock(t *testing.T, nextRunAt, wantTZ, wantClock string) {
 }
 
 func TestToolHandler_CancelSchedule(t *testing.T) {
+	closed := newClosedToolHandler(t)
 	h, db := newMemoryToolHandler(t)
 	ctx := context.Background()
 
@@ -458,16 +530,18 @@ func TestToolHandler_CancelSchedule(t *testing.T) {
 	tests := []struct {
 		name       string
 		id         string
+		closedDB   bool
 		wantErrMsg string
 	}{
-		{"cancels recurring schedule", "c1", ""},
-		{"cancels one-shot schedule", "s1", ""},
-		{"empty schedule_id", "  ", "'schedule_id' is required"},
-		{"non-existent schedule", "missing-id", "not found"},
+		{"cancels recurring schedule", "c1", false, ""},
+		{"cancels one-shot schedule", "s1", false, ""},
+		{"empty schedule_id", "  ", false, "'schedule_id' is required"},
+		{"non-existent schedule", "missing-id", false, "not found"},
+		{"closed db", "s1", true, "database is closed"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			out, err := h.CancelSchedule(ctx, CancelScheduleArgs{ScheduleID: tc.id})
+			out, err := pickToolHandler(h, closed, tc.closedDB).CancelSchedule(ctx, CancelScheduleArgs{ScheduleID: tc.id})
 			if tc.wantErrMsg != "" {
 				if err == nil || !strings.Contains(err.Error(), tc.wantErrMsg) {
 					t.Fatalf("expected error containing %q, got %v", tc.wantErrMsg, err)
@@ -478,5 +552,105 @@ func TestToolHandler_CancelSchedule(t *testing.T) {
 				t.Fatalf("CancelSchedule %s = %+v, err: %v", tc.id, out, err)
 			}
 		})
+	}
+}
+
+func TestToolHandler_RestateArmingAndCancelling(t *testing.T) {
+	t.Parallel()
+	db := openToolsTestDB(t)
+	ctx := context.Background()
+
+	var capturedPaths []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		capturedPaths = append(capturedPaths, r.URL.Path)
+		w.WriteHeader(http.StatusAccepted)
+	}))
+	defer srv.Close()
+
+	cfg := &config.Config{
+		DatabaseURL:       ":memory:",
+		Timezone:          "UTC",
+		RestateIngressURL: srv.URL,
+	}
+	h := NewToolHandler(cfg, db)
+	h.httpClient = srv.Client()
+
+	// 1. ScheduleRecurring arms
+	recOut, err := h.ScheduleRecurring(ctx, ScheduleRecurringArgs{
+		ChannelID:      "100000000000000001",
+		CronExpression: "0 * * * *",
+		Prompt:         "Prompt recurring",
+	})
+	if err != nil || recOut.ScheduleID == "" {
+		t.Fatalf("ScheduleRecurring error: %v", err)
+	}
+
+	// 2. ScheduleOnce arms
+	onceOut, err := h.ScheduleOnce(ctx, ScheduleOnceArgs{
+		ThreadID: "100000000000000001",
+		Prompt:   "Prompt once",
+		RunAt:    "15m",
+	})
+	if err != nil || onceOut.ScheduleID == "" {
+		t.Fatalf("ScheduleOnce error: %v", err)
+	}
+
+	// 3. UpdateCronSchedule (enabled) arms
+	newExpr := "*/10 * * * *"
+	upOut, err := h.UpdateCronSchedule(ctx, UpdateCronScheduleArgs{
+		ScheduleID:     recOut.ScheduleID,
+		CronExpression: &newExpr,
+	})
+	if err != nil || upOut.Status != "success" {
+		t.Fatalf("UpdateCronSchedule error: %v", err)
+	}
+
+	// 4. UpdateCronSchedule on disabled schedule cancels
+	if insErr := store.InsertCronSchedule(ctx, db, model.CronSchedule{
+		ID:        "c-disabled-1",
+		TargetID:  "100000000000000001",
+		CronExpr:  "0 * * * *",
+		Prompt:    "Disabled prompt",
+		NextRunAt: time.Now().UTC().Add(time.Hour),
+		Enabled:   false,
+	}); insErr != nil {
+		t.Fatalf("InsertCronSchedule failed: %v", insErr)
+	}
+	upDisOut, err := h.UpdateCronSchedule(ctx, UpdateCronScheduleArgs{
+		ScheduleID:     "c-disabled-1",
+		CronExpression: &newExpr,
+	})
+	if err != nil || upDisOut.Status != "success" {
+		t.Fatalf("UpdateCronSchedule disabled error: %v", err)
+	}
+
+	// 5. CancelSchedule cancels
+	canOut, err := h.CancelSchedule(ctx, CancelScheduleArgs{ScheduleID: recOut.ScheduleID})
+	if err != nil || canOut.Status != "success" {
+		t.Fatalf("CancelSchedule error: %v", err)
+	}
+
+	wantRecArm := "/HaroSchedule/" + recOut.ScheduleID + "/Arm/send"
+	wantOnceArm := "/HaroSchedule/" + onceOut.ScheduleID + "/Arm/send"
+	wantDisabledCancel := "/HaroSchedule/c-disabled-1/Cancel/send"
+	wantRecCancel := "/HaroSchedule/" + recOut.ScheduleID + "/Cancel/send"
+
+	if len(capturedPaths) != 5 {
+		t.Fatalf("captured %d requests, want 5", len(capturedPaths))
+	}
+	if capturedPaths[0] != wantRecArm {
+		t.Errorf("req 0 path = %q, want %q", capturedPaths[0], wantRecArm)
+	}
+	if capturedPaths[1] != wantOnceArm {
+		t.Errorf("req 1 path = %q, want %q", capturedPaths[1], wantOnceArm)
+	}
+	if capturedPaths[2] != wantRecArm {
+		t.Errorf("req 2 path = %q, want %q", capturedPaths[2], wantRecArm)
+	}
+	if capturedPaths[3] != wantDisabledCancel {
+		t.Errorf("req 3 path = %q, want %q", capturedPaths[3], wantDisabledCancel)
+	}
+	if capturedPaths[4] != wantRecCancel {
+		t.Errorf("req 4 path = %q, want %q", capturedPaths[4], wantRecCancel)
 	}
 }

@@ -1,22 +1,35 @@
 package router
 
 import (
+	"bytes"
 	"context"
 	"crypto/hmac"
+	"crypto/rand"
+	"crypto/rsa"
 	"crypto/sha256"
+	"crypto/x509"
 	"encoding/hex"
 	"encoding/json"
+	"encoding/pem"
 	"errors"
 	"io"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
-	"slices"
+	"reflect"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus/testutil"
+
+	"github.com/azylman/aerial/pkg/githubauth"
+	"github.com/azylman/aerial/pkg/prwire"
 	"github.com/azylman/aerial/pkg/pubsub"
+	"github.com/azylman/aerial/services/synapse/internal/config"
+	"github.com/azylman/aerial/services/synapse/internal/metrics"
 )
 
 // --- 3. GitHub Webhook HTTP Handler & Event Processing ---
@@ -139,724 +152,6 @@ func TestHandleGitHubWebhook(t *testing.T) {
 	}
 }
 
-type ghPriorEvent struct {
-	event    string
-	delivery string
-	payload  string
-}
-
-type ghEventCase struct {
-	name                    string
-	event                   string
-	delivery                string
-	payload                 string
-	priorEvent              *ghPriorEvent
-	priorEvents             []ghPriorEvent
-	reg                     *mockPRRegistry
-	disp                    *mockOutboundDispatcher
-	bus                     *mockEventBus
-	spyNoGitHubHit          bool
-	systemChannelID         string
-	autoUpdateAuthors       []string
-	nonDefaultOwner         bool
-	botID                   string
-	wantErr                 bool
-	authoritative           bool
-	wantRepo                string
-	wantAction              string
-	wantPR                  int
-	wantBranch              string
-	wantHeadSHA             string
-	wantMergeSHA            string
-	wantTargetID            string
-	wantSource              string
-	wantConclusion          string
-	wantSender              string
-	wantMergedCalls         int
-	wantClosedCalls         int
-	wantSyncCalls           int
-	wantCIFailedCalls       int
-	wantCIFailedSHAs        int
-	wantDeployFailedCalls   int
-	wantDeployFailedEvents  int
-	wantDeployEventMergeSHA string
-	wantBackfillCalls       int
-	wantConflictCalls       int
-	wantAdvanceCalls        int
-	wantEnsureCalls         int
-	wantGitPushes           int
-	wantPrompts             int
-	wantDispatches          int
-	wantDMs                 int
-	wantPromptSubstr        string
-	wantDMSubstr            string
-	wantRecordCheckCalls    int
-	wantRecordCheckState    string
-	wantUpdatedBranchHit    string
-	wantRerunHit            string
-	wantReconciles          []fluxKustomizationRef
-	wantCIFailedChecks      []string
-	wantSyncEvents          int
-}
-
-func newProcessGitHubEventMockServer(ghPaths *sync.Map) *httptest.Server {
-	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		ghPaths.Store(r.URL.Path, true)
-		w.Header().Set("Content-Type", "application/json")
-		switch {
-		case strings.Contains(r.URL.Path, "/commits/") && strings.HasSuffix(r.URL.Path, "/pulls"):
-			bodies := map[string]string{
-				"commit-fallback": `[{"number": 777, "state": "open", "head": {"ref": "feat/fallback", "sha": "commit-fallback"}}]`,
-				"wf-fallback":     `[{"number": 888, "state": "open", "head": {"ref": "feat/wf-branch", "sha": "wf-fallback"}}]`,
-				"squash123":       `[{"number": 999, "state": "closed", "head": {"ref": "feat/squash", "sha": "squash123"}}]`,
-				"pushsha999":      `[{"number": 522, "state": "closed"}]`,
-				"forksha711":      `[{"number": 711, "state": "open", "head": {"ref": "fork/patch-1", "sha": "forksha711"}}]`,
-			}
-			sha := strings.TrimSuffix(r.URL.Path[strings.LastIndex(r.URL.Path, "/commits/")+len("/commits/"):], "/pulls")
-			if body, ok := bodies[sha]; ok {
-				_, _ = w.Write([]byte(body))
-				return
-			}
-			w.WriteHeader(http.StatusNotFound)
-		case strings.Contains(r.URL.Path, "/pulls/543/update-branch"):
-			w.WriteHeader(http.StatusUnprocessableEntity)
-			_, _ = w.Write([]byte(`{"message": "merge conflict between base and head"}`))
-		case r.Method == http.MethodGet && (r.URL.Path == "/repos/azylman/aerial/pulls" || strings.HasSuffix(r.URL.Path, "/repos/azylman/aerial/pulls")):
-			_, _ = w.Write([]byte(`[{"number": 543, "head": {"ref": "feat/conflict-check", "sha": "head543"}, "user": {"login": "trusted-author"}}]`))
-		case r.Method == http.MethodGet && (r.URL.Path == "/repos/azylman/mirrormere/pulls" || strings.HasSuffix(r.URL.Path, "/repos/azylman/mirrormere/pulls")):
-			_, _ = w.Write([]byte(`[{"number": 891, "head": {"ref": "feat/fail-pr", "sha": "failhead891"}, "user": {"login": "trusted-author"}}, {"number": 894, "head": {"ref": "feat/clean-pr", "sha": "cleanhead894"}, "user": {"login": "trusted-author"}}]`))
-		case r.Method == http.MethodPut && strings.Contains(r.URL.Path, "/repos/azylman/mirrormere/pulls/894/update-branch"):
-			w.WriteHeader(http.StatusAccepted)
-			_, _ = w.Write([]byte(`{"message": "Updating pull request branch."}`))
-		case strings.Contains(r.URL.Path, "/check-runs"):
-			_, _ = w.Write([]byte(`{"check_runs":[]}`))
-		case strings.Contains(r.URL.Path, "/issues/525/comments"):
-			_, _ = w.Write([]byte(`[{"id": 0, "body": "Non-roborev comment"}, {"id": 1, "body": "## roborev: Review Complete (` + "`old0000`" + `)\nOld bug"}, {"id": 2, "body": "## roborev: Combined Review (` + "`robo525`" + `)\nFound SQL injection in query"}]`))
-		case strings.Contains(r.URL.Path, "/actions/runs/800/jobs"):
-			_, _ = w.Write([]byte(`{"total_count":1,"jobs":[{"id":1,"name":"Verify Codebase","status":"completed","conclusion":"success"}]}`))
-		case strings.Contains(r.URL.Path, "/actions/runs/801/rerun-failed-jobs"):
-			w.WriteHeader(http.StatusCreated)
-			_, _ = w.Write([]byte(`{}`))
-		case strings.Contains(r.URL.Path, "/actions/runs/802/rerun-failed-jobs"):
-			w.WriteHeader(http.StatusInternalServerError)
-			_, _ = w.Write([]byte(`{"message":"failed to rerun"}`))
-		default:
-			w.WriteHeader(http.StatusNotFound)
-		}
-	}))
-}
-
-var prAndPushTestCases = []ghEventCase{
-	{
-		name: "ping valid", event: "ping", delivery: "del-ping-1",
-		payload:  `{"zen":"Responsive is better than fast.","hook_id":98765,"repository":{"full_name":"azylman/aerial"}}`,
-		wantRepo: "azylman/aerial",
-	},
-	{
-		name: "ping malformed", event: "ping", delivery: "del-ping-2",
-		payload: `{invalid`, wantErr: true,
-	},
-	{
-		name: "pull_request closed and merged", event: "pull_request", delivery: "del-pr-1",
-		payload:    `{"action":"closed","number":512,"pull_request":{"number":512,"title":"feat: test pr","head":{"ref":"feat/test","sha":"headsha123"},"base":{"ref":"main","sha":"basesha456"},"merged":true,"merge_commit_sha":"mergesha789"},"repository":{"full_name":"azylman/aerial"},"sender":{"login":"arcane103"}}`,
-		wantAction: "closed", wantPR: 512, wantBranch: "feat/test", wantHeadSHA: "headsha123", wantMergeSHA: "mergesha789", wantSource: "pull_request_payload", wantSender: "arcane103",
-	},
-	{
-		name: "pull_request malformed", event: "pull_request", delivery: "del-pr-2",
-		payload: `{invalid`, wantErr: true,
-	},
-	{
-		name: "push to main with commit resolution", event: "push", delivery: "del-push-1",
-		payload: `{"ref":"refs/heads/main","before":"prev111","after":"squash123","deleted":false,"head_commit":{"id":"squash123","message":"feat: merged feature (#999)"},"repository":{"full_name":"azylman/aerial"}}`,
-		wantPR:  999, wantMergeSHA: "squash123", wantSource: "commit_sha_lookup",
-	},
-	{
-		name: "push branch deletion", event: "push", delivery: "del-push-2",
-		payload:    `{"ref":"refs/heads/feat/temp","before":"temp111","after":"0000000000000000000000000000000000000000","deleted":true,"repository":{"full_name":"azylman/aerial"}}`,
-		wantSource: "branch_deleted",
-	},
-	{
-		name: "push tag non-branch ref", event: "push", delivery: "del-push-3",
-		payload:    `{"ref":"refs/tags/v1.0.0","after":"tagsha111","repository":{"full_name":"azylman/aerial"}}`,
-		wantSource: "non_branch_ref",
-	},
-	{
-		name: "push feature branch", event: "push", delivery: "del-push-feat",
-		payload:    `{"ref":"refs/heads/feat/new-feature","before":"featprev","after":"featsha222","head_commit":{"id":"featsha222","message":"feat: new feature"},"repository":{"full_name":"azylman/aerial"}}`,
-		wantSource: "non_main_branch",
-	},
-	{
-		name: "push git push dispatcher error", event: "push", delivery: "del-push-disp-err",
-		payload: `{"ref":"refs/heads/main","before":"prev111","after":"pushsha999","head_commit":{"id":"pushsha999","message":"feat: push"},"repository":{"full_name":"azylman/aerial"}}`,
-		disp:    &mockOutboundDispatcher{gitPushErr: errors.New("hangar down")},
-		wantErr: true,
-	},
-	{
-		name: "push git push dispatcher error still runs open pr conflict check and branch update", event: "push", delivery: "del-push-disp-err-update",
-		payload:              `{"ref":"refs/heads/main","before":"prev111","after":"pushsha894","head_commit":{"id":"pushsha894","message":"feat: push"},"repository":{"full_name":"azylman/mirrormere"}}`,
-		autoUpdateAuthors:    []string{"trusted-author"},
-		disp:                 &mockOutboundDispatcher{gitPushErr: errors.New("flux 429 rate limit")},
-		wantErr:              true,
-		wantUpdatedBranchHit: "/repos/azylman/mirrormere/pulls/894/update-branch",
-	},
-	{
-		name: "push malformed", event: "push", delivery: "del-push-4",
-		payload: `{invalid`, wantErr: true,
-	},
-	{
-		name: "unhandled event", event: "star", delivery: "del-star-1",
-		payload: `{"action":"created"}`, wantSource: "unhandled_event",
-	},
-	{
-		name: "pull_request closed and merged transitions registry", event: "pull_request", delivery: "del-pr-merged",
-		payload: `{"action":"closed","number":515,"pull_request":{"number":515,"head":{"ref":"feat/decouple","sha":"head111"},"merged":true,"merge_commit_sha":"merge111"},"repository":{"full_name":"azylman/aerial"},"sender":{"login":"arcane103"}}`,
-		reg:     &mockPRRegistry{mergedTargetID: "target-merged-1"},
-		wantPR:  515, wantMergeSHA: "merge111", wantTargetID: "target-merged-1", wantMergedCalls: 1, wantAdvanceCalls: 1,
-	},
-	{
-		name: "pull_request closed unmerged transitions registry", event: "pull_request", delivery: "del-pr-closed",
-		payload: `{"action":"closed","number":516,"pull_request":{"number":516,"head":{"ref":"feat/discard","sha":"head222"},"merged":false},"repository":{"full_name":"azylman/aerial"},"sender":{"login":"arcane103"}}`,
-		reg:     &mockPRRegistry{closedTargetID: "target-closed-1"},
-		wantPR:  516, wantTargetID: "target-closed-1", wantClosedCalls: 1,
-	},
-	{
-		name: "pull_request synchronize transitions registry", event: "pull_request", delivery: "del-pr-sync",
-		payload: `{"action":"synchronize","number":517,"pull_request":{"number":517,"head":{"ref":"feat/update","sha":"newhead333"}},"repository":{"full_name":"azylman/aerial"},"sender":{"login":"arcane103"}}`,
-		reg:     &mockPRRegistry{syncTargetID: "target-sync-1", resolveTargetID: "target-sync-1", resolveBranch: "feat/update"},
-		wantPR:  517, wantHeadSHA: "newhead333", wantTargetID: "target-sync-1", wantSyncCalls: 1,
-	},
-	{
-		name: "push to main with resolved PR backfills merge SHA", event: "push", delivery: "del-push-main",
-		payload: `{"ref":"refs/heads/main","after":"pushsha999","repository":{"full_name":"azylman/aerial"},"head_commit":{"id":"pushsha999","message":"feat: merge pr"}}`,
-		reg:     &mockPRRegistry{backfillTargetID: "target-backfill"},
-		wantPR:  522, wantMergeSHA: "pushsha999", wantBackfillCalls: 1, wantAdvanceCalls: 1,
-	},
-	{
-		name: "authoritative push journal failure surfaces", event: "push", delivery: "del-push-auth",
-		payload:       `{"ref":"refs/heads/main","before":"prev111","after":"squash123","deleted":false,"head_commit":{"id":"squash123","message":"feat: merged feature (#999)"},"repository":{"full_name":"azylman/aerial"}}`,
-		authoritative: true, wantErr: true,
-	},
-	{
-		name: "push to main falls back to squash commit message when SHA lookup misses", event: "push", delivery: "del-push-msg-fallback",
-		payload: `{"ref":"refs/heads/main","after":"unindexedsha898","repository":{"full_name":"azylman/aerial"},"head_commit":{"id":"unindexedsha898","message":"refactor(runner): compact streaming daemon (chunk 3/5) (#898)\n\nDetailed body"}}`,
-		reg:     &mockPRRegistry{backfillTargetID: "100000000000000003"},
-		disp:    &mockOutboundDispatcher{},
-		wantPR:  898, wantMergeSHA: "unindexedsha898", wantTargetID: "100000000000000003", wantSource: "commit_message", wantBackfillCalls: 1, wantAdvanceCalls: 1, wantGitPushes: 1,
-	},
-	{
-		name: "push to main falls back to merge commit message when SHA lookup misses", event: "push", delivery: "del-push-merge-msg-fallback",
-		payload: `{"ref":"refs/heads/main","after":"unindexedsha899","repository":{"full_name":"azylman/aerial"},"head_commit":{"id":"unindexedsha899","message":"Merge pull request #899 from azylman/feat/test\n\nMerge body"}}`,
-		reg:     &mockPRRegistry{backfillTargetID: "100000000000000003"},
-		disp:    &mockOutboundDispatcher{},
-		wantPR:  899, wantMergeSHA: "unindexedsha899", wantTargetID: "100000000000000003", wantSource: "commit_message", wantBackfillCalls: 1, wantAdvanceCalls: 1, wantGitPushes: 1,
-	},
-	{
-		name: "feature branch push does not backfill", event: "push", delivery: "del-push-feat-reg",
-		payload:    `{"ref":"refs/heads/feat/branch-1","after":"featsha888","repository":{"full_name":"azylman/aerial"},"head_commit":{"id":"featsha888","message":"feat: wip"}}`,
-		reg:        &mockPRRegistry{},
-		wantSource: "non_main_branch",
-	},
-	{
-		name: "registry error propagation", event: "pull_request", delivery: "del-err",
-		payload: `{"action":"closed","number":515,"pull_request":{"number":515,"head":{"ref":"feat/decouple","sha":"head111"},"merged":true,"merge_commit_sha":"merge111"},"repository":{"full_name":"azylman/aerial"},"sender":{"login":"arcane103"}}`,
-		reg:     &mockPRRegistry{err: errors.New("simulated database failure")},
-		wantErr: true,
-	},
-	{
-		name: "push local PR resolution priority avoids GitHub API", event: "push", delivery: "del-push-local",
-		payload:        `{"ref":"refs/heads/main","after":"localsha123","repository":{"full_name":"azylman/aerial"},"head_commit":{"id":"localsha123","message":"feat: merged commit"}}`,
-		reg:            &mockPRRegistry{resolvePRNum: 530, resolveBranch: "feat/local-resolved", resolveTargetID: "thread-local-530"},
-		spyNoGitHubHit: true, wantPR: 530, wantTargetID: "thread-local-530", wantMergeSHA: "localsha123", wantSource: "local_pr_registry", wantBackfillCalls: 1, wantAdvanceCalls: 1,
-	},
-	{
-		name: "push to main triggers DispatchGitPush", event: "push", delivery: "del-push-main-disp",
-		payload: `{"ref":"refs/heads/main","after":"maincommit123","repository":{"full_name":"azylman/aerial"}}`,
-		reg:     &mockPRRegistry{resolvePRNum: 542, resolveBranch: "main", resolveTargetID: "100000000000000001"},
-		disp:    &mockOutboundDispatcher{},
-		wantPR:  542, wantTargetID: "100000000000000001", wantGitPushes: 1, wantBackfillCalls: 1, wantAdvanceCalls: 1,
-	},
-	{
-		name: "push to feature branch does not trigger DispatchGitPush", event: "push", delivery: "del-push-feat-disp",
-		payload:       `{"ref":"refs/heads/feat/test-branch","after":"featcommit456","repository":{"full_name":"azylman/aerial"}}`,
-		reg:           &mockPRRegistry{resolvePRNum: 542, resolveBranch: "main", resolveTargetID: "100000000000000001"},
-		disp:          &mockOutboundDispatcher{},
-		wantGitPushes: 0,
-	},
-	{
-		name: "pull_request closed and merged suppresses direct message", event: "pull_request", delivery: "del-pr-merge-disp",
-		payload: `{"action":"closed","number":542,"pull_request":{"number":542,"merged":true,"head":{"ref":"feat/batch1","sha":"head542"},"merge_commit_sha":"merge542"},"repository":{"full_name":"azylman/aerial"}}`,
-		reg:     &mockPRRegistry{mergedTargetID: "100000000000000001"},
-		disp:    &mockOutboundDispatcher{},
-		wantPR:  542, wantAction: "closed", wantMergedCalls: 1, wantAdvanceCalls: 1, wantDMs: 0,
-	},
-	{
-		name: "pull_request auto_merge_disabled transitions conflict without prompt", event: "pull_request", delivery: "del-amd",
-		payload:    `{"action":"auto_merge_disabled","number":543,"pull_request":{"number":543,"head":{"ref":"feat/my-feature","sha":"head543"},"mergeable_state":"dirty"},"repository":{"full_name":"azylman/aerial"}}`,
-		reg:        &mockPRRegistry{conflictTargetID: "100000000000000001", conflictUpdated: true},
-		disp:       &mockOutboundDispatcher{},
-		wantAction: "auto_merge_disabled", wantPR: 543, wantConflictCalls: 1, wantDMs: 0, wantDispatches: 0,
-	},
-	{
-		name: "pull_request auto_merge_disabled error propagating", event: "pull_request", delivery: "del-amd-err",
-		payload: `{"action":"auto_merge_disabled","number":543,"pull_request":{"number":543,"head":{"ref":"feat/my-feature","sha":"head543"},"mergeable_state":"dirty"},"repository":{"full_name":"azylman/aerial"}}`,
-		reg:     &mockPRRegistry{conflictErr: errors.New("simulated conflict transition error")},
-		wantErr: true,
-	},
-	{
-		name: "pull_request auto_merge_disabled clean state ignores conflict", event: "pull_request", delivery: "del-amd-clean",
-		payload:    `{"action":"auto_merge_disabled","number":543,"pull_request":{"number":543,"head":{"ref":"feat/my-feature","sha":"head543"},"mergeable_state":"clean"},"repository":{"full_name":"azylman/aerial"}}`,
-		reg:        &mockPRRegistry{conflictTargetID: "100000000000000001", conflictUpdated: true},
-		disp:       &mockOutboundDispatcher{},
-		wantAction: "auto_merge_disabled", wantPR: 543, wantConflictCalls: 0, wantDMs: 0, wantDispatches: 0,
-	},
-	{
-		name: "push to main triggers conflict check on open PRs", event: "push", delivery: "del-push-conflict",
-		payload:           `{"ref":"refs/heads/main","after":"maincommit123","repository":{"full_name":"azylman/aerial"}}`,
-		reg:               &mockPRRegistry{conflictTargetID: "100000000000000001", conflictUpdated: true},
-		disp:              &mockOutboundDispatcher{},
-		autoUpdateAuthors: []string{"trusted-author"},
-		wantConflictCalls: 1, wantGitPushes: 1, wantDMs: 0, wantDispatches: 0,
-	},
-	{
-		name: "pull_request closed merged UpdatePRMerged error", event: "pull_request", delivery: "del-pr-merged-err",
-		payload: `{"action":"closed","number":215,"pull_request":{"number":215,"head":{"ref":"feat/ui3","sha":"head215"},"merged":true,"merge_commit_sha":"merge215"},"repository":{"full_name":"azylman/mirrormere"},"sender":{"login":"arcane103"}}`,
-		reg:     &mockPRRegistry{err: errors.New("merged db error")},
-		wantErr: true,
-	},
-	{
-		name: "pull_request closed unmerged UpdatePRClosedUnmerged error", event: "pull_request", delivery: "del-pr-closed-err",
-		payload: `{"action":"closed","number":216,"pull_request":{"number":216,"head":{"ref":"feat/discard2","sha":"head216"},"merged":false},"repository":{"full_name":"azylman/mirrormere"},"sender":{"login":"arcane103"}}`,
-		reg:     &mockPRRegistry{err: errors.New("closed db error")},
-		wantErr: true,
-	},
-	{
-		name: "pull_request synchronize UpdatePRSync error", event: "pull_request", delivery: "del-pr-sync-err",
-		payload: `{"action":"synchronize","number":217,"pull_request":{"number":217,"head":{"ref":"feat/update2","sha":"head217"},"merged":false},"repository":{"full_name":"azylman/mirrormere"},"sender":{"login":"arcane103"}}`,
-		reg:     &mockPRRegistry{err: errors.New("sync db error")},
-		wantErr: true,
-	},
-	{
-		name: "pull_request opened with aerial-pr trailer self-heals registration", event: "pull_request", delivery: "del-pr-trailer-open",
-		payload: `{"action":"opened","number":692,"pull_request":{"number":692,"title":"fix: chunk 2","body":"PR description\n\n<!-- aerial-pr: {\"target_id\":\"100000000000000002\",\"chunk_id\":\"build-1792510680-f4ce8eee-chunk-2\",\"jobs\":[\"kiosk-client\"]} -->","head":{"ref":"feat/chunk2","sha":"head692"}},"repository":{"full_name":"azylman/mirrormere"},"sender":{"login":"arcane103"}}`,
-		reg:     &mockPRRegistry{resolveTargetID: "100000000000000002", resolveBranch: "feat/chunk2"}, wantPR: 692, wantTargetID: "100000000000000002", wantEnsureCalls: 1,
-	},
-	{
-		name: "pull_request with aerial-pr trailer EnsurePRRegistered error propagates", event: "pull_request", delivery: "del-pr-trailer-err",
-		payload: `{"action":"opened","number":693,"pull_request":{"number":693,"title":"fix: chunk 3","body":"PR description\n\n<!-- aerial-pr: {\"target_id\":\"100000000000000002\",\"chunk_id\":\"build-123-chunk-3\",\"jobs\":[]} -->","head":{"ref":"feat/chunk3","sha":"head693"}},"repository":{"full_name":"azylman/mirrormere"},"sender":{"login":"arcane103"}}`,
-		reg:     &mockPRRegistry{ensureErr: errors.New("ensure db error")}, wantErr: true,
-	},
-	{
-		name: "dependabot PR opened registers in pr_registry with system channel snowflake", event: "pull_request", delivery: "del-pr-dependabot-reg-1",
-		payload:         `{"action":"opened","number":605,"pull_request":{"node_id":"node-ok","number":605,"title":"build(deps): bump bar","head":{"ref":"dependabot/go_modules/bar-1.0.2","sha":"depsha605"},"base":{"ref":"main","sha":"basesha"},"user":{"login":"dependabot[bot]"}},"repository":{"full_name":"azylman/aerial"},"sender":{"login":"dependabot[bot]"}}`,
-		systemChannelID: "100000000000000004", reg: &mockPRRegistry{},
-		wantRepo: "azylman/aerial", wantAction: "opened", wantPR: 605, wantBranch: "dependabot/go_modules/bar-1.0.2", wantHeadSHA: "depsha605", wantSender: "dependabot[bot]", wantSource: "pull_request_payload", wantEnsureCalls: 1, wantTargetID: "100000000000000004",
-	},
-	{
-		name: "dependabot PR opened registry error logs warning without failing event", event: "pull_request", delivery: "del-pr-dependabot-reg-err",
-		payload:         `{"action":"opened","number":606,"pull_request":{"node_id":"node-ok","number":606,"title":"build(deps): bump baz","head":{"ref":"dependabot/go_modules/baz-1.0.2","sha":"depsha606"},"base":{"ref":"main","sha":"basesha"},"user":{"login":"dependabot[bot]"}},"repository":{"full_name":"azylman/aerial"},"sender":{"login":"dependabot[bot]"}}`,
-		systemChannelID: "100000000000000004", reg: &mockPRRegistry{ensureErr: errors.New("db err")},
-		wantRepo: "azylman/aerial", wantAction: "opened", wantPR: 606, wantBranch: "dependabot/go_modules/baz-1.0.2", wantHeadSHA: "depsha606", wantSender: "dependabot[bot]", wantSource: "pull_request_payload", wantEnsureCalls: 1,
-	},
-	{
-		name: "dependabot PR opened on non-default owner skips registration and leaves targetID empty", event: "pull_request", delivery: "del-pr-dependabot-non-default-owner",
-		payload:         `{"action":"opened","number":609,"pull_request":{"node_id":"node-ok","number":609,"title":"build(deps): bump qux","head":{"ref":"dependabot/go_modules/qux-1.0.0","sha":"depsha609"},"base":{"ref":"main","sha":"basesha"},"user":{"login":"dependabot[bot]"}},"repository":{"full_name":"azylman/aerial"},"sender":{"login":"dependabot[bot]"}}`,
-		systemChannelID: "100000000000000004", nonDefaultOwner: true, reg: &mockPRRegistry{},
-		wantRepo: "azylman/aerial", wantAction: "opened", wantPR: 609, wantBranch: "dependabot/go_modules/qux-1.0.0", wantHeadSHA: "depsha609", wantSender: "dependabot[bot]", wantSource: "pull_request_payload",
-	},
-	{
-		name: "pull_request opened foreign bot_id skips registration and lifecycle events", event: "pull_request", delivery: "del-pr-foreign-open",
-		payload:  `{"action":"opened","number":2165,"pull_request":{"number":2165,"title":"feat: foreign bot work","body":"PR description\n\n<!-- aerial-pr: {\"target_id\":\"100000000000000002\",\"bot_id\":\"agent-beta\"} -->","head":{"ref":"feat/agent-beta","sha":"foreignsha2165"}},"repository":{"full_name":"azylman/aerial"},"sender":{"login":"agent-beta"}}`,
-		botID:    "aerial",
-		reg:      &mockPRRegistry{resolveTargetID: "100000000000000002", resolveBranch: "feat/agent-beta"},
-		wantRepo: "azylman/aerial", wantAction: "opened", wantPR: 2165, wantBranch: "feat/agent-beta", wantHeadSHA: "foreignsha2165", wantSource: "pull_request_payload",
-		wantEnsureCalls: 0,
-	},
-	{
-		name: "pull_request synchronize foreign bot_id skips sync update and commit sha caching", event: "pull_request", delivery: "del-pr-foreign-sync",
-		payload:  `{"action":"synchronize","number":2165,"pull_request":{"number":2165,"body":"PR description\n\n<!-- aerial-pr: {\"bot_id\":\"agent-beta\"} -->","head":{"ref":"feat/agent-beta","sha":"foreignsha2165sync"}},"repository":{"full_name":"azylman/aerial"},"sender":{"login":"agent-beta"}}`,
-		botID:    "aerial",
-		reg:      &mockPRRegistry{syncTargetID: "100000000000000002", resolveTargetID: "100000000000000002", resolveBranch: "feat/agent-beta"},
-		wantRepo: "azylman/aerial", wantAction: "synchronize", wantPR: 2165, wantBranch: "feat/agent-beta", wantHeadSHA: "foreignsha2165sync", wantSource: "pull_request_payload",
-		wantSyncCalls:  0,
-		wantSyncEvents: 0,
-	},
-	{
-		name: "pull_request closed unmerged foreign bot_id skips closed transition", event: "pull_request", delivery: "del-pr-foreign-closed",
-		payload:  `{"action":"closed","number":2165,"pull_request":{"number":2165,"body":"PR description\n\n<!-- aerial-pr: {\"bot_id\":\"agent-beta\"} -->","head":{"ref":"feat/agent-beta","sha":"foreignsha2165closed"},"merged":false},"repository":{"full_name":"azylman/aerial"},"sender":{"login":"agent-beta"}}`,
-		botID:    "aerial",
-		reg:      &mockPRRegistry{closedTargetID: "100000000000000002"},
-		wantRepo: "azylman/aerial", wantAction: "closed", wantPR: 2165, wantBranch: "feat/agent-beta", wantHeadSHA: "foreignsha2165closed", wantSource: "pull_request_payload",
-		wantClosedCalls: 0,
-	},
-	{
-		name: "pull_request closed merged foreign bot_id skips merged transition", event: "pull_request", delivery: "del-pr-foreign-merged",
-		payload:  `{"action":"closed","number":2165,"pull_request":{"number":2165,"body":"PR description\n\n<!-- aerial-pr: {\"bot_id\":\"agent-beta\"} -->","head":{"ref":"feat/agent-beta","sha":"foreignsha2165merged"},"merged":true,"merge_commit_sha":"foreignmergesha2165"},"repository":{"full_name":"azylman/aerial"},"sender":{"login":"agent-beta"}}`,
-		botID:    "aerial",
-		reg:      &mockPRRegistry{mergedTargetID: "100000000000000002"},
-		wantRepo: "azylman/aerial", wantAction: "closed", wantPR: 2165, wantBranch: "feat/agent-beta", wantHeadSHA: "foreignsha2165merged", wantMergeSHA: "foreignmergesha2165", wantSource: "pull_request_payload",
-		wantMergedCalls: 0,
-	},
-}
-
-func TestProcessGitHubEvent_PullRequestAndPush(t *testing.T) {
-	t.Parallel()
-	ctx := context.Background()
-	for _, tc := range prAndPushTestCases {
-		t.Run(tc.name, func(t *testing.T) {
-			runProcessGitHubEventCase(ctx, t, tc)
-		})
-	}
-}
-
-func assertEventRegistryCalls(t *testing.T, tc ghEventCase) {
-	t.Helper()
-	if tc.reg == nil {
-		return
-	}
-	assertEventRegistryTransitionCalls(t, tc)
-	assertEventRegistryLifecycleCalls(t, tc)
-}
-
-func assertEventRegistryTransitionCalls(t *testing.T, tc ghEventCase) {
-	t.Helper()
-	if len(tc.reg.mergedCalls) != tc.wantMergedCalls {
-		t.Errorf("mergedCalls = %d, want %d", len(tc.reg.mergedCalls), tc.wantMergedCalls)
-	}
-	if tc.wantMergeSHA != "" && len(tc.reg.mergedCalls) > 0 && tc.reg.mergedCalls[0].mergeSHA != tc.wantMergeSHA {
-		t.Errorf("mergedCalls mergeSHA = %q, want %q", tc.reg.mergedCalls[0].mergeSHA, tc.wantMergeSHA)
-	}
-	if len(tc.reg.closedUnmergedCalls) != tc.wantClosedCalls {
-		t.Errorf("closedUnmergedCalls = %d, want %d", len(tc.reg.closedUnmergedCalls), tc.wantClosedCalls)
-	}
-	if len(tc.reg.syncCalls) != tc.wantSyncCalls {
-		t.Errorf("syncCalls = %d, want %d", len(tc.reg.syncCalls), tc.wantSyncCalls)
-	}
-	if len(tc.reg.ciFailedCalls) != tc.wantCIFailedCalls {
-		t.Errorf("ciFailedCalls = %d, want %d", len(tc.reg.ciFailedCalls), tc.wantCIFailedCalls)
-	}
-	if len(tc.reg.ciFailedBySHACalls) != tc.wantCIFailedSHAs {
-		t.Errorf("ciFailedBySHACalls = %d, want %d", len(tc.reg.ciFailedBySHACalls), tc.wantCIFailedSHAs)
-	}
-	if tc.wantHeadSHA != "" && len(tc.reg.ciFailedBySHACalls) > 0 && tc.reg.ciFailedBySHACalls[0].headSHA != tc.wantHeadSHA {
-		t.Errorf("ciFailedBySHACalls headSHA = %q, want %q", tc.reg.ciFailedBySHACalls[0].headSHA, tc.wantHeadSHA)
-	}
-	if len(tc.reg.deployFailedCalls) != tc.wantDeployFailedCalls {
-		t.Errorf("deployFailedCalls = %d, want %d", len(tc.reg.deployFailedCalls), tc.wantDeployFailedCalls)
-	}
-	if tc.wantPR != 0 && tc.wantDeployFailedCalls > 0 && len(tc.reg.deployFailedCalls) > 0 && tc.reg.deployFailedCalls[0].prNumber != tc.wantPR {
-		t.Errorf("deployFailedCalls prNumber = %d, want %d", tc.reg.deployFailedCalls[0].prNumber, tc.wantPR)
-	}
-}
-
-func assertEventRegistryLifecycleCalls(t *testing.T, tc ghEventCase) {
-	t.Helper()
-	if len(tc.reg.backfillCalls) != tc.wantBackfillCalls {
-		t.Errorf("backfillCalls = %d, want %d", len(tc.reg.backfillCalls), tc.wantBackfillCalls)
-	}
-	if tc.wantMergeSHA != "" && len(tc.reg.backfillCalls) > 0 && tc.reg.backfillCalls[0].mergeSHA != tc.wantMergeSHA {
-		t.Errorf("backfillCalls mergeSHA = %q, want %q", tc.reg.backfillCalls[0].mergeSHA, tc.wantMergeSHA)
-	}
-	if len(tc.reg.conflictCalls) != tc.wantConflictCalls {
-		t.Errorf("conflictCalls = %d, want %d", len(tc.reg.conflictCalls), tc.wantConflictCalls)
-	}
-	if len(tc.reg.ensureCalls) != tc.wantEnsureCalls {
-		t.Errorf("ensureCalls = %d, want %d", len(tc.reg.ensureCalls), tc.wantEnsureCalls)
-	}
-	if len(tc.reg.recordCheckCalls) != tc.wantRecordCheckCalls {
-		t.Errorf("recordCheckCalls = %d, want %d", len(tc.reg.recordCheckCalls), tc.wantRecordCheckCalls)
-	}
-	if tc.wantRecordCheckState != "" && len(tc.reg.recordCheckCalls) > 0 && tc.reg.recordCheckCalls[0].checkState != tc.wantRecordCheckState {
-		t.Errorf("recordCheckCalls checkState = %q, want %q", tc.reg.recordCheckCalls[0].checkState, tc.wantRecordCheckState)
-	}
-}
-
-func assertEventDispatcherCalls(t *testing.T, tc ghEventCase) {
-	t.Helper()
-	if tc.disp == nil {
-		return
-	}
-	assertEventDispatcherPushesAndReconciles(t, tc)
-	assertEventDispatcherPromptsAndDMs(t, tc)
-}
-
-func assertEventDispatcherPushesAndReconciles(t *testing.T, tc ghEventCase) {
-	t.Helper()
-	gitPushes := tc.disp.GitPushCalls()
-	if len(gitPushes) != tc.wantGitPushes {
-		t.Errorf("gitPushes = %d, want %d", len(gitPushes), tc.wantGitPushes)
-	}
-	if tc.wantGitPushes > 0 && len(gitPushes) > 0 {
-		if tc.wantTargetID != "" && gitPushes[0].TargetID != tc.wantTargetID {
-			t.Errorf("git push TargetID = %q, want %q", gitPushes[0].TargetID, tc.wantTargetID)
-		}
-		if tc.wantPR != 0 && gitPushes[0].PRNumber != tc.wantPR {
-			t.Errorf("git push PRNumber = %d, want %d", gitPushes[0].PRNumber, tc.wantPR)
-		}
-	}
-	if got := tc.disp.ReconcileCalls(); !slices.Equal(got, tc.wantReconciles) {
-		t.Errorf("reconcile calls = %v, want %v", got, tc.wantReconciles)
-	}
-}
-
-func assertEventDispatcherPromptsAndDMs(t *testing.T, tc ghEventCase) {
-	t.Helper()
-	dispatches := tc.disp.DispatchCalls()
-	if len(dispatches) != tc.wantDispatches {
-		t.Errorf("dispatches = %d, want %d", len(dispatches), tc.wantDispatches)
-	}
-	if tc.wantPromptSubstr != "" && len(dispatches) > 0 && !strings.Contains(dispatches[len(dispatches)-1].Prompt, tc.wantPromptSubstr) {
-		t.Errorf("expected dispatch to contain %q, got %+v", tc.wantPromptSubstr, dispatches)
-	}
-	prompts := tc.disp.PromptCalls()
-	if len(prompts) != tc.wantPrompts {
-		t.Errorf("prompts = %d, want %d", len(prompts), tc.wantPrompts)
-	}
-	if tc.wantPromptSubstr != "" && len(prompts) > 0 && !strings.Contains(prompts[len(prompts)-1].Prompt, tc.wantPromptSubstr) {
-		t.Errorf("expected prompt to contain %q, got %+v", tc.wantPromptSubstr, prompts)
-	}
-	dms := tc.disp.DirectMessageCalls()
-	if len(dms) != tc.wantDMs {
-		t.Errorf("dms = %d, want %d", len(dms), tc.wantDMs)
-	}
-	if tc.wantDMSubstr != "" && (len(dms) == 0 || !strings.Contains(dms[len(dms)-1].Content, tc.wantDMSubstr)) {
-		t.Errorf("expected DM to contain %q, got %+v", tc.wantDMSubstr, dms)
-	}
-}
-
-func assertEventResult(t *testing.T, tc ghEventCase, res *ResolvedGitHubEvent, ghPaths *sync.Map) {
-	t.Helper()
-	if tc.spyNoGitHubHit {
-		if _, hit := ghPaths.Load("/repos/azylman/aerial/commits/localsha123/pulls"); hit {
-			t.Fatalf("expected 0 GitHub API hits for localsha123, but endpoint was called")
-		}
-	}
-	for _, hitPath := range []string{tc.wantUpdatedBranchHit, tc.wantRerunHit} {
-		if hitPath != "" {
-			if _, hit := ghPaths.Load(hitPath); !hit {
-				t.Errorf("expected hit for %q, but was not called", hitPath)
-			}
-		}
-	}
-	assertEventBasicFields(t, tc, res)
-	assertEventRegistryCalls(t, tc)
-	assertEventDispatcherCalls(t, tc)
-}
-
-func assertEventBasicFields(t *testing.T, tc ghEventCase, res *ResolvedGitHubEvent) {
-	t.Helper()
-	checkFields := []struct {
-		name, got, want string
-	}{
-		{"Repo", res.Repo, tc.wantRepo},
-		{"Action", res.Action, tc.wantAction},
-		{"Branch", res.Branch, tc.wantBranch},
-		{"HeadSHA", res.HeadSHA, tc.wantHeadSHA},
-		{"MergeSHA", res.MergeSHA, tc.wantMergeSHA},
-		{"TargetID", res.TargetID, tc.wantTargetID},
-		{"ResolutionSource", res.ResolutionSource, tc.wantSource},
-		{"Conclusion", res.Conclusion, tc.wantConclusion},
-		{"Sender", res.Sender, tc.wantSender},
-	}
-	for _, f := range checkFields {
-		if f.want != "" && f.got != f.want {
-			t.Errorf("%s = %q, want %q", f.name, f.got, f.want)
-		}
-	}
-	if tc.wantPR != 0 && res.PRNumber != tc.wantPR {
-		t.Errorf("PRNumber = %d, want %d", res.PRNumber, tc.wantPR)
-	}
-}
-
-func runProcessGitHubEventCase(ctx context.Context, t *testing.T, tc ghEventCase) {
-	t.Helper()
-	t.Parallel()
-	var ghPaths sync.Map
-	mockServer := newProcessGitHubEventMockServer(&ghPaths)
-	defer mockServer.Close()
-	var inserters []pubsub.Bus
-	activeBus := tc.bus
-	if activeBus == nil && (len(tc.wantCIFailedChecks) > 0 || tc.wantDeployFailedEvents > 0 || tc.wantSyncEvents > 0) {
-		activeBus = &mockEventBus{}
-	}
-	if activeBus != nil {
-		inserters = append(inserters, activeBus)
-	}
-	var reg PRRegistryUpdater
-	if tc.reg != nil {
-		reg = tc.reg
-	}
-	var disp OutboundDispatcher
-	if tc.disp != nil {
-		disp = tc.disp
-	}
-	cfg := legacyFixtureConfig(Config{GitHubAPIURL: mockServer.URL, GitHubToken: "test-token", SystemChannelID: tc.systemChannelID, AutoUpdatePRAuthors: tc.autoUpdateAuthors, DefaultOwner: !tc.nonDefaultOwner, BotID: tc.botID, RestateAuthoritative: tc.authoritative})
-	srv := newTestRouter(cfg, legacyFixtureClient(mockServer.Client()), reg, disp, inserters...)
-	srv.onProcessed = func(string, string) {}
-	if tc.priorEvent != nil {
-		if _, err := srv.ProcessGitHubEvent(ctx, tc.priorEvent.event, tc.priorEvent.delivery, []byte(tc.priorEvent.payload)); err != nil {
-			t.Fatalf("priorEvent failed: %v", err)
-		}
-	}
-	for i, pe := range tc.priorEvents {
-		if _, err := srv.ProcessGitHubEvent(ctx, pe.event, pe.delivery, []byte(pe.payload)); err != nil {
-			t.Fatalf("priorEvents[%d] failed: %v", i, err)
-		}
-	}
-	res, err := srv.ProcessGitHubEvent(ctx, tc.event, tc.delivery, []byte(tc.payload))
-	if (err != nil) != tc.wantErr {
-		t.Fatalf("ProcessGitHubEvent() err = %v, wantErr %v", err, tc.wantErr)
-	}
-	if tc.wantErr {
-		if tc.wantUpdatedBranchHit != "" {
-			if _, hit := ghPaths.Load(tc.wantUpdatedBranchHit); !hit {
-				t.Errorf("expected hit for %q, but was not called", tc.wantUpdatedBranchHit)
-			}
-		}
-		return
-	}
-	assertEventResult(t, tc, res, &ghPaths)
-	assertEventBusCalls(t, tc, activeBus)
-}
-
-func assertDeployFailedEvents(t *testing.T, tc ghEventCase, bus *mockEventBus) {
-	t.Helper()
-	if bus == nil {
-		t.Fatalf("wantDeployFailedEvents specified but no bus available")
-	}
-	deployEventsCount := 0
-	for _, evt := range bus.publishedPREvents {
-		if evt.Event == eventDeployFailed {
-			deployEventsCount++
-			if tc.wantPR != 0 && evt.PRNumber != tc.wantPR {
-				t.Errorf("deploy_failed PRNumber = %d, want %d", evt.PRNumber, tc.wantPR)
-			}
-			if tc.wantDeployEventMergeSHA != "" && evt.MergeSHA != tc.wantDeployEventMergeSHA {
-				t.Errorf("deploy_failed MergeSHA = %q, want %q", evt.MergeSHA, tc.wantDeployEventMergeSHA)
-			}
-			if tc.wantTargetID != "" && evt.TargetID != tc.wantTargetID {
-				t.Errorf("deploy_failed TargetID = %q, want %q", evt.TargetID, tc.wantTargetID)
-			}
-		}
-	}
-	if deployEventsCount != tc.wantDeployFailedEvents {
-		t.Errorf("deploy_failed events count = %d, want %d", deployEventsCount, tc.wantDeployFailedEvents)
-	}
-}
-
-func assertSyncEvents(t *testing.T, tc ghEventCase, bus *mockEventBus) {
-	t.Helper()
-	if bus == nil {
-		t.Fatalf("wantSyncEvents specified but no bus available")
-	}
-	syncCount := 0
-	for _, evt := range bus.publishedPREvents {
-		if evt.Event == "synchronize" {
-			syncCount++
-			if tc.wantPR != 0 && evt.PRNumber != tc.wantPR {
-				t.Errorf("synchronize PRNumber = %d, want %d", evt.PRNumber, tc.wantPR)
-			}
-			if tc.wantHeadSHA != "" && evt.HeadSHA != tc.wantHeadSHA {
-				t.Errorf("synchronize HeadSHA = %q, want %q", evt.HeadSHA, tc.wantHeadSHA)
-			}
-		}
-	}
-	if syncCount != tc.wantSyncEvents {
-		t.Errorf("synchronize events count = %d, want %d", syncCount, tc.wantSyncEvents)
-	}
-}
-
-func assertEventBusCalls(t *testing.T, tc ghEventCase, bus *mockEventBus) {
-	t.Helper()
-	if len(tc.wantCIFailedChecks) > 0 {
-		if bus == nil {
-			t.Fatalf("wantCIFailedChecks specified but no bus available")
-		}
-		var gotChecks []string
-		for _, evt := range bus.publishedPREvents {
-			if evt.Event == "ci_failed" {
-				gotChecks = append(gotChecks, firstNonEmpty(evt.CheckName, evt.JobName))
-			}
-		}
-		if !slices.Equal(gotChecks, tc.wantCIFailedChecks) {
-			t.Errorf("ci_failed event checks = %v, want %v", gotChecks, tc.wantCIFailedChecks)
-		}
-	}
-	if tc.wantDeployFailedEvents > 0 {
-		assertDeployFailedEvents(t, tc, bus)
-	}
-	if tc.wantSyncEvents > 0 {
-		assertSyncEvents(t, tc, bus)
-	}
-}
-
-func TestResolveOwningAgent(t *testing.T) {
-	t.Parallel()
-
-	tests := []struct {
-		name      string
-		cfgBots   map[string]BotConfig
-		prBody    string
-		meta      map[string]any
-		prNum     int
-		repo      string
-		wantAgent string
-	}{
-		{
-			name:      "pr body trailer agent takes precedence",
-			prBody:    "Fix bug\n<!-- aerial-pr: {\"agent\":\"agent-beta\"} -->",
-			meta:      map[string]any{"agent": "agent-alpha"},
-			prNum:     42,
-			repo:      "azylman/aerial",
-			wantAgent: "agent-beta",
-		},
-		{
-			name:      "registry metadata agent used when prBody has no trailer",
-			prBody:    "Fix bug without trailer",
-			meta:      map[string]any{"agent": "agent-alpha"},
-			prNum:     42,
-			repo:      "azylman/aerial",
-			wantAgent: "agent-alpha",
-		},
-		{
-			name:      "registry metadata bot_id used when agent not in meta",
-			prBody:    "Fix bug without trailer",
-			meta:      map[string]any{"bot_id": "agent-alpha"},
-			prNum:     42,
-			repo:      "azylman/aerial",
-			wantAgent: "agent-alpha",
-		},
-		{
-			name:   "default owner agent used when no trailer or registry metadata",
-			prBody: "Dependabot bump",
-			prNum:  42,
-			repo:   "azylman/aerial",
-			cfgBots: map[string]BotConfig{
-				"aerial":      {DefaultOwner: false},
-				"agent-alpha": {DefaultOwner: true},
-			},
-			wantAgent: "agent-alpha",
-		},
-		{
-			name:      "fallback aerial used when no config or registry",
-			prBody:    "Dependabot bump",
-			wantAgent: "aerial",
-		},
-	}
-
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			reg := &mockPRRegistry{rawMetadata: tc.meta}
-			cfg := Config{Bots: tc.cfgBots}
-			srv := newTestRouter(cfg, nil, reg, nil)
-			got := srv.resolveOwningAgent(context.Background(), tc.repo, tc.prNum, tc.prBody)
-			if got != tc.wantAgent {
-				t.Errorf("resolveOwningAgent() = %q, want %q", got, tc.wantAgent)
-			}
-		})
-	}
-}
-
 func TestIsForeignBotEvent(t *testing.T) {
 	t.Parallel()
 
@@ -919,11 +214,534 @@ func TestIsForeignBotEvent(t *testing.T) {
 			if tc.nilCfg {
 				srv = &RouterServer{}
 			} else {
-				srv = newTestRouter(Config{Bots: tc.cfgBots, BotID: tc.cfgBotID}, nil, nil, nil)
+				srv = newTestRouter(Config{Bots: tc.cfgBots, BotID: tc.cfgBotID}, nil, nil)
 			}
 			got := srv.isForeignBotEvent(tc.meta)
 			if got != tc.wantForeign {
 				t.Errorf("isForeignBotEvent() = %v, want %v", got, tc.wantForeign)
+			}
+		})
+	}
+}
+
+// authRecorder serves GitHub REST JSON and records each Authorization header.
+type authRecorder struct {
+	mu   sync.Mutex
+	auth []string
+}
+
+func (a *authRecorder) server(t *testing.T) *httptest.Server {
+	t.Helper()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		a.mu.Lock()
+		a.auth = append(a.auth, r.Header.Get("Authorization"))
+		a.mu.Unlock()
+		w.Header().Set("X-Ratelimit-Remaining", "4321")
+		_, _ = w.Write([]byte(`{}`))
+	}))
+	t.Cleanup(srv.Close)
+	return srv
+}
+
+func (a *authRecorder) headers() []string {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return append([]string(nil), a.auth...)
+}
+
+func TestRouterGitHubTransportCredential(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name       string
+		pat        string
+		src        githubauth.TokenSource
+		wantGitHub string
+	}{
+		{name: "no token source attaches config PAT", pat: "pat-secret", wantGitHub: "Bearer pat-secret"},
+		{name: "no token source and no PAT is unauthenticated", wantGitHub: ""},
+		{name: "injected source wins over config PAT", pat: "pat-secret", src: githubauth.NewStaticTokenSource("injected"), wantGitHub: "Bearer injected"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			gh := &authRecorder{}
+			ghSrv := gh.server(t)
+			other := &authRecorder{}
+			otherSrv := other.server(t)
+			srv := NewRouterServer(fixedConfig(Config{GitHubAPIURL: ghSrv.URL, GitHubToken: tc.pat}), nil, WithGitHubTokenSource(tc.src))
+			var out map[string]any
+			if err := srv.getGitHubJSON(context.Background(), "/repos/o/r", 1<<20, &out); err != nil {
+				t.Fatalf("getGitHubJSON: %v", err)
+			}
+			req, err := http.NewRequestWithContext(context.Background(), http.MethodGet, otherSrv.URL+"/blob", http.NoBody)
+			if err != nil {
+				t.Fatalf("NewRequest: %v", err)
+			}
+			resp, err := srv.githubClient.Do(req)
+			if err != nil {
+				t.Fatalf("non-GitHub host request: %v", err)
+			}
+			_ = resp.Body.Close()
+			if got := gh.headers(); len(got) != 1 || got[0] != tc.wantGitHub {
+				t.Errorf("GitHub Authorization = %q, want [%q]", got, tc.wantGitHub)
+			}
+			if got := other.headers(); len(got) != 1 || got[0] != "" {
+				t.Errorf("non-GitHub Authorization = %q, want [\"\"]", got)
+			}
+		})
+	}
+}
+
+func testAppKeyPEM(t *testing.T) string {
+	t.Helper()
+	k, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatalf("GenerateKey: %v", err)
+	}
+	return string(pem.EncodeToMemory(&pem.Block{Type: "RSA PRIVATE KEY", Bytes: x509.MarshalPKCS1PrivateKey(k)}))
+}
+
+// newAppMintServer answers installation 42 token mints with app-token.
+func newAppMintServer(t *testing.T) *httptest.Server {
+	t.Helper()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.URL.Path != "/app/installations/42/access_tokens" {
+			http.NotFound(w, r)
+			return
+		}
+		w.WriteHeader(http.StatusCreated)
+		_, _ = w.Write([]byte(`{"token":"app-token","expires_at":"2099-01-01T00:00:00Z"}`))
+	}))
+	t.Cleanup(srv.Close)
+	return srv
+}
+
+// TestNewGitHubTokenSource mutates the process-wide credential gauge, so it
+// runs serially.
+func TestNewGitHubTokenSource(t *testing.T) {
+	keyPEM := testAppKeyPEM(t)
+	mint := newAppMintServer(t)
+	appEnv := gitHubAppEnv{AppID: "7", InstallationID: "42", PrivateKeyPEM: keyPEM}
+	tests := []struct {
+		name       string
+		credential string
+		env        gitHubAppEnv
+		wantValue  string
+		wantSource string
+		wantAppG   float64
+	}{
+		{name: "app with App env mints app token", credential: "app", env: appEnv, wantValue: "app-token", wantSource: "app", wantAppG: 1},
+		{name: "pat with App env uses PAT", credential: "pat", env: appEnv, wantValue: "pat-secret", wantSource: "pat", wantAppG: 0},
+		{name: "app without App env stays on PAT", credential: "app", wantValue: "pat-secret", wantSource: "pat", wantAppG: 1},
+		{name: "partial App env stays on PAT", credential: "app", env: gitHubAppEnv{AppID: "7"}, wantValue: "pat-secret", wantSource: "pat", wantAppG: 1},
+		{name: "non-integer App ID falls back to PAT", credential: "app", env: gitHubAppEnv{AppID: "not-a-number", InstallationID: "42", PrivateKeyPEM: keyPEM}, wantValue: "pat-secret", wantSource: "pat", wantAppG: 1},
+		{name: "app with unreachable mint falls back to PAT", credential: "app", env: gitHubAppEnv{AppID: "7", InstallationID: "99", PrivateKeyPEM: keyPEM}, wantValue: "pat-secret", wantSource: "pat", wantAppG: 1},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			cfgSrc := fixedConfig(Config{GitHubAPIURL: mint.URL, GitHubToken: "pat-secret", GitHubCredential: tc.credential})
+			src := newGitHubTokenSource(cfgSrc, tc.env)
+			value, source, err := src.Token(context.Background())
+			if err != nil {
+				t.Fatalf("Token: %v", err)
+			}
+			if value != tc.wantValue || source != tc.wantSource {
+				t.Errorf("Token = (%q, %q), want (%q, %q)", value, source, tc.wantValue, tc.wantSource)
+			}
+			if got := testutil.ToFloat64(metrics.GitHubCredentialConfigured.WithLabelValues("app")); got != tc.wantAppG {
+				t.Errorf("github_credential_configured{credential=app} = %v, want %v", got, tc.wantAppG)
+			}
+		})
+	}
+}
+
+func TestConfigPATSource(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name   string
+		cfgSrc ConfigSource
+		want   string
+	}{
+		{name: "nil config source", want: ""},
+		{name: "nil snapshot", cfgSrc: &nilConfigSource{}, want: ""},
+		{name: "trimmed PAT", cfgSrc: fixedConfig(Config{GitHubToken: " pat-x "}), want: "pat-x"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			src := configPATSource{cfgSrc: tc.cfgSrc}
+			src.Invalidate("ignored")
+			value, source, err := src.Token(context.Background())
+			if err != nil || value != tc.want || source != githubauth.SourcePAT {
+				t.Errorf("Token = (%q, %q, %v), want (%q, pat, nil)", value, source, err, tc.want)
+			}
+		})
+	}
+}
+
+func TestGitHubAPIHost(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name   string
+		cfgSrc ConfigSource
+		want   string
+	}{
+		{name: "nil config source", want: "api.github.com"},
+		{name: "nil snapshot", cfgSrc: &nilConfigSource{}, want: "api.github.com"},
+		{name: "empty URL", cfgSrc: fixedConfig(Config{}), want: "api.github.com"},
+		{name: "enterprise URL host", cfgSrc: fixedConfig(Config{GitHubAPIURL: "https://ghe.example.com/api/v3"}), want: "ghe.example.com"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got := githubAPIHost(tc.cfgSrc); got != tc.want {
+				t.Errorf("githubAPIHost = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+// nilConfigSource returns a nil snapshot.
+type nilConfigSource struct{}
+
+func (*nilConfigSource) Current() *Config { return nil }
+
+// githubBodyServer answers every GitHub API request with code and body and
+// counts the requests.
+func githubBodyServer(t *testing.T, code int, body string, calls *atomic.Int64) *httptest.Server {
+	t.Helper()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		calls.Add(1)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(code)
+		_, _ = w.Write([]byte(body))
+	}))
+	t.Cleanup(srv.Close)
+	return srv
+}
+
+func TestResolveAutoMergeDisabledPR(t *testing.T) {
+	t.Parallel()
+	known := true
+	tests := []struct {
+		name       string
+		res        ResolvedGitHubEvent
+		pr         GitHubPullRequest
+		ghCode     int
+		ghBody     string
+		wantOK     bool
+		wantErr    bool
+		wantState  string
+		wantBranch string
+		wantCalls  int64
+	}{
+		{name: "known mergeability passes through without a fetch", res: ResolvedGitHubEvent{Repo: "example/aerial", PRNumber: 7}, pr: GitHubPullRequest{Number: 7, Mergeable: &known, MergeableState: "clean"}, wantOK: true, wantState: "clean"},
+		{name: "pr-less event passes through without a fetch", res: ResolvedGitHubEvent{Repo: "example/aerial"}, pr: GitHubPullRequest{}, wantOK: true},
+		{
+			name: "unknown mergeability is fetched and filled from the event", res: ResolvedGitHubEvent{Repo: "example/aerial", PRNumber: 7, Branch: "feat", HeadSHA: "h1"}, pr: GitHubPullRequest{Number: 7},
+			ghCode: http.StatusOK, ghBody: `{"number":7,"state":"open","mergeable_state":"dirty","head":{"sha":"h1"}}`, wantOK: true, wantState: "dirty", wantBranch: "feat", wantCalls: 1,
+		},
+		{name: "merged pr is skipped", res: ResolvedGitHubEvent{Repo: "example/aerial", PRNumber: 7}, ghCode: http.StatusOK, ghBody: `{"number":7,"merged":true,"mergeable_state":"clean"}`, wantCalls: 1},
+		{name: "closed pr is skipped", res: ResolvedGitHubEvent{Repo: "example/aerial", PRNumber: 7}, ghCode: http.StatusOK, ghBody: `{"number":7,"state":"closed","mergeable_state":"clean"}`, wantCalls: 1},
+		{name: "moved head is skipped", res: ResolvedGitHubEvent{Repo: "example/aerial", PRNumber: 7, HeadSHA: "h1"}, ghCode: http.StatusOK, ghBody: `{"number":7,"state":"open","mergeable_state":"dirty","head":{"sha":"h2"}}`, wantCalls: 1},
+		{name: "fetch failure surfaces", res: ResolvedGitHubEvent{Repo: "example/aerial", PRNumber: 7}, ghCode: http.StatusInternalServerError, ghBody: `{}`, wantErr: true, wantCalls: 1},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			var calls atomic.Int64
+			gh := githubBodyServer(t, tc.ghCode, tc.ghBody, &calls)
+			srv := newTestRouter(Config{GitHubAPIURL: gh.URL}, gh.Client(), nil)
+			res := tc.res
+			got, ok, err := srv.resolveAutoMergeDisabledPR(context.Background(), &res, tc.pr)
+			if (err != nil) != tc.wantErr || ok != tc.wantOK {
+				t.Fatalf("resolveAutoMergeDisabledPR() = ok %v err %v, want ok %v wantErr %v", ok, err, tc.wantOK, tc.wantErr)
+			}
+			if ok && (got.MergeableState != tc.wantState || got.Head.Ref != tc.wantBranch) {
+				t.Errorf("pr = state %q branch %q, want %q %q", got.MergeableState, got.Head.Ref, tc.wantState, tc.wantBranch)
+			}
+			if got := calls.Load(); got != tc.wantCalls {
+				t.Errorf("github calls = %d, want %d", got, tc.wantCalls)
+			}
+		})
+	}
+}
+
+func TestFetchLatestRoboRevComment(t *testing.T) {
+	t.Parallel()
+	const head = "abcdef1234567890"
+	tests := []struct {
+		name     string
+		prNumber int
+		ghCode   int
+		ghBody   string
+		want     string
+	}{
+		{name: "latest matching roborev comment wins", prNumber: 7, ghCode: http.StatusOK, ghBody: `[{"body":"## roborev: old ` + "`abcdef1" + `"},{"body":"unrelated"},{"body":"## roborev: newest ` + "`abcdef1" + `"}]`, want: "## roborev: newest `abcdef1"},
+		{name: "override comment counts", prNumber: 7, ghCode: http.StatusOK, ghBody: `[{"body":"## roborev-override for ` + head + `"}]`, want: "## roborev-override for " + head},
+		{name: "comment for another head is ignored", prNumber: 7, ghCode: http.StatusOK, ghBody: `[{"body":"## roborev: ` + "`9999999" + `"}]`},
+		{name: "fetch failure yields nothing", prNumber: 7, ghCode: http.StatusInternalServerError, ghBody: `{}`},
+		{name: "pr-less lookup yields nothing", prNumber: 0, ghCode: http.StatusOK, ghBody: `[]`},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			var calls atomic.Int64
+			gh := githubBodyServer(t, tc.ghCode, tc.ghBody, &calls)
+			srv := newTestRouter(Config{GitHubAPIURL: gh.URL}, gh.Client(), nil)
+			if got := srv.fetchLatestRoboRevComment(context.Background(), "example/aerial", tc.prNumber, head); strings.TrimSpace(got) != tc.want {
+				t.Errorf("fetchLatestRoboRevComment() = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+// TestLogBuildMetadataWarning swaps the process-wide slog default, so it
+// runs before the parallel tests instead of alongside them.
+func TestLogBuildMetadataWarning(t *testing.T) {
+	var buf bytes.Buffer
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{ReplaceAttr: func(_ []string, a slog.Attr) slog.Attr {
+		if a.Key == slog.TimeKey {
+			return slog.Attr{}
+		}
+		return a
+	}})))
+	t.Cleanup(func() { slog.SetDefault(prev) })
+
+	logBuildMetadataWarning(context.Background(), "refreshing build metadata", "example/aerial", 42, errors.New("boom"))
+
+	const want = `level=WARN msg="[synapse] [build_metadata] refreshing build metadata" repo=example/aerial pr=42 error=boom` + "\n"
+	if !strings.Contains(buf.String(), want) {
+		t.Errorf("log = %q, want line %q", buf.String(), want)
+	}
+}
+
+func TestParseAerialPRMetadata(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name, body, wantTarget, wantBotID string
+		wantOK                            bool
+	}{
+		{name: "no trailer", body: "Standard PR body\n<!-- regular comment -->"},
+		{name: "unclosed trailer", body: "Body\n<!-- aerial-pr: {\"target_id\":\"100000000000000002\"}"},
+		{name: "invalid json", body: "Body\n<!-- aerial-pr: {bad-json} -->"},
+		{name: "invalid target and empty", body: "Body\n<!-- aerial-pr: {\"target_id\":\"bad\"} -->"},
+		{name: "valid target", body: "<!-- x -->\n<!-- aerial-pr: {\"target_id\":\"100000000000000002\"} -->", wantTarget: "100000000000000002", wantOK: true},
+		{name: "discord prefixed target and pool prefix", body: "<!-- aerial-pr: {\"target_id\":\"stateful_medium:discord-100000000000000002\"} -->", wantTarget: "100000000000000002", wantOK: true},
+		{name: "valid bot id only", body: "<!-- aerial-pr: {\"bot_id\":\"eri-sub\"} -->", wantBotID: "eri-sub", wantOK: true},
+		{name: "valid target and bot id", body: "<!-- aerial-pr: {\"target_id\":\"100000000000000002\",\"bot_id\":\"eri-sub\"} -->", wantTarget: "100000000000000002", wantBotID: "eri-sub", wantOK: true},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			got := ParseAerialPRMetadata(tc.body)
+			if got.OK() != tc.wantOK || got.TargetID != tc.wantTarget || got.BotID != tc.wantBotID {
+				t.Fatalf("ParseAerialPRMetadata() = %+v (ok=%v), want target=%q bot=%q ok=%v", got, got.OK(), tc.wantTarget, tc.wantBotID, tc.wantOK)
+			}
+		})
+	}
+}
+
+const testChunkTag = "van" + "adis"
+
+func TestExtractChunkIDFromBranch(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name, repo, branch, want string
+	}{
+		{name: "empty repo", repo: "", branch: "feat/aerial-pr-" + testChunkTag + "-c1-012345", want: ""},
+		{name: "empty branch", repo: "aerial", branch: "", want: ""},
+		{name: "standalone branch without chunk tag", repo: "aerial", branch: "feat/aerial-pr-20261116-123456", want: ""},
+		{name: "valid with refs/heads", repo: "azylman/aerial", branch: "refs/heads/feat/aerial-pr-" + testChunkTag + "-chunk-1-router-a1b2c3", want: "chunk-1-router"},
+		{name: "valid bare branch", repo: "aerial", branch: "feat/aerial-pr-" + testChunkTag + "-c1-012345", want: "c1"},
+		{name: "valid with target id", repo: "azylman/aerial", branch: "feat/aerial-pr-" + testChunkTag + "-chunk-1-t111111111111111111-a1b2c3", want: "chunk-1"},
+		{name: "valid uppercase hex", repo: "aerial", branch: "feat/aerial-pr-" + testChunkTag + "-c1-ABCDEF", want: "c1"},
+		{name: "git suffix repo", repo: "aerial.git", branch: "feat/aerial-pr-" + testChunkTag + "-c1-012345", want: "c1"},
+		{name: "repo and chunk containing delimiter", repo: "owner/demo-pr-" + testChunkTag + "-tools", branch: "feat/demo-pr-" + testChunkTag + "-tools-pr-" + testChunkTag + "-c1-pr-" + testChunkTag + "-2-a1b2c3", want: "c1-pr-" + testChunkTag + "-2"},
+		{name: "invalid suffix too short", repo: "aerial", branch: "feat/aerial-pr-" + testChunkTag + "-c1-12345", want: ""},
+		{name: "invalid suffix too long", repo: "aerial", branch: "feat/aerial-pr-" + testChunkTag + "-c1-1234567", want: ""},
+		{name: "invalid suffix non-hex", repo: "aerial", branch: "feat/aerial-pr-" + testChunkTag + "-c1-12345g", want: ""},
+		{name: "no separator after chunk tag", repo: "aerial", branch: "feat/aerial-pr-" + testChunkTag + "-c1", want: ""},
+		{name: "empty chunk id", repo: "aerial", branch: "feat/aerial-pr-" + testChunkTag + "--123456", want: ""},
+		{name: "invalid chunk characters", repo: "aerial", branch: "feat/aerial-pr-" + testChunkTag + "-c1!-012345", want: ""},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got := ExtractChunkIDFromBranch(tc.repo, tc.branch); got != tc.want {
+				t.Fatalf("ExtractChunkIDFromBranch(%q, %q) = %q, want %q", tc.repo, tc.branch, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestExtractTargetIDFromBranch(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name, repo, branch, want string
+	}{
+		{name: "empty repo", repo: "", branch: "feat/aerial-pr-t111111111111111111-012345", want: ""},
+		{name: "empty branch", repo: "aerial", branch: "", want: ""},
+		{name: "standalone branch with target id", repo: "aerial", branch: "feat/aerial-pr-t111111111111111111-a1b2c3", want: "111111111111111111"},
+		{name: "standalone branch with refs/heads and target id", repo: "azylman/aerial", branch: "refs/heads/feat/aerial-pr-t111111111111111111-a1b2c3", want: "111111111111111111"},
+		{name: "standalone branch timestamp without target", repo: "aerial", branch: "feat/aerial-pr-20261116-123456", want: ""},
+		{name: "chunk branch with target id", repo: "aerial", branch: "feat/aerial-pr-" + testChunkTag + "-chunk-1-t111111111111111111-a1b2c3", want: "111111111111111111"},
+		{name: "chunk branch without target id", repo: "aerial", branch: "feat/aerial-pr-" + testChunkTag + "-chunk-1-a1b2c3", want: ""},
+		{name: "target id too short (16 digits)", repo: "aerial", branch: "feat/aerial-pr-t1111111111111111-a1b2c3", want: ""},
+		{name: "target id too long (21 digits)", repo: "aerial", branch: "feat/aerial-pr-t111111111111111111111-a1b2c3", want: ""},
+		{name: "target id non digits", repo: "aerial", branch: "feat/aerial-pr-tabcdefabcdefabcde-a1b2c3", want: ""},
+		{name: "invalid suffix non-hex", repo: "aerial", branch: "feat/aerial-pr-t111111111111111111-12345g", want: ""},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got := ExtractTargetIDFromBranch(tc.repo, tc.branch); got != tc.want {
+				t.Fatalf("ExtractTargetIDFromBranch(%q, %q) = %q, want %q", tc.repo, tc.branch, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestResolveAerialPRMetadata(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name, repo, branch, body, wantTarget, wantBotID string
+		wantOK                                          bool
+	}{
+		{
+			name:       "body trailer wins over branch target",
+			repo:       "aerial",
+			branch:     "feat/aerial-pr-t111111111111111111-a1b2c3",
+			body:       "<!-- aerial-pr: {\"target_id\":\"222222222222222222\",\"bot_id\":\"aerial\"} -->",
+			wantTarget: "222222222222222222",
+			wantBotID:  "aerial",
+			wantOK:     true,
+		},
+		{
+			name:       "empty body resolves branch target",
+			repo:       "aerial",
+			branch:     "feat/aerial-pr-t111111111111111111-a1b2c3",
+			body:       "Just a regular PR body with no comment",
+			wantTarget: "111111111111111111",
+			wantOK:     true,
+		},
+		{
+			name:       "body with bot id only resolves branch target",
+			repo:       "aerial",
+			branch:     "feat/aerial-pr-t111111111111111111-a1b2c3",
+			body:       "<!-- aerial-pr: {\"bot_id\":\"eri\"} -->",
+			wantTarget: "111111111111111111",
+			wantBotID:  "eri",
+			wantOK:     true,
+		},
+		{
+			name:   "empty body and timestamp branch yields empty metadata",
+			repo:   "aerial",
+			branch: "feat/aerial-pr-20261116-123456",
+			body:   "Plain body",
+			wantOK: false,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			got := ResolveAerialPRMetadata(tc.repo, tc.branch, tc.body)
+			if got.OK() != tc.wantOK || got.TargetID != tc.wantTarget || got.BotID != tc.wantBotID {
+				t.Fatalf("ResolveAerialPRMetadata() = %+v (ok=%v), want target=%q bot=%q ok=%v", got, got.OK(), tc.wantTarget, tc.wantBotID, tc.wantOK)
+			}
+		})
+	}
+}
+
+func TestResolveCollaboratorAlertTargetBranchMetadata(t *testing.T) {
+	t.Parallel()
+	srv := newTestRouter(Config{
+		CollaboratorCIAlerts: []config.CollaboratorCIAlertRule{
+			{
+				Repo:      "azylman/aerial",
+				ChannelID: "111111111111111111",
+				Authors:   map[string]string{"collab-user": "<@123>"},
+			},
+		},
+	}, nil, nil)
+
+	tests := []struct {
+		name   string
+		branch string
+		body   string
+		wantOK bool
+	}{
+		{
+			name:   "collaborator branch with no metadata is alerted",
+			branch: "feat/some-collab-branch",
+			body:   "Plain body",
+			wantOK: true,
+		},
+		{
+			name:   "branch with encoded target is treated as bot managed",
+			branch: "feat/aerial-pr-t111111111111111111-a1b2c3",
+			body:   "Plain body",
+			wantOK: false,
+		},
+		{
+			name:   "chunk branch without target is treated as bot managed",
+			branch: "feat/aerial-pr-" + testChunkTag + "-c1-a1b2c3",
+			body:   "Plain body",
+			wantOK: false,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			pr := GitHubPullRequest{
+				Number: 1,
+				State:  "open",
+				Head:   GitHubPRRef{Ref: tc.branch, SHA: "sha1"},
+				Body:   tc.body,
+				User: struct {
+					Login string `json:"login"`
+				}{Login: "collab-user"},
+			}
+			_, _, _, ok, err := srv.resolveCollaboratorAlertTarget(context.Background(), "azylman/aerial", 1, "sha1", pr)
+			if err != nil {
+				t.Fatalf("resolveCollaboratorAlertTarget() unexpected err = %v", err)
+			}
+			if ok != tc.wantOK {
+				t.Fatalf("resolveCollaboratorAlertTarget() ok = %v, want %v", ok, tc.wantOK)
+			}
+		})
+	}
+}
+
+func TestAutoUpdatePolicy(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name string
+		cfg  Config
+		repo string
+		want *prwire.AutoUpdatePolicy
+	}{
+		{
+			name: "authors, default owner, and the repo's collaborators sorted by author",
+			cfg: Config{AutoUpdatePRAuthors: []string{"bot"}, DefaultOwner: true, CollaboratorCIAlerts: []config.CollaboratorCIAlertRule{
+				{Repo: "azylman/aerial", ChannelID: "111111111111111111", Authors: map[string]string{"zed": "<@2>", "amy": "<@1>", "blank": " "}},
+				{Repo: "azylman/mirrormere", ChannelID: "333333333333333333", Authors: map[string]string{"other": "<@3>"}},
+			}},
+			repo: "azylman/aerial",
+			want: &prwire.AutoUpdatePolicy{Authors: []string{"bot"}, DefaultOwner: true, Collaborators: []prwire.CollaboratorAlert{
+				{Author: "amy", ChannelID: "111111111111111111", Mention: "<@1>"},
+				{Author: "zed", ChannelID: "111111111111111111", Mention: "<@2>"},
+			}},
+		},
+		{name: "empty config renders an empty policy", repo: "azylman/aerial", want: &prwire.AutoUpdatePolicy{}},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			srv := NewRouterServer(fixedConfig(tc.cfg), nil)
+			if got := srv.autoUpdatePolicy(tc.repo); !reflect.DeepEqual(got, tc.want) {
+				t.Errorf("autoUpdatePolicy() = %+v, want %+v", got, tc.want)
 			}
 		})
 	}

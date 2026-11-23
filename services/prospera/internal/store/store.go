@@ -9,9 +9,7 @@ import (
 	"strings"
 	"time"
 
-	// pgx driver registration for the postgres:// connection strings handled by OpenDB.
-	_ "github.com/jackc/pgx/v5/stdlib"
-
+	"github.com/azylman/aerial/pkg/pgutil"
 	"github.com/azylman/aerial/services/prospera/internal/model"
 )
 
@@ -43,6 +41,7 @@ type Store interface {
 	AppendOwnerInstruction(ctx context.Context, callID string, instr model.OwnerInstruction) error
 	SetVoicemailRecording(ctx context.Context, callID, recordingURL string) error
 	TransitionReportStatus(ctx context.Context, callID string, allowedFrom []string, toStatus, summary string) (bool, error)
+	ListUnfinishedReportCalls(ctx context.Context, limit int) ([]model.VoiceCall, error)
 	ReconcileOrphanedCalls(ctx context.Context, checkActive func(ctx context.Context, providerSID string) (bool, error)) (int, error)
 	SaveVoiceMessage(ctx context.Context, msg model.VoiceMessage) (bool, error)
 	MarkVoiceMessageDelivered(ctx context.Context, messageSID string) error
@@ -50,43 +49,20 @@ type Store interface {
 	Close() error
 }
 
-// PGStore implements Store backed by PostgreSQL (or SQLite in tests).
+// PGStore implements Store backed by PostgreSQL.
 type PGStore struct {
-	db       *sql.DB
-	isSQLite bool
+	db *sql.DB
 }
 
 // NewPGStore constructs a new PGStore wrapping a sql.DB instance.
 func NewPGStore(db *sql.DB) *PGStore {
-	var isSQLite bool
-	if db != nil && db.Driver() != nil {
-		driverName := fmt.Sprintf("%T", db.Driver())
-		if strings.Contains(strings.ToLower(driverName), "sqlite") {
-			isSQLite = true
-		}
-	}
-	return &PGStore{db: db, isSQLite: isSQLite}
+	return &PGStore{db: db}
 }
 
-// IsSQLite reports whether the underlying database is SQLite.
-func (s *PGStore) IsSQLite() bool {
-	return s.isSQLite
-}
-
-// OpenDB opens a database connection from a connection string.
-func OpenDB(databaseURL string) (*sql.DB, error) {
-	trimmed := strings.TrimSpace(databaseURL)
-	if trimmed == "" {
-		return nil, fmt.Errorf("store: connection string cannot be empty")
-	}
-	if strings.HasPrefix(trimmed, "sqlite://") || strings.HasPrefix(trimmed, "file:") || strings.Contains(trimmed, ":memory:") {
-		sqlitePath := strings.TrimPrefix(trimmed, "sqlite://")
-		return sql.Open("sqlite", sqlitePath)
-	}
-	if !strings.HasPrefix(trimmed, "postgres://") && !strings.HasPrefix(trimmed, "postgresql://") {
-		return nil, fmt.Errorf("store: unsupported database scheme in %q: only postgres:// or postgresql:// supported", trimmed)
-	}
-	return sql.Open("pgx", trimmed)
+// OpenDB opens a PostgreSQL connection from a postgres:// or postgresql://
+// connection string via pgutil.OpenSQL (pinged at open).
+func OpenDB(ctx context.Context, databaseURL string) (*sql.DB, error) {
+	return pgutil.OpenSQL(ctx, strings.TrimSpace(databaseURL), pgutil.SQLOptions{})
 }
 
 const selectCallFields = `call_id, provider_call_sid, direction, state, end_reason,

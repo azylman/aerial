@@ -3,210 +3,83 @@ package ericlient
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+
+	"github.com/azylman/aerial/pkg/eriwire"
+	"github.com/azylman/aerial/pkg/restateingresstest"
 )
+
+// eriClosedURL returns the URL of an httptest server that is already closed,
+// so dialing it fails with connection refused on loopback.
+func eriClosedURL(t *testing.T) string {
+	t.Helper()
+	srv := httptest.NewServer(http.NotFoundHandler())
+	srv.Close()
+	return srv.URL
+}
+
+// requireErrText asserts err is nil when want is empty, else that its text
+// contains want.
+func requireErrText(t *testing.T, err error, want string) {
+	t.Helper()
+	if want == "" {
+		require.NoError(t, err)
+		return
+	}
+	require.ErrorContains(t, err, want)
+}
 
 func TestServiceNaming(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
-		name           string
-		agent          string
-		wantNorm       string
-		wantSessionMgr string
-		wantThread     string
-		wantDisp       string
-		wantVoice      string
+		name       string
+		agent      string
+		wantThread string
+		wantDisp   string
 	}{
-		{
-			name:           "empty defaults to aerial",
-			agent:          "",
-			wantNorm:       "",
-			wantSessionMgr: "SessionManager",
-			wantThread:     "ThreadSession",
-			wantDisp:       "DispatchSession",
-			wantVoice:      "VoiceSession",
-		},
-		{
-			name:           "aerial explicit",
-			agent:          "aerial",
-			wantNorm:       "aerial",
-			wantSessionMgr: "SessionManager",
-			wantThread:     "ThreadSession",
-			wantDisp:       "DispatchSession",
-			wantVoice:      "VoiceSession",
-		},
-		{
-			name:           "agent-alpha lowercase",
-			agent:          "agent-alpha",
-			wantNorm:       "agent-alpha",
-			wantSessionMgr: "SessionManager-agent-alpha",
-			wantThread:     "ThreadSession-agent-alpha",
-			wantDisp:       "DispatchSession-agent-alpha",
-			wantVoice:      "VoiceSession-agent-alpha",
-		},
-		{
-			name:           "agent-beta uppercase trimmed",
-			agent:          "  agent-beta  ",
-			wantNorm:       "agent-beta",
-			wantSessionMgr: "SessionManager-agent-beta",
-			wantThread:     "ThreadSession-agent-beta",
-			wantDisp:       "DispatchSession-agent-beta",
-			wantVoice:      "VoiceSession-agent-beta",
-		},
-		{
-			name:           "unsafe characters fallback",
-			agent:          "bad/agent@name!",
-			wantNorm:       "aerial",
-			wantSessionMgr: "SessionManager",
-			wantThread:     "ThreadSession",
-			wantDisp:       "DispatchSession",
-			wantVoice:      "VoiceSession",
-		},
-		{
-			name:           "safe hyphens and underscores",
-			agent:          "bot-1_test",
-			wantNorm:       "bot-1_test",
-			wantSessionMgr: "SessionManager-bot-1_test",
-			wantThread:     "ThreadSession-bot-1_test",
-			wantDisp:       "DispatchSession-bot-1_test",
-			wantVoice:      "VoiceSession-bot-1_test",
-		},
+		{name: "empty defaults to aerial", agent: "", wantThread: "ThreadSession", wantDisp: "DispatchSession"},
+		{name: "aerial explicit", agent: "aerial", wantThread: "ThreadSession", wantDisp: "DispatchSession"},
+		{name: "agent-alpha lowercase", agent: "agent-alpha", wantThread: "ThreadSession-agent-alpha", wantDisp: "DispatchSession-agent-alpha"},
+		{name: "agent-beta uppercase trimmed", agent: "  Agent-Beta  ", wantThread: "ThreadSession-agent-beta", wantDisp: "DispatchSession-agent-beta"},
+		{name: "unsafe characters fallback", agent: "bad/agent@name!", wantThread: "ThreadSession", wantDisp: "DispatchSession"},
+		{name: "safe hyphens and underscores", agent: "bot-1_test", wantThread: "ThreadSession-bot-1_test", wantDisp: "DispatchSession-bot-1_test"},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			if got := NormalizeAgentName(tc.agent); got != tc.wantNorm {
-				t.Errorf("NormalizeAgentName(%q) = %q, want %q", tc.agent, got, tc.wantNorm)
-			}
-			if got := SessionManagerServiceName(tc.agent); got != tc.wantSessionMgr {
-				t.Errorf("SessionManagerServiceName(%q) = %q, want %q", tc.agent, got, tc.wantSessionMgr)
-			}
 			if got := ThreadSessionServiceName(tc.agent); got != tc.wantThread {
 				t.Errorf("ThreadSessionServiceName(%q) = %q, want %q", tc.agent, got, tc.wantThread)
 			}
 			if got := DispatchSessionServiceName(tc.agent); got != tc.wantDisp {
 				t.Errorf("DispatchSessionServiceName(%q) = %q, want %q", tc.agent, got, tc.wantDisp)
 			}
-			if got := VoiceSessionServiceName(tc.agent); got != tc.wantVoice {
-				t.Errorf("VoiceSessionServiceName(%q) = %q, want %q", tc.agent, got, tc.wantVoice)
-			}
 		})
 	}
 }
 
-type reconcileTestCase struct {
-	name       string
-	adminURL   string
-	status     int
-	body       string
-	wantErr    bool
-	errContain string
-}
-
-func runReconcileTest(t *testing.T, tc reconcileTestCase) {
-	t.Helper()
-	adminURL := tc.adminURL
-	if tc.adminURL == "placeholder" {
-		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			if r.Method != http.MethodPatch {
-				t.Errorf("expected PATCH, got %s", r.Method)
-			}
-			if r.Header.Get("Content-Type") != "application/json" {
-				t.Errorf("expected application/json, got %s", r.Header.Get("Content-Type"))
-			}
-			w.WriteHeader(tc.status)
-			_, _ = w.Write([]byte(tc.body))
-		}))
-		defer srv.Close()
-		adminURL = srv.URL
-	}
-	if tc.adminURL == "partial-placeholder" {
-		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			if strings.Contains(r.URL.Path, "VoiceSession") {
-				w.WriteHeader(http.StatusOK)
-				_, _ = w.Write([]byte(`{"status":"ok"}`))
-				return
-			}
-			w.WriteHeader(http.StatusInternalServerError)
-			_, _ = w.Write([]byte(`fail`))
-		}))
-		defer srv.Close()
-		adminURL = srv.URL
-	}
-
-	err := ReconcileRestateServiceTimeouts(context.Background(), adminURL, "aerial", nil)
-	if tc.wantErr {
-		if err == nil {
-			t.Fatalf("expected error, got nil")
-		}
-		if tc.errContain != "" && !strings.Contains(err.Error(), tc.errContain) {
-			t.Fatalf("error %q does not contain %q", err.Error(), tc.errContain)
-		}
-		return
-	}
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-}
-
-func TestReconcileRestateServiceTimeouts(t *testing.T) {
-	t.Parallel()
-
-	tests := []reconcileTestCase{
-		{
-			name:     "success patch all services",
-			adminURL: "placeholder",
-			status:   http.StatusOK,
-			body:     `{"status":"ok"}`,
-		},
-		{
-			name:       "empty admin url",
-			adminURL:   "",
-			wantErr:    true,
-			errContain: "admin url cannot be empty",
-		},
-		{
-			name:       "server returns 500 error",
-			adminURL:   "placeholder",
-			status:     http.StatusInternalServerError,
-			body:       `internal error`,
-			wantErr:    true,
-			errContain: "returned HTTP 500",
-		},
-		{
-			name:       "server partial 500 aggregates errors",
-			adminURL:   "partial-placeholder",
-			status:     http.StatusInternalServerError,
-			body:       `internal error`,
-			wantErr:    true,
-			errContain: "ThreadSession",
-		},
-		{
-			name:       "invalid admin url",
-			adminURL:   "http://127.0.0.1:0\nbad",
-			wantErr:    true,
-			errContain: "create timeout patch request",
-		},
-	}
-
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			runReconcileTest(t, tc)
-		})
-	}
-}
-
+// mockDeliverer is a plain status-widget and direct-message deliverer that
+// records the last direct message.
 type mockDeliverer struct {
 	msgID       string
 	err         error
 	lastChannel string
 	lastContent string
+	// deleted records each DeleteStatusWidget as "<agent> <channel> <message>".
+	deleted []string
+}
+
+func (m *mockDeliverer) DeleteStatusWidget(_ context.Context, agent, channelID, messageID string) error {
+	m.deleted = append(m.deleted, agent+" "+channelID+" "+messageID)
+	return m.err
 }
 
 func (m *mockDeliverer) DeliverStatusWidget(_ context.Context, _ StatusWidgetRequest) (string, error) {
@@ -219,535 +92,338 @@ func (m *mockDeliverer) DeliverDirectMessage(_ context.Context, channelID, conte
 	return m.err
 }
 
-type dispatchTestCase struct {
-	name       string
-	restateSrv bool
-	status     int
-	body       string
-	req        BrainDispatchRequest
-	fallback   bool
-	wantErr    bool
-	errContain string
-	errIs      error
+// delivered is the last direct message as "<channel> <content>", or "".
+func (m *mockDeliverer) delivered() string {
+	return strings.TrimSpace(m.lastChannel + " " + m.lastContent)
 }
 
-func runDispatchTest(t *testing.T, tc dispatchTestCase) {
-	t.Helper()
-	var restateURL, eriURL string
-	if tc.restateSrv {
-		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			if r.Header.Get("Idempotency-Key") != tc.req.ID {
-				t.Errorf("Idempotency-Key = %q, want %q", r.Header.Get("Idempotency-Key"), tc.req.ID)
-			}
-			w.WriteHeader(tc.status)
-			_, _ = w.Write([]byte(tc.body))
-		}))
-		defer srv.Close()
-		restateURL = srv.URL
-	}
-	if tc.fallback {
-		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			if r.URL.Path != "/dispatch" {
-				t.Errorf("path = %q, want /dispatch", r.URL.Path)
-			}
-			w.WriteHeader(tc.status)
-			_, _ = w.Write([]byte(tc.body))
-		}))
-		defer srv.Close()
-		eriURL = srv.URL
-	}
+var errBoom = errors.New("boom")
 
-	client := NewRestateEriClient(restateURL, eriURL, "aerial", nil)
-	err := client.Dispatch(context.Background(), tc.req)
-	if tc.wantErr {
-		if err == nil {
-			t.Fatalf("expected error, got nil")
-		}
-		if tc.errIs != nil && !errors.Is(err, tc.errIs) {
-			t.Fatalf("error %v is not %v", err, tc.errIs)
-		}
-		if tc.errContain != "" && !strings.Contains(err.Error(), tc.errContain) {
-			t.Fatalf("error %q does not contain %q", err.Error(), tc.errContain)
-		}
-		return
+// deliveryRecorder is implemented by the fake deliverers.
+type deliveryRecorder interface{ delivered() string }
+
+// restateClientFake starts a recording Restate ingress and a recording eri,
+// both replying status and body on path (other paths reply 200 with no body).
+func restateClientFake(t *testing.T, path string, status int, body string) (ingress, eri *restateingresstest.Server) {
+	t.Helper()
+	routes := map[string]restateingresstest.Response{path: {Status: status, Body: body}}
+	ingress, eri = restateingresstest.New(t), restateingresstest.New(t)
+	ingress.Routes, eri.Routes = routes, routes
+	return ingress, eri
+}
+
+// restateClientURLs picks the URLs a row configures: restateURL overrides the
+// fake ingress, noRestate and noEri leave that URL empty.
+func restateClientURLs(ingress, eri *restateingresstest.Server, noRestate, noEri bool, restateURL string) (string, string) {
+	if restateURL == "" && !noRestate {
+		restateURL = ingress.URL()
 	}
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
+	eriURL := ""
+	if !noEri {
+		eriURL = eri.URL()
 	}
+	return restateURL, eriURL
+}
+
+// restateClientCalls lists both fakes' requests as "restate <path>
+// key=<Idempotency-Key>" and "eri <path>", ingress first.
+func restateClientCalls(ingress, eri *restateingresstest.Server) []string {
+	ingressCalls, eriCalls := ingress.Calls(), eri.Calls()
+	if len(ingressCalls)+len(eriCalls) == 0 {
+		return nil
+	}
+	calls := make([]string, 0, len(ingressCalls)+len(eriCalls))
+	for _, c := range ingressCalls {
+		calls = append(calls, fmt.Sprintf("restate %s key=%s", c.Path, c.IdempotencyKey))
+	}
+	for _, c := range eriCalls {
+		calls = append(calls, "eri "+c.Path)
+	}
+	return calls
 }
 
 func TestRestateEriClient_Dispatch(t *testing.T) {
 	t.Parallel()
-
-	tests := []dispatchTestCase{
+	closedURL := eriClosedURL(t)
+	accepted := `{"status":"accepted","dispatch_id":"d1"}`
+	d1 := eriwire.BrainDispatchRequest{ID: "d1", Source: "test"}
+	tests := []struct {
+		name       string
+		noRestate  bool
+		noEri      bool
+		restateURL string
+		req        eriwire.BrainDispatchRequest
+		path       string
+		status     int
+		body       string
+		wantErr    string
+		wantCalls  []string
+	}{
 		{
-			name:       "restate success accepted",
-			restateSrv: true,
-			status:     http.StatusOK,
-			body:       `{"status":"accepted","dispatch_id":"d1"}`,
-			req:        BrainDispatchRequest{ID: "d1", VanadisChunkID: "c1", Source: "test"},
+			name: "restate accepted on the chunk session", req: eriwire.BrainDispatchRequest{ID: "d1", VanadisChunkID: "c1", Source: "test"}, path: "/DispatchSession/vanadis-c1/Enqueue", body: accepted,
+			wantCalls: []string{"restate /DispatchSession/vanadis-c1/Enqueue key=d1"},
 		},
 		{
-			name:       "restate skipped_active maps to ErrDispatchActive",
-			restateSrv: true,
-			status:     http.StatusOK,
-			body:       `{"status":"skipped_active"}`,
-			req:        BrainDispatchRequest{ID: "d1", Source: "test"},
-			wantErr:    true,
-			errIs:      ErrDispatchActive,
+			name: "request agent picks the agent session", req: eriwire.BrainDispatchRequest{ID: "d1", Agent: "agent-alpha", VanadisChunkID: "c1", Source: "test"},
+			path: "/DispatchSession-agent-alpha/vanadis-c1/Enqueue", body: accepted, wantCalls: []string{"restate /DispatchSession-agent-alpha/vanadis-c1/Enqueue key=d1"},
 		},
 		{
-			name:       "restate rejected unknown status",
-			restateSrv: true,
-			status:     http.StatusOK,
-			body:       `{"status":"rejected"}`,
-			req:        BrainDispatchRequest{ID: "d1", Source: "test"},
-			wantErr:    true,
-			errContain: "restate rejected dispatch",
+			name: "skipped active maps to dispatch active", req: d1, path: "/DispatchSession/dispatch-d1/Enqueue", body: `{"status":"skipped_active"}`,
+			wantErr: eriwire.ErrDispatchActive.Error(), wantCalls: []string{"restate /DispatchSession/dispatch-d1/Enqueue key=d1"},
 		},
 		{
-			name:       "restate server http 500 with message",
-			restateSrv: true,
-			status:     http.StatusInternalServerError,
-			body:       `{"message":"actor busy"}`,
-			req:        BrainDispatchRequest{ID: "d1", Source: "test"},
-			wantErr:    true,
-			errContain: "actor busy",
+			name: "unknown status is rejected", req: d1, path: "/DispatchSession/dispatch-d1/Enqueue", body: `{"status":"rejected"}`,
+			wantErr: `restate rejected dispatch "d1" (status "rejected")`, wantCalls: []string{"restate /DispatchSession/dispatch-d1/Enqueue key=d1"},
 		},
 		{
-			name:       "restate server http 400 with error field",
-			restateSrv: true,
-			status:     http.StatusBadRequest,
-			body:       `{"error":"invalid payload"}`,
-			req:        BrainDispatchRequest{ID: "d1", Source: "test"},
-			wantErr:    true,
-			errContain: "invalid payload",
+			name: "http 500 carries the message field", req: d1, path: "/DispatchSession/dispatch-d1/Enqueue", status: 500, body: `{"message":"actor busy"}`,
+			wantErr: "restate dispatch error (500): actor busy", wantCalls: []string{"restate /DispatchSession/dispatch-d1/Enqueue key=d1"},
 		},
 		{
-			name:     "fallback to http eri when restate url empty",
-			fallback: true,
-			status:   http.StatusOK,
-			body:     `{"status":"accepted","dispatch_id":"d1"}`,
-			req:      BrainDispatchRequest{ID: "d1", Source: "test"},
+			name: "http 400 carries the error field", req: d1, path: "/DispatchSession/dispatch-d1/Enqueue", status: 400, body: `{"error":"invalid payload"}`,
+			wantErr: "restate dispatch error (400): invalid payload", wantCalls: []string{"restate /DispatchSession/dispatch-d1/Enqueue key=d1"},
 		},
 		{
-			name:       "neither url configured",
-			req:        BrainDispatchRequest{ID: "d1", Source: "test"},
-			wantErr:    true,
-			errContain: "neither restate url nor eri url configured",
+			name: "http 502 non json carries the raw body", req: d1, path: "/DispatchSession/dispatch-d1/Enqueue", status: 502, body: "raw text gateway error",
+			wantErr: "restate dispatch returned HTTP 502: raw text gateway error", wantCalls: []string{"restate /DispatchSession/dispatch-d1/Enqueue key=d1"},
 		},
+		{
+			name: "malformed json reply errors", req: d1, path: "/DispatchSession/dispatch-d1/Enqueue", body: "{invalid-json",
+			wantErr: "decode restate dispatch response: invalid character 'i'", wantCalls: []string{"restate /DispatchSession/dispatch-d1/Enqueue key=d1"},
+		},
+		{name: "bad restate url fails building the request", restateURL: "http://127.0.0.1:0\nbad", req: d1, wantErr: "dispatch failed: "},
+		{name: "unreachable restate fails", restateURL: closedURL, req: d1, wantErr: "dispatch failed: "},
+		{name: "no restate url errors", noRestate: true, req: d1, wantErr: "restate url not configured"},
 	}
-
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			runDispatchTest(t, tc)
+			ingress, eri := restateClientFake(t, tc.path, tc.status, tc.body)
+			restateURL, eriURL := restateClientURLs(ingress, eri, tc.noRestate, tc.noEri, tc.restateURL)
+			err := NewRestateEriClient(restateURL, eriURL, "aerial", nil).Dispatch(context.Background(), tc.req)
+			requireErrText(t, err, tc.wantErr)
+			assert.Equal(t, tc.wantCalls, restateClientCalls(ingress, eri))
 		})
 	}
 }
 
 func TestRestateEriClient_DispatchAccepted(t *testing.T) {
 	t.Parallel()
-
+	accepted := `{"status":"accepted","dispatch_id":"d1"}`
+	d1 := eriwire.BrainDispatchRequest{ID: "d1", Source: "test"}
+	const path = "/DispatchSession/dispatch-d1/Enqueue"
 	tests := []struct {
-		name       string
-		restateSrv bool
-		status     int
-		body       string
-		req        BrainDispatchRequest
-		fallback   bool
-		wantErr    bool
-		errContain string
-		errIs      error
+		name      string
+		noRestate bool
+		req       eriwire.BrainDispatchRequest
+		path      string
+		body      string
+		wantErr   string
+		wantCalls []string
 	}{
+		{name: "accepted with dispatch id", req: d1, path: path, body: accepted, wantCalls: []string{"restate " + path + " key=d1"}},
+		{name: "already exists with message id", req: d1, path: path, body: `{"status":"already_exists","message_id":"d1"}`, wantCalls: []string{"restate " + path + " key=d1"}},
 		{
-			name:       "restate success accepted with dispatch_id",
-			restateSrv: true,
-			status:     http.StatusOK,
-			body:       `{"status":"accepted","dispatch_id":"d1"}`,
-			req:        BrainDispatchRequest{ID: "d1", Source: "test"},
+			name: "skipped active maps to dispatch active", req: d1, path: path, body: `{"status":"skipped_active"}`, wantErr: eriwire.ErrDispatchActive.Error(),
+			wantCalls: []string{"restate " + path + " key=d1"},
 		},
 		{
-			name:       "restate success already_exists with message_id",
-			restateSrv: true,
-			status:     http.StatusOK,
-			body:       `{"status":"already_exists","message_id":"d1"}`,
-			req:        BrainDispatchRequest{ID: "d1", Source: "test"},
+			name: "mismatched identity errors", req: d1, path: path, body: `{"status":"accepted","dispatch_id":"other"}`,
+			wantErr: `restate did not accept dispatch "d1" (status "accepted", identity "other")`, wantCalls: []string{"restate " + path + " key=d1"},
 		},
-		{
-			name:       "restate skipped_active maps to ErrDispatchActive",
-			restateSrv: true,
-			status:     http.StatusOK,
-			body:       `{"status":"skipped_active"}`,
-			req:        BrainDispatchRequest{ID: "d1", Source: "test"},
-			wantErr:    true,
-			errIs:      ErrDispatchActive,
-		},
-		{
-			name:       "restate mismatched identity",
-			restateSrv: true,
-			status:     http.StatusOK,
-			body:       `{"status":"accepted","dispatch_id":"other"}`,
-			req:        BrainDispatchRequest{ID: "d1", Source: "test"},
-			wantErr:    true,
-			errContain: "restate did not accept dispatch",
-		},
-		{
-			name:     "fallback to http eri",
-			fallback: true,
-			status:   http.StatusOK,
-			body:     `{"status":"accepted","dispatch_id":"d1"}`,
-			req:      BrainDispatchRequest{ID: "d1", Source: "test"},
-		},
+		{name: "empty reply errors", req: d1, path: path, wantErr: `restate did not accept dispatch "d1" (status "", identity "")`, wantCalls: []string{"restate " + path + " key=d1"}},
+		{name: "no restate url errors", noRestate: true, req: d1, wantErr: "restate url not configured"},
 	}
-
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			var restateURL, eriURL string
-			if tc.restateSrv {
-				srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-					w.WriteHeader(tc.status)
-					_, _ = w.Write([]byte(tc.body))
-				}))
-				defer srv.Close()
-				restateURL = srv.URL
-			}
-			if tc.fallback {
-				srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-					w.WriteHeader(tc.status)
-					_, _ = w.Write([]byte(tc.body))
-				}))
-				defer srv.Close()
-				eriURL = srv.URL
-			}
-
-			client := NewRestateEriClient(restateURL, eriURL, "aerial", nil)
-			err := client.DispatchAccepted(context.Background(), tc.req)
-			if tc.wantErr {
-				if err == nil {
-					t.Fatalf("expected error, got nil")
-				}
-				if tc.errIs != nil && !errors.Is(err, tc.errIs) {
-					t.Fatalf("error %v is not %v", err, tc.errIs)
-				}
-				if tc.errContain != "" && !strings.Contains(err.Error(), tc.errContain) {
-					t.Fatalf("error %q does not contain %q", err.Error(), tc.errContain)
-				}
-				return
-			}
-			if err != nil {
-				t.Fatalf("unexpected error: %v", err)
-			}
+			ingress, eri := restateClientFake(t, tc.path, 0, tc.body)
+			restateURL, eriURL := restateClientURLs(ingress, eri, tc.noRestate, false, "")
+			err := NewRestateEriClient(restateURL, eriURL, "aerial", nil).DispatchAccepted(context.Background(), tc.req)
+			requireErrText(t, err, tc.wantErr)
+			assert.Equal(t, tc.wantCalls, restateClientCalls(ingress, eri))
 		})
 	}
 }
 
-func TestRestateEriClient_CancelDispatchAndPrompt(t *testing.T) {
+func TestRestateEriClient_CancelDispatch(t *testing.T) {
 	t.Parallel()
-
 	tests := []struct {
-		name       string
-		op         string
-		chunkID    string
-		threadID   string
-		prompt     string
-		restateSrv bool
-		status     int
-		body       string
-		fallback   bool
-		wantErr    bool
-		errContain string
+		name      string
+		noRestate bool
+		noEri     bool
+		chunkID   string
+		path      string
+		wantErr   string
+		wantCalls []string
 	}{
-		{
-			name:       "cancel dispatch restate success",
-			op:         "cancel",
-			chunkID:    "c1",
-			restateSrv: true,
-			status:     http.StatusOK,
-			body:       `{"status":"ok"}`,
-		},
-		{
-			name:       "cancel dispatch empty chunk id no-op",
-			op:         "cancel",
-			chunkID:    "",
-			restateSrv: false,
-		},
-		{
-			name:     "cancel dispatch fallback to eri",
-			op:       "cancel",
-			chunkID:  "c1",
-			fallback: true,
-			status:   http.StatusOK,
-			body:     `{"status":"ok"}`,
-		},
-		{
-			name:       "prompt restate success",
-			op:         "prompt",
-			threadID:   "th-1",
-			prompt:     "hello world",
-			restateSrv: true,
-			status:     http.StatusOK,
-			body:       `{"status":"accepted"}`,
-		},
-		{
-			name:       "prompt empty no-op",
-			op:         "prompt",
-			threadID:   "",
-			prompt:     "",
-			restateSrv: false,
-		},
-		{
-			name:     "prompt fallback to eri",
-			op:       "prompt",
-			threadID: "th-1",
-			prompt:   "hello",
-			fallback: true,
-			status:   http.StatusOK,
-			body:     `{"status":"ok"}`,
-		},
-		{
-			name:       "prompt neither configured",
-			op:         "prompt",
-			threadID:   "th-1",
-			prompt:     "hello",
-			wantErr:    true,
-			errContain: "neither restate url nor eri url configured",
-		},
+		{name: "restate cancels the chunk session", chunkID: "c1", path: "/DispatchSession/vanadis-c1/Cancel", wantCalls: []string{"restate /DispatchSession/vanadis-c1/Cancel key="}},
+		{name: "blank chunk is a noop", chunkID: " "},
+		{name: "no restate url errors", noRestate: true, chunkID: "c1", wantErr: "restate url not configured"},
 	}
-
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			var restateURL, eriURL string
-			if tc.restateSrv {
-				srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-					w.WriteHeader(tc.status)
-					_, _ = w.Write([]byte(tc.body))
-				}))
-				defer srv.Close()
-				restateURL = srv.URL
-			}
-			if tc.fallback {
-				srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-					w.WriteHeader(tc.status)
-					_, _ = w.Write([]byte(tc.body))
-				}))
-				defer srv.Close()
-				eriURL = srv.URL
-			}
-
-			client := NewRestateEriClient(restateURL, eriURL, "aerial", nil)
-			var err error
-			if tc.op == "cancel" {
-				err = client.CancelDispatch(context.Background(), tc.chunkID)
-			} else {
-				err = client.Prompt(context.Background(), tc.threadID, tc.prompt)
-			}
-
-			if tc.wantErr {
-				if err == nil {
-					t.Fatalf("expected error, got nil")
-				}
-				if tc.errContain != "" && !strings.Contains(err.Error(), tc.errContain) {
-					t.Fatalf("error %q does not contain %q", err.Error(), tc.errContain)
-				}
-				return
-			}
-			if err != nil {
-				t.Fatalf("unexpected error: %v", err)
-			}
+			ingress, eri := restateClientFake(t, tc.path, 0, `{"status":"ok"}`)
+			restateURL, eriURL := restateClientURLs(ingress, eri, tc.noRestate, tc.noEri, "")
+			requireErrText(t, NewRestateEriClient(restateURL, eriURL, "aerial", nil).CancelDispatch(context.Background(), tc.chunkID), tc.wantErr)
+			assert.Equal(t, tc.wantCalls, restateClientCalls(ingress, eri))
 		})
 	}
 }
 
-type widgetTestCase struct {
-	name        string
-	envToken    string
-	restateURL  string
-	hasDeliver  bool
-	deliverMsg  string
-	deliverErr  error
-	eriStatus   int
-	eriBody     string
-	wantMsgID   string
-	wantErr     bool
-	errContain  string
-	testMessage bool
-	wantEriHit  bool
-}
-
-func assertExpectedError(t *testing.T, err error, wantErr bool, errContain string) bool {
-	t.Helper()
-	if !wantErr {
-		if err != nil {
-			t.Fatalf("unexpected error: %v", err)
-		}
-		return false
-	}
-	if err == nil {
-		t.Fatalf("expected error, got nil")
-	}
-	if errContain != "" && !strings.Contains(err.Error(), errContain) {
-		t.Fatalf("error %q does not contain %q", err.Error(), errContain)
-	}
-	return true
-}
-
-func verifyWidgetMessageCall(t *testing.T, client *RestateEriClient, mockDel *mockDeliverer, eriHits *int, tc widgetTestCase) {
-	t.Helper()
-	err := client.Message(context.Background(), "ch-1", "test content")
-	if assertExpectedError(t, err, tc.wantErr, tc.errContain) {
-		return
-	}
-	if tc.wantEriHit {
-		if eriHits == nil || *eriHits != 1 {
-			t.Errorf("eriHits = %v, want 1", eriHits)
-		}
-		if mockDel != nil && (mockDel.lastChannel != "" || mockDel.lastContent != "") {
-			t.Errorf("mockDeliverer was unexpectedly called: channel=%q, content=%q", mockDel.lastChannel, mockDel.lastContent)
-		}
-		return
-	}
-	if tc.hasDeliver && tc.envToken != "" && tc.restateURL != "" && mockDel != nil {
-		if mockDel.lastChannel != "ch-1" || mockDel.lastContent != "test content" {
-			t.Errorf("mockDeliverer got channel=%q content=%q, want ch-1 / test content", mockDel.lastChannel, mockDel.lastContent)
-		}
-		if eriHits != nil && *eriHits != 0 {
-			t.Errorf("eriHits = %d, want 0 when direct deliverer active", *eriHits)
-		}
-	}
-}
-
-func runWidgetTest(t *testing.T, tc widgetTestCase) {
-	t.Helper()
-	t.Setenv("DISCORD_TOKEN", tc.envToken)
-	var eriHits int
-	var eriURL string
-	if tc.eriBody != "" {
-		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			eriHits++
-			w.WriteHeader(tc.eriStatus)
-			_, _ = w.Write([]byte(tc.eriBody))
-		}))
-		defer srv.Close()
-		eriURL = srv.URL
-	}
-
-	var deliverer StatusWidgetDeliverer
-	var mockDel *mockDeliverer
-	if tc.hasDeliver {
-		mockDel = &mockDeliverer{msgID: tc.deliverMsg, err: tc.deliverErr}
-		deliverer = mockDel
-	}
-
-	client := NewRestateEriClient(tc.restateURL, eriURL, "aerial", nil, deliverer)
-	if tc.testMessage {
-		verifyWidgetMessageCall(t, client, mockDel, &eriHits, tc)
-		return
-	}
-
-	msgID, err := client.Widget(context.Background(), StatusWidgetRequest{ID: "w1"})
-	if assertExpectedError(t, err, tc.wantErr, tc.errContain) {
-		return
-	}
-	if msgID != tc.wantMsgID {
-		t.Errorf("msgID = %q, want %q", msgID, tc.wantMsgID)
-	}
-}
-
-func TestRestateEriClient_WidgetAndMessage(t *testing.T) {
-	tests := []widgetTestCase{
+func TestRestateEriClient_Prompt(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name      string
+		noRestate bool
+		noEri     bool
+		thread    string
+		prompt    string
+		path      string
+		wantErr   string
+		wantCalls []string
+	}{
 		{
-			name:       "widget direct deliverer active when token and restate set",
-			envToken:   "dummy-token",
-			restateURL: "http://restate.test",
-			hasDeliver: true,
-			deliverMsg: "msg-direct-1",
-			wantMsgID:  "msg-direct-1",
+			name: "restate enqueues on the thread session", thread: "th-1", prompt: "hello world", path: "/ThreadSession/th-1/Enqueue",
+			wantCalls: []string{"restate /ThreadSession/th-1/Enqueue key=prompt:th-1:vanadis-prompt-83e7044d26ed4a0c7faf9d30d9d2089e"},
 		},
-		{
-			name:       "widget falls back to eri when token missing",
-			envToken:   "",
-			restateURL: "http://restate.test",
-			hasDeliver: true,
-			eriStatus:  http.StatusOK,
-			eriBody:    `{"message_id":"msg-eri-2"}`,
-			wantMsgID:  "msg-eri-2",
-		},
-		{
-			name:       "widget falls back to eri when restate url empty",
-			envToken:   "dummy-token",
-			restateURL: "",
-			hasDeliver: true,
-			eriStatus:  http.StatusOK,
-			eriBody:    `{"message_id":"msg-eri-3"}`,
-			wantMsgID:  "msg-eri-3",
-		},
-		{
-			name:       "widget unconfigured returns error",
-			envToken:   "",
-			restateURL: "",
-			wantErr:    true,
-			errContain: "neither widget deliverer nor eri url configured",
-		},
-		{
-			name:        "message direct deliverer active when token and restate set",
-			envToken:    "dummy-token",
-			restateURL:  "http://restate.test",
-			hasDeliver:  true,
-			testMessage: true,
-		},
-		{
-			name:        "message direct deliverer error propagates",
-			envToken:    "dummy-token",
-			restateURL:  "http://restate.test",
-			hasDeliver:  true,
-			deliverErr:  errors.New("deliverer direct boom"),
-			testMessage: true,
-			wantErr:     true,
-			errContain:  "deliverer direct boom",
-		},
-		{
-			name:        "message falls back to eri when token missing",
-			envToken:    "",
-			restateURL:  "http://restate.test",
-			hasDeliver:  true,
-			eriStatus:   http.StatusOK,
-			eriBody:     `{"status":"ok"}`,
-			testMessage: true,
-			wantEriHit:  true,
-		},
-		{
-			name:        "message falls back to eri when restate url empty",
-			envToken:    "dummy-token",
-			restateURL:  "",
-			hasDeliver:  true,
-			eriStatus:   http.StatusOK,
-			eriBody:     `{"status":"ok"}`,
-			testMessage: true,
-			wantEriHit:  true,
-		},
-		{
-			name:        "message unconfigured returns error",
-			envToken:    "",
-			restateURL:  "",
-			testMessage: true,
-			wantErr:     true,
-			errContain:  "neither direct message deliverer nor http fallback configured for message delivery",
-		},
-		{
-			name:        "message delegates to http fallback",
-			eriStatus:   http.StatusOK,
-			eriBody:     `{"status":"ok"}`,
-			testMessage: true,
-			wantEriHit:  true,
-		},
+		{name: "blank thread and prompt is a noop", thread: " ", prompt: " "},
+		{name: "no restate url errors", noRestate: true, thread: "th-1", prompt: "hello", wantErr: "restate url not configured"},
 	}
-
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			runWidgetTest(t, tc)
+			t.Parallel()
+			ingress, eri := restateClientFake(t, tc.path, 0, `{"status":"accepted"}`)
+			restateURL, eriURL := restateClientURLs(ingress, eri, tc.noRestate, tc.noEri, "")
+			requireErrText(t, NewRestateEriClient(restateURL, eriURL, "aerial", nil).Prompt(context.Background(), tc.thread, tc.prompt), tc.wantErr)
+			assert.Equal(t, tc.wantCalls, restateClientCalls(ingress, eri))
+		})
+	}
+}
+
+// The widget and message tables set Discord auth with SetDiscordAuth, so the
+// DISCORD_TOKEN the constructor reads from the process env never matters.
+
+func TestRestateEriClient_Widget(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name      string
+		auth      bool
+		noRestate bool
+		noEri     bool
+		deliverer *mockDeliverer
+		wantID    string
+		wantErr   string
+		wantCalls []string
+	}{
+		{name: "direct deliverer with auth and restate", auth: true, deliverer: &mockDeliverer{msgID: "msg-direct-1"}, wantID: "msg-direct-1"},
+		{name: "missing auth errors", deliverer: &mockDeliverer{msgID: "unused"}, wantErr: "direct widget delivery is unconfigured"},
+		{name: "missing restate url errors", auth: true, noRestate: true, deliverer: &mockDeliverer{msgID: "unused"}, wantErr: "restate url not configured"},
+		{name: "unconfigured errors", auth: true, wantErr: "direct widget delivery is unconfigured"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			ingress, eri := restateClientFake(t, "/discord/widget", 0, `{"message_id":"msg-eri"}`)
+			restateURL, eriURL := restateClientURLs(ingress, eri, tc.noRestate, tc.noEri, "")
+			var deliverer StatusWidgetDeliverer
+			if tc.deliverer != nil {
+				deliverer = tc.deliverer
+			}
+			client := NewRestateEriClient(restateURL, eriURL, "aerial", nil, deliverer)
+			client.SetDiscordAuth(tc.auth)
+			got, err := client.Widget(context.Background(), StatusWidgetRequest{ID: "w1"})
+			requireErrText(t, err, tc.wantErr)
+			assert.Equal(t, tc.wantID, got)
+			assert.Equal(t, tc.wantCalls, restateClientCalls(ingress, eri))
+		})
+	}
+}
+
+func TestRestateEriClient_DeleteWidget(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name        string
+		auth        bool
+		noRestate   bool
+		deliverer   *mockDeliverer
+		agent       string
+		channel     string
+		message     string
+		ctxAgent    string
+		wantErr     string
+		wantDeleted []string
+	}{
+		{name: "direct deliverer deletes with the explicit agent", auth: true, deliverer: &mockDeliverer{}, agent: "Beta", channel: " ch-1 ", message: " m1 ", wantDeleted: []string{"beta ch-1 m1"}},
+		{name: "empty agent resolves from context", auth: true, deliverer: &mockDeliverer{}, ctxAgent: "alpha", channel: "ch-1", message: "m1", wantDeleted: []string{"alpha ch-1 m1"}},
+		{name: "deliverer error propagates", auth: true, deliverer: &mockDeliverer{err: errBoom}, channel: "ch-1", message: "m1", wantErr: "boom", wantDeleted: []string{"aerial ch-1 m1"}},
+		{name: "missing auth is a fallback no-op", deliverer: &mockDeliverer{}, channel: "ch-1", message: "m1"},
+		{name: "missing restate url is a fallback no-op", auth: true, noRestate: true, deliverer: &mockDeliverer{}, channel: "ch-1", message: "m1"},
+		{name: "no deliverer is a fallback no-op", auth: true, channel: "ch-1", message: "m1"},
+		{name: "blank message is a no-op", auth: true, deliverer: &mockDeliverer{}, channel: "ch-1", message: " "},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			ingress, eri := restateClientFake(t, "/discord/widget", 0, `{}`)
+			restateURL, eriURL := restateClientURLs(ingress, eri, tc.noRestate, false, "")
+			var deliverer StatusWidgetDeliverer
+			if tc.deliverer != nil {
+				deliverer = tc.deliverer
+			}
+			client := NewRestateEriClient(restateURL, eriURL, "aerial", nil, deliverer)
+			client.SetDiscordAuth(tc.auth)
+			ctx := context.Background()
+			if tc.ctxAgent != "" {
+				ctx = WithAgent(ctx, tc.ctxAgent)
+			}
+			requireErrText(t, client.DeleteWidget(ctx, tc.agent, tc.channel, tc.message), tc.wantErr)
+			var deleted []string
+			if tc.deliverer != nil {
+				deleted = tc.deliverer.deleted
+			}
+			assert.Equal(t, tc.wantDeleted, deleted)
+			assert.Empty(t, restateClientCalls(ingress, eri))
+		})
+	}
+}
+
+func TestRestateEriClient_Message(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name          string
+		auth          bool
+		noRestate     bool
+		noEri         bool
+		deliverer     StatusWidgetDeliverer
+		channel       string
+		wantErr       string
+		wantDelivered string
+		wantCalls     []string
+	}{
+		{name: "plain deliverer with auth and restate", auth: true, deliverer: &mockDeliverer{}, channel: "ch-1", wantDelivered: "ch-1 test content"},
+		{name: "agent deliverer routes through the client agent", auth: true, deliverer: &agentDeliverer{}, channel: "ch-1", wantDelivered: "aerial ch-1 test content"},
+		{name: "deliverer error propagates", auth: true, deliverer: &mockDeliverer{err: errBoom}, channel: "ch-1", wantErr: "boom", wantDelivered: "ch-1 test content"},
+		{name: "missing auth errors", deliverer: &mockDeliverer{}, channel: "ch-1", wantErr: "direct message delivery is unconfigured"},
+		{name: "missing restate url errors", auth: true, noRestate: true, deliverer: &mockDeliverer{}, channel: "ch-1", wantErr: "restate url not configured"},
+		{name: "no deliverer errors", auth: true, channel: "ch-1", wantErr: "direct message delivery is unconfigured"},
+		{name: "blank channel is a noop", auth: true, channel: " "},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			ingress, eri := restateClientFake(t, "/discord/message", 0, `{"status":"ok"}`)
+			restateURL, eriURL := restateClientURLs(ingress, eri, tc.noRestate, tc.noEri, "")
+			client := NewRestateEriClient(restateURL, eriURL, "aerial", nil, tc.deliverer)
+			client.SetDiscordAuth(tc.auth)
+			requireErrText(t, client.Message(context.Background(), tc.channel, "test content"), tc.wantErr)
+			delivered := ""
+			if rec, ok := tc.deliverer.(deliveryRecorder); ok {
+				delivered = rec.delivered()
+			}
+			assert.Equal(t, tc.wantDelivered, delivered)
+			assert.Equal(t, tc.wantCalls, restateClientCalls(ingress, eri))
 		})
 	}
 }
@@ -758,10 +434,10 @@ func TestRestateEriClient_NilReceiver(t *testing.T) {
 	var nilClient *RestateEriClient
 	ctx := context.Background()
 
-	if err := nilClient.Dispatch(ctx, BrainDispatchRequest{}); err == nil {
+	if err := nilClient.Dispatch(ctx, eriwire.BrainDispatchRequest{}); err == nil {
 		t.Error("expected error on nil client Dispatch")
 	}
-	if err := nilClient.DispatchAccepted(ctx, BrainDispatchRequest{}); err == nil {
+	if err := nilClient.DispatchAccepted(ctx, eriwire.BrainDispatchRequest{}); err == nil {
 		t.Error("expected error on nil client DispatchAccepted")
 	}
 	if err := nilClient.CancelDispatch(ctx, "c1"); err == nil {
@@ -776,90 +452,83 @@ func TestRestateEriClient_NilReceiver(t *testing.T) {
 	if err := nilClient.Message(ctx, "ch1", "m"); err == nil {
 		t.Error("expected error on nil client Message")
 	}
+	if err := nilClient.DeleteWidget(ctx, "a", "ch1", "m1"); err == nil {
+		t.Error("expected error on nil client DeleteWidget")
+	}
+	if err := nilClient.PromptAgent(ctx, "a", "th1", "p", "k"); err == nil {
+		t.Error("expected error on nil client PromptAgent")
+	}
+	if err := nilClient.DispatchRestate(ctx, eriwire.BrainDispatchRequest{}); err == nil {
+		t.Error("expected error on nil client DispatchRestate")
+	}
+	if err := nilClient.MessageAgent(ctx, "a", "ch1", "m"); err == nil {
+		t.Error("expected error on nil client MessageAgent")
+	}
 }
 
-func TestRestateEriClient_EdgeBehaviors(t *testing.T) {
+func TestAgentContextAndEffectiveResolution(t *testing.T) {
 	t.Parallel()
-	ctx := context.Background()
 
-	client := NewRestateEriClient("", "", "", nil)
-	client.SetWidgetDeliverer(&mockDeliverer{})
-	client.SetDiscordAuth(true)
-	if err := client.Message(ctx, "", ""); err != nil {
-		t.Errorf("empty message should be no-op: %v", err)
+	tests := []struct {
+		name          string
+		clientAgent   string
+		ctxAgent      string
+		explicitAgent string
+		wantAgent     string
+	}{
+		{
+			name:      "all empty falls back to default agent",
+			wantAgent: "aerial",
+		},
+		{
+			name:        "client agent used when context and explicit empty",
+			clientAgent: "agent-alpha",
+			wantAgent:   "agent-alpha",
+		},
+		{
+			name:        "context agent overrides client agent",
+			clientAgent: "agent-alpha",
+			ctxAgent:    "agent-beta",
+			wantAgent:   "agent-beta",
+		},
+		{
+			name:        "empty with-agent context preserves fallback",
+			clientAgent: "agent-alpha",
+			ctxAgent:    "   ",
+			wantAgent:   "agent-alpha",
+		},
+		{
+			name:          "explicit agent overrides context and client",
+			clientAgent:   "agent-alpha",
+			ctxAgent:      "agent-beta",
+			explicitAgent: "agent-gamma",
+			wantAgent:     "agent-gamma",
+		},
+		{
+			name:          "whitespace trimmed from explicit agent",
+			clientAgent:   "agent-alpha",
+			explicitAgent: "  agent-beta  ",
+			wantAgent:     "agent-beta",
+		},
 	}
 
-	// Coverage for CancelDispatch without restate or eri url
-	if err := client.CancelDispatch(ctx, "c1"); err == nil {
-		t.Error("expected error when neither url configured in CancelDispatch")
-	}
-
-	// Coverage for DispatchAccepted with empty body
-	emptyBodySrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusOK)
-	}))
-	defer emptyBodySrv.Close()
-
-	emptyClient := NewRestateEriClient(emptyBodySrv.URL, "", "aerial", nil)
-	if err := emptyClient.DispatchAccepted(ctx, BrainDispatchRequest{ID: "d1"}); err == nil {
-		t.Error("expected error when DispatchAccepted receives empty body")
-	}
-
-	// Coverage for malformed JSON in parseDispatchResponse
-	badJSONSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusOK)
-		_, _ = w.Write([]byte("{invalid-json"))
-	}))
-	defer badJSONSrv.Close()
-
-	badJSONClient := NewRestateEriClient(badJSONSrv.URL, "", "aerial", nil)
-	if err := badJSONClient.Dispatch(ctx, BrainDispatchRequest{ID: "d1"}); err == nil {
-		t.Error("expected error on malformed JSON response")
-	}
-
-	// Coverage for HTTP request creation failure (invalid URL)
-	badURLClient := NewRestateEriClient("http://127.0.0.1:0\nbad", "", "aerial", nil)
-	if err := badURLClient.Dispatch(ctx, BrainDispatchRequest{ID: "d1"}); err == nil {
-		t.Error("expected error on bad restate URL")
-	}
-
-	// Coverage for client.Do failure (unreachable server)
-	closedSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
-	closedURL := closedSrv.URL
-	closedSrv.Close()
-	unreachableClient := NewRestateEriClient(closedURL, "", "aerial", nil)
-	if err := unreachableClient.Dispatch(ctx, BrainDispatchRequest{ID: "d1"}); err == nil {
-		t.Error("expected error on unreachable restate server")
-	}
-
-	// Coverage for Message error when fallback is nil
-	noFallbackClient := NewRestateEriClient("", "", "", nil)
-	if err := noFallbackClient.Message(ctx, "ch1", "content"); err == nil {
-		t.Error("expected error when Message called without fallback")
-	}
-
-	// Coverage for parseRestateHTTPError fallback string
-	nonJSONErrSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusBadGateway)
-		_, _ = w.Write([]byte("raw text gateway error"))
-	}))
-	defer nonJSONErrSrv.Close()
-	gatewayErrClient := NewRestateEriClient(nonJSONErrSrv.URL, "", "aerial", nil)
-	if err := gatewayErrClient.Dispatch(ctx, BrainDispatchRequest{ID: "d1"}); err == nil || !strings.Contains(err.Error(), "raw text gateway error") {
-		t.Errorf("expected raw text error, got %v", err)
-	}
-
-	// Coverage for resolveSessionKey fallback branches
-	key1 := resolveSessionKey(BrainDispatchRequest{SessionID: "sess-1"})
-	if key1 != "sess-1" {
-		t.Errorf("key1 = %q, want sess-1", key1)
-	}
-	key2 := resolveSessionKey(BrainDispatchRequest{VanadisChunkID: "chunk-2"})
-	if key2 != "vanadis-chunk-2" {
-		t.Errorf("key2 = %q, want vanadis-chunk-2", key2)
-	}
-	key3 := resolveSessionKey(BrainDispatchRequest{ID: "disp-3"})
-	if key3 != "dispatch-disp-3" {
-		t.Errorf("key3 = %q, want dispatch-disp-3", key3)
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			ctx := context.Background()
+			if tc.ctxAgent != "" {
+				ctx = WithAgent(ctx, tc.ctxAgent)
+			}
+			c := NewRestateEriClient("", "", tc.clientAgent, nil)
+			var got string
+			if tc.explicitAgent != "" {
+				got = c.effectiveAgent(ctx, tc.explicitAgent)
+			} else {
+				got = c.effectiveAgent(ctx)
+			}
+			if got != tc.wantAgent {
+				t.Errorf("effectiveAgent() = %q, want %q", got, tc.wantAgent)
+			}
+		})
 	}
 }

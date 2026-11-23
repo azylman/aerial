@@ -1,36 +1,36 @@
 package app
 
 import (
-	"bytes"
 	"context"
-	"database/sql"
-	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"log"
 	"net"
 	"net/http"
-	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
 	"time"
 
 	"github.com/bwmarrin/discordgo"
-	"github.com/prometheus/client_golang/prometheus/promhttp"
 	restate "github.com/restatedev/sdk-go"
 	"github.com/restatedev/sdk-go/server"
 	"golang.org/x/sync/errgroup"
 
 	"github.com/azylman/aerial/pkg/httpkit"
+	"github.com/azylman/aerial/pkg/k8sauth"
 	"github.com/azylman/aerial/pkg/pubsub"
+	"github.com/azylman/aerial/pkg/strutil"
 	"github.com/azylman/aerial/pkg/tracing"
 	"github.com/azylman/aerial/services/eri/pkg/ambient"
+	"github.com/azylman/aerial/services/eri/pkg/bootstrap"
 	"github.com/azylman/aerial/services/eri/pkg/classifier"
 	"github.com/azylman/aerial/services/eri/pkg/config"
 	"github.com/azylman/aerial/services/eri/pkg/db"
+	"github.com/azylman/aerial/services/eri/pkg/egressscan"
 	"github.com/azylman/aerial/services/eri/pkg/env"
+	"github.com/azylman/aerial/services/eri/pkg/githubproxy"
+	"github.com/azylman/aerial/services/eri/pkg/llmcall"
 	"github.com/azylman/aerial/services/eri/pkg/mcp"
 	"github.com/azylman/aerial/services/eri/pkg/metrics"
 	"github.com/azylman/aerial/services/eri/pkg/queue"
@@ -42,19 +42,8 @@ import (
 type Config struct {
 	RestatePort string
 	HealthPort  string
-	AdminURL    string
 	PostgresURL string
 	AgentName   string
-}
-
-// FirstNonEmpty returns the first non-blank string after trimming.
-func FirstNonEmpty(vals ...string) string {
-	for _, v := range vals {
-		if trimmed := strings.TrimSpace(v); trimmed != "" {
-			return trimmed
-		}
-	}
-	return ""
 }
 
 // LoadConfigFromEnv loads configuration from environment variables with defaults.
@@ -72,177 +61,61 @@ func LoadConfigFromEnv() Config {
 		healthPort = "4028"
 	}
 
-	adminURL := strings.TrimRight(strings.TrimSpace(os.Getenv("RESTATE_ADMIN_URL")), "/")
-	if adminURL == "" {
-		adminURL = "http://restate.aerial:9070"
-	}
-
-	pgURL := strings.TrimSpace(FirstNonEmpty(os.Getenv("DATABASE_URL"), os.Getenv("POSTGRES_URL"), httpkit.BuildPostgresDSN(os.Getenv, "aerial")))
-	agentName := strings.TrimSpace(FirstNonEmpty(os.Getenv("AGENT_NAME"), "aerial"))
+	pgURL := strings.TrimSpace(strutil.FirstNonEmpty(os.Getenv("DATABASE_URL"), os.Getenv("POSTGRES_URL"), httpkit.BuildPostgresDSN(os.Getenv, "aerial")))
+	agentName := strings.TrimSpace(strutil.FirstNonEmpty(os.Getenv("AGENT_NAME"), "aerial"))
 
 	return Config{
 		RestatePort: restatePort,
 		HealthPort:  healthPort,
-		AdminURL:    adminURL,
 		PostgresURL: pgURL,
 		AgentName:   agentName,
 	}
 }
 
-// NewEriRestateServer binds the Eri Virtual Objects and returns a Restate server handler.
-func NewEriRestateServer(pool *queue.WorkerPool, agentName string) *server.Restate {
-	threadSession := queue.NewThreadSessionObject(pool, agentName)
-	dispatchSession := queue.NewDispatchSessionObject(pool, agentName)
-	voiceSession := queue.NewVoiceSessionObject(pool, agentName)
-	sessionManager := queue.NewSessionManagerService(pool, agentName)
-
-	return server.NewRestate().
-		Bind(restate.Reflect(threadSession, restate.WithInactivityTimeout(time.Hour), restate.WithAbortTimeout(time.Hour))).
-		Bind(restate.Reflect(dispatchSession, restate.WithInactivityTimeout(time.Hour), restate.WithAbortTimeout(time.Hour))).
-		Bind(restate.Reflect(voiceSession, restate.WithInactivityTimeout(time.Hour), restate.WithAbortTimeout(time.Hour))).
-		Bind(restate.Reflect(sessionManager, restate.WithInactivityTimeout(time.Hour), restate.WithAbortTimeout(time.Hour)))
+// eriRestateDefinitions returns the fixed service set every eri-restate revision binds: the
+// thread and dispatch coordinators, the voice session, the dispatch cancel router (under the
+// SessionManager service name), TurnRunner and the LLM service on llmFn (the ephemeral
+// summarizer pool). Only TurnRunner holds an invocation open across a turn, so it alone takes
+// queue.TurnHoldTimeout; every other service keeps 1h.
+func eriRestateDefinitions(pool *queue.WorkerPool, agentName string, llmFn runner.LLMFunc) []restate.ServiceDefinition {
+	hour := []restate.ServiceDefinitionOption{restate.WithInactivityTimeout(time.Hour), restate.WithAbortTimeout(time.Hour)}
+	store := pool.Store()
+	return []restate.ServiceDefinition{
+		restate.Reflect(queue.NewThreadCoordinator(store, pool, agentName), hour...),
+		restate.Reflect(queue.NewDispatchCoordinator(store, agentName), hour...),
+		restate.Reflect(queue.NewVoiceSessionObject(pool, agentName), hour...),
+		restate.Reflect(queue.NewDispatchCancelRouter(store, agentName), hour...),
+		queue.ReflectTurnRunner(queue.NewTurnRunnerService(pool, agentName)),
+		restate.Reflect(llmcall.NewService(llmFn, agentName), hour...),
+	}
 }
 
-var defaultTimeoutPayload = []byte(`{"inactivity_timeout":"1h","abort_timeout":"1h"}`)
-
-func startDiscoveryTimeoutReconciler(
-	ctx context.Context,
-	adminURL, agent string,
-	httpClient *http.Client,
-	maxAttempts int,
-	retryDelay time.Duration,
-) *ReloadTrigger {
-	reconcileFn := func(source string) {
-		log.Printf("[eri-restate] Service timeout reconciliation triggered via %s", source)
-		for attempt := 1; attempt <= maxAttempts; attempt++ {
-			recCtx, recCancel := context.WithTimeout(ctx, 30*time.Second)
-			err := ReconcileRestateServiceTimeouts(recCtx, adminURL, agent, httpClient)
-			recCancel()
-			if err == nil {
-				log.Printf("[eri-restate] Successfully reconciled service timeouts for agent %q", agent)
-				return
-			}
-			log.Printf("[eri-restate] Service timeout reconciliation attempt %d/%d failed: %v", attempt, maxAttempts, err)
-			if attempt == maxAttempts {
-				break
-			}
-			select {
-			case <-ctx.Done():
-				return
-			case <-time.After(retryDelay):
-			}
-		}
+// NewEriRestateServer binds the Eri services plus the LLM service on llmFn and returns a Restate
+// server handler.
+func NewEriRestateServer(pool *queue.WorkerPool, agentName string, llmFn runner.LLMFunc) *server.Restate {
+	srv := server.NewRestate()
+	for _, def := range eriRestateDefinitions(pool, agentName, llmFn) {
+		srv = srv.Bind(def)
 	}
-
-	trigger := NewReloadTrigger(ctx, reconcileFn)
-	return trigger
-}
-
-func wrapDiscoveryTimeoutReconciler(next http.Handler, triggerFn func()) http.Handler {
-	if triggerFn == nil {
-		return next
-	}
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		next.ServeHTTP(w, r)
-		if r.URL != nil && strings.HasPrefix(r.URL.Path, "/discover") {
-			triggerFn()
-		}
-	})
-}
-
-// ReconcileRestateServiceTimeouts sets 1h timeouts on Eri services via the Restate admin API.
-func ReconcileRestateServiceTimeouts(ctx context.Context, adminURL string, agent string, httpClient ...*http.Client) error {
-	adminURL = strings.TrimRight(strings.TrimSpace(adminURL), "/")
-	if adminURL == "" {
-		adminURL = "http://restate.aerial:9070"
-	}
-
-	client := &http.Client{Timeout: 10 * time.Second}
-	if len(httpClient) > 0 && httpClient[0] != nil {
-		client = httpClient[0]
-	}
-
-	services := []string{
-		queue.ThreadSessionServiceName(agent),
-		queue.DispatchSessionServiceName(agent),
-		queue.VoiceSessionServiceName(agent),
-	}
-
-	for _, svc := range services {
-		reqURL := fmt.Sprintf("%s/services/%s", adminURL, url.PathEscape(svc))
-		req, reqErr := http.NewRequestWithContext(ctx, http.MethodPatch, reqURL, bytes.NewReader(defaultTimeoutPayload))
-		if reqErr != nil {
-			return fmt.Errorf("create timeout reconcile request for %s: %w", svc, reqErr)
-		}
-		req.Header.Set("Content-Type", "application/json")
-
-		resp, doErr := client.Do(req)
-		if doErr != nil {
-			return fmt.Errorf("patch service %s timeouts: %w", svc, doErr)
-		}
-		resp.Body.Close()
-
-		if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-			return fmt.Errorf("patch service %s timeouts failed with status %d", svc, resp.StatusCode)
-		}
-	}
-	return nil
-}
-
-// ReloadTrigger coalesces background configuration reloads.
-type ReloadTrigger struct {
-	pending chan struct{}
-	done    chan struct{}
-}
-
-// NewReloadTrigger starts the background reload worker.
-func NewReloadTrigger(ctx context.Context, reloadFn func(string)) *ReloadTrigger {
-	t := &ReloadTrigger{pending: make(chan struct{}, 1), done: make(chan struct{})}
-	go func() {
-		defer close(t.done)
-		for {
-			select {
-			case <-ctx.Done():
-				return
-			case <-t.pending:
-				if ctx.Err() != nil {
-					return
-				}
-				if reloadFn != nil {
-					reloadFn("git-sync webhook")
-				}
-			}
-		}
-	}()
-	return t
-}
-
-// Trigger queues a reload without blocking.
-func (t *ReloadTrigger) Trigger() {
-	if t == nil {
-		return
-	}
-	select {
-	case t.pending <- struct{}{}:
-	default:
-	}
+	return srv
 }
 
 // HealthMuxOptions configures the health and internal endpoint HTTP mux.
 type HealthMuxOptions struct {
 	AgentName     string
-	Pool          *queue.WorkerPool
-	LLMFunc       runner.LLMFunc
 	MCPRoutes     *env.MCPProxyRoutes
 	ActiveTurns   *runner.ActiveTurnRegistry
-	ReloadTrigger *ReloadTrigger
+	ReloadTrigger *bootstrap.ReloadTrigger
+	// Config supplies the live GitHub PAT for the loopback-only GitHub egress
+	// proxy. A nil Config still mounts the routes; they answer 503.
+	Config *config.Config
 }
 
 func writeErr(w http.ResponseWriter, status int, msg string) {
 	httpkit.WriteJSON(w, status, map[string]string{"error": msg})
 }
 
-// SetupHealthMux creates the ServeMux for health, metrics, quota, llm, and diagnostics.
+// SetupHealthMux creates the ServeMux for health, metrics, quota, and diagnostics.
 func SetupHealthMux(opts HealthMuxOptions) *http.ServeMux {
 	mux := http.NewServeMux()
 
@@ -255,20 +128,17 @@ func SetupHealthMux(opts HealthMuxOptions) *http.ServeMux {
 	}
 	mux.HandleFunc("/health", healthHandler)
 	mux.HandleFunc("/healthz", healthHandler)
-	mux.Handle("/metrics", promhttp.Handler())
+	mux.Handle("/metrics", metrics.Handler())
 	mux.HandleFunc("/debug/coverage/flush", httpkit.HandleCoverageFlush("eri-restate"))
 
 	if opts.ReloadTrigger != nil {
-		mux.Handle("POST /-/reload", httpkit.LoopbackOnly(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-			opts.ReloadTrigger.Trigger()
-			httpkit.WriteJSON(w, http.StatusOK, map[string]string{"status": "queued"})
-		})))
+		mux.Handle("POST /-/reload", httpkit.LoopbackOnly(bootstrap.GitSyncReloadHandler(opts.ReloadTrigger)))
 	}
 
 	// NOTE: Unlike POST /-/reload (which is invoked by the pod-local git-sync sidecar over 127.0.0.1),
-	// /internal/quota and /internal/llm are cross-pod cluster endpoints invoked by stateless
+	// /internal/quota is a cross-pod cluster endpoint invoked by stateless
 	// Deployment/eri pods over the Kubernetes pod network via Service/eri-restate-health:4028
-	// (isolated by Kubernetes NetworkPolicy). They must NOT be wrapped in httpkit.LoopbackOnly,
+	// (isolated by Kubernetes NetworkPolicy). It must NOT be wrapped in httpkit.LoopbackOnly,
 	// which would reject cross-pod requests from Deployment/eri with 403 Forbidden.
 	mux.HandleFunc("/internal/quota", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
@@ -276,54 +146,7 @@ func SetupHealthMux(opts HealthMuxOptions) *http.ServeMux {
 			writeErr(w, http.StatusMethodNotAllowed, "method not allowed")
 			return
 		}
-		groups := metrics.LatestQuotaGroups()
-		httpkit.WriteJSON(w, http.StatusOK, groups)
-	})
-
-	llmFn := opts.LLMFunc
-	if llmFn == nil && opts.Pool != nil {
-		llmFn = opts.Pool.LLMFunc()
-	}
-
-	mux.HandleFunc("/internal/llm", func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodPost {
-			w.Header().Set("Allow", "POST")
-			writeErr(w, http.StatusMethodNotAllowed, "method not allowed")
-			return
-		}
-		if llmFn == nil {
-			writeErr(w, http.StatusServiceUnavailable, "llm function not available")
-			return
-		}
-		var req struct {
-			Prompt string `json:"prompt"`
-			Model  string `json:"model"`
-		}
-		r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
-		body, err := io.ReadAll(r.Body)
-		if err != nil {
-			if _, ok := errors.AsType[*http.MaxBytesError](err); ok {
-				writeErr(w, http.StatusRequestEntityTooLarge, "request body too large")
-				return
-			}
-			writeErr(w, http.StatusBadRequest, "failed to read body: "+err.Error())
-			return
-		}
-		if uErr := json.Unmarshal(body, &req); uErr != nil {
-			writeErr(w, http.StatusBadRequest, "invalid json payload: "+uErr.Error())
-			return
-		}
-		prompt := strings.TrimSpace(req.Prompt)
-		if prompt == "" {
-			writeErr(w, http.StatusBadRequest, "prompt is required")
-			return
-		}
-		resp, err := llmFn(r.Context(), req.Model, prompt)
-		if err != nil {
-			writeErr(w, http.StatusInternalServerError, err.Error())
-			return
-		}
-		httpkit.WriteJSON(w, http.StatusOK, map[string]string{"response": resp})
+		httpkit.WriteJSON(w, http.StatusOK, metrics.LatestQuotaSnapshot())
 	})
 
 	if opts.MCPRoutes != nil {
@@ -337,6 +160,13 @@ func SetupHealthMux(opts HealthMuxOptions) *http.ServeMux {
 		Turns: opts.ActiveTurns,
 		Stack: opts.AgentName,
 	}).Register(mux)
+
+	// Agent turns in this pod push and call the GitHub API through this proxy;
+	// it is loopback-only so the PAT-injecting routes never face the pod network.
+	githubproxy.Register(mux, opts.Config)
+	// The in-pod hook-guard posts blocklisted MCP tool arguments here, where the
+	// registered secret values are loaded; loopback-only like the proxy.
+	egressscan.Register(mux, opts.Config)
 
 	return mux
 }
@@ -373,48 +203,7 @@ type appOptions struct {
 	txStore        db.TranscriptStore
 	processSpawner runner.DaemonSpawner
 	llmFn          runner.LLMFunc
-	httpClient     *http.Client
 	appConfig      *config.Config
-	discordSession *discordgo.Session
-	eventBus       pubsub.Bus
-}
-
-// WithDiscordSession sets an explicit Discord session for testing or dependency injection.
-func WithDiscordSession(s *discordgo.Session) AppOption {
-	return func(o *appOptions) {
-		o.discordSession = s
-	}
-}
-
-// WithEventBus sets an explicit pubsub.Bus for testing or dependency injection.
-func WithEventBus(bus pubsub.Bus) AppOption {
-	return func(o *appOptions) {
-		o.eventBus = bus
-	}
-}
-
-func createReloadFunc(ctx context.Context, appCfg *config.Config, provisioner *env.Provisioner, ephemeralPool *runner.InterchangeablePool, workerPool *queue.WorkerPool) func(string) {
-	return func(source string) {
-		log.Printf("[eri-restate] Config reload triggered via %s", source)
-		if appCfg != nil {
-			if err := config.ReloadWithSupplier(appCfg, config.New); err != nil {
-				log.Printf("[eri-restate] Error reloading config: %v", err)
-				return
-			}
-			config.RegisterConfigTokens(appCfg)
-		}
-		if provisioner != nil {
-			if pErr := provisioner.Sync(ctx, appCfg); pErr != nil {
-				log.Printf("[eri-restate] Warning: env sync error on reload: %v", pErr)
-			}
-		}
-		if ephemeralPool != nil {
-			ephemeralPool.MarkDirty()
-		}
-		if workerPool != nil {
-			workerPool.MarkDirty()
-		}
-	}
 }
 
 func startUsagePoller(ctx context.Context, cur *config.ConfigData, ephemeralHome string, envVars []string) {
@@ -433,32 +222,11 @@ func startUsagePoller(ctx context.Context, cur *config.ConfigData, ephemeralHome
 	}
 }
 
-func defaultReloadLogger(source string) {
-	log.Printf("[eri-restate] Config reload triggered via %s", source)
-}
-
 var (
-	openDefaultDB        = db.New
-	onServerReady        func(restateAddr, healthAddr string)
-	startUsagePollerFn   = metrics.StartUsagePoller
-	reconcileRetryDelay  = 2 * time.Second
-	reconcileMaxAttempts = 3
+	openDefaultDB      = db.New
+	onServerReady      func(restateAddr, healthAddr string)
+	startUsagePollerFn = metrics.StartUsagePoller
 )
-
-func initDatabaseAndStores(_ context.Context, appCfg *config.Config, cur *config.ConfigData, agentName string) (*sql.DB, db.Store, db.TranscriptStore, error) {
-	database, err := openDefaultDB(appCfg)
-	if err != nil {
-		return nil, nil, nil, fmt.Errorf("failed to initialize database: %w", err)
-	}
-	store := db.NewSQLStore(database).WithAgent(db.ResolveAgentName(agentName))
-	stack, err := db.ResolveTranscriptStack(cur.DatabaseURL, cur.Transcripts.Stack)
-	if err != nil {
-		_ = database.Close()
-		return nil, nil, nil, fmt.Errorf("failed to resolve transcript stack: %w", err)
-	}
-	txStore := db.NewSQLTranscriptStore(database, stack)
-	return database, store, txStore, nil
-}
 
 type agentPoolsBundle struct {
 	discordPools  map[queue.PoolKey]runner.AgentPool
@@ -547,33 +315,32 @@ func initializeAgentPools(cur *config.ConfigData, cfg Config, sessionMgr *sessio
 	}
 }
 
-func wireOutboundIntegrations(ctx context.Context, cur *config.ConfigData, workerPool *queue.WorkerPool, appOpts appOptions) func() {
-	if appOpts.discordSession != nil {
-		workerPool.SetDiscordSession(appOpts.discordSession)
-	} else if token := strings.TrimSpace(cur.DiscordToken); token != "" {
-		if dg, err := discordgo.New("Bot " + token); err == nil {
+// wireOutboundIntegrations attaches the Discord session (returned so config
+// reloads can alert the system channel; nil without a token) and the NATS event
+// bus (closed by the returned func; nil when unset or unreachable).
+func wireOutboundIntegrations(ctx context.Context, cur *config.ConfigData, workerPool *queue.WorkerPool) (*discordgo.Session, func()) {
+	var dg *discordgo.Session
+	if token := strings.TrimSpace(cur.DiscordToken); token != "" {
+		if s, err := discordgo.New("Bot " + token); err == nil {
+			dg = s
 			workerPool.SetDiscordSession(dg)
 		}
 	}
 
-	if appOpts.eventBus != nil {
-		workerPool.SetEventBus(appOpts.eventBus)
-		return nil
-	}
 	if natsURL := strings.TrimSpace(cur.NATSURL); natsURL != "" {
 		bus, err := pubsub.NewJetStreamBus(ctx, natsURL)
 		if err != nil {
 			log.Printf("[eri-restate] Warning connecting to NATS event bus: %v", err)
-			return nil
+			return dg, nil
 		}
 		workerPool.SetEventBus(bus)
-		return func() {
+		return dg, func() {
 			if cErr := bus.Close(); cErr != nil {
 				log.Printf("[eri-restate] Warning closing event bus: %v", cErr)
 			}
 		}
 	}
-	return nil
+	return dg, nil
 }
 
 // RunApp runs both the Restate worker server and the health/metrics server.
@@ -595,23 +362,18 @@ func RunApp(ctx context.Context, cfg Config, opts ...AppOption) error {
 	}
 
 	cur := appCfg.Current()
-	if cur == nil {
-		cur = config.DefaultConfigData()
-	}
 	config.RegisterConfigTokens(appCfg)
+
+	log.Printf("[eri-restate] turn_queue=coordinator source=builtin")
 
 	store := appOpts.store
 	txStore := appOpts.txStore
 	if store == nil {
-		database, s, tx, err := initDatabaseAndStores(ctx, appCfg, cur, cfg.AgentName)
+		s, tx, cleanupStores, err := bootstrap.InitDefaultStores(openDefaultDB, appCfg, cur, cfg.AgentName)
 		if err != nil {
 			return err
 		}
-		defer func() {
-			if cErr := database.Close(); cErr != nil {
-				log.Printf("[eri-restate] Warning closing database: %v", cErr)
-			}
-		}()
+		defer cleanupStores()
 		store, txStore = s, tx
 	}
 
@@ -663,18 +425,23 @@ func RunApp(ctx context.Context, cfg Config, opts ...AppOption) error {
 		ChunkStepFlushInterval: queue.DefaultChunkStepFlushInterval,
 		AmbientResolver:        ambientResolver.Resolve,
 		TranscriptsIndexerURL:  cur.Transcripts.IndexerURL,
+		SATokenPath:            k8sauth.DefaultTokenPath,
 	})
 
-	if closeBus := wireOutboundIntegrations(ctx, cur, workerPool, appOpts); closeBus != nil {
+	dgSession, closeBus := wireOutboundIntegrations(ctx, cur, workerPool)
+	if closeBus != nil {
 		defer closeBus()
 	}
 
 	workerPool.Start()
 	defer workerPool.Stop()
 
-	reloadTrigger := NewReloadTrigger(ctx, createReloadFunc(ctx, appCfg, provisioner, pools.ephemeralPool, workerPool))
+	reloadTrigger := bootstrap.NewReloadTrigger(ctx, bootstrap.CreateReloadConfigFunc(appCfg,
+		bootstrap.WithDiscordSession(dgSession),
+		bootstrap.WithProvisioner(ctx, provisioner),
+		bootstrap.WithDirtyPools(pools.ephemeralPool, workerPool)))
 
-	restateSrv := NewEriRestateServer(workerPool, cfg.AgentName)
+	restateSrv := NewEriRestateServer(workerPool, cfg.AgentName, llmFn)
 	restateHandler, err := restateSrv.Handler()
 	if err != nil {
 		return fmt.Errorf("create restate handler: %w", err)
@@ -682,17 +449,13 @@ func RunApp(ctx context.Context, cfg Config, opts ...AppOption) error {
 
 	healthMux := SetupHealthMux(HealthMuxOptions{
 		AgentName:     cfg.AgentName,
-		Pool:          workerPool,
-		LLMFunc:       llmFn,
 		MCPRoutes:     mcpRoutes,
 		ActiveTurns:   activeTurns,
 		ReloadTrigger: reloadTrigger,
+		Config:        appCfg,
 	})
 
-	reconcileTrigger := startDiscoveryTimeoutReconciler(ctx, cfg.AdminURL, cfg.AgentName, appOpts.httpClient, reconcileMaxAttempts, reconcileRetryDelay)
-	reconcileTrigger.Trigger()
-
-	return runServers(ctx, cfg, wrapDiscoveryTimeoutReconciler(restateHandler, reconcileTrigger.Trigger), healthMux)
+	return runServers(ctx, cfg, restateHandler, healthMux)
 }
 
 func runServers(ctx context.Context, cfg Config, restateHandler http.Handler, healthMux http.Handler) error {

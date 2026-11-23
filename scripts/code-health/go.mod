@@ -1,4 +1,4 @@
-module code-health
+module github.com/azylman/aerial/scripts/code-health
 
 go 1.27.3
 

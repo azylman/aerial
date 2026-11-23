@@ -10,12 +10,14 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"maps"
 	"net"
 	"net/http"
 	"os"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -192,11 +194,8 @@ func defaultK8sHTTPClient(tokenPath string) *http.Client {
 	}
 
 	var tlsConfig *tls.Config
-	if caCert, err := os.ReadFile(certPath); err == nil {
-		rootCAs := x509.NewCertPool()
-		if rootCAs.AppendCertsFromPEM(caCert) {
-			tlsConfig = &tls.Config{RootCAs: rootCAs}
-		}
+	if rootCAs := LoadCAPool(certPath); rootCAs != nil {
+		tlsConfig = &tls.Config{RootCAs: rootCAs}
 	}
 
 	return &http.Client{
@@ -543,6 +542,63 @@ func writeJSONError(w http.ResponseWriter, statusCode int, msg string) {
 	if err := json.NewEncoder(w).Encode(errorResponse{Error: msg}); err != nil {
 		return
 	}
+}
+
+// DefaultExemptPaths lists the probe, metrics and coverage paths every service
+// serves without bearer authentication.
+var DefaultExemptPaths = []string{"/health", "/healthz", "/readyz", "/metrics", "/debug/coverage/flush"}
+
+// WriteError writes err as a JSON error body. A coded error (ValidationError,
+// UnauthorizedError, ForbiddenError) writes its StatusCode and message. Any
+// other error is logged and answered with 500 and a generic "internal error"
+// body so internal detail never reaches the caller.
+func WriteError(w http.ResponseWriter, err error) {
+	if coded, ok := errors.AsType[interface {
+		error
+		StatusCode() int
+	}](err); ok {
+		writeJSONError(w, coded.StatusCode(), err.Error())
+		return
+	}
+	slog.Error("k8sauth internal error", "error", err)
+	writeJSONError(w, http.StatusInternalServerError, "internal error")
+}
+
+// ApplyEnvOverride applies K8S_AUTH_ENABLED from getenv to cfg. An empty value
+// leaves cfg unchanged; an unparsable value is an error.
+func ApplyEnvOverride(cfg *Config, getenv func(string) string) error {
+	raw := strings.TrimSpace(getenv("K8S_AUTH_ENABLED"))
+	if raw == "" {
+		return nil
+	}
+	enabled, err := strconv.ParseBool(raw)
+	if err != nil {
+		return fmt.Errorf("invalid K8S_AUTH_ENABLED %q: %w", raw, err)
+	}
+	cfg.Enabled = enabled
+	return nil
+}
+
+// LoadCAPool returns a clone of the system cert pool plus the PEM certificates
+// in path. It returns nil when path is empty, missing, empty or unparsable.
+func LoadCAPool(path string) *x509.CertPool {
+	if path == "" {
+		return nil
+	}
+	caData, err := os.ReadFile(path)
+	if err != nil || len(caData) == 0 {
+		return nil
+	}
+	pool, err := x509.SystemCertPool()
+	if err != nil || pool == nil {
+		pool = x509.NewCertPool()
+	} else {
+		pool = pool.Clone()
+	}
+	if pool.AppendCertsFromPEM(caData) {
+		return pool
+	}
+	return nil
 }
 
 // Middleware creates HTTP middleware that authenticates requests using bearer tokens.

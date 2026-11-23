@@ -2,69 +2,25 @@ package server
 
 import (
 	"context"
-	"errors"
-	"fmt"
-	"net/http"
 	"sync"
 	"testing"
 	"time"
 
-	"go.uber.org/goleak"
-
+	"github.com/azylman/aerial/pkg/hermetictest"
+	"github.com/azylman/aerial/pkg/pgtest"
 	"github.com/azylman/aerial/services/prospera/internal/config"
+	"github.com/azylman/aerial/services/prospera/internal/fakes"
 	"github.com/azylman/aerial/services/prospera/internal/mediastream"
 )
 
-type hermeticTestTransport struct {
-	base http.RoundTripper
-}
+// pgRunner runs the package under pkg/pgtest so RunApp tests open a real
+// Postgres clone, inside hermetictest's goleak check.
+type pgRunner struct{ m *testing.M }
 
-func (h *hermeticTestTransport) RoundTrip(req *http.Request) (*http.Response, error) {
-	if req == nil || req.URL == nil {
-		return nil, errors.New("hermetic test guard: nil request or URL")
-	}
-	host := req.URL.Hostname()
-	if host != "127.0.0.1" && host != "::1" && host != "localhost" {
-		return nil, fmt.Errorf("hermetic test guard: blocked non-loopback HTTP call to %s", req.URL.Host)
-	}
-	switch req.URL.Port() {
-	case "8080", "8088", "4020", "8081", "8082", "8083", "8090", "8070", "9070":
-		return nil, fmt.Errorf("hermetic test guard: blocked dial to live daemon port %s", req.URL.Port())
-	}
-	base := h.base
-	if base == nil {
-		base = http.DefaultTransport
-		if base == h {
-			base = &http.Transport{}
-		}
-	}
-	return base.RoundTrip(req)
-}
-
-func (h *hermeticTestTransport) CloseIdleConnections() {
-	if cl, ok := h.base.(interface{ CloseIdleConnections() }); ok {
-		cl.CloseIdleConnections()
-	}
-}
-
-func wrapHermeticTransport() {
-	if _, ok := http.DefaultTransport.(*hermeticTestTransport); !ok {
-		http.DefaultTransport = &hermeticTestTransport{base: http.DefaultTransport}
-	}
-}
-
-func init() {
-	wrapHermeticTransport()
-}
+func (r pgRunner) Run() int { return pgtest.Main(r.m) }
 
 func TestMain(m *testing.M) {
-	wrapHermeticTransport()
-	goleak.VerifyTestMain(m, goleak.Cleanup(func(exitCode int) {
-		http.DefaultClient.CloseIdleConnections()
-		if cl, ok := http.DefaultTransport.(interface{ CloseIdleConnections() }); ok {
-			cl.CloseIdleConnections()
-		}
-	}))
+	hermetictest.Main(pgRunner{m: m})
 }
 
 func TestDrain(t *testing.T) {
@@ -85,7 +41,7 @@ func TestDrain(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			cfg := &config.Config{Port: "4019"}
-			mgr := mediastream.NewCallSessionManager(staticConfig{cfg: cfg}, newMockStoreForDelivery(), nil, nil, nil)
+			mgr := mediastream.NewCallSessionManager(fakes.StaticConfig{Cfg: cfg}, fakes.NewFakeStore(), nil, nil, nil)
 			var srv *Server
 			if tc.nilMgr {
 				srv = &Server{}
@@ -122,7 +78,7 @@ func TestDrain(t *testing.T) {
 func TestDrain_WaitsForActiveSessions(t *testing.T) {
 	t.Parallel()
 	cfg := &config.Config{Port: "4019"}
-	mgr := mediastream.NewCallSessionManager(staticConfig{cfg: cfg}, newMockStoreForDelivery(), nil, nil, nil)
+	mgr := mediastream.NewCallSessionManager(fakes.StaticConfig{Cfg: cfg}, fakes.NewFakeStore(), nil, nil, nil)
 	mgr.RegisterSession("call-drain-live", &stubSession{})
 	srv := &Server{sessionMgr: mgr}
 

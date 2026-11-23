@@ -2,112 +2,59 @@ package server
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
+	"maps"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/azylman/aerial/pkg/k8sauth"
+	"github.com/azylman/aerial/pkg/k8sauthtest"
+	"github.com/azylman/aerial/services/vanadis/internal/storetest"
 )
 
-type staticAuthRoundTripper struct {
-	authStatus int
-	authBody   string
-	sarStatus  int
-	sarBody    string
-	err        error
+// authFake answers TokenReview as the eri service account (or unauthenticated
+// when authOK is false) and SubjectAccessReview with sarOK.
+func authFake(authOK, sarOK bool) *k8sauthtest.RoundTripper {
+	rt := &k8sauthtest.RoundTripper{AuthBody: k8sauthtest.TokenReviewDenied(), SARBody: k8sauthtest.SAR(sarOK, "")}
+	if authOK {
+		rt.AuthBody = k8sauthtest.TokenReview("system:serviceaccount:default:eri-aerial")
+	}
+	return rt
 }
 
-func (s *staticAuthRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
-	if s.err != nil {
-		return nil, s.err
-	}
-	if strings.Contains(req.URL.Path, "tokenreviews") {
-		return &http.Response{
-			StatusCode: s.authStatus,
-			Body:       io.NopCloser(strings.NewReader(s.authBody)),
-			Header:     make(http.Header),
-			Request:    req,
-		}, nil
-	}
-	if strings.Contains(req.URL.Path, "subjectaccessreviews") {
-		return &http.Response{
-			StatusCode: s.sarStatus,
-			Body:       io.NopCloser(strings.NewReader(s.sarBody)),
-			Header:     make(http.Header),
-			Request:    req,
-		}, nil
-	}
-	return &http.Response{
-		StatusCode: http.StatusOK,
-		Body:       io.NopCloser(strings.NewReader(`{}`)),
-		Header:     make(http.Header),
-		Request:    req,
-	}, nil
-}
-
-func newTestAuthenticator(t *testing.T, tr *staticAuthRoundTripper) *k8sauth.Authenticator {
-	t.Helper()
-	tokenFile := filepath.Join(t.TempDir(), "token")
-	if err := os.WriteFile(tokenFile, []byte("host-token"), 0o600); err != nil {
-		t.Fatalf("failed to write host token: %v", err)
-	}
-	return k8sauth.NewAuthenticator(k8sauth.Config{
-		Enabled:      true,
-		TokenPath:    tokenFile,
-		APIServerURL: "https://k8s.local",
-		HTTPClient:   &http.Client{Transport: tr},
-	})
-}
-
-func authRoundTripper(authOk, sarOk bool) *staticAuthRoundTripper {
-	authBody := `{"apiVersion":"authentication.k8s.io/v1","kind":"TokenReview","status":{"authenticated":false}}`
-	if authOk {
-		authBody = `{"apiVersion":"authentication.k8s.io/v1","kind":"TokenReview","status":{"authenticated":true,"user":{"username":"system:serviceaccount:default:eri-aerial"}}}`
-	}
-	sarBody := `{"apiVersion":"authorization.k8s.io/v1","kind":"SubjectAccessReview","status":{"allowed":false}}`
-	if sarOk {
-		sarBody = `{"apiVersion":"authorization.k8s.io/v1","kind":"SubjectAccessReview","status":{"allowed":true}}`
-	}
-	return &staticAuthRoundTripper{
-		authStatus: http.StatusOK,
-		authBody:   authBody,
-		sarStatus:  http.StatusOK,
-		sarBody:    sarBody,
-	}
-}
-
-func TestServer_WriteAuthAndStoreErrors(t *testing.T) {
+func TestWriteStoreErr(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
 		name       string
-		isAuthErr  bool
 		err        error
 		wantCode   int
 		wantSubstr string
 	}{
-		{name: "auth validation error", isAuthErr: true, err: &k8sauth.ValidationError{Message: "bad slug"}, wantCode: http.StatusBadRequest, wantSubstr: "bad slug"},
-		{name: "auth unauthorized error", isAuthErr: true, err: &k8sauth.UnauthorizedError{Message: "no token"}, wantCode: http.StatusUnauthorized, wantSubstr: "no token"},
-		{name: "auth forbidden error", isAuthErr: true, err: &k8sauth.ForbiddenError{Message: "denied"}, wantCode: http.StatusForbidden, wantSubstr: "denied"},
-		{name: "auth generic error", isAuthErr: true, err: errors.New("boom"), wantCode: http.StatusInternalServerError, wantSubstr: "boom"},
-		{name: "store build not found", isAuthErr: false, err: ErrBuildNotFound, wantCode: http.StatusNotFound, wantSubstr: "build not found"},
-		{name: "store build conflict", isAuthErr: false, err: ErrBuildConflict, wantCode: http.StatusConflict, wantSubstr: "vanadis build state conflict"},
-		{name: "store invalid build input", isAuthErr: false, err: ErrInvalidBuildInput, wantCode: http.StatusBadRequest, wantSubstr: "invalid vanadis build input"},
+		{name: "auth validation error", err: &k8sauth.ValidationError{Message: "bad slug"}, wantCode: http.StatusBadRequest, wantSubstr: "bad slug"},
+		{name: "auth unauthorized error", err: &k8sauth.UnauthorizedError{Message: "no token"}, wantCode: http.StatusUnauthorized, wantSubstr: "no token"},
+		{name: "auth forbidden error", err: &k8sauth.ForbiddenError{Message: "denied"}, wantCode: http.StatusForbidden, wantSubstr: "denied"},
+		{name: "auth generic error", err: errors.New("boom"), wantCode: http.StatusInternalServerError, wantSubstr: "boom"},
+		{name: "store build not found", err: ErrBuildNotFound, wantCode: http.StatusNotFound, wantSubstr: "build not found"},
+		{name: "store build conflict", err: ErrBuildConflict, wantCode: http.StatusConflict, wantSubstr: "vanadis build state conflict"},
+		{name: "store invalid build input", err: ErrInvalidBuildInput, wantCode: http.StatusBadRequest, wantSubstr: "invalid vanadis build input"},
+		{name: "restate timeout", err: ErrRestateTimeout, wantCode: http.StatusGatewayTimeout, wantSubstr: "upstream response timed out"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			rec := httptest.NewRecorder()
-			if tc.isAuthErr {
-				writeAuthErr(rec, tc.err)
-			} else {
-				writeStoreErr(context.Background(), rec, tc.err)
-			}
+			writeStoreErr(context.Background(), rec, tc.err)
 			if rec.Code != tc.wantCode {
 				t.Fatalf("code = %d, want %d", rec.Code, tc.wantCode)
 			}
@@ -124,7 +71,7 @@ func TestServer_AuthEnabledConfig(t *testing.T) {
 	if err := os.WriteFile(tokenFile, []byte("tok"), 0o600); err != nil {
 		t.Fatalf("failed to write token: %v", err)
 	}
-	srv := NewVanadisServer(Config{Auth: k8sauth.Config{Enabled: true, TokenPath: tokenFile}}, nil, nil)
+	srv := NewVanadisServer(Config{Auth: k8sauth.Config{Enabled: true, TokenPath: tokenFile}}, RestateConfig{}, nil, nil)
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodGet, "/builds", http.NoBody)
 	srv.Routes().ServeHTTP(rec, req)
@@ -133,295 +80,17 @@ func TestServer_AuthEnabledConfig(t *testing.T) {
 	}
 }
 
-func TestServer_AuthMiddleware_ExemptAndProtected(t *testing.T) {
-	t.Parallel()
-	tests := []struct {
-		name       string
-		path       string
-		method     string
-		token      string
-		authOk     bool
-		sarOk      bool
-		wantCode   int
-		wantSubstr string
-	}{
-		{name: "exempt health without token", path: "/health", method: http.MethodGet, wantCode: http.StatusOK, wantSubstr: "ok"},
-		{name: "exempt healthz without token", path: "/healthz", method: http.MethodGet, wantCode: http.StatusOK, wantSubstr: "ok"},
-		{name: "exempt metrics without token", path: "/metrics", method: http.MethodGet, wantCode: http.StatusOK},
-		{name: "protected builds missing auth header", path: "/builds", method: http.MethodGet, wantCode: http.StatusUnauthorized, wantSubstr: "missing Authorization header"},
-		{name: "protected builds invalid token format", path: "/builds", method: http.MethodGet, token: "Basic abc", wantCode: http.StatusUnauthorized, wantSubstr: "invalid bearer token"},
-		{name: "protected builds unauthenticated token", path: "/builds", method: http.MethodGet, token: "Bearer bad-token", authOk: false, wantCode: http.StatusUnauthorized, wantSubstr: "token not authenticated"},
-		{name: "protected builds authenticated but forbidden", path: "/builds", method: http.MethodGet, token: "Bearer good-token", authOk: true, sarOk: false, wantCode: http.StatusForbidden, wantSubstr: "access denied"},
-		{name: "protected builds authenticated and allowed", path: "/builds", method: http.MethodGet, token: "Bearer good-token", authOk: true, sarOk: true, wantCode: http.StatusOK},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			auth := newTestAuthenticator(t, authRoundTripper(tc.authOk, tc.sarOk))
-			mem := newMemoryVanadisStore()
-			srv := NewVanadisServer(Config{}, mem, nil, auth)
-			mux := srv.Routes()
-
-			req := httptest.NewRequest(tc.method, tc.path, http.NoBody)
-			if tc.token != "" {
-				req.Header.Set("Authorization", tc.token)
-			}
-			rec := httptest.NewRecorder()
-			mux.ServeHTTP(rec, req)
-
-			if rec.Code != tc.wantCode {
-				t.Fatalf("code = %d, want %d (body: %s)", rec.Code, tc.wantCode, rec.Body.String())
-			}
-			if tc.wantSubstr != "" && !strings.Contains(rec.Body.String(), tc.wantSubstr) {
-				t.Fatalf("body %q missing %q", rec.Body.String(), tc.wantSubstr)
-			}
-		})
-	}
-}
-
-func TestServer_RBAC_Endpoints(t *testing.T) {
-	restateSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusOK)
-		if strings.Contains(r.URL.Path, "AppendChunks") {
-			_, _ = w.Write([]byte(`[{"id":"c2","status":"pending"}]`))
-			return
-		}
-		_, _ = w.Write([]byte(`{"id":"b1","status":"running"}`))
-	}))
-	defer restateSrv.Close()
-
-	now := time.Now().UTC()
-	b1 := mkBuild("b1", "1234567890", "Build 1", "Obj 1", "running")
-	b1.Agent = "aerial"
-	b1.CreatedAt = now
-	c1 := mkChunk("c1", "b1", 0, "Chunk 1", "Inst 1", "medium", "running")
-
-	bEmpty := mkBuild("b-empty", "1234567890", "Build Empty", "Obj", "running")
-	bEmpty.CreatedAt = now
-	cEmpty := mkChunk("c-empty", "b-empty", 0, "Chunk Empty", "Inst", "medium", "running")
-
-	tests := []struct {
-		name       string
-		path       string
-		method     string
-		body       string
-		sarOk      bool
-		wantCode   int
-		wantSubstr string
-	}{
-		{name: "create build allowed", path: "/builds", method: http.MethodPost, body: `{"thread_id":"1234567890","objective":"obj","chunks":[{"mode":"action","title":"c","instructions":"i","depends_on":[]}]}`, sarOk: true, wantCode: http.StatusAccepted},
-		{name: "create build forbidden", path: "/builds", method: http.MethodPost, body: `{"thread_id":"1234567890","objective":"obj","chunks":[{"mode":"action","title":"c","instructions":"i","depends_on":[]}]}`, sarOk: false, wantCode: http.StatusForbidden},
-		{name: "create build invalid agent slug", path: "/builds", method: http.MethodPost, body: `{"agent":"BAD_SLUG!","thread_id":"1234567890","objective":"obj","chunks":[{"mode":"action","title":"c","instructions":"i","depends_on":[]}]}`, sarOk: true, wantCode: http.StatusBadRequest, wantSubstr: "invalid target agent"},
-		{name: "get build allowed", path: "/builds/b1", method: http.MethodGet, sarOk: true, wantCode: http.StatusOK, wantSubstr: "b1"},
-		{name: "get build forbidden", path: "/builds/b1", method: http.MethodGet, sarOk: false, wantCode: http.StatusForbidden},
-		{name: "cancel build allowed", path: "/builds/b1/cancel", method: http.MethodPost, body: `{"reason":"cancel"}`, sarOk: true, wantCode: http.StatusOK},
-		{name: "cancel build forbidden", path: "/builds/b1/cancel", method: http.MethodPost, body: `{"reason":"cancel"}`, sarOk: false, wantCode: http.StatusForbidden},
-		{name: "cancel build not found", path: "/builds/b-missing/cancel", method: http.MethodPost, body: `{"reason":"cancel"}`, sarOk: true, wantCode: http.StatusNotFound},
-		{name: "cancel build empty agent fallback", path: "/builds/b-empty/cancel", method: http.MethodPost, body: `{"reason":"cancel"}`, sarOk: true, wantCode: http.StatusOK},
-		{name: "get chunk by id allowed", path: "/chunks/c1", method: http.MethodGet, sarOk: true, wantCode: http.StatusOK, wantSubstr: "c1"},
-		{name: "get chunk by id forbidden", path: "/chunks/c1", method: http.MethodGet, sarOk: false, wantCode: http.StatusForbidden},
-		{name: "get chunk by id not found", path: "/chunks/c-missing", method: http.MethodGet, sarOk: true, wantCode: http.StatusNotFound},
-		{name: "get build chunk allowed", path: "/builds/b1/chunks/c1", method: http.MethodGet, sarOk: true, wantCode: http.StatusOK, wantSubstr: "c1"},
-		{name: "get build chunk forbidden", path: "/builds/b1/chunks/c1", method: http.MethodGet, sarOk: false, wantCode: http.StatusForbidden},
-		{name: "get build chunk not found", path: "/builds/b1/chunks/c-missing", method: http.MethodGet, sarOk: true, wantCode: http.StatusNotFound},
-		{name: "update build allowed", path: "/builds/b1", method: http.MethodPatch, body: `{"title":"new"}`, sarOk: true, wantCode: http.StatusOK},
-		{name: "update build forbidden", path: "/builds/b1", method: http.MethodPatch, body: `{"title":"new"}`, sarOk: false, wantCode: http.StatusForbidden},
-		{name: "update build bad json", path: "/builds/b1", method: http.MethodPatch, body: `{bad json}`, sarOk: true, wantCode: http.StatusBadRequest},
-		{name: "update build not found", path: "/builds/b-missing", method: http.MethodPatch, body: `{"title":"new"}`, sarOk: true, wantCode: http.StatusNotFound},
-		{name: "update build empty agent fallback", path: "/builds/b-empty", method: http.MethodPatch, body: `{"title":"new"}`, sarOk: true, wantCode: http.StatusOK},
-		{name: "update chunk allowed", path: "/builds/b1/chunks/c1", method: http.MethodPatch, body: `{"title":"new"}`, sarOk: true, wantCode: http.StatusOK},
-		{name: "update chunk forbidden", path: "/builds/b1/chunks/c1", method: http.MethodPatch, body: `{"title":"new"}`, sarOk: false, wantCode: http.StatusForbidden},
-		{name: "update chunk bad json", path: "/builds/b1/chunks/c1", method: http.MethodPatch, body: `{bad json}`, sarOk: true, wantCode: http.StatusBadRequest},
-		{name: "update chunk empty agent fallback", path: "/builds/b-empty/chunks/c-empty", method: http.MethodPatch, body: `{"title":"new"}`, sarOk: true, wantCode: http.StatusOK},
-		{name: "append chunks allowed", path: "/builds/b1/chunks", method: http.MethodPost, body: `{"chunks":[{"mode":"action","title":"c2","instructions":"i2"}]}`, sarOk: true, wantCode: http.StatusOK},
-		{name: "append chunks forbidden", path: "/builds/b1/chunks", method: http.MethodPost, body: `{"chunks":[{"mode":"action","title":"c2","instructions":"i2"}]}`, sarOk: false, wantCode: http.StatusForbidden},
-		{name: "append chunks bad json", path: "/builds/b1/chunks", method: http.MethodPost, body: `{bad json}`, sarOk: true, wantCode: http.StatusBadRequest},
-		{name: "append chunks empty agent fallback", path: "/builds/b-empty/chunks", method: http.MethodPost, body: `{"chunks":[{"mode":"action","title":"c2","instructions":"i2"}]}`, sarOk: true, wantCode: http.StatusOK},
-		{name: "remove chunk allowed", path: "/builds/b1/chunks/c1", method: http.MethodDelete, sarOk: true, wantCode: http.StatusOK},
-		{name: "remove chunk forbidden", path: "/builds/b1/chunks/c1", method: http.MethodDelete, sarOk: false, wantCode: http.StatusForbidden},
-		{name: "remove chunk not found", path: "/builds/b-missing/chunks/c1", method: http.MethodDelete, sarOk: true, wantCode: http.StatusNotFound},
-		{name: "remove chunk empty agent fallback", path: "/builds/b-empty/chunks/c-empty", method: http.MethodDelete, sarOk: true, wantCode: http.StatusOK},
-		{name: "build by id empty id", path: "/builds/", method: http.MethodGet, sarOk: true, wantCode: http.StatusBadRequest, wantSubstr: "build id is required"},
-		{name: "build chunk routes method not allowed", path: "/builds/b1/chunks/c1", method: http.MethodPost, sarOk: true, wantCode: http.StatusMethodNotAllowed},
-		{name: "build root method not allowed", path: "/builds/b1", method: http.MethodPut, sarOk: true, wantCode: http.StatusMethodNotAllowed},
-		{name: "build cancel method not allowed", path: "/builds/b1/cancel", method: http.MethodGet, sarOk: true, wantCode: http.StatusMethodNotAllowed},
-		{name: "build chunk empty chunkRef trailing slash", path: "/builds/b1/chunks/", method: http.MethodGet, sarOk: true, wantCode: http.StatusBadRequest, wantSubstr: "chunk_ref is required"},
-		{name: "build chunk unknown subpath", path: "/builds/b1/unknown", method: http.MethodGet, sarOk: true, wantCode: http.StatusNotFound},
-		{name: "build chunk deep unknown subpath", path: "/builds/b1/chunks/c1/deep", method: http.MethodGet, sarOk: true, wantCode: http.StatusNotFound},
-		{name: "build 3 parts not chunks", path: "/builds/b1/notchunks/c1", method: http.MethodGet, sarOk: true, wantCode: http.StatusNotFound},
-		{name: "list builds forbidden", path: "/builds", method: http.MethodGet, sarOk: false, wantCode: http.StatusForbidden},
-		{name: "chunk by id method not allowed", path: "/chunks/c1", method: http.MethodPost, sarOk: true, wantCode: http.StatusMethodNotAllowed},
-		{name: "update build empty fields", path: "/builds/b1", method: http.MethodPatch, body: `{}`, sarOk: true, wantCode: http.StatusBadRequest},
-		{name: "append chunks empty chunks", path: "/builds/b1/chunks", method: http.MethodPost, body: `{"chunks":[]}`, sarOk: true, wantCode: http.StatusBadRequest},
-		{name: "update chunk invalid mode", path: "/builds/b1/chunks/c1", method: http.MethodPatch, body: `{"mode":"invalid"}`, sarOk: true, wantCode: http.StatusBadRequest},
-		{name: "update chunk invalid effort", path: "/builds/b1/chunks/c1", method: http.MethodPatch, body: `{"effort":"superheavy"}`, sarOk: true, wantCode: http.StatusBadRequest},
-		{name: "update chunk empty mode", path: "/builds/b1/chunks/c1", method: http.MethodPatch, body: `{"mode":""}`, sarOk: true, wantCode: http.StatusBadRequest},
-		{name: "update chunk empty body fields", path: "/builds/b1/chunks/c1", method: http.MethodPatch, body: `{}`, sarOk: true, wantCode: http.StatusBadRequest},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			auth := newTestAuthenticator(t, authRoundTripper(true, tc.sarOk))
-			mem := newMemoryVanadisStore()
-			_ = mem.CreateBuild(context.Background(), b1, []VanadisChunk{c1})
-			_ = mem.CreateBuild(context.Background(), bEmpty, []VanadisChunk{cEmpty})
-
-			srv := NewVanadisServer(Config{}, mem, nil, auth)
-			srv.restateCfg = RestateConfig{RestateIngressURL: restateSrv.URL}
-			mux := srv.Routes()
-
-			var body io.Reader = http.NoBody
-			if tc.body != "" {
-				body = strings.NewReader(tc.body)
-			}
-			req := httptest.NewRequest(tc.method, tc.path, body)
-			req.Header.Set("Authorization", "Bearer valid-token")
-			rec := httptest.NewRecorder()
-			mux.ServeHTTP(rec, req)
-
-			if rec.Code != tc.wantCode {
-				t.Fatalf("code = %d, want %d (body: %s)", rec.Code, tc.wantCode, rec.Body.String())
-			}
-			if tc.wantSubstr != "" && !strings.Contains(rec.Body.String(), tc.wantSubstr) {
-				t.Fatalf("body %q missing %q", rec.Body.String(), tc.wantSubstr)
-			}
-		})
-	}
-}
-
-func TestServer_ActiveStepEndpoints(t *testing.T) {
-	restateSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if strings.Contains(r.URL.Path, "error-build") {
-			w.WriteHeader(http.StatusInternalServerError)
-			_, _ = w.Write([]byte(`internal restate error`))
-			return
-		}
-		if r.Method == http.MethodPost && strings.Contains(r.URL.Path, "UpdateActiveStep/send") {
-			w.WriteHeader(http.StatusOK)
-			_, _ = w.Write([]byte(`{}`))
-			return
-		}
-		w.WriteHeader(http.StatusNotFound)
-	}))
-	defer restateSrv.Close()
-
-	now := time.Now().UTC()
-	b1 := mkBuild("b1", "1234567890", "Build 1", "Obj 1", "running")
-	b1.Agent = "aerial"
-	b1.CreatedAt = now
-	c1 := mkChunk("c1", "b1", 0, "Chunk 1", "Inst 1", "medium", "running")
-
-	bErr := mkBuild("error-build", "1234567890", "Error Build", "Obj", "running")
-	bErr.Agent = "aerial"
-	bErr.CreatedAt = now
-	cErr := mkChunk("c-err", "error-build", 0, "Chunk Err", "Inst", "medium", "running")
-
-	bEmptyActive := mkBuild("b-empty-active", "1234567890", "Build Empty", "Obj", "running")
-	bEmptyActive.CreatedAt = now
-	cEmptyActive := mkChunk("c-empty-active", "b-empty-active", 0, "Chunk", "Inst", "medium", "running")
-
-	tests := []struct {
-		name       string
-		path       string
-		method     string
-		body       string
-		sarOk      bool
-		wantCode   int
-		wantSubstr string
-	}{
-		{name: "chunks active step invalid json", path: "/chunks/active-step", method: http.MethodPost, body: `{bad json`, sarOk: true, wantCode: http.StatusBadRequest},
-		{name: "chunks active step missing chunk_id", path: "/chunks/active-step", method: http.MethodPost, body: `{"active_step":"step 1"}`, sarOk: true, wantCode: http.StatusBadRequest},
-		{name: "chunks active step chunk not found", path: "/chunks/active-step", method: http.MethodPost, body: `{"chunk_id":"c-missing","active_step":"step 1"}`, sarOk: true, wantCode: http.StatusNotFound},
-		{name: "chunks active step forbidden", path: "/chunks/active-step", method: http.MethodPost, body: `{"chunk_id":"c1","active_step":"step 1"}`, sarOk: false, wantCode: http.StatusForbidden},
-		{name: "chunks active step success", path: "/chunks/active-step", method: http.MethodPost, body: `{"chunk_id":"c1","active_step":"step 1"}`, sarOk: true, wantCode: http.StatusOK, wantSubstr: "ok"},
-		{name: "chunks active step empty agent fallback", path: "/chunks/active-step", method: http.MethodPost, body: `{"chunk_id":"c-empty-active","active_step":"step 1"}`, sarOk: true, wantCode: http.StatusOK, wantSubstr: "ok"},
-		{name: "chunks active step restate error 500", path: "/chunks/active-step", method: http.MethodPost, body: `{"chunk_id":"c-err","active_step":"step 1"}`, sarOk: true, wantCode: http.StatusInternalServerError},
-		{name: "builds active step method not allowed", path: "/builds/b1/active-step", method: http.MethodGet, sarOk: true, wantCode: http.StatusMethodNotAllowed},
-		{name: "builds active step invalid json", path: "/builds/b1/active-step", method: http.MethodPost, body: `{bad json`, sarOk: true, wantCode: http.StatusBadRequest},
-		{name: "builds active step missing chunk_id", path: "/builds/b1/active-step", method: http.MethodPost, body: `{"active_step":"step 1"}`, sarOk: true, wantCode: http.StatusBadRequest},
-		{name: "builds active step build not found", path: "/builds/b-missing/active-step", method: http.MethodPost, body: `{"chunk_id":"c1","active_step":"step 1"}`, sarOk: true, wantCode: http.StatusNotFound},
-		{name: "builds active step forbidden", path: "/builds/b1/active-step", method: http.MethodPost, body: `{"chunk_id":"c1","active_step":"step 1"}`, sarOk: false, wantCode: http.StatusForbidden},
-		{name: "builds active step success", path: "/builds/b1/active-step", method: http.MethodPost, body: `{"chunk_id":"c1","active_step":"step 1"}`, sarOk: true, wantCode: http.StatusOK, wantSubstr: "ok"},
-		{name: "builds active step empty agent fallback", path: "/builds/b-empty-active/active-step", method: http.MethodPost, body: `{"chunk_id":"c-empty-active","active_step":"step 1"}`, sarOk: true, wantCode: http.StatusOK, wantSubstr: "ok"},
-		{name: "builds active step restate error 500", path: "/builds/error-build/active-step", method: http.MethodPost, body: `{"chunk_id":"c-err","active_step":"step 1"}`, sarOk: true, wantCode: http.StatusInternalServerError},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			auth := newTestAuthenticator(t, authRoundTripper(true, tc.sarOk))
-			mem := newMemoryVanadisStore()
-			_ = mem.CreateBuild(context.Background(), b1, []VanadisChunk{c1})
-			_ = mem.CreateBuild(context.Background(), bErr, []VanadisChunk{cErr})
-			_ = mem.CreateBuild(context.Background(), bEmptyActive, []VanadisChunk{cEmptyActive})
-
-			srv := NewVanadisServer(Config{}, mem, nil, auth)
-			srv.restateCfg = RestateConfig{
-				RestateIngressURL: restateSrv.URL,
-			}
-			mux := srv.Routes()
-
-			var body io.Reader = http.NoBody
-			if tc.body != "" {
-				body = strings.NewReader(tc.body)
-			}
-			req := httptest.NewRequest(tc.method, tc.path, body)
-			req.Header.Set("Authorization", "Bearer valid-token")
-			rec := httptest.NewRecorder()
-			mux.ServeHTTP(rec, req)
-
-			if rec.Code != tc.wantCode {
-				t.Fatalf("code = %d, want %d (body: %s)", rec.Code, tc.wantCode, rec.Body.String())
-			}
-			if tc.wantSubstr != "" && !strings.Contains(rec.Body.String(), tc.wantSubstr) {
-				t.Fatalf("body %q missing %q", rec.Body.String(), tc.wantSubstr)
-			}
-		})
-	}
-}
-
-func TestServer_NilStore_Endpoints(t *testing.T) {
-	t.Parallel()
-	srv := NewVanadisServer(Config{}, nil, nil)
-	mux := srv.Routes()
-
-	tests := []struct {
-		name     string
-		method   string
-		path     string
-		body     string
-		wantCode int
-	}{
-		{name: "get build chunk nil store", method: http.MethodGet, path: "/builds/b1/chunks/c1", wantCode: http.StatusInternalServerError},
-		{name: "remove chunk nil store", method: http.MethodDelete, path: "/builds/b1/chunks/c1", wantCode: http.StatusInternalServerError},
-		{name: "update build nil store", method: http.MethodPatch, path: "/builds/b1", body: `{"title":"new"}`, wantCode: http.StatusInternalServerError},
-		{name: "chunks active step nil store", method: http.MethodPost, path: "/chunks/active-step", body: `{"chunk_id":"c1"}`, wantCode: http.StatusInternalServerError},
-		{name: "builds active step nil store", method: http.MethodPost, path: "/builds/b1/active-step", body: `{"chunk_id":"c1"}`, wantCode: http.StatusInternalServerError},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			var body io.Reader = http.NoBody
-			if tc.body != "" {
-				body = strings.NewReader(tc.body)
-			}
-			req := httptest.NewRequest(tc.method, tc.path, body)
-			rec := httptest.NewRecorder()
-			mux.ServeHTTP(rec, req)
-			if rec.Code != tc.wantCode {
-				t.Fatalf("code = %d, want %d", rec.Code, tc.wantCode)
-			}
-		})
-	}
-}
-
 func TestServer_MissingCallerInContext(t *testing.T) {
 	t.Parallel()
-	auth := newTestAuthenticator(t, authRoundTripper(true, true))
+	auth := k8sauthtest.Authenticator(t, authFake(true, true))
 	mem := newMemoryVanadisStore()
-	b1 := mkBuild("b1", "1234567890", "Build 1", "Obj 1", "running")
-	c1 := mkChunk("c1", "b1", 0, "Chunk 1", "Inst 1", "medium", "running")
-	_ = mem.CreateBuild(context.Background(), b1, []VanadisChunk{c1})
+	b1 := storetest.Build("b1", "1234567890", "Build 1", "Obj 1", "running")
+	c1 := storetest.Chunk("c1", "b1", 0, "Chunk 1", "Inst 1", "medium", "running")
+	if err := mem.CreateBuild(context.Background(), b1, []VanadisChunk{c1}); err != nil {
+		t.Fatalf("CreateBuild failed: %v", err)
+	}
 
-	srv := NewVanadisServer(Config{}, mem, nil, auth)
+	srv := NewVanadisServer(Config{}, RestateConfig{}, mem, nil, auth)
 
 	err := srv.authorizeBuildUpdate(context.Background(), "aerial")
 	if err == nil {
@@ -485,4 +154,379 @@ func TestServer_MissingCallerInContext(t *testing.T) {
 			}
 		})
 	}
+}
+
+type coalescingTestCase struct {
+	name              string
+	initialSteps      map[string]string
+	initialInFlight   bool
+	lastForwardOffset time.Duration
+	minInterval       time.Duration
+	uninitializedMaps bool
+	req               UpdateActiveStepRequest
+	wantRestateCall   bool
+	wantCode          int
+	wantSteps         map[string]string
+}
+
+func setupCoalescingTestServer(mockURL string, client *http.Client, now time.Time, tc coalescingTestCase) *VanadisServer {
+	if tc.uninitializedMaps {
+		return &VanadisServer{
+			restateCfg: RestateConfig{RestateIngressURL: mockURL},
+			httpClient: client,
+			nowFn:      func() time.Time { return now },
+		}
+	}
+	srv := NewVanadisServer(Config{}, RestateConfig{RestateIngressURL: mockURL}, nil, client)
+	srv.nowFn = func() time.Time { return now }
+	if tc.minInterval > 0 {
+		srv.minActiveStepInterval = tc.minInterval
+	}
+	if tc.initialSteps != nil {
+		srv.stepsByBuild["b1"] = maps.Clone(tc.initialSteps)
+	}
+	if tc.initialInFlight {
+		srv.inFlightBuilds["b1"] = true
+	}
+	if tc.lastForwardOffset != 0 {
+		srv.lastForwardedAt["b1"] = now.Add(tc.lastForwardOffset)
+	}
+	return srv
+}
+
+func assertCoalescingState(t *testing.T, srv *VanadisServer, tc coalescingTestCase) {
+	t.Helper()
+	srv.activeStepMu.Lock()
+	defer srv.activeStepMu.Unlock()
+	if tc.wantSteps == nil {
+		if srv.stepsByBuild["b1"] != nil {
+			t.Fatalf("expected nil steps map for b1, got %+v", srv.stepsByBuild["b1"])
+		}
+	} else if !reflect.DeepEqual(srv.stepsByBuild["b1"], tc.wantSteps) {
+		t.Fatalf("stepsByBuild[b1] = %+v, want %+v", srv.stepsByBuild["b1"], tc.wantSteps)
+	}
+	if !tc.initialInFlight && srv.inFlightBuilds["b1"] {
+		t.Fatal("expected inFlightBuilds[b1] to be false after completion")
+	}
+}
+
+func TestProcessActiveStepUpdate_Coalescing(t *testing.T) {
+	t.Parallel()
+
+	tests := []coalescingTestCase{
+		{
+			name:            "initial step forwards to restate",
+			req:             UpdateActiveStepRequest{ChunkID: "c1", ActiveStep: "step 1"},
+			wantRestateCall: true,
+			wantCode:        http.StatusOK,
+			wantSteps:       map[string]string{"c1": "step 1"},
+		},
+		{
+			name:              "uninitialized maps and zero minInterval forward safely",
+			uninitializedMaps: true,
+			req:               UpdateActiveStepRequest{ChunkID: "c1", Step: "fallback step"},
+			wantRestateCall:   true,
+			wantCode:          http.StatusOK,
+			wantSteps:         map[string]string{"c1": "fallback step"},
+		},
+		{
+			name:              "duplicate non-empty step returns ok without calling restate",
+			initialSteps:      map[string]string{"c1": "step 1"},
+			lastForwardOffset: -5 * time.Second,
+			req:               UpdateActiveStepRequest{ChunkID: "c1", ActiveStep: "step 1"},
+			wantRestateCall:   false,
+			wantCode:          http.StatusOK,
+			wantSteps:         map[string]string{"c1": "step 1"},
+		},
+		{
+			name:            "update while in flight returns ok without calling restate but records new step",
+			initialSteps:    map[string]string{"c1": "step 1"},
+			initialInFlight: true,
+			req:             UpdateActiveStepRequest{ChunkID: "c1", ActiveStep: "step 2"},
+			wantRestateCall: false,
+			wantCode:        http.StatusOK,
+			wantSteps:       map[string]string{"c1": "step 2"},
+		},
+		{
+			name:              "throttled update within minInterval returns ok without calling restate",
+			initialSteps:      map[string]string{"c1": "step 1"},
+			lastForwardOffset: -500 * time.Millisecond,
+			minInterval:       2 * time.Second,
+			req:               UpdateActiveStepRequest{ChunkID: "c1", ActiveStep: "step 2"},
+			wantRestateCall:   false,
+			wantCode:          http.StatusOK,
+			wantSteps:         map[string]string{"c1": "step 2"},
+		},
+		{
+			name:              "update after minInterval forwards with all active steps",
+			initialSteps:      map[string]string{"c1": "step 1", "c2": "other step"},
+			lastForwardOffset: -3 * time.Second,
+			minInterval:       2 * time.Second,
+			req:               UpdateActiveStepRequest{ChunkID: "c1", ActiveStep: "step 2"},
+			wantRestateCall:   true,
+			wantCode:          http.StatusOK,
+			wantSteps:         map[string]string{"c1": "step 2", "c2": "other step"},
+		},
+		{
+			name:              "clear removes chunk and forwards when not in flight",
+			initialSteps:      map[string]string{"c1": "step 1", "c2": "step 2"},
+			lastForwardOffset: -500 * time.Millisecond,
+			minInterval:       2 * time.Second,
+			req:               UpdateActiveStepRequest{ChunkID: "c1", ActiveStep: ""},
+			wantRestateCall:   true,
+			wantCode:          http.StatusOK,
+			wantSteps:         map[string]string{"c2": "step 2"},
+		},
+		{
+			name:              "clear last chunk deletes build entry from map",
+			initialSteps:      map[string]string{"c1": "step 1"},
+			lastForwardOffset: -3 * time.Second,
+			req:               UpdateActiveStepRequest{ChunkID: "c1", ActiveStep: ""},
+			wantRestateCall:   true,
+			wantCode:          http.StatusOK,
+			wantSteps:         nil,
+		},
+		{
+			name:            "clear while in flight updates map and returns ok without calling restate",
+			initialSteps:    map[string]string{"c1": "step 1"},
+			initialInFlight: true,
+			req:             UpdateActiveStepRequest{ChunkID: "c1", ActiveStep: ""},
+			wantRestateCall: false,
+			wantCode:        http.StatusOK,
+			wantSteps:       nil,
+		},
+		{
+			name:            "forwarding error returns 500 status",
+			req:             UpdateActiveStepRequest{ChunkID: "c1", ActiveStep: "trigger-err"},
+			wantRestateCall: true,
+			wantCode:        http.StatusInternalServerError,
+			wantSteps:       map[string]string{"c1": "trigger-err"},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			called := false
+			var lastFwdReq UpdateActiveStepRequest
+			var lastFwdMu sync.Mutex
+			mockRestate := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				called = true
+				if tc.req.ActiveStep == "trigger-err" {
+					w.WriteHeader(http.StatusInternalServerError)
+					return
+				}
+				var fwdReq UpdateActiveStepRequest
+				if err := json.NewDecoder(r.Body).Decode(&fwdReq); err != nil {
+					w.WriteHeader(http.StatusBadRequest)
+					_, _ = w.Write([]byte(err.Error()))
+					return
+				}
+				lastFwdMu.Lock()
+				lastFwdReq = fwdReq
+				lastFwdMu.Unlock()
+				if fwdReq.ChunkID == "" && fwdReq.ActiveSteps == nil && !fwdReq.ClearAll {
+					w.WriteHeader(http.StatusBadRequest)
+					_, _ = w.Write([]byte(`{"error":"chunk_id cannot be empty without active_steps"}`))
+					return
+				}
+				w.WriteHeader(http.StatusOK)
+				_, _ = w.Write([]byte(`{"status":"ok"}`))
+			}))
+			defer mockRestate.Close()
+
+			now := time.Date(2026, 11, 22, 12, 0, 0, 0, time.UTC)
+			srv := setupCoalescingTestServer(mockRestate.URL, mockRestate.Client(), now, tc)
+
+			rec := httptest.NewRecorder()
+			req := httptest.NewRequest(http.MethodPost, "/builds/b1/active-step", http.NoBody)
+			srv.processActiveStepUpdate(rec, req, &VanadisBuild{ID: "b1", Agent: "aerial"}, tc.req)
+
+			if rec.Code != tc.wantCode {
+				t.Fatalf("code = %d, want %d", rec.Code, tc.wantCode)
+			}
+			if called != tc.wantRestateCall {
+				t.Fatalf("restate called = %v, want %v", called, tc.wantRestateCall)
+			}
+			if tc.wantSteps == nil && tc.wantRestateCall {
+				lastFwdMu.Lock()
+				fwd := lastFwdReq
+				lastFwdMu.Unlock()
+				if !fwd.ClearAll {
+					t.Fatal("expected ClearAll to be true on final clear forward")
+				}
+			}
+			assertCoalescingState(t, srv, tc)
+		})
+	}
+}
+
+func TestProcessActiveStepUpdate_TrailingFlushAndPrune(t *testing.T) {
+	t.Parallel()
+	flushed := make(chan struct{}, 5)
+	var lastPayload UpdateActiveStepRequest
+	var payloadMu sync.Mutex
+	mockRestate := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req UpdateActiveStepRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		payloadMu.Lock()
+		lastPayload = req
+		payloadMu.Unlock()
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"status":"ok"}`))
+		flushed <- struct{}{}
+	}))
+	defer mockRestate.Close()
+
+	srv := NewVanadisServer(Config{}, RestateConfig{RestateIngressURL: mockRestate.URL}, nil, mockRestate.Client())
+	baseTime := time.Date(2026, 11, 22, 12, 0, 0, 0, time.UTC)
+	currentTime := baseTime
+	srv.nowFn = func() time.Time { return currentTime }
+	srv.minActiveStepInterval = 20 * time.Millisecond
+	b := &VanadisBuild{ID: "b-trail", Agent: "aerial"}
+
+	rec1 := httptest.NewRecorder()
+	req1 := httptest.NewRequest(http.MethodPost, "/builds/b-trail/active-step", http.NoBody)
+	srv.processActiveStepUpdate(rec1, req1, b, UpdateActiveStepRequest{ChunkID: "c1", ActiveStep: "step 1"})
+	if rec1.Code != http.StatusOK {
+		t.Fatalf("step 1 code = %d", rec1.Code)
+	}
+
+	select {
+	case <-flushed:
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for initial flush")
+	}
+
+	currentTime = baseTime.Add(5 * time.Millisecond) // Inside 20ms debounce window
+	rec2 := httptest.NewRecorder()
+	req2 := httptest.NewRequest(http.MethodPost, "/builds/b-trail/active-step", http.NoBody)
+	srv.processActiveStepUpdate(rec2, req2, b, UpdateActiveStepRequest{ChunkID: "c1", ActiveStep: "step 2"})
+	if rec2.Code != http.StatusOK {
+		t.Fatalf("step 2 code = %d", rec2.Code)
+	}
+
+	select {
+	case <-flushed:
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for trailing flush")
+	}
+
+	payloadMu.Lock()
+	gotStep := lastPayload.ActiveSteps["c1"]
+	payloadMu.Unlock()
+	if gotStep != "step 2" {
+		t.Fatalf("expected trailing flush to send 'step 2', got %q", gotStep)
+	}
+
+	// Test prune stale builds
+	srv.activeStepMu.Lock()
+	now := time.Now()
+	for i := range 300 {
+		id := fmt.Sprintf("old-b-%d", i)
+		srv.lastForwardedAt[id] = now.Add(-2 * time.Hour)
+		srv.stepsByBuild[id] = map[string]string{"c": "s"}
+	}
+	srv.pruneStaleBuildsLocked(now)
+	tracked := len(srv.lastForwardedAt)
+	srv.activeStepMu.Unlock()
+	if tracked > maxTrackedActiveStepBuilds {
+		t.Fatalf("expected pruned entries <= %d, got %d", maxTrackedActiveStepBuilds, tracked)
+	}
+}
+
+func TestProcessActiveStepUpdate_DirtyLoopAndFlushBranches(t *testing.T) {
+	t.Parallel()
+	var forwardCalls atomic.Int32
+	var srv *VanadisServer
+	mockRestate := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var fwdReq UpdateActiveStepRequest
+		if err := json.NewDecoder(r.Body).Decode(&fwdReq); err != nil {
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		if fwdReq.ChunkID == "" && fwdReq.ActiveSteps == nil && !fwdReq.ClearAll {
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		n := forwardCalls.Add(1)
+		if n == 1 && srv != nil {
+			srv.activeStepMu.Lock()
+			srv.dirtyBuilds["b-loop"] = true
+			srv.stepsByBuild["b-loop"]["c2"] = "step 2"
+			srv.activeStepMu.Unlock()
+		}
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"status":"ok"}`))
+	}))
+	defer mockRestate.Close()
+
+	srv = NewVanadisServer(Config{}, RestateConfig{RestateIngressURL: mockRestate.URL}, nil, mockRestate.Client())
+	b := &VanadisBuild{ID: "b-loop", Agent: "aerial"}
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/builds/b-loop/active-step", http.NoBody)
+	srv.processActiveStepUpdate(rec, req, b, UpdateActiveStepRequest{ChunkID: "c1", ActiveStep: "step 1"})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("code = %d", rec.Code)
+	}
+	if forwardCalls.Load() != 2 {
+		t.Fatalf("expected 2 forward calls in loop, got %d", forwardCalls.Load())
+	}
+
+	// Test flushTrailingActiveStep when in flight
+	srv.activeStepMu.Lock()
+	srv.inFlightBuilds["b-loop"] = true
+	srv.activeStepMu.Unlock()
+	srv.flushTrailingActiveStep(context.Background(), b)
+	srv.activeStepMu.Lock()
+	if !srv.dirtyBuilds["b-loop"] {
+		t.Fatal("expected dirtyBuilds to be true when flushing during in flight")
+	}
+	delete(srv.inFlightBuilds, "b-loop")
+	srv.activeStepMu.Unlock()
+
+	// Test flushTrailingActiveStep when empty steps
+	var emptyCalls atomic.Int32
+	emptyMock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		emptyCalls.Add(1)
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer emptyMock.Close()
+	emptySrv := NewVanadisServer(Config{}, RestateConfig{RestateIngressURL: emptyMock.URL}, nil, emptyMock.Client())
+	emptyBuild := &VanadisBuild{ID: "b-empty", Agent: "aerial"}
+	emptySrv.flushTrailingActiveStep(context.Background(), emptyBuild)
+	if emptyCalls.Load() != 0 {
+		t.Fatalf("expected no restate calls for empty steps build, got %d", emptyCalls.Load())
+	}
+	emptySrv.activeStepMu.Lock()
+	if emptySrv.inFlightBuilds["b-empty"] {
+		t.Fatal("expected inFlightBuilds to be false for empty steps build")
+	}
+	emptySrv.activeStepMu.Unlock()
+
+	// Test flushTrailingActiveStep error logging cleans up in flight flag
+	var errCalls atomic.Int32
+	errMock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		errCalls.Add(1)
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer errMock.Close()
+	errSrv := NewVanadisServer(Config{}, RestateConfig{RestateIngressURL: errMock.URL}, nil, errMock.Client())
+	errBuild := &VanadisBuild{ID: "b-err", Agent: "aerial"}
+	errSrv.activeStepMu.Lock()
+	errSrv.stepsByBuild["b-err"] = map[string]string{"c1": "s1"}
+	errSrv.activeStepMu.Unlock()
+	errSrv.flushTrailingActiveStep(context.Background(), errBuild)
+	if errCalls.Load() != 1 {
+		t.Fatalf("expected 1 restate call on error build, got %d", errCalls.Load())
+	}
+	errSrv.activeStepMu.Lock()
+	if errSrv.inFlightBuilds["b-err"] {
+		t.Fatal("expected inFlightBuilds to be cleaned up after forward error")
+	}
+	errSrv.activeStepMu.Unlock()
 }

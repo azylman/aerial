@@ -4,37 +4,47 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"os"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/google/uuid"
-	"github.com/nats-io/nats.go"
 
+	"github.com/azylman/aerial/pkg/eriwire"
+	"github.com/azylman/aerial/pkg/pgtest"
 	"github.com/azylman/aerial/pkg/pubsub"
+	"github.com/azylman/aerial/pkg/pubsubtest"
 	"github.com/azylman/aerial/services/haro/internal/dispatch"
 	"github.com/azylman/aerial/services/haro/internal/model"
 	"github.com/azylman/aerial/services/haro/internal/store"
 	"github.com/azylman/aerial/services/haro/internal/testutil"
 )
 
+func TestMain(m *testing.M) {
+	os.Exit(pgtest.Main(m))
+}
+
 func openTickerTestDB(t *testing.T) *sql.DB {
 	t.Helper()
-	db, err := testutil.OpenSQLiteTestDB(":memory:")
-	if err != nil {
-		t.Fatalf("OpenSQLiteTestDB failed: %v", err)
-	}
-	t.Cleanup(func() { _ = db.Close() })
-	return db
+	return testutil.NewDB(t)
+}
+
+// failTriggerSQL returns DDL that makes every op (UPDATE or DELETE) on table
+// raise msg, sabotaging only the calling test's private database.
+func failTriggerSQL(table, op, msg string) string {
+	return fmt.Sprintf(`CREATE FUNCTION fail_%[1]s_%[2]s() RETURNS trigger LANGUAGE plpgsql AS $$BEGIN RAISE EXCEPTION '%[3]s'; END$$;
+CREATE TRIGGER fail_%[1]s_%[2]s BEFORE %[2]s ON %[1]s FOR EACH ROW EXECUTE FUNCTION fail_%[1]s_%[2]s();`, table, op, msg)
 }
 
 type fakeDispatcher struct {
 	dispatched         []dispatch.PromptDispatchRequest
 	response           dispatch.PromptDispatchResponse
 	err                error
-	dispatchedRequests []dispatch.DispatchRequest
-	dispatchResponse   dispatch.DispatchResponse
+	dispatchedRequests []eriwire.BrainDispatchRequest
+	dispatchResponse   eriwire.DispatchEnqueueResponse
 	dispatchErr        error
 	onDispatch         func()
 }
@@ -47,7 +57,7 @@ func (m *fakeDispatcher) DispatchPrompt(_ context.Context, req dispatch.PromptDi
 	return m.response, m.err
 }
 
-func (m *fakeDispatcher) Dispatch(_ context.Context, req dispatch.DispatchRequest) (dispatch.DispatchResponse, error) {
+func (m *fakeDispatcher) Dispatch(_ context.Context, req eriwire.BrainDispatchRequest) (eriwire.DispatchEnqueueResponse, error) {
 	m.dispatchedRequests = append(m.dispatchedRequests, req)
 	if m.onDispatch != nil {
 		m.onDispatch()
@@ -128,10 +138,9 @@ func runEvaluateDueSchedulesCase(t *testing.T, tc evaluateDueSchedulesTestCase) 
 			MessageID: tc.responseMessageID,
 		},
 		err: tc.dispatcherErr,
-		dispatchResponse: dispatch.DispatchResponse{
+		dispatchResponse: eriwire.DispatchEnqueueResponse{
 			Status:     tc.dispatcherStatus,
 			DispatchID: tc.responseMessageID,
-			MessageID:  tc.responseMessageID,
 		},
 		dispatchErr: tc.dispatcherErr,
 	}
@@ -147,7 +156,7 @@ func runEvaluateDueSchedulesCase(t *testing.T, tc evaluateDueSchedulesTestCase) 
 	if tc.wantRunStatus == "" {
 		return
 	}
-	row := db.QueryRowContext(ctx, "SELECT id, status, error, thread_id, message_id FROM schedule_runs WHERE schedule_id = ?", scheduleID)
+	row := db.QueryRowContext(ctx, "SELECT id, status, error, thread_id, message_id FROM schedule_runs WHERE schedule_id = $1", scheduleID)
 	var runID, status, errMsg, threadID, messageID string
 	if err := row.Scan(&runID, &status, &errMsg, &threadID, &messageID); err != nil {
 		t.Fatalf("failed to query schedule_runs for %s: %v", scheduleID, err)
@@ -278,45 +287,6 @@ func TestTicker_EvaluateDueSchedules(t *testing.T) {
 	}
 }
 
-func TestTicker_Guards(t *testing.T) {
-	t.Parallel()
-	tests := []struct {
-		name          string
-		nilTicker     bool
-		nilDB         bool
-		nilDispatcher bool
-	}{
-		{name: "nil ticker does not panic", nilTicker: true},
-		{name: "nil db does not panic", nilDB: true},
-		{name: "nil dispatcher does not panic", nilDispatcher: true},
-	}
-
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			db := openTickerTestDB(t)
-			mock := &fakeDispatcher{response: dispatch.PromptDispatchResponse{Status: "ok"}}
-			ctx := context.Background()
-
-			var ticker *Ticker
-			switch {
-			case tc.nilTicker:
-			case tc.nilDB:
-				ticker = NewTicker(nil, mock, 30*time.Second)
-			case tc.nilDispatcher:
-				ticker = NewTicker(db, nil, 30*time.Second)
-			default:
-				ticker = NewTicker(db, mock, 30*time.Second)
-			}
-			ticker.EvaluateDueSchedules(ctx, time.Now().UTC())
-
-			if !tc.nilTicker && !tc.nilDB && !tc.nilDispatcher && len(mock.dispatched)+len(mock.dispatchedRequests) != 0 {
-				t.Errorf("expected no dispatches on empty db, got %d", len(mock.dispatched)+len(mock.dispatchedRequests))
-			}
-		})
-	}
-}
-
 func TestTicker_Pruning(t *testing.T) {
 	t.Parallel()
 	now := time.Date(2026, 10, 23, 12, 0, 0, 0, time.UTC)
@@ -410,15 +380,19 @@ func TestTicker_Start(t *testing.T) {
 				cancel()
 			}
 			doneCh := make(chan struct{})
+			var startErr error
 			go func() {
 				defer close(doneCh)
-				ticker.Start(ctx)
+				startErr = ticker.Start(ctx)
 			}()
 
 			select {
 			case <-doneCh:
 			case <-time.After(5 * time.Second):
 				t.Fatal("timed out waiting for ticker.Start() to stop")
+			}
+			if startErr != nil && !errors.Is(startErr, context.Canceled) {
+				t.Fatalf("unexpected start error: %v", startErr)
 			}
 
 			if got := len(mock.dispatched) + len(mock.dispatchedRequests); got != tc.wantDispatched {
@@ -481,7 +455,9 @@ func assertHeartbeatScheduleRuns(t *testing.T, db *sql.DB, tc evaluateDueHeartbe
 	t.Helper()
 	var runCount int
 	var runStatus, runPrompt, runType string
-	_ = db.QueryRow("SELECT COUNT(*), COALESCE(MAX(status), ''), COALESCE(MAX(prompt), ''), COALESCE(MAX(schedule_type), '') FROM schedule_runs WHERE schedule_id = ?", tc.hbID).Scan(&runCount, &runStatus, &runPrompt, &runType)
+	if err := db.QueryRow("SELECT COUNT(*), COALESCE(MAX(status), ''), COALESCE(MAX(prompt), ''), COALESCE(MAX(schedule_type), '') FROM schedule_runs WHERE schedule_id = $1", tc.hbID).Scan(&runCount, &runStatus, &runPrompt, &runType); err != nil {
+		t.Fatalf("query schedule_runs: %v", err)
+	}
 
 	if tc.seedRunningRun {
 		if runCount != 1 || runStatus != "running" {
@@ -493,10 +469,7 @@ func assertHeartbeatScheduleRuns(t *testing.T, db *sql.DB, tc evaluateDueHeartbe
 	if tc.wantSkippedRun && runCount != 0 {
 		t.Errorf("expected 0 runs for skipped active heartbeat %s, got count=%d", tc.hbID, runCount)
 	}
-	if tc.wantStaleRun && (runCount == 0 || runStatus != model.StatusFailed) {
-		t.Errorf("expected stale failed run for %s, got count=%d, status=%s", tc.hbID, runCount, runStatus)
-	}
-	if tc.wantFailedRun && (runCount == 0 || runStatus != model.StatusFailed) {
+	if (tc.wantStaleRun || tc.wantFailedRun) && (runCount == 0 || runStatus != model.StatusFailed) {
 		t.Errorf("expected failed run for %s, got count=%d, status=%s", tc.hbID, runCount, runStatus)
 	}
 	if tc.wantDispatched && tc.dispatcherErr == nil && !tc.wantSkippedRun && (runCount == 0 || runStatus != "running") {
@@ -552,7 +525,7 @@ func runEvaluateDueHeartbeatsCase(t *testing.T, tc evaluateDueHeartbeatsTestCase
 	mock := &fakeDispatcher{
 		response:         dispatch.PromptDispatchResponse{Status: dispStatus, MessageID: "msg-dispatched"},
 		err:              tc.dispatcherErr,
-		dispatchResponse: dispatch.DispatchResponse{Status: dispStatus, DispatchID: "msg-dispatched", MessageID: "msg-dispatched"},
+		dispatchResponse: eriwire.DispatchEnqueueResponse{Status: dispStatus, DispatchID: "msg-dispatched"},
 		dispatchErr:      tc.dispatcherErr,
 	}
 	ticker := NewTicker(db, mock, 30*time.Second)
@@ -615,28 +588,6 @@ func TestTicker_EvaluateDueHeartbeats(t *testing.T) {
 	}
 }
 
-type outcomeMsg struct {
-	data         []byte
-	subject      string
-	naked        bool
-	numDelivered uint64
-}
-
-func (m *outcomeMsg) Data() []byte      { return m.data }
-func (m *outcomeMsg) Subject() string   { return m.subject }
-func (*outcomeMsg) Header() nats.Header { return nil }
-func (m *outcomeMsg) NumDelivered() uint64 {
-	if m.numDelivered > 0 {
-		return m.numDelivered
-	}
-	return 1
-}
-func (*outcomeMsg) Ack() error                           { return nil }
-func (m *outcomeMsg) NakWithDelay(_ time.Duration) error { m.naked = true; return nil }
-func (*outcomeMsg) Term() error                          { return nil }
-func (*outcomeMsg) Snooze(_ time.Duration) error         { return nil }
-func (*outcomeMsg) InProgress() error                    { return nil }
-
 type dispatchOutcomeTestCase struct {
 	name                string
 	rawPayload          string
@@ -645,6 +596,7 @@ type dispatchOutcomeTestCase struct {
 	seedRunID           string
 	seedRunStatus       string
 	seedRunStartedAt    time.Time
+	orphanRun           bool
 	event               *pubsub.DispatchOutcomeEvent
 	nilDatabase         bool
 	nilMessage          bool
@@ -705,13 +657,18 @@ func runDispatchOutcomeCase(t *testing.T, tc dispatchOutcomeTestCase, now time.T
 	if tc.nilDatabase {
 		database = nil
 	}
-	var msg pubsub.Message = &outcomeMsg{data: outcomePayload(t, tc.rawPayload, tc.event), subject: "aerial.dispatch.completed", numDelivered: tc.numDelivered}
+	om := &pubsubtest.Message{Payload: outcomePayload(t, tc.rawPayload, tc.event), Subj: "aerial.dispatch.completed", Delivered: max(tc.numDelivered, 1)}
+	var msg pubsub.Message = om
 	if tc.nilMessage {
 		msg = nil
 	}
 
+	heartbeatID := tc.seedScheduleID
+	if tc.orphanRun {
+		heartbeatID = ""
+	}
 	if !tc.nilDatabase && !tc.closeDatabase {
-		seedOutcomeHeartbeat(ctx, t, db, tc.seedScheduleType, tc.seedScheduleID, now)
+		seedOutcomeHeartbeat(ctx, t, db, tc.seedScheduleType, heartbeatID, now)
 		startedAt := now
 		if !tc.seedRunStartedAt.IsZero() {
 			startedAt = tc.seedRunStartedAt
@@ -731,12 +688,8 @@ func runDispatchOutcomeCase(t *testing.T, tc dispatchOutcomeTestCase, now time.T
 	if tc.nilDatabase || tc.nilMessage || tc.closeDatabase {
 		return
 	}
-	om, ok := msg.(*outcomeMsg)
-	if !ok {
-		t.Fatalf("message is %T, want *outcomeMsg", msg)
-	}
-	if got := om.naked; got != tc.wantNaked {
-		t.Errorf("msg.naked = %v, want %v", got, tc.wantNaked)
+	if _, got := om.NakDelay(); got != tc.wantNaked {
+		t.Errorf("msg naked = %v, want %v (calls %v)", got, tc.wantNaked, om.Calls())
 	}
 
 	assertOutcomeRun(ctx, t, db, tc)
@@ -783,7 +736,7 @@ func assertOutcomeRun(ctx context.Context, t *testing.T, db *sql.DB, tc dispatch
 
 func assertOutcomeWatermark(ctx context.Context, t *testing.T, db *sql.DB, tc dispatchOutcomeTestCase) {
 	t.Helper()
-	if tc.seedScheduleID == "" || tc.seedScheduleType != model.ScheduleTypeHeartbeat {
+	if tc.orphanRun || tc.seedScheduleID == "" || tc.seedScheduleType != model.ScheduleTypeHeartbeat {
 		return
 	}
 	hb, err := store.GetHeartbeatSchedule(ctx, db, tc.seedScheduleID)
@@ -809,11 +762,7 @@ func TestHandleDispatchOutcome(t *testing.T) {
 			event:         &pubsub.DispatchOutcomeEvent{DispatchID: "healthcheck-ping", Status: "completed"},
 			wantRunStatus: "running", wantDurationMs: -1,
 		},
-		{
-			name:      "unknown dispatch id naks with delay for retry",
-			event:     &pubsub.DispatchOutcomeEvent{DispatchID: "disp-unknown", Status: "completed"},
-			wantNaked: true, wantDurationMs: -1,
-		},
+		{name: "unknown dispatch id naks with delay for retry", event: &pubsub.DispatchOutcomeEvent{DispatchID: "disp-unknown", Status: "completed"}, wantNaked: true, wantDurationMs: -1},
 		{
 			name:         "unknown dispatch id delivered five times is dropped without nak",
 			event:        &pubsub.DispatchOutcomeEvent{DispatchID: "disp-unknown", Status: "completed"},
@@ -829,6 +778,12 @@ func TestHandleDispatchOutcome(t *testing.T) {
 			seedScheduleType: "heartbeat", seedScheduleID: "hb-disp-1", seedRunID: "run-hb-1",
 			event:         &pubsub.DispatchOutcomeEvent{DispatchID: "run-hb-1", Status: "completed", StartedAt: now, CompletedAt: now.Add(5 * time.Second), DurationMs: 5000},
 			wantRunStatus: "completed", wantDurationMs: 5000, wantWatermarkTime: &now,
+		},
+		{
+			name:             "heartbeat completed with missing schedule updates orphan run and continues",
+			seedScheduleType: "heartbeat", seedScheduleID: "hb-orphan", seedRunID: "run-hb-orphan", orphanRun: true,
+			event:         &pubsub.DispatchOutcomeEvent{DispatchID: "run-hb-orphan", Status: "completed", StartedAt: now, CompletedAt: now.Add(5 * time.Second), DurationMs: 5000},
+			wantRunStatus: "completed", wantDurationMs: 5000,
 		},
 		{
 			name:             "heartbeat failed updates run and does not advance watermark",
@@ -860,12 +815,8 @@ func TestHandleDispatchOutcome(t *testing.T) {
 			event:         &pubsub.DispatchOutcomeEvent{DispatchID: "run-hb-term", Status: "failed", Error: "late failure"},
 			wantRunStatus: "completed", wantDurationMs: -1,
 		},
-		{
-			name: "nil database returns error", nilDatabase: true, wantErr: true, wantDurationMs: -1,
-		},
-		{
-			name: "nil message returns error", nilMessage: true, wantErr: true, wantDurationMs: -1,
-		},
+		{name: "nil database returns error", nilDatabase: true, wantErr: true, wantDurationMs: -1},
+		{name: "nil message returns error", nilMessage: true, wantErr: true, wantDurationMs: -1},
 		{
 			name: "closed database returns query error", closeDatabase: true,
 			event:   &pubsub.DispatchOutcomeEvent{DispatchID: "run-on-closed-db", Status: "completed"},
@@ -875,13 +826,10 @@ func TestHandleDispatchOutcome(t *testing.T) {
 			name:             "outcome update failure returns error",
 			seedScheduleType: "heartbeat", seedScheduleID: "hb-upd-fail", seedRunID: "run-upd-fail",
 			event:       &pubsub.DispatchOutcomeEvent{DispatchID: "run-upd-fail", Status: "completed", StartedAt: now, CompletedAt: now.Add(time.Second)},
-			sabotageSQL: "CREATE TRIGGER trg_fail_run_upd BEFORE UPDATE ON schedule_runs BEGIN SELECT RAISE(ABORT, 'forced update failure'); END;",
+			sabotageSQL: failTriggerSQL("schedule_runs", "UPDATE", "forced update failure"),
 			wantErr:     true, wantDurationMs: -1,
 		},
-		{
-			name:  "empty dispatch id returns nil",
-			event: &pubsub.DispatchOutcomeEvent{DispatchID: "   "}, wantDurationMs: -1,
-		},
+		{name: "empty dispatch id returns nil", event: &pubsub.DispatchOutcomeEvent{DispatchID: "   "}, wantDurationMs: -1},
 		{
 			name:             "zero event startedAt falls back to run startedAt for duration and watermark",
 			seedScheduleType: "heartbeat", seedScheduleID: "hb-fallback-1", seedRunID: "run-fallback-1",
@@ -894,37 +842,6 @@ func TestHandleDispatchOutcome(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			runDispatchOutcomeCase(t, tc, now)
-		})
-	}
-}
-
-func TestHandleDispatchOutcome_OrphanHeartbeatRun(t *testing.T) {
-	t.Parallel()
-	now := time.Date(2026, 11, 14, 1, 0, 0, 0, time.UTC)
-	tests := []struct {
-		name       string
-		scheduleID string
-		runID      string
-	}{
-		{name: "completed run with missing schedule logs and continues", scheduleID: "hb-orphan", runID: "run-hb-orphan"},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			db := openTickerTestDB(t)
-			ctx := context.Background()
-			seedOutcomeRun(ctx, t, db, tc.runID, model.ScheduleTypeHeartbeat, tc.scheduleID, "running", now)
-			msg := &outcomeMsg{data: outcomePayload(t, "", &pubsub.DispatchOutcomeEvent{DispatchID: tc.runID, Status: "completed", StartedAt: now, CompletedAt: now.Add(5 * time.Second), DurationMs: 5000}), subject: "aerial.dispatch.completed"}
-			if err := HandleDispatchOutcome(ctx, db, msg); err != nil {
-				t.Fatalf("HandleDispatchOutcome err = %v, want nil", err)
-			}
-			run, err := store.GetScheduleRun(ctx, db, tc.runID)
-			if err != nil {
-				t.Fatalf("GetScheduleRun failed: %v", err)
-			}
-			if run.Status != model.StatusCompleted {
-				t.Errorf("run.Status = %q, want completed", run.Status)
-			}
 		})
 	}
 }
@@ -1079,7 +996,7 @@ func runEvaluateFaultCase(t *testing.T, tc evaluateFaultTestCase, now time.Time)
 
 	mock := &fakeDispatcher{
 		response:         dispatch.PromptDispatchResponse{Status: "ok", MessageID: "msg-x"},
-		dispatchResponse: dispatch.DispatchResponse{Status: "ok", DispatchID: "msg-x", MessageID: "msg-x"},
+		dispatchResponse: eriwire.DispatchEnqueueResponse{Status: "ok", DispatchID: "msg-x"},
 	}
 	NewTicker(db, mock, 30*time.Second).EvaluateDueSchedules(ctx, now)
 
@@ -1125,12 +1042,12 @@ func TestTicker_EvaluateFaults(t *testing.T) {
 	tests := []evaluateFaultTestCase{
 		{
 			name: "cron advance failure skips dispatch without run", seedCron: faultCron("cron-adv", due),
-			sabotageSQL:  "CREATE TRIGGER trg_fail_cron_upd BEFORE UPDATE ON cron_schedules BEGIN SELECT RAISE(ABORT, 'forced advance failure'); END;",
+			sabotageSQL:  failTriggerSQL("cron_schedules", "UPDATE", "forced advance failure"),
 			wantDispatch: 0, wantRuns: 0,
 		},
 		{
 			name: "stale cron advance failure still records stale run", seedCron: faultCron("cron-adv-stale", stale),
-			sabotageSQL:  "CREATE TRIGGER trg_fail_cron_upd2 BEFORE UPDATE ON cron_schedules BEGIN SELECT RAISE(ABORT, 'forced advance failure'); END;",
+			sabotageSQL:  failTriggerSQL("cron_schedules", "UPDATE", "forced advance failure"),
 			wantDispatch: 0, wantRuns: 1,
 		},
 		{
@@ -1143,7 +1060,7 @@ func TestTicker_EvaluateFaults(t *testing.T) {
 		},
 		{
 			name: "one-shot delete failure skips dispatch without run", seedOneShot: faultOneShot("os-del", due),
-			sabotageSQL:  "CREATE TRIGGER trg_fail_os_del BEFORE DELETE ON one_shot_schedules BEGIN SELECT RAISE(ABORT, 'forced delete failure'); END;",
+			sabotageSQL:  failTriggerSQL("one_shot_schedules", "DELETE", "forced delete failure"),
 			wantDispatch: 0, wantRuns: 0,
 		},
 		{
@@ -1156,12 +1073,12 @@ func TestTicker_EvaluateFaults(t *testing.T) {
 		},
 		{
 			name: "heartbeat advance failure skips dispatch without run", seedBeat: faultHeartbeat("hb-adv", due),
-			sabotageSQL:  "CREATE TRIGGER trg_fail_hb_upd BEFORE UPDATE ON heartbeat_schedules BEGIN SELECT RAISE(ABORT, 'forced advance failure'); END;",
+			sabotageSQL:  failTriggerSQL("heartbeat_schedules", "UPDATE", "forced advance failure"),
 			wantDispatch: 0, wantRuns: 0,
 		},
 		{
 			name: "stale heartbeat advance failure still records stale run", seedBeat: faultHeartbeat("hb-adv-stale", stale),
-			sabotageSQL:  "CREATE TRIGGER trg_fail_hb_upd2 BEFORE UPDATE ON heartbeat_schedules BEGIN SELECT RAISE(ABORT, 'forced advance failure'); END;",
+			sabotageSQL:  failTriggerSQL("heartbeat_schedules", "UPDATE", "forced advance failure"),
 			wantDispatch: 0, wantRuns: 1,
 		},
 		{
@@ -1231,7 +1148,7 @@ func TestTicker_EvaluateCancelledMidLoop(t *testing.T) {
 			defer cancel()
 			mock := &fakeDispatcher{
 				response:         dispatch.PromptDispatchResponse{Status: "ok", MessageID: "msg-x"},
-				dispatchResponse: dispatch.DispatchResponse{Status: "ok", DispatchID: "msg-x", MessageID: "msg-x"},
+				dispatchResponse: eriwire.DispatchEnqueueResponse{Status: "ok", DispatchID: "msg-x"},
 			}
 			calls := 0
 			mock.onDispatch = func() {
@@ -1246,7 +1163,7 @@ func TestTicker_EvaluateCancelledMidLoop(t *testing.T) {
 				t.Errorf("dispatched = %d, want exactly 1 before cancellation", got)
 			}
 			var secondRuns int
-			if err := db.QueryRowContext(context.Background(), "SELECT COUNT(*) FROM schedule_runs WHERE schedule_id = ?", seedIDs[1]).Scan(&secondRuns); err != nil {
+			if err := db.QueryRowContext(context.Background(), "SELECT COUNT(*) FROM schedule_runs WHERE schedule_id = $1", seedIDs[1]).Scan(&secondRuns); err != nil {
 				t.Fatalf("counting second schedule runs failed: %v", err)
 			}
 			if secondRuns != 0 {

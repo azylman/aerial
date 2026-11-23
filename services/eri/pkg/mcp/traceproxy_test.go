@@ -211,16 +211,8 @@ func TestTraceProxy(t *testing.T) {
 			turns: twoTurns,
 			calls: []proxyCall{{daemonHeader: "p1/discord-2", body: pingReply}, {daemonHeader: "p1/discord-2", body: toolsList, wantParent: 2}},
 		},
-		{
-			name:  "agy ping reply joins no sole turn",
-			turns: twoTurns[:1],
-			calls: []proxyCall{{body: pingReply}, {body: toolsList, wantParent: 1}},
-		},
-		{
-			name:  "empty body joins no turn",
-			turns: twoTurns,
-			calls: []proxyCall{{daemonHeader: "p1/discord-1", body: ""}},
-		},
+		{name: "agy ping reply joins no sole turn", turns: twoTurns[:1], calls: []proxyCall{{body: pingReply}, {body: toolsList, wantParent: 1}}},
+		{name: "empty body joins no turn", turns: twoTurns, calls: []proxyCall{{daemonHeader: "p1/discord-1", body: ""}}},
 		{
 			name:  "claude tools/call nests under the execute_tool span of its tool_use id",
 			turns: []activeTurn{{daemon: "p1/discord-1", target: "discord", span: 1, tools: toolSpans{"docket/create/toolu_7": 9}}},
@@ -381,38 +373,87 @@ func assertTraceProxySpan(t *testing.T, rec endedSpans, got seenRequest, i int, 
 	}
 }
 
-func TestTraceProxy_StreamsSSE(t *testing.T) {
-	t.Parallel()
-	release := make(chan struct{})
-	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+// newSSEUpstream streams event1, waits until event1Read closes, then streams event2 and holds the
+// stream open until streamDone closes (closing streamDone alone also releases it).
+func newSSEUpstream(t *testing.T, event1, event2 string) (upstream *httptest.Server, event1Read, streamDone chan struct{}) {
+	t.Helper()
+	event1Read, streamDone = make(chan struct{}), make(chan struct{})
+	upstream = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "text/event-stream")
-		_, _ = w.Write([]byte("data: first\n\n"))
+		_, _ = w.Write([]byte(event1 + "\n\n"))
 		if err := http.NewResponseController(w).Flush(); err != nil {
 			t.Errorf("flush first SSE event: %v", err)
 		}
-		<-release
-		_, _ = w.Write([]byte("data: second\n\n"))
+		select {
+		case <-event1Read:
+		case <-streamDone:
+			return
+		}
+		_, _ = w.Write([]byte(event2 + "\n\n"))
+		_ = http.NewResponseController(w).Flush()
+		<-streamDone
 	}))
-	defer upstream.Close()
-	defer close(release)
+	t.Cleanup(upstream.Close)
+	return upstream, event1Read, streamDone
+}
 
-	mux := http.NewServeMux()
-	mcp.NewTraceProxy(mcp.TraceProxyConfig{
-		Upstreams: upstreamMap{"discord/docket": upstream.URL},
-		Turns:     runner.NewActiveTurnRegistry(),
-	}).Register(mux)
-	srv := httptest.NewServer(mux)
-	defer srv.Close()
-
-	resp, err := srv.Client().Post(srv.URL+"/internal/mcp-proxy/discord/docket", "application/json", strings.NewReader(toolsList))
-	if err != nil {
-		t.Fatalf("post: %v", err)
+// TestTraceProxy_StreamsSSE checks each SSE event is flushed to the client while the upstream
+// still holds the stream open, with and without a tool-shaping policy on the server.
+func TestTraceProxy_StreamsSSE(t *testing.T) {
+	t.Parallel()
+	const (
+		event1 = `data: {"jsonrpc":"2.0","id":1,"result":{"tools":[{"name":"allowed_tool"},{"name":"blocked_tool"}]}}`
+		event2 = `data: {"jsonrpc":"2.0","id":2,"result":{"tools":[{"name":"allowed_tool_2"},{"name":"blocked_tool"}]}}`
+	)
+	tests := []struct {
+		name                 string
+		disabled             map[string]bool // shaping policy; nil means no policy for the server
+		wantLine1, wantLine2 string
+	}{
+		{name: "pass-through", wantLine1: event1 + "\n", wantLine2: event2 + "\n"},
+		{
+			name:      "shaped",
+			disabled:  map[string]bool{"blocked_tool": true},
+			wantLine1: `data: {"id":1,"jsonrpc":"2.0","result":{"tools":[{"name":"allowed_tool"}]}}` + "\n",
+			wantLine2: `data: {"id":2,"jsonrpc":"2.0","result":{"tools":[{"name":"allowed_tool_2"}]}}` + "\n",
+		},
 	}
-	defer resp.Body.Close()
-	// The first event must arrive while the upstream is still holding the stream open.
-	line, err := bufio.NewReader(resp.Body).ReadString('\n')
-	if err != nil || line != "data: first\n" {
-		t.Fatalf("first SSE line = %q, %v", line, err)
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			upstream, event1Read, streamDone := newSSEUpstream(t, event1, event2)
+
+			routes := upstreamPolicyMap{upstreams: map[string]string{"discord/serverA": upstream.URL}}
+			if tc.disabled != nil {
+				routes.policies = map[string]env.ServerPolicy{"discord/serverA": {DisabledTools: tc.disabled}}
+			}
+			mux := http.NewServeMux()
+			mcp.NewTraceProxy(mcp.TraceProxyConfig{Upstreams: routes, Turns: runner.NewActiveTurnRegistry()}).Register(mux)
+			srv := httptest.NewServer(mux)
+			defer srv.Close()
+			defer close(streamDone) // runs first so a failed read never leaves the servers blocked
+
+			resp, err := srv.Client().Post(srv.URL+"/internal/mcp-proxy/discord/serverA", "application/json", strings.NewReader(toolsList))
+			if err != nil {
+				t.Fatalf("post: %v", err)
+			}
+			defer resp.Body.Close()
+			if ct := resp.Header.Get("Content-Type"); resp.StatusCode != http.StatusOK || !strings.HasPrefix(ct, "text/event-stream") {
+				t.Fatalf("status = %d, Content-Type = %q, want 200 text/event-stream", resp.StatusCode, ct)
+			}
+			reader := bufio.NewReader(resp.Body)
+			// The first event must arrive while the upstream is still holding the stream open.
+			if line, err := reader.ReadString('\n'); err != nil || line != tc.wantLine1 {
+				t.Fatalf("first SSE line = %q, %v; want %q", line, err, tc.wantLine1)
+			}
+			if line, err := reader.ReadString('\n'); err != nil || line != "\n" {
+				t.Fatalf("SSE delimiter = %q, %v", line, err)
+			}
+			close(event1Read)
+			if line, err := reader.ReadString('\n'); err != nil || line != tc.wantLine2 {
+				t.Fatalf("second SSE line = %q, %v; want %q", line, err, tc.wantLine2)
+			}
+		})
 	}
 }
 
@@ -428,8 +469,8 @@ func TestTraceProxy_Routes(t *testing.T) {
 		body       string
 		wantStatus int
 	}{
-		{name: "proxy rejects non-loopback", remoteAddr: "10.0.0.7:5555", path: "/internal/mcp-proxy/discord/docket", body: toolsList, wantStatus: http.StatusForbidden},
-		{name: "announce rejects non-loopback", remoteAddr: "10.0.0.7:5555", path: "/internal/mcp-proxy/announce", body: `{"daemon_id":"d1","server":"docket","tool":"create"}`, wantStatus: http.StatusForbidden},
+		{name: "proxy rejects non-loopback", remoteAddr: "192.0.2.7:5555", path: "/internal/mcp-proxy/discord/docket", body: toolsList, wantStatus: http.StatusForbidden},
+		{name: "announce rejects non-loopback", remoteAddr: "192.0.2.7:5555", path: "/internal/mcp-proxy/announce", body: `{"daemon_id":"d1","server":"docket","tool":"create"}`, wantStatus: http.StatusForbidden},
 		{name: "unknown server is not found", remoteAddr: "127.0.0.1:5555", path: "/internal/mcp-proxy/discord/nope", body: toolsList, wantStatus: http.StatusNotFound},
 		{name: "malformed announcement is rejected", remoteAddr: "127.0.0.1:5555", path: "/internal/mcp-proxy/announce", body: `{`, wantStatus: http.StatusBadRequest},
 		{name: "unreachable upstream is a bad gateway", remoteAddr: "127.0.0.1:5555", path: "/internal/mcp-proxy/discord/down", body: toolsCall("create"), wantStatus: http.StatusBadGateway},
@@ -574,12 +615,7 @@ type blockedToolCase struct {
 
 func blockedToolTestCases() []blockedToolCase {
 	return []blockedToolCase{
-		{
-			name:        "empty policy allows any tool",
-			policy:      env.ServerPolicy{},
-			rawReq:      toolsCall("delete"),
-			wantBlocked: false,
-		},
+		{name: "empty policy allows any tool", policy: env.ServerPolicy{}, rawReq: toolsCall("delete"), wantBlocked: false},
 		{
 			name:        "disabled tool blocked",
 			policy:      env.ServerPolicy{DisabledTools: map[string]bool{"delete": true}},
@@ -937,100 +973,6 @@ func TestTraceProxy_ShapingAndPolicy(t *testing.T) {
 	}
 }
 
-func TestTraceProxy_StreamsSSE_Shaped(t *testing.T) {
-	t.Parallel()
-
-	event1Written := make(chan struct{})
-	event1Read := make(chan struct{})
-	streamDone := make(chan struct{})
-
-	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		flusher, ok := w.(http.Flusher)
-		if !ok {
-			http.Error(w, "streaming unsupported", http.StatusInternalServerError)
-			return
-		}
-		w.Header().Set("Content-Type", "text/event-stream")
-		w.WriteHeader(http.StatusOK)
-		flusher.Flush()
-
-		_, _ = w.Write([]byte("data: {\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"tools\":[{\"name\":\"allowed_tool\"},{\"name\":\"blocked_tool\"}]}}\n\n"))
-		flusher.Flush()
-		close(event1Written)
-
-		<-event1Read
-		_, _ = w.Write([]byte("data: {\"jsonrpc\":\"2.0\",\"id\":2,\"result\":{\"tools\":[{\"name\":\"allowed_tool_2\"},{\"name\":\"blocked_tool\"}]}}\n\n"))
-		flusher.Flush()
-		<-streamDone
-	}))
-	defer upstream.Close()
-
-	proxyRoutes := upstreamPolicyMap{
-		upstreams: map[string]string{
-			"discord/serverA": upstream.URL,
-		},
-		policies: map[string]env.ServerPolicy{
-			"discord/serverA": {
-				DisabledTools: map[string]bool{"blocked_tool": true},
-			},
-		},
-	}
-	mux := http.NewServeMux()
-	mcp.NewTraceProxy(mcp.TraceProxyConfig{
-		Upstreams: proxyRoutes,
-		Turns:     runner.NewActiveTurnRegistry(),
-	}).Register(mux)
-	srv := httptest.NewServer(mux)
-	defer srv.Close()
-
-	req, err := http.NewRequestWithContext(context.Background(), http.MethodPost, srv.URL+"/internal/mcp-proxy/discord/serverA", strings.NewReader(`{"jsonrpc":"2.0","id":1,"method":"tools/list"}`))
-	if err != nil {
-		t.Fatalf("new request: %v", err)
-	}
-	req.Header.Set("Content-Type", "application/json")
-
-	resp, err := srv.Client().Do(req)
-	if err != nil {
-		t.Fatalf("client do: %v", err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		t.Fatalf("status = %d, want 200", resp.StatusCode)
-	}
-	if ct := resp.Header.Get("Content-Type"); !strings.HasPrefix(ct, "text/event-stream") {
-		t.Fatalf("Content-Type = %q, want text/event-stream", ct)
-	}
-
-	reader := bufio.NewReader(resp.Body)
-	<-event1Written
-
-	line1, err := reader.ReadString('\n')
-	if err != nil {
-		t.Fatalf("read line 1: %v", err)
-	}
-	if !strings.Contains(line1, `"name":"allowed_tool"`) || strings.Contains(line1, `"blocked_tool"`) {
-		t.Errorf("line1 = %s, want allowed_tool and no blocked_tool", line1)
-	}
-
-	_, err = reader.ReadString('\n')
-	if err != nil {
-		t.Fatalf("read delimiter: %v", err)
-	}
-
-	close(event1Read)
-
-	line2, err := reader.ReadString('\n')
-	if err != nil {
-		t.Fatalf("read line 2: %v", err)
-	}
-	if !strings.Contains(line2, `"name":"allowed_tool_2"`) || strings.Contains(line2, `"blocked_tool"`) {
-		t.Errorf("line2 = %s, want allowed_tool_2 and no blocked_tool", line2)
-	}
-
-	close(streamDone)
-}
-
 type bearerAuthCase struct {
 	name             string
 	initToken        string
@@ -1045,22 +987,14 @@ type bearerAuthCase struct {
 func TestTraceProxy_BearerAuth(t *testing.T) {
 	t.Parallel()
 	tests := []bearerAuthCase{
-		{
-			name:      "injects bearer token from file when auth header empty",
-			initToken: "test-token-alpha",
-			wantAuth1: "Bearer test-token-alpha",
-		},
+		{name: "injects bearer token from file when auth header empty", initToken: "test-token-alpha", wantAuth1: "Bearer test-token-alpha"},
 		{
 			name:       "preserves explicit upstream authorization header",
 			initToken:  "test-token-alpha",
 			clientAuth: "Bearer custom-agent-token",
 			wantAuth1:  "Bearer custom-agent-token",
 		},
-		{
-			name:      "graceful fallback when token file does not exist",
-			initToken: "",
-			wantAuth1: "",
-		},
+		{name: "graceful fallback when token file does not exist", initToken: "", wantAuth1: ""},
 		{
 			name:        "caches token for 60 seconds and re-reads after expiry",
 			initToken:   "token-initial",

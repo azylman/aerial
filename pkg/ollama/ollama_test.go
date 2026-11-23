@@ -28,33 +28,15 @@ func TestNewDynamicClient_TableDriven(t *testing.T) {
 		nilCfgFn    bool
 		wantBaseURL string
 	}{
+		{"static default values", Config{}, false, ""},
 		{
-			name:        "static default values",
-			cfg:         Config{},
-			wantBaseURL: "",
+			"static custom base url with trailing slash",
+			Config{BaseURL: "http://senses.aerial:8080/", Model: "nomic-embed-text", NumCtx: 1024},
+			false,
+			"http://senses.aerial:8080",
 		},
-		{
-			name: "static custom base url with trailing slash",
-			cfg: Config{
-				BaseURL: "http://custom-ollama:11434/",
-				Model:   "nomic-embed-text",
-				NumCtx:  1024,
-			},
-			wantBaseURL: "http://custom-ollama:11434",
-		},
-		{
-			name:        "dynamic with nil func",
-			nilCfgFn:    true,
-			wantBaseURL: "",
-		},
-		{
-			name: "dynamic with valid func",
-			cfg: Config{
-				BaseURL: "http://dynamic-host:11434",
-			},
-			nilCfgFn:    false,
-			wantBaseURL: "http://dynamic-host:11434",
-		},
+		{"dynamic with nil func", Config{}, true, ""},
+		{"dynamic with valid func", Config{BaseURL: "http://pjev.aerial:8080"}, false, "http://pjev.aerial:8080"},
 	}
 
 	for _, tc := range tests {
@@ -89,6 +71,7 @@ type generateEmbeddingTestCase struct {
 	retryDelay    time.Duration
 	emptyBaseURL  bool
 	nilHTTPClient bool
+	rt            http.RoundTripper
 	cancelInDelay bool
 	handlerStatus int
 	handlerBody   string
@@ -114,7 +97,10 @@ func runGenerateEmbeddingCase(t *testing.T, tc generateEmbeddingTestCase) {
 
 		if tc.isQuery && tc.queryPrefix != "" {
 			var req embeddingRequest
-			_ = json.NewDecoder(r.Body).Decode(&req)
+			if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+				http.Error(w, err.Error(), http.StatusBadRequest)
+				return
+			}
 			if !strings.HasPrefix(req.Prompt, tc.queryPrefix) {
 				http.Error(w, fmt.Sprintf("expected prompt to have prefix %q", tc.queryPrefix), http.StatusBadRequest)
 				return
@@ -149,10 +135,13 @@ func runGenerateEmbeddingCase(t *testing.T, tc generateEmbeddingTestCase) {
 			QueryPrefix: tc.queryPrefix,
 		}
 	})
-	if !tc.nilHTTPClient {
-		client.SetHTTPClient(server.Client())
-	} else {
+	switch {
+	case tc.rt != nil:
+		client.SetHTTPClient(&http.Client{Transport: tc.rt})
+	case tc.nilHTTPClient:
 		client.SetHTTPClient(nil)
+	default:
+		client.SetHTTPClient(server.Client())
 	}
 	client.SetRetryDelay(tc.retryDelay)
 
@@ -184,171 +173,56 @@ func TestGenerateEmbedding_TableDriven(t *testing.T) {
 	t.Parallel()
 
 	tests := []generateEmbeddingTestCase{
+		{name: "empty text validation error", text: "   ", wantErrSubstr: "text cannot be empty"},
 		{
-			name:          "empty text validation error",
-			text:          "   ",
-			wantErrSubstr: "text cannot be empty",
+			name: "successful embedding standard text", text: "search document query", maxRetries: 1, handlerBody: `{"embedding": [0.1, 0.2, 0.3]}`,
+			wantEmbedding: []float32{0.1, 0.2, 0.3}, wantAttempts: 1,
 		},
 		{
-			name:          "successful embedding standard text",
-			text:          "search document query",
-			isQuery:       false,
-			maxRetries:    1,
-			handlerStatus: http.StatusOK,
-			handlerBody:   `{"embedding": [0.1, 0.2, 0.3]}`,
-			wantEmbedding: []float32{0.1, 0.2, 0.3},
-			wantAttempts:  1,
+			name: "successful embedding query prefix", text: "semantic search target", isQuery: true, queryPrefix: "query: ", maxRetries: 1,
+			handlerBody: `{"embedding": [0.5, 0.6]}`, wantEmbedding: []float32{0.5, 0.6}, wantAttempts: 1,
 		},
 		{
-			name:          "successful embedding query prefix",
-			text:          "semantic search target",
-			isQuery:       true,
-			queryPrefix:   "query: ",
-			maxRetries:    1,
-			handlerStatus: http.StatusOK,
-			handlerBody:   `{"embedding": [0.5, 0.6]}`,
-			wantEmbedding: []float32{0.5, 0.6},
-			wantAttempts:  1,
+			name: "client 400 error returns immediately without retry", text: "invalid payload triggering 400", maxRetries: 3,
+			handlerStatus: http.StatusBadRequest, handlerBody: `{"error":"bad request payload"}`, wantErrSubstr: "ollama HTTP 400", wantAttempts: 1,
 		},
 		{
-			name:          "client 400 error returns immediately without retry",
-			text:          "invalid payload triggering 400",
-			maxRetries:    3,
-			handlerStatus: http.StatusBadRequest,
-			handlerBody:   `{"error":"bad request payload"}`,
-			wantErrSubstr: "ollama HTTP 400",
-			wantAttempts:  1,
+			name: "server 500 error retries with delay and succeeds", text: "retry with positive delay", maxRetries: 2, retryDelay: time.Microsecond,
+			failAttempts: 1, handlerBody: `{"embedding": [0.42]}`, wantEmbedding: []float32{0.42}, wantAttempts: 2,
 		},
 		{
-			name:          "server 500 error retries with delay and succeeds",
-			text:          "retry with positive delay",
-			maxRetries:    2,
-			retryDelay:    time.Microsecond,
-			failAttempts:  1,
-			handlerStatus: http.StatusOK,
-			handlerBody:   `{"embedding": [0.42]}`,
-			wantEmbedding: []float32{0.42},
-			wantAttempts:  2,
+			name: "server 500 error default maxRetries 3 exhausted", text: "retry until failure default retries", retryDelay: time.Microsecond,
+			handlerStatus: http.StatusInternalServerError, handlerBody: `{"error":"internal server error"}`, wantErrSubstr: "failed after 4 attempts", wantAttempts: 4,
 		},
 		{
-			name:          "server 500 error default maxRetries 3 exhausted",
-			text:          "retry until failure default retries",
-			maxRetries:    0,
-			retryDelay:    time.Microsecond,
-			handlerStatus: http.StatusInternalServerError,
-			handlerBody:   `{"error":"internal server error"}`,
-			wantErrSubstr: "failed after 4 attempts",
-			wantAttempts:  4,
+			name: "empty embedding slice retried", text: "empty embedding response", maxRetries: 1, handlerBody: `{"embedding": []}`,
+			wantErrSubstr: "empty embedding returned", wantAttempts: 2,
 		},
 		{
-			name:          "empty embedding slice retried",
-			text:          "empty embedding response",
-			maxRetries:    1,
-			handlerStatus: http.StatusOK,
-			handlerBody:   `{"embedding": []}`,
-			wantErrSubstr: "empty embedding returned",
-			wantAttempts:  2,
+			name: "response has explicit error field", text: "model error", maxRetries: 1, handlerBody: `{"error": "model out of memory"}`,
+			wantErrSubstr: "ollama error: model out of memory", wantAttempts: 2,
+		},
+		{name: "malformed json response", text: "garbage response", maxRetries: 1, handlerBody: `not-valid-json`, wantErrSubstr: "failed to parse JSON", wantAttempts: 2},
+		{
+			name: "canceled context aborts immediately before call", text: "context cancellation", cancelCtx: true, maxRetries: 2,
+			handlerStatus: http.StatusInternalServerError, handlerBody: `{"error":"temporary error"}`, wantErrSubstr: "context canceled",
 		},
 		{
-			name:          "response has explicit error field",
-			text:          "model error",
-			maxRetries:    1,
-			handlerStatus: http.StatusOK,
-			handlerBody:   `{"error": "model out of memory"}`,
-			wantErrSubstr: "ollama error: model out of memory",
-			wantAttempts:  2,
+			name: "cancel during retry delay", text: "cancel in retry delay", maxRetries: 2, retryDelay: 200 * time.Millisecond, cancelInDelay: true,
+			failAttempts: 2, handlerStatus: http.StatusInternalServerError, handlerBody: `{"error":"fail"}`, wantErrSubstr: "context canceled", wantAttempts: 1,
 		},
 		{
-			name:          "malformed json response",
-			text:          "garbage response",
-			maxRetries:    1,
-			handlerStatus: http.StatusOK,
-			handlerBody:   `not-valid-json`,
-			wantErrSubstr: "failed to parse JSON",
-			wantAttempts:  2,
+			name: "default http client fallback when nil", text: "default client check", maxRetries: 1, nilHTTPClient: true, handlerBody: `{"embedding": [0.77]}`,
+			wantEmbedding: []float32{0.77}, wantAttempts: 1,
 		},
-		{
-			name:          "canceled context aborts immediately before call",
-			text:          "context cancellation",
-			cancelCtx:     true,
-			maxRetries:    2,
-			handlerStatus: http.StatusInternalServerError,
-			handlerBody:   `{"error":"temporary error"}`,
-			wantErrSubstr: "context canceled",
-			wantAttempts:  0,
-		},
-		{
-			name:          "cancel during retry delay",
-			text:          "cancel in retry delay",
-			maxRetries:    2,
-			retryDelay:    200 * time.Millisecond,
-			cancelInDelay: true,
-			failAttempts:  2,
-			handlerStatus: http.StatusInternalServerError,
-			handlerBody:   `{"error":"fail"}`,
-			wantErrSubstr: "context canceled",
-			wantAttempts:  1,
-		},
-		{
-			name:          "default http client fallback when nil",
-			text:          "default client check",
-			maxRetries:    1,
-			nilHTTPClient: true,
-			handlerStatus: http.StatusOK,
-			handlerBody:   `{"embedding": [0.77]}`,
-			wantEmbedding: []float32{0.77},
-			wantAttempts:  1,
-		},
-		{
-			name:          "unconfigured base URL fails fast with zero network IO",
-			text:          "test prompt",
-			emptyBaseURL:  true,
-			wantErrSubstr: "ollama base URL is not configured",
-			wantAttempts:  0,
-		},
+		{name: "transport error surfaces as request error", text: "test prompt", maxRetries: 1, rt: errRoundTripper{}, wantErrSubstr: "request error"},
+		{name: "unconfigured base URL fails fast with zero network IO", text: "test prompt", emptyBaseURL: true, wantErrSubstr: "ollama base URL is not configured"},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			runGenerateEmbeddingCase(t, tc)
-		})
-	}
-}
-
-func TestGenerateEmbedding_NetworkError_TableDriven(t *testing.T) {
-	t.Parallel()
-
-	tests := []struct {
-		name          string
-		baseURL       string
-		maxRetries    int
-		wantErrSubstr string
-	}{
-		{
-			name:          "unreachable connection refused",
-			baseURL:       "http://127.0.0.1:59999",
-			maxRetries:    1,
-			wantErrSubstr: "request error",
-		},
-	}
-
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-
-			client := NewDynamicClient(func() Config {
-				return Config{
-					BaseURL: tc.baseURL,
-				}
-			})
-			client.SetHTTPClient(&http.Client{Transport: errRoundTripper{}})
-			client.SetRetryDelay(0)
-
-			_, err := client.GenerateEmbedding(context.Background(), "test prompt", false, tc.maxRetries)
-			if err == nil || !strings.Contains(err.Error(), tc.wantErrSubstr) {
-				t.Fatalf("GenerateEmbedding() error = %v, want substring %q", err, tc.wantErrSubstr)
-			}
 		})
 	}
 }

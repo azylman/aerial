@@ -58,11 +58,15 @@ func TestThrowawayTurnSink(t *testing.T) {
 	for range 50 {
 		resCh := make(chan string, 1)
 		resCh <- "ready"
-		_, _ = selectContext(ctxCancel, resCh, nil, "")
+		if _, err := selectContext(ctxCancel, resCh, nil, ""); err == nil {
+			t.Fatal("expected error on canceled context")
+		}
 
 		errCh := make(chan error, 1)
 		errCh <- errors.New("ready")
-		_, _ = selectContext(ctxCancel, nil, errCh, "")
+		if _, err := selectContext(ctxCancel, nil, errCh, ""); err == nil {
+			t.Fatal("expected error on canceled context")
+		}
 	}
 }
 
@@ -79,6 +83,8 @@ func TestIsSubstantiveResponse(t *testing.T) {
 		{"<turn>content</turn>", true},
 		{"Hello, I am Aerial.", true},
 		{"```go\nfmt.Println(1)\n```", true},
+		{"Turn is aborted because model did not make any tool calls or return any response text", false},
+		{"prefix Turn is aborted because model did not make any tool calls or return any response text suffix", false},
 	} {
 		if got := IsSubstantiveResponse(tc.in); got != tc.want {
 			t.Errorf("IsSubstantiveResponse(%q) = %v, want %v", tc.in, got, tc.want)
@@ -153,81 +159,80 @@ func TestBufferingTurnSink_OnResultPrecedence(t *testing.T) {
 	}
 }
 
-func TestBufferingTurnSink_ToolResetPurgesBuffer(t *testing.T) {
-	t.Parallel()
-	for _, tc := range []struct {
-		pre, mid, post []string
-		call           bool
-		doneStatus     string
-		res, want      string
-	}{
-		{pre: []string{"Pre-tool commentary."}, call: true, res: "Pre-tool commentary.", want: ""},
-		{pre: []string{"Stray delta."}, doneStatus: "DONE", res: "", want: ""},
-		{pre: []string{"Let me run tests..."}, mid: []string{"chunk..."}, post: []string{"All tests passed! ", "Ready."}, call: true, doneStatus: "DONE", res: "Noise. All tests passed! Ready.", want: "All tests passed! Ready."},
-		{call: true, doneStatus: "DONE", res: "Completed task output.", want: "Completed task output."},
-		{pre: []string{"Spawning subagent..."}, post: []string{"Final deliverable preserved."}, call: true, doneStatus: "aborted", res: "Spawning subagent... Final deliverable preserved.", want: "Final deliverable preserved."},
-		{post: []string{"Streamed final response."}, doneStatus: "aborted", res: "Streamed final response.", want: "Streamed final response."},
-	} {
-		sink := NewBufferingTurnSink(BufferingTurnSinkConfig{})
-		feed := func(deltas []string) {
-			for _, d := range deltas {
-				sink.OnTextDelta(d)
-			}
-		}
-		feed(tc.pre)
-		if tc.call {
-			sink.OnToolCall(ToolCall{Name: "run_command", Command: "bash"})
-		}
-		feed(tc.mid)
-		if tc.doneStatus != "" && tc.doneStatus != "aborted" {
-			sink.OnToolCompleted(ToolCall{Name: "run_command"}, "native", 100*time.Millisecond, tc.doneStatus)
-		}
-		feed(tc.post)
-		if tc.doneStatus == "aborted" {
-			sink.OnToolCompleted(ToolCall{Name: "invoke_subagent"}, "native", 100*time.Millisecond, tc.doneStatus)
-		}
-		if tc.res != "" {
-			sink.OnResult(&TurnResult{Response: tc.res})
-			if res, err := sink.Wait(context.Background()); err != nil || res.Response != tc.want {
-				t.Errorf("response = (%v, %v), want %q", res, err, tc.want)
-			}
-		} else if sink.AccumulatedText() != tc.want {
-			t.Errorf("accum = %q, want %q", sink.AccumulatedText(), tc.want)
-		}
-	}
+// purgeEvent is one sink callback in a scripted purge scenario: a text delta, a tool call, a
+// tool completion (name + status) or a step start.
+type purgeEvent struct {
+	kind, text, status string
+	step               int
 }
 
-func TestBufferingTurnSink_StepResetPurgesBuffer(t *testing.T) {
+func purgeDelta(text string) purgeEvent { return purgeEvent{kind: "delta", text: text} }
+func purgeToolCall() purgeEvent         { return purgeEvent{kind: "toolCall", text: "run_command"} }
+func purgeToolDone(name, status string) purgeEvent {
+	return purgeEvent{kind: "toolDone", text: name, status: status}
+}
+func purgeStep(idx int) purgeEvent { return purgeEvent{kind: "step", step: idx} }
+
+func TestBufferingTurnSink_PurgesBufferOnReset(t *testing.T) {
 	t.Parallel()
-	for _, tc := range []struct {
-		steps         [][]string
-		stepIndices   []int
-		res, wantResp string
-		wantHooks     []int
+	tests := []struct {
+		name      string
+		events    []purgeEvent
+		res       string // "" asserts AccumulatedText instead of the waited result
+		want      string
+		wantHooks []int // non-nil installs an OnStepStarted hook
 	}{
-		{[][]string{{"wait..."}, {"check..."}, {"Clean! ", "Ready."}}, []int{348, 349, 352}, "wait... check... Clean! Ready.", "Clean! Ready.", []int{348, 349, 352}},
-		{[][]string{{"Waiting commentary."}, nil}, []int{1, 2}, "Waiting commentary.", "", nil},
-		{[][]string{{"Clean direct response."}}, []int{1}, "Clean direct response.", "Clean direct response.", nil},
-	} {
-		var hooks []int
-		cfg := BufferingTurnSinkConfig{}
-		if tc.wantHooks != nil {
-			cfg.OnStepStarted = func(idx int) { hooks = append(hooks, idx) }
-		}
-		sink := NewBufferingTurnSink(cfg)
-		for i, deltas := range tc.steps {
-			sink.OnStepStarted(tc.stepIndices[i])
-			for _, d := range deltas {
-				sink.OnTextDelta(d)
+		{name: "tool call purges pre-tool commentary", events: []purgeEvent{purgeDelta("Pre-tool commentary."), purgeToolCall()}, res: "Pre-tool commentary."},
+		{name: "tool completion purges stray delta", events: []purgeEvent{purgeDelta("Stray delta."), purgeToolDone("run_command", "DONE")}},
+		{name: "post-tool deltas replace noisy result", events: []purgeEvent{
+			purgeDelta("Let me run tests..."), purgeToolCall(), purgeDelta("chunk..."), purgeToolDone("run_command", "DONE"), purgeDelta("All tests passed! "), purgeDelta("Ready."),
+		}, res: "Noise. All tests passed! Ready.", want: "All tests passed! Ready."},
+		{name: "no deltas keeps result", events: []purgeEvent{purgeToolCall(), purgeToolDone("run_command", "DONE")}, res: "Completed task output.", want: "Completed task output."},
+		{name: "aborted subagent keeps final deliverable", events: []purgeEvent{
+			purgeDelta("Spawning subagent..."), purgeToolCall(), purgeDelta("Final deliverable preserved."), purgeToolDone("invoke_subagent", "aborted"),
+		}, res: "Spawning subagent... Final deliverable preserved.", want: "Final deliverable preserved."},
+		{name: "aborted tool keeps streamed response", events: []purgeEvent{purgeDelta("Streamed final response."), purgeToolDone("invoke_subagent", "aborted")}, res: "Streamed final response.", want: "Streamed final response."},
+		{name: "step starts purge earlier steps", events: []purgeEvent{
+			purgeStep(348), purgeDelta("wait..."), purgeStep(349), purgeDelta("check..."), purgeStep(352), purgeDelta("Clean! "), purgeDelta("Ready."),
+		}, res: "wait... check... Clean! Ready.", want: "Clean! Ready.", wantHooks: []int{348, 349, 352}},
+		{name: "empty final step purges commentary", events: []purgeEvent{purgeStep(1), purgeDelta("Waiting commentary."), purgeStep(2)}, res: "Waiting commentary."},
+		{name: "single step keeps direct response", events: []purgeEvent{purgeStep(1), purgeDelta("Clean direct response.")}, res: "Clean direct response.", want: "Clean direct response."},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			var hooks []int
+			cfg := BufferingTurnSinkConfig{}
+			if tc.wantHooks != nil {
+				cfg.OnStepStarted = func(idx int) { hooks = append(hooks, idx) }
 			}
-		}
-		sink.OnResult(&TurnResult{Response: tc.res})
-		if res, err := sink.Wait(context.Background()); err != nil || res.Response != tc.wantResp {
-			t.Errorf("response = (%v, %v), want %q", res, err, tc.wantResp)
-		}
-		if tc.wantHooks != nil && !reflect.DeepEqual(hooks, tc.wantHooks) {
-			t.Errorf("hooks = %v, want %v", hooks, tc.wantHooks)
-		}
+			sink := NewBufferingTurnSink(cfg)
+			for _, ev := range tc.events {
+				switch ev.kind {
+				case "delta":
+					sink.OnTextDelta(ev.text)
+				case "toolCall":
+					sink.OnToolCall(ToolCall{Name: ev.text, Command: "bash"})
+				case "toolDone":
+					sink.OnToolCompleted(ToolCall{Name: ev.text}, "native", 100*time.Millisecond, ev.status)
+				case "step":
+					sink.OnStepStarted(ev.step)
+				}
+			}
+			if tc.res == "" {
+				if got := sink.AccumulatedText(); got != tc.want {
+					t.Errorf("accum = %q, want %q", got, tc.want)
+				}
+			} else {
+				sink.OnResult(&TurnResult{Response: tc.res})
+				if res, err := sink.Wait(context.Background()); err != nil || res.Response != tc.want {
+					t.Errorf("response = (%v, %v), want %q", res, err, tc.want)
+				}
+			}
+			if !reflect.DeepEqual(hooks, tc.wantHooks) {
+				t.Errorf("hooks = %v, want %v", hooks, tc.wantHooks)
+			}
+		})
 	}
 }
 

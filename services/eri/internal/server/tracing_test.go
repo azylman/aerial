@@ -1,0 +1,271 @@
+package server
+
+import (
+	"context"
+	"net/http"
+	"net/http/httptest"
+	"os"
+	"path/filepath"
+	"slices"
+	"strings"
+	"testing"
+
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/propagation"
+	sdktrace "go.opentelemetry.io/otel/sdk/trace"
+	"go.opentelemetry.io/otel/sdk/trace/tracetest"
+	"go.opentelemetry.io/otel/trace"
+
+	"github.com/azylman/aerial/pkg/eriwire"
+	"github.com/azylman/aerial/pkg/tracing"
+	"github.com/azylman/aerial/services/eri/pkg/db/dbtest"
+	"github.com/azylman/aerial/services/eri/pkg/queue"
+)
+
+// TestSetupTracing mutates the global propagator, so it is not parallel.
+func TestSetupTracing(t *testing.T) {
+	tests := []struct {
+		name        string
+		content     string // "" means the config file is absent
+		wantAgent   string
+		wantProxy   bool // MCP trace proxy switched on
+		wantContent bool // prompt/response capture switched on
+	}{
+		{name: "missing config runs disabled", content: ""},
+		{name: "malformed config runs disabled", content: "enabled: [true\nstack: agent-gamma\n"},
+		{name: "enabled without endpoint runs disabled", content: "enabled: true\nstack: agent-gamma\n"},
+		{name: "stack names the turn agent", content: "enabled: false\nstack: agent-gamma\n", wantAgent: "agent-gamma"},
+		{name: "enabled config switches on the MCP trace proxy", content: "enabled: true\nendpoint: http://127.0.0.1:1/v1/traces\nstack: aerial\n", wantAgent: "aerial", wantProxy: true},
+		{name: "capture_content on an enabled config captures content", content: "enabled: true\nendpoint: http://127.0.0.1:1/v1/traces\nstack: aerial\ncapture_content: true\n", wantAgent: "aerial", wantProxy: true, wantContent: true},
+		{name: "capture_content on a disabled config captures nothing", content: "enabled: false\nstack: aerial\ncapture_content: true\n", wantAgent: "aerial"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			otel.SetTextMapPropagator(propagation.NewCompositeTextMapPropagator())
+			path := filepath.Join(t.TempDir(), "tracing.yaml")
+			if tc.content != "" {
+				if err := os.WriteFile(path, []byte(tc.content), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			withTracing, shutdown := SetupTracing(context.Background(), path)
+			shutdown()
+			var opts brainAppOptions
+			withTracing(&opts)
+			if opts.agentName != tc.wantAgent || opts.tracingEnabled != tc.wantProxy || opts.traceContent != tc.wantContent {
+				t.Errorf("agent name = %q, proxy = %v, content = %v; want %q, %v, %v",
+					opts.agentName, opts.tracingEnabled, opts.traceContent, tc.wantAgent, tc.wantProxy, tc.wantContent)
+			}
+			if fields := otel.GetTextMapPropagator().Fields(); !slices.Contains(fields, "traceparent") {
+				t.Errorf("propagator fields = %v, want traceparent", fields)
+			}
+		})
+	}
+}
+
+// TestInternalDiscordMessage_ForwardsTraceparent serves the Discord ingress through the
+// production tracing middleware with tracing disabled (no config file), proving inbound trace
+// context still rides on the message enqueued to the thread coordinator.
+func TestInternalDiscordMessage_ForwardsTraceparent(t *testing.T) {
+	setupTestConfig(t, `
+model: "gemini-2.5-flash"
+channels:
+  default:
+    mode: "threads"
+`)
+	shutdown, err := tracing.Setup(context.Background(), "eri", tracing.Config{})
+	if err != nil {
+		t.Fatalf("tracing.Setup: %v", err)
+	}
+	t.Cleanup(func() { _ = shutdown(context.Background()) })
+
+	const inbound = "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01"
+	tests := []struct {
+		name        string
+		body        string
+		traceparent string
+		want        string
+	}{
+		{
+			name: "with trace context", traceparent: inbound, want: inbound,
+			body: `{"bot_user_id":"bot-1","message":{"id":"123456789012345679","channel_id":"ch-1","author":{"id":"u-1","username":"alice"},"content":"hey aerial"}}`,
+		},
+		{
+			name: "without trace context", want: "",
+			body: `{"bot_user_id":"bot-1","message":{"id":"123456789012345680","channel_id":"ch-1","author":{"id":"u-1","username":"alice"},"content":"hey aerial"}}`,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			capture := installRestateCapture(t, http.StatusOK, `{"status":"accepted"}`)
+			store := dbtest.NewFakeStore()
+			mux := http.NewServeMux()
+			mux.HandleFunc("/internal/discord/message", handleInternalDiscordMessage(newTestWorkerPool(store)))
+
+			req := httptest.NewRequest(http.MethodPost, "/internal/discord/message", strings.NewReader(tc.body))
+			if tc.traceparent != "" {
+				req.Header.Set("Traceparent", tc.traceparent)
+			}
+			rec := httptest.NewRecorder()
+			tracing.Middleware("eri", metricsMiddleware(mux)).ServeHTTP(rec, req)
+			if rec.Code >= http.StatusBadRequest {
+				t.Fatalf("status = %d (body: %s)", rec.Code, rec.Body.String())
+			}
+			var got queue.ThreadEnqueueRequest
+			capture.decodeLast(t, &got)
+			if got.Message == nil || got.Message.Traceparent != tc.want {
+				t.Errorf("enqueued message = %+v, want traceparent %q", got.Message, tc.want)
+			}
+		})
+	}
+}
+
+// TestPrompt_ForwardsTraceparent serves /prompt through tracing middleware,
+// proving inbound trace context rides on ThreadEnqueueRequest.
+func TestPrompt_ForwardsTraceparent(t *testing.T) {
+	setupTestConfig(t, `
+model: "gemini-2.5-flash"
+channels:
+  default:
+    mode: "threads"
+`)
+	shutdown, err := tracing.Setup(context.Background(), "eri", tracing.Config{})
+	if err != nil {
+		t.Fatalf("tracing.Setup: %v", err)
+	}
+	t.Cleanup(func() { _ = shutdown(context.Background()) })
+
+	const inbound = "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01"
+	tests := []struct {
+		name        string
+		body        string
+		traceparent string
+		want        string
+	}{
+		{
+			name: "with trace context", traceparent: inbound, want: inbound,
+			body: `{"channel_id":"123456789012345679","prompt":"hey aerial"}`,
+		},
+		{
+			name: "without trace context", want: "",
+			body: `{"channel_id":"123456789012345680","prompt":"hey aerial"}`,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			capture := installRestateCapture(t, http.StatusOK, `{"status":"accepted"}`)
+			store := dbtest.NewFakeStore()
+			mux := http.NewServeMux()
+			mux.HandleFunc("/prompt", handlePrompt(store, nil))
+
+			req := httptest.NewRequest(http.MethodPost, "/prompt", strings.NewReader(tc.body))
+			if tc.traceparent != "" {
+				req.Header.Set("Traceparent", tc.traceparent)
+			}
+			rec := httptest.NewRecorder()
+			tracing.Middleware("eri", metricsMiddleware(mux)).ServeHTTP(rec, req)
+			if rec.Code >= http.StatusBadRequest {
+				t.Fatalf("status = %d (body: %s)", rec.Code, rec.Body.String())
+			}
+			var got queue.ThreadEnqueueRequest
+			capture.decodeLast(t, &got)
+			if got.Traceparent != tc.want {
+				t.Errorf("enqueued prompt traceparent = %q, want %q", got.Traceparent, tc.want)
+			}
+		})
+	}
+}
+
+// TestDispatch_ForwardsTraceparent serves /dispatch through tracing middleware,
+// proving inbound trace context rides on BrainDispatchRequest.
+func TestDispatch_ForwardsTraceparent(t *testing.T) {
+	setupTestConfig(t, `
+model: "gemini-2.5-flash"
+channels:
+  default:
+    mode: "threads"
+`)
+	shutdown, err := tracing.Setup(context.Background(), "eri", tracing.Config{})
+	if err != nil {
+		t.Fatalf("tracing.Setup: %v", err)
+	}
+	t.Cleanup(func() { _ = shutdown(context.Background()) })
+
+	const inbound = "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01"
+	tests := []struct {
+		name        string
+		body        string
+		traceparent string
+		want        string
+	}{
+		{
+			name: "with trace context", traceparent: inbound, want: inbound,
+			body: `{"source":"vanadis","prompt":"execute chunk","id":"disp-tp-1"}`,
+		},
+		{
+			name: "without trace context", want: "",
+			body: `{"source":"vanadis","prompt":"execute chunk","id":"disp-tp-2"}`,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			capture := installRestateCapture(t, http.StatusOK, `{"status":"accepted"}`)
+			store := dbtest.NewFakeStore()
+			mux := http.NewServeMux()
+			mux.HandleFunc("/dispatch", handleDispatch(store))
+
+			req := httptest.NewRequest(http.MethodPost, "/dispatch", strings.NewReader(tc.body))
+			if tc.traceparent != "" {
+				req.Header.Set("Traceparent", tc.traceparent)
+			}
+			rec := httptest.NewRecorder()
+			tracing.Middleware("eri", metricsMiddleware(mux)).ServeHTTP(rec, req)
+			if rec.Code >= http.StatusBadRequest {
+				t.Fatalf("status = %d (body: %s)", rec.Code, rec.Body.String())
+			}
+			var got eriwire.BrainDispatchRequest
+			capture.decodeLast(t, &got)
+			if got.Traceparent != tc.want {
+				t.Errorf("enqueued dispatch traceparent = %q, want %q", got.Traceparent, tc.want)
+			}
+		})
+	}
+}
+
+// TestBrainHandler_ServerSpans mutates the global tracer provider, so it is
+// not parallel.
+func TestBrainHandler_ServerSpans(t *testing.T) {
+	tests := []struct {
+		name      string
+		path      string
+		wantSpans int
+	}{
+		{name: "ordinary route gets a server span", path: "/prompt", wantSpans: 1},
+		{name: "health probe is untraced", path: "/health", wantSpans: 0},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			prev := otel.GetTracerProvider()
+			defer otel.SetTracerProvider(prev)
+			rec := tracetest.NewSpanRecorder()
+			otel.SetTracerProvider(sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(rec)))
+
+			mux := http.NewServeMux()
+			mux.HandleFunc("/", func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusNoContent) })
+			w := httptest.NewRecorder()
+			brainHandler(mux).ServeHTTP(w, httptest.NewRequest(http.MethodPost, tc.path, http.NoBody))
+			if w.Code != http.StatusNoContent {
+				t.Errorf("status = %d, want 204", w.Code)
+			}
+			var serverSpans int
+			for _, s := range rec.Ended() {
+				if s.SpanKind() == trace.SpanKindServer {
+					serverSpans++
+				}
+			}
+			if serverSpans != tc.wantSpans {
+				t.Errorf("server spans = %d, want %d", serverSpans, tc.wantSpans)
+			}
+		})
+	}
+}

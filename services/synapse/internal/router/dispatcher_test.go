@@ -1,11 +1,17 @@
 package router
 
 import (
+	"cmp"
 	"context"
+	"errors"
 	"net/http"
 	"net/http/httptest"
+	"slices"
+	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/bwmarrin/discordgo"
 )
@@ -42,6 +48,40 @@ func TestDefaultOutboundDispatcher_ResolveEriURL(t *testing.T) {
 			t.Parallel()
 			if got := tc.disp.resolveEriURL(tc.agent); got != tc.want {
 				t.Errorf("resolveEriURL(%q) = %q, want %q", tc.agent, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestDefaultOutboundDispatcher_KubeConfig pins the promoted kube accessors
+// the Flux watcher reads: it silently does nothing if APIServer() is empty.
+func TestDefaultOutboundDispatcher_KubeConfig(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name           string
+		apiServer      string
+		retryDelay     time.Duration
+		wantAPIServer  string
+		wantRetryDelay time.Duration
+	}{
+		{name: "unconfigured keeps defaults", wantRetryDelay: 1500 * time.Millisecond},
+		{name: "configured server and retry delay", apiServer: "https://kube.test:6443/", retryDelay: 20 * time.Millisecond, wantAPIServer: "https://kube.test:6443", wantRetryDelay: 20 * time.Millisecond},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			d := NewDefaultOutboundDispatcher("http://eri.test", nil)
+			if tc.apiServer != "" {
+				d.SetKubeConfig(tc.apiServer, "tok")
+			}
+			if tc.retryDelay != 0 {
+				d.kubeClient.SetRetryConfig(tc.retryDelay, 3)
+			}
+			if got := d.APIServer(); got != tc.wantAPIServer {
+				t.Errorf("APIServer() = %q, want %q", got, tc.wantAPIServer)
+			}
+			if got := d.RetryDelay(); got != tc.wantRetryDelay {
+				t.Errorf("RetryDelay() = %v, want %v", got, tc.wantRetryDelay)
 			}
 		})
 	}
@@ -151,4 +191,207 @@ func TestDefaultOutboundDispatcher_MultiBotRouting(t *testing.T) {
 		t.Errorf("unknown interaction hit counts: aerial=%d, fallback=%d; want (1, 1)",
 			aerialInteractionHits.Load(), fallbackInteractionHits.Load())
 	}
+}
+
+type mockOutboundDispatcher struct {
+	mu                           sync.Mutex
+	promptCalls                  []PromptRequest
+	dispatchCalls                []DispatchRequest
+	directMessageCalls           []DirectMessageRequest
+	discordMessageCalls          []DiscordMessageIngressRequest
+	discordInteractionCalls      []*discordgo.Interaction
+	discordInteractionAgentCalls []string
+	discoverErr                  error
+	sourceRepo                   string
+	sourceRepoErr                error
+	promptErr                    error
+	dispatchErr                  error
+	directMessageErr             error
+	discordMessageErr            error
+	discordMessageFailCount      int
+	discordMessageAttempts       int
+	// discordMessageCancel, when set, is called after each recorded
+	// DispatchDiscordMessage, cancelling the caller's context mid-retry.
+	discordMessageCancel  context.CancelFunc
+	discordInteractionErr error
+	kustomizationsByImage map[string][]fluxKustomizationRef
+	workloads             []workloadRollout
+	workloadsErr          error
+	configMaps            []configMapChange
+	configMapsErr         error
+	repoKustomizations    map[string][]fluxKustomizationRef
+	repoDiscoverErr       error
+}
+
+func (m *mockOutboundDispatcher) DiscoverImageKustomizations(ctx context.Context, imageNames []string) ([]fluxKustomizationRef, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.discoverErr != nil {
+		return nil, m.discoverErr
+	}
+	var refs []fluxKustomizationRef
+	for _, name := range imageNames {
+		for _, ref := range m.kustomizationsByImage[name] {
+			if !slices.Contains(refs, ref) {
+				refs = append(refs, ref)
+			}
+		}
+	}
+	return refs, nil
+}
+
+func (m *mockOutboundDispatcher) ResolveFluxSourceRepo(ctx context.Context, obj FluxInvolvedObject) (string, error) {
+	return m.sourceRepo, m.sourceRepoErr
+}
+
+func (m *mockOutboundDispatcher) DiscoverRepoKustomizations(ctx context.Context, repo string) ([]fluxKustomizationRef, error) {
+	if m.repoDiscoverErr != nil {
+		return nil, m.repoDiscoverErr
+	}
+	return m.repoKustomizations[strings.TrimSpace(repo)], nil
+}
+
+func (m *mockOutboundDispatcher) DispatchPrompt(ctx context.Context, req PromptRequest) error {
+	m.mu.Lock()
+	m.promptCalls = append(m.promptCalls, req)
+	m.mu.Unlock()
+	return m.promptErr
+}
+
+func (m *mockOutboundDispatcher) DispatchBackground(ctx context.Context, req DispatchRequest) error {
+	m.mu.Lock()
+	m.dispatchCalls = append(m.dispatchCalls, req)
+	m.mu.Unlock()
+	return m.dispatchErr
+}
+
+func (m *mockOutboundDispatcher) DispatchDirectMessage(ctx context.Context, req DirectMessageRequest) error {
+	m.mu.Lock()
+	m.directMessageCalls = append(m.directMessageCalls, req)
+	m.mu.Unlock()
+	return m.directMessageErr
+}
+
+func (m *mockOutboundDispatcher) PromptCalls() []PromptRequest {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return append([]PromptRequest(nil), m.promptCalls...)
+}
+
+func (m *mockOutboundDispatcher) DispatchCalls() []DispatchRequest {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return append([]DispatchRequest(nil), m.dispatchCalls...)
+}
+
+func (m *mockOutboundDispatcher) DirectMessageCalls() []DirectMessageRequest {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return append([]DirectMessageRequest(nil), m.directMessageCalls...)
+}
+
+func (m *mockOutboundDispatcher) DispatchDiscordMessage(ctx context.Context, req DiscordMessageIngressRequest) error {
+	m.mu.Lock()
+	m.discordMessageCalls = append(m.discordMessageCalls, req)
+	m.discordMessageAttempts++
+	if m.discordMessageFailCount > 0 {
+		if m.discordMessageAttempts <= m.discordMessageFailCount {
+			err := m.discordMessageErr
+			if err == nil {
+				err = errors.New("transient error")
+			}
+			m.mu.Unlock()
+			return err
+		}
+		m.mu.Unlock()
+		return nil
+	}
+	err := m.discordMessageErr
+	cancel := m.discordMessageCancel
+	m.mu.Unlock()
+	if cancel != nil {
+		cancel()
+	}
+	return err
+}
+
+func (m *mockOutboundDispatcher) DispatchDiscordInteraction(ctx context.Context, interaction *discordgo.Interaction) error {
+	m.mu.Lock()
+	m.discordInteractionCalls = append(m.discordInteractionCalls, interaction)
+	m.mu.Unlock()
+	return m.discordInteractionErr
+}
+
+func (m *mockOutboundDispatcher) DispatchDiscordInteractionForAgent(ctx context.Context, agent string, interaction *discordgo.Interaction) error {
+	m.mu.Lock()
+	m.discordInteractionAgentCalls = append(m.discordInteractionAgentCalls, agent)
+	m.discordInteractionCalls = append(m.discordInteractionCalls, interaction)
+	m.mu.Unlock()
+	return m.discordInteractionErr
+}
+
+func (m *mockOutboundDispatcher) DiscordInteractionAgentCalls() []string {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return append([]string(nil), m.discordInteractionAgentCalls...)
+}
+
+func (m *mockOutboundDispatcher) DiscordMessageCalls() []DiscordMessageIngressRequest {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return append([]DiscordMessageIngressRequest(nil), m.discordMessageCalls...)
+}
+
+func (m *mockOutboundDispatcher) DiscordInteractionCalls() []*discordgo.Interaction {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return append([]*discordgo.Interaction(nil), m.discordInteractionCalls...)
+}
+
+type kubeRoute struct {
+	status int
+	body   string
+}
+
+// kubeFixture is a declarative kube API mock that records every request in arrival order.
+type kubeFixture struct {
+	mu       sync.Mutex
+	routes   map[string]kubeRoute
+	requests []string
+	queries  map[string]string
+}
+
+func newKubeFixture(t *testing.T, routes map[string]kubeRoute) (*kubeFixture, *httptest.Server) {
+	t.Helper()
+	f := &kubeFixture{routes: routes, queries: map[string]string{}}
+	ts := httptest.NewServer(f)
+	t.Cleanup(ts.Close)
+	return f, ts
+}
+
+func (f *kubeFixture) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	key := r.Method + " " + r.URL.Path
+	f.mu.Lock()
+	f.requests = append(f.requests, key)
+	f.queries[key] = r.URL.RawQuery
+	route, ok := f.routes[key]
+	f.mu.Unlock()
+	if !ok {
+		route = kubeRoute{status: http.StatusNotFound, body: `{"kind":"Status","reason":"NotFound"}`}
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(cmp.Or(route.status, http.StatusOK))
+	_, _ = w.Write([]byte(route.body))
+}
+
+func (f *kubeFixture) Requests() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]string(nil), f.requests...)
+}
+
+func (f *kubeFixture) Query(key string) string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.queries[key]
 }

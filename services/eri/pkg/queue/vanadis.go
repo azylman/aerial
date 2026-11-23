@@ -10,7 +10,6 @@ import (
 	"log"
 	"net/http"
 	"net/url"
-	"os"
 	"strings"
 	"time"
 
@@ -23,19 +22,14 @@ var restateActiveStepHTTPClient = &http.Client{
 	Timeout: 10 * time.Second,
 }
 
-func resolveSATokenPath() string {
-	if p := os.Getenv("AERIAL_SA_TOKEN_PATH"); p != "" {
-		return p
-	}
-	return k8sauth.DefaultTokenPath
-}
-
+// vanadisHTTPClient returns the injected client or a ServiceAccount-authenticated
+// client reading PoolConfig.SATokenPath (wired by main).
 func (p *WorkerPool) vanadisHTTPClient() *http.Client {
 	if p != nil && p.cfg.VanadisHTTPClient != nil {
 		return p.cfg.VanadisHTTPClient
 	}
-	tokenPath := resolveSATokenPath()
-	if p != nil && p.cfg.SATokenPath != "" {
+	tokenPath := ""
+	if p != nil {
 		tokenPath = p.cfg.SATokenPath
 	}
 	return &http.Client{
@@ -45,37 +39,35 @@ func (p *WorkerPool) vanadisHTTPClient() *http.Client {
 }
 
 // BuildServiceName derives the Restate Build Virtual Object name for an agent.
-func BuildServiceName(agent string) string {
-	norm := NormalizeAgentName(agent)
-	if norm == "" || norm == defaultStackName {
-		return "Build"
-	}
-	return "Build-" + norm
+// With vanadis-restate consolidated into a single agent-aware instance,
+// this unconditionally returns the canonical "Build" Virtual Object name.
+func BuildServiceName(_ string) string {
+	return "Build"
 }
 
+// resolveRestateIngressURL returns PoolConfig.RestateIngressURL without a trailing slash.
 func (p *WorkerPool) resolveRestateIngressURL() string {
-	if p != nil && strings.TrimSpace(p.cfg.RestateIngressURL) != "" {
-		return strings.TrimRight(strings.TrimSpace(p.cfg.RestateIngressURL), "/")
+	if p == nil {
+		return ""
 	}
-	if envURL := strings.TrimSpace(os.Getenv("RESTATE_INGRESS_URL")); envURL != "" {
-		return strings.TrimRight(envURL, "/")
-	}
-	return "http://restate.aerial:8080"
+	return strings.TrimRight(strings.TrimSpace(p.cfg.RestateIngressURL), "/")
 }
 
+// resolveVanadisAPIURL returns PoolConfig.VanadisURL, else the live vanadis_url
+// from the app config snapshot, else "" (unconfigured).
 func (p *WorkerPool) resolveVanadisAPIURL() string {
-	if p != nil && strings.TrimSpace(p.cfg.VanadisURL) != "" {
-		return strings.TrimRight(strings.TrimSpace(p.cfg.VanadisURL), "/")
+	if p == nil {
+		return ""
 	}
-	if p != nil && p.appCfg != nil {
-		if cur := p.appCfg.Current(); cur != nil && strings.TrimSpace(cur.VanadisURL) != "" {
+	if u := strings.TrimSpace(p.cfg.VanadisURL); u != "" {
+		return strings.TrimRight(u, "/")
+	}
+	if p.appCfg != nil {
+		if cur := p.appCfg.Current(); cur != nil {
 			return strings.TrimRight(strings.TrimSpace(cur.VanadisURL), "/")
 		}
 	}
-	if envURL := strings.TrimSpace(os.Getenv("VANADIS_URL")); envURL != "" {
-		return strings.TrimRight(envURL, "/")
-	}
-	return "http://vanadis.aerial:4025"
+	return ""
 }
 
 type updateActiveStepPayload struct {
@@ -90,7 +82,7 @@ func (p *WorkerPool) flushActiveStepToRestateIngress(ctx context.Context, buildI
 	}
 	serviceName := BuildServiceName(agentName)
 	ingressURL := p.resolveRestateIngressURL()
-	targetURL := fmt.Sprintf("%s/%s/%s/UpdateActiveStep/send", ingressURL, serviceName, url.PathEscape(buildID))
+	targetURL := fmt.Sprintf("%s/%s/%s/UpdateActiveStep", ingressURL, serviceName, url.PathEscape(buildID))
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, targetURL, bytes.NewReader(body))
 	if err != nil {
@@ -114,8 +106,7 @@ func (p *WorkerPool) flushActiveStepToRestateIngress(ctx context.Context, buildI
 	return nil
 }
 
-func (p *WorkerPool) flushActiveStepToVanadisAPI(ctx context.Context, buildID string, body []byte) error {
-	vanadisURL := p.resolveVanadisAPIURL()
+func (p *WorkerPool) flushActiveStepToVanadisAPI(ctx context.Context, vanadisURL, buildID string, body []byte) error {
 	var targetURL string
 	if trimmed := strings.TrimSpace(buildID); trimmed != "" {
 		targetURL = fmt.Sprintf("%s/builds/%s/active-step", vanadisURL, url.PathEscape(trimmed))
@@ -147,9 +138,10 @@ func (p *WorkerPool) flushActiveStepToVanadisAPI(ctx context.Context, buildID st
 
 // FlushChunkActiveStepToRestate forwards the active step for a running chunk.
 // When RestateIngressURL is explicitly configured on PoolConfig and VanadisURL is empty,
-// it falls back to direct Restate ingress (<ingressURL>/<BuildServiceName>/<buildID>/UpdateActiveStep/send)
+// it falls back to direct Restate ingress (<ingressURL>/<BuildServiceName>/<buildID>/UpdateActiveStep)
 // for backward compatibility and hermetic unit tests. Otherwise, it routes through the vanadis
 // HTTP API (<vanadisURL>/builds/<buildID>/active-step or <vanadisURL>/chunks/active-step) using a ServiceAccount Bearer token.
+// With neither URL configured the update is skipped (logged once); it never dials a default host.
 func (p *WorkerPool) FlushChunkActiveStepToRestate(ctx context.Context, buildID, chunkID, step string) error {
 	trimmedChunkID := strings.TrimSpace(chunkID)
 	if trimmedChunkID == "" {
@@ -182,7 +174,14 @@ func (p *WorkerPool) FlushChunkActiveStepToRestate(ctx context.Context, buildID,
 		return nil
 	}
 
-	if flushErr := p.flushActiveStepToVanadisAPI(ctx, trimmedBuildID, body); flushErr != nil {
+	vanadisURL := p.resolveVanadisAPIURL()
+	if vanadisURL == "" {
+		if p != nil && p.vanadisURLWarned.CompareAndSwap(false, true) {
+			log.Printf("[WorkerPool] Warning: vanadis_url is not configured; skipping chunk active-step updates")
+		}
+		return nil
+	}
+	if flushErr := p.flushActiveStepToVanadisAPI(ctx, vanadisURL, trimmedBuildID, body); flushErr != nil {
 		log.Printf("[WorkerPool] Warning flushing active step for chunk %s (build %s): %v", chunkID, buildID, flushErr)
 		return flushErr
 	}
@@ -228,66 +227,4 @@ func (p *WorkerPool) publishDispatchOutcome(ctx context.Context, d db.Dispatch, 
 	msgID := fmt.Sprintf("dispatch:%s:%s", d.ID, normStatus)
 
 	return bus.Publish(ctx, subject, msgID, ev)
-}
-
-func (p *WorkerPool) setupDispatchTurn(d db.Dispatch, te *turnExecution) func() {
-	chunkID, buildID := extractVanadisDispatchInfo(&d)
-	if chunkID != "" {
-		widgetCtx := context.WithoutCancel(te.turnCtxValue())
-		te.statusUpdater = NewChunkStepStatusUpdater(chunkID, func(step string) error {
-			return p.FlushChunkActiveStepToRestate(widgetCtx, buildID, chunkID, step)
-		})
-	}
-	return func() {
-		if te.statusUpdater != nil {
-			te.statusUpdater.Stop()
-		}
-		if chunkID != "" {
-			widgetCtx := context.WithoutCancel(te.turnCtxValue())
-			if err := p.FlushChunkActiveStepToRestate(widgetCtx, buildID, chunkID, ""); err != nil {
-				log.Printf("[WorkerPool] Warning clearing active step on turn cleanup for chunk %s (build %s): %v", chunkID, buildID, err)
-			}
-		}
-		if te.isInterrupted() || strings.TrimSpace(te.turnStatus) == "" {
-			return
-		}
-		if p.EventBus() == nil {
-			if d.Source == "vanadis" && chunkID != "" {
-				log.Printf("[WorkerPool] Warning: cannot publish dispatch outcome for vanadis chunk %s (dispatch %s, status %s): event bus is nil", chunkID, d.ID, te.turnStatus)
-			}
-			return
-		}
-		p.publishDispatchOutcomeWithRetries(d, te)
-	}
-}
-
-func (p *WorkerPool) publishDispatchOutcomeWithRetries(d db.Dispatch, te *turnExecution) {
-	delay := 500 * time.Millisecond
-	if p.cfg.RetryDelayOverride > 0 {
-		delay = p.cfg.RetryDelayOverride
-	}
-	var pubErr error
-retryLoop:
-	for attempt := 1; attempt <= 3; attempt++ {
-		pubCtx, cancel := context.WithTimeout(context.WithoutCancel(te.turnCtxValue()), 5*time.Second)
-		pubErr = p.publishDispatchOutcome(pubCtx, d, te.turnStatus, te.turnError, te.execStart, time.Now().UTC())
-		cancel()
-		if pubErr == nil {
-			return
-		}
-		if attempt < 3 {
-			var doneCh <-chan struct{}
-			if p.ctx != nil {
-				doneCh = p.ctx.Done()
-			}
-			select {
-			case <-time.After(delay):
-			case <-doneCh:
-				break retryLoop
-			}
-		}
-	}
-	if pubErr != nil {
-		log.Printf("[WorkerPool] Warning publishing dispatch outcome for %s: %v", d.ID, pubErr)
-	}
 }

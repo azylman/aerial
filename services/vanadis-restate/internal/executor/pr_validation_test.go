@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 
@@ -14,91 +15,120 @@ import (
 	"github.com/azylman/aerial/services/vanadis-restate/internal/store"
 )
 
-func TestDispatchAccepted(t *testing.T) {
-	t.Parallel()
-	tests := []struct {
-		name       string
-		body       string
-		code       int
-		reqID      string
-		wantErr    bool
-		wantActive bool
-	}{
-		{name: "accepted", body: `{"status":"accepted","dispatch_id":"d1"}`, code: 202, reqID: "d1"},
-		{name: "already exists", body: `{"status":"already_exists","dispatch_id":"d1"}`, code: 200, reqID: "d1"},
-		{name: "skipped active", body: `{"status":"skipped_active","dispatch_id":"d1"}`, code: 200, reqID: "d1", wantErr: true, wantActive: true},
-		{name: "wrong dispatch id", body: `{"status":"accepted","dispatch_id":"other"}`, code: 202, reqID: "d1", wantErr: true},
-		{name: "empty request id", body: `{"status":"accepted","dispatch_id":"d1"}`, code: 202, reqID: "", wantErr: true},
-		{name: "missing status", body: `{}`, code: 200, reqID: "d1", wantErr: true},
-		{name: "malformed body", body: `invalid`, code: 200, reqID: "d1", wantErr: true},
-		{name: "server failure", body: `{}`, code: 500, reqID: "d1", wantErr: true},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-				w.WriteHeader(tc.code)
-				_, _ = w.Write([]byte(tc.body))
-			}))
-			defer srv.Close()
-			c := NewHTTPEriClient(srv.URL, srv.Client())
-			err := c.DispatchAccepted(context.Background(), BrainDispatchRequest{ID: tc.reqID})
-			if tc.wantActive {
-				assert.ErrorIs(t, err, ErrDispatchActive)
-				return
-			}
-			if tc.wantErr {
-				assert.Error(t, err)
-				return
-			}
-			assert.NoError(t, err)
-		})
-	}
-}
-
 func TestFetchGitHubPullRequest(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
-		name      string
-		nilExec   bool
-		repo      string
-		number    int
-		status    int
-		body      string
-		wantOwner string
-		wantFull  string
-		wantErr   bool
+		name        string
+		nilExec     bool
+		repo        string
+		number      int
+		status      int
+		headerKey   string
+		headerVal   string
+		body        string
+		wantOwner   string
+		wantFull    string
+		wantErr     bool
+		wantSkipped bool
 	}{
 		{name: "nil executor", nilExec: true, repo: "owner/repo", number: 12, wantErr: true},
 		{name: "empty repo", repo: "", number: 12, wantErr: true},
 		{name: "zero pr number", repo: "owner/repo", number: 0, wantErr: true},
-		{name: "api error", repo: "owner/repo", number: 12, status: 404, body: `{}`, wantErr: true},
+		{name: "404 skips transition", repo: "owner/repo", number: 12, status: 404, body: `{"message":"Not Found"}`, wantErr: true, wantSkipped: true},
+		{name: "410 gone skips transition", repo: "owner/repo", number: 12, status: 410, body: `{"message":"Gone"}`, wantErr: true, wantSkipped: true},
+		{name: "plain 403 returns error without skip", repo: "owner/repo", number: 12, status: 403, body: `{"message":"Forbidden"}`, wantErr: true},
+		{name: "plain 401 returns error without skip", repo: "owner/repo", number: 12, status: 401, body: `{"message":"Unauthorized"}`, wantErr: true},
+		{name: "rate limited 403 returns error without skip", repo: "owner/repo", number: 12, status: 403, headerKey: "X-Ratelimit-Remaining", headerVal: "0", body: `{"message":"rate limit"}`, wantErr: true},
+		{name: "rate limited 429 returns error without skip", repo: "owner/repo", number: 12, status: 429, headerKey: "Retry-After", headerVal: "60", body: `{"message":"too many requests"}`, wantErr: true},
+		{name: "server 500 error returns error without skip", repo: "owner/repo", number: 12, status: 500, body: `{}`, wantErr: true},
 		{name: "invalid json", repo: "owner/repo", number: 12, status: 200, body: `invalid`, wantErr: true},
 		{name: "ok", repo: "owner/repo", number: 12, status: 200, body: `{"state":"open"}`, wantOwner: "owner", wantFull: "owner/repo"},
-		{name: "bare repo resolves owner", repo: "aerial", number: 12, status: 200, body: `{"state":"open"}`, wantOwner: "azylman", wantFull: "azylman/aerial"},
+		{name: "bare repo resolves owner", repo: "aerial", number: 12, status: 200, body: `{"state":"open"}`, wantOwner: "example-owner", wantFull: "example-owner/aerial"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				if tc.headerKey != "" {
+					w.Header().Set(tc.headerKey, tc.headerVal)
+				}
 				w.WriteHeader(tc.status)
 				_, _ = w.Write([]byte(tc.body))
 			}))
 			defer srv.Close()
 			var exec *Executor
 			if !tc.nilExec {
-				exec = NewExecutor("", nil, nil, "", srv.Client())
+				exec = NewExecutor("", nil, nil, "", "example-owner", srv.Client())
 				exec.GitHubAPIURL = srv.URL
 			}
 			pr, owner, full, err := exec.fetchGitHubPullRequest(context.Background(), tc.repo, tc.number)
+			if tc.wantSkipped {
+				assert.ErrorIs(t, err, store.ErrPRTransitionSkipped)
+				return
+			}
 			if tc.wantErr {
 				assert.Error(t, err)
+				assert.NotErrorIs(t, err, store.ErrPRTransitionSkipped)
 				return
 			}
 			assert.NoError(t, err)
 			assert.NotNil(t, pr)
 			assert.Equal(t, tc.wantOwner, owner)
 			assert.Equal(t, tc.wantFull, full)
+		})
+	}
+}
+
+type stubRateLimitTransport struct {
+	resetAt time.Time
+}
+
+func (*stubRateLimitTransport) RoundTrip(*http.Request) (*http.Response, error) {
+	return nil, nil
+}
+
+func (s *stubRateLimitTransport) RateLimitResetAt() time.Time {
+	return s.resetAt
+}
+
+func TestExecutor_RateLimitDelay(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, 11, 21, 12, 0, 0, 0, time.UTC)
+	tests := []struct {
+		name      string
+		exec      *Executor
+		now       time.Time
+		wantDelay time.Duration
+	}{
+		{
+			name:      "nil executor",
+			exec:      nil,
+			now:       now,
+			wantDelay: 0,
+		},
+		{
+			name:      "nil http client",
+			exec:      &Executor{},
+			now:       now,
+			wantDelay: 0,
+		},
+		{
+			name:      "active rate limit delay",
+			exec:      &Executor{HTTPClient: &http.Client{Transport: &stubRateLimitTransport{resetAt: now.Add(5 * time.Minute)}}},
+			now:       now,
+			wantDelay: 5 * time.Minute,
+		},
+		{
+			name:      "past rate limit delay clamps to zero",
+			exec:      &Executor{HTTPClient: &http.Client{Transport: &stubRateLimitTransport{resetAt: now.Add(-5 * time.Minute)}}},
+			now:       now,
+			wantDelay: 0,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			assert.Equal(t, tc.wantDelay, tc.exec.RateLimitDelay(tc.now))
 		})
 	}
 }
@@ -134,7 +164,7 @@ func TestValidatePRHead(t *testing.T) {
 				_, _ = w.Write([]byte(tc.body))
 			}))
 			defer srv.Close()
-			exec := NewExecutor("", nil, nil, "", srv.Client())
+			exec := NewExecutor("", nil, nil, "", "example-owner", srv.Client())
 			exec.GitHubAPIURL = srv.URL
 			err := exec.ValidatePRHead(context.Background(), tc.repo, 12, tc.head)
 			if tc.wantSkipped {
@@ -146,6 +176,42 @@ func TestValidatePRHead(t *testing.T) {
 				return
 			}
 			assert.NoError(t, err)
+		})
+	}
+}
+
+func TestLivePRState(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name     string
+		status   int
+		body     string
+		wantHead string
+		wantOpen bool
+		wantErr  bool
+	}{
+		{"open pr", 200, `{"state":"open","merged":false,"head":{"sha":" abc123 "}}`, "abc123", true, false},
+		{"open pr without merged field", 200, `{"state":"open","head":{"sha":"abc123"}}`, "abc123", true, false},
+		{"closed pr", 200, `{"state":"closed","merged":false,"head":{"sha":"abc123"}}`, "abc123", false, false},
+		{"merged pr", 200, `{"state":"closed","merged":true,"head":{"sha":"abc123"}}`, "abc123", false, false},
+		{"missing pr reads closed", 404, `{"message":"Not Found"}`, "", false, false},
+		{"server error returned", 500, `{}`, "", false, true},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				assert.Equal(t, "/repos/example-owner/aerial/pulls/42", r.URL.Path)
+				w.WriteHeader(tc.status)
+				_, _ = w.Write([]byte(tc.body))
+			}))
+			defer srv.Close()
+			exec := NewExecutor("", nil, nil, "", "example-owner", srv.Client())
+			exec.GitHubAPIURL = srv.URL
+			head, open, err := exec.LivePRState(context.Background(), "aerial", 42)
+			assert.Equal(t, tc.wantErr, err != nil)
+			assert.Equal(t, tc.wantHead, head)
+			assert.Equal(t, tc.wantOpen, open)
 		})
 	}
 }
@@ -239,7 +305,7 @@ func TestValidateChunkPRAttachment(t *testing.T) {
 				_, _ = w.Write([]byte(tc.prBody))
 			}))
 			defer srv.Close()
-			exec := NewExecutor("", nil, nil, "", srv.Client())
+			exec := NewExecutor("", nil, nil, "", "example-owner", srv.Client())
 			exec.GitHubAPIURL = srv.URL
 			build := model.VanadisBuild{ID: "b", ThreadID: "th-1"}
 			chunk := model.VanadisChunk{ID: "c1"}

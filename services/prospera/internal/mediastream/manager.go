@@ -53,19 +53,18 @@ type SessionManagerOption func(*CallSessionManager)
 
 // CallSessionManager coordinates active Twilio Media Stream <-> Gemini Live sessions.
 type CallSessionManager struct {
-	mu             sync.RWMutex
-	cfgSrc         config.ConfigSource
-	store          store.Store
-	twilioClient   twilio.TwilioClient
-	consultClient  gemini.ContextConsultClient
-	tokenMgr       *twilio.StreamTokenManager
-	pacerInterval  time.Duration
-	geminiDialer   func(ctx context.Context, modelName string) (*websocket.Conn, error)
-	newSession     SessionFactory
-	sessions       map[string]Session
-	sessionWaiters map[string][]chan Session
-	recordings     map[string][]byte
-	upgrader       websocket.Upgrader
+	mu            sync.RWMutex
+	cfgSrc        config.ConfigSource
+	store         store.Store
+	twilioClient  twilio.TwilioClient
+	consultClient gemini.ContextConsultClient
+	tokenMgr      *twilio.StreamTokenManager
+	pacerInterval time.Duration
+	geminiDialer  func(ctx context.Context, modelName string) (*websocket.Conn, error)
+	newSession    SessionFactory
+	sessions      map[string]Session
+	recordings    map[string][]byte
+	upgrader      websocket.Upgrader
 }
 
 // NewCallSessionManager initializes a CallSessionManager.
@@ -78,19 +77,18 @@ func NewCallSessionManager(
 	opts ...SessionManagerOption,
 ) *CallSessionManager {
 	if tokenMgr == nil {
-		tokenMgr = twilio.NewStreamTokenManager(time.Now)
+		tokenMgr = twilio.NewStreamTokenManager(time.Now, nil)
 	}
 
 	m := &CallSessionManager{
-		cfgSrc:         cfgSrc,
-		store:          st,
-		twilioClient:   twilioClient,
-		consultClient:  consultClient,
-		tokenMgr:       tokenMgr,
-		pacerInterval:  20 * time.Millisecond,
-		sessions:       make(map[string]Session),
-		sessionWaiters: make(map[string][]chan Session),
-		recordings:     make(map[string][]byte),
+		cfgSrc:        cfgSrc,
+		store:         st,
+		twilioClient:  twilioClient,
+		consultClient: consultClient,
+		tokenMgr:      tokenMgr,
+		pacerInterval: 20 * time.Millisecond,
+		sessions:      make(map[string]Session),
+		recordings:    make(map[string][]byte),
 		upgrader: websocket.Upgrader{
 			CheckOrigin: func(r *http.Request) bool {
 				return true
@@ -102,20 +100,6 @@ func NewCallSessionManager(
 		opt(m)
 	}
 	return m
-}
-
-// WithPacerInterval overrides the outbound audio pacing interval.
-func WithPacerInterval(d time.Duration) SessionManagerOption {
-	return func(m *CallSessionManager) {
-		m.pacerInterval = d
-	}
-}
-
-// WithGeminiDialer overrides the Gemini Live dialer.
-func WithGeminiDialer(dialer func(ctx context.Context, modelName string) (*websocket.Conn, error)) SessionManagerOption {
-	return func(m *CallSessionManager) {
-		m.geminiDialer = dialer
-	}
 }
 
 // WithSessionFactory sets the factory used to construct live sessions for
@@ -169,13 +153,6 @@ func (m *CallSessionManager) RegisterSession(callID string, sess Session) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.sessions[callID] = sess
-	for _, ch := range m.sessionWaiters[callID] {
-		select {
-		case ch <- sess:
-		default:
-		}
-	}
-	delete(m.sessionWaiters, callID)
 }
 
 // DeregisterSession removes a session, snapshotting any recording first.
@@ -194,37 +171,6 @@ func (m *CallSessionManager) DeregisterSession(callID string) {
 		}
 	}
 	delete(m.sessions, callID)
-}
-
-// WaitForSession blocks until the session for callID registers or ctx ends.
-func (m *CallSessionManager) WaitForSession(ctx context.Context, callID string) (Session, error) {
-	m.mu.Lock()
-	if sess, ok := m.sessions[callID]; ok {
-		m.mu.Unlock()
-		return sess, nil
-	}
-	ch := make(chan Session, 1)
-	m.sessionWaiters[callID] = append(m.sessionWaiters[callID], ch)
-	m.mu.Unlock()
-
-	select {
-	case <-ctx.Done():
-		m.mu.Lock()
-		waiters := m.sessionWaiters[callID]
-		for i, w := range waiters {
-			if w == ch {
-				m.sessionWaiters[callID] = append(waiters[:i], waiters[i+1:]...)
-				break
-			}
-		}
-		if len(m.sessionWaiters[callID]) == 0 {
-			delete(m.sessionWaiters, callID)
-		}
-		m.mu.Unlock()
-		return nil, ctx.Err()
-	case sess := <-ch:
-		return sess, nil
-	}
 }
 
 // GetRecordingWAV returns and consumes the recorded WAV payload for callID, or snapshots an active session.

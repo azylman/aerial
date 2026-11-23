@@ -17,7 +17,10 @@ import (
 
 	restate "github.com/restatedev/sdk-go"
 
+	"github.com/azylman/aerial/pkg/eriwire"
 	"github.com/azylman/aerial/pkg/pubsub"
+	"github.com/azylman/aerial/pkg/strutil"
+	"github.com/azylman/aerial/services/vanadis-restate/internal/ericlient"
 	"github.com/azylman/aerial/services/vanadis-restate/internal/executor"
 	"github.com/azylman/aerial/services/vanadis-restate/internal/model"
 	"github.com/azylman/aerial/services/vanadis-restate/internal/store"
@@ -80,6 +83,9 @@ type StepOutput struct {
 	LaunchedMap    map[string]bool               `json:"launched_map,omitempty"`
 	Error          string                        `json:"error,omitempty"`
 	State          *model.BuildObjectState       `json:"state,omitempty"`
+	// ReconcileTargets mirrors the build step payload; deployment gate steps
+	// never touch other builds, so it stays empty here.
+	ReconcileTargets []store.SweptChunk `json:"reconcile_targets,omitempty"`
 }
 
 // Runtime is the Restate deployment state surface Gate operates on.
@@ -115,7 +121,7 @@ func NewGate(st Store, exec *executor.Executor) *Gate {
 }
 
 func revision(c model.VanadisChunk) string {
-	return store.FirstNonEmpty(strings.TrimSpace(c.MergeSHA), strings.TrimSpace(c.HeadSHA))
+	return strutil.FirstNonEmpty(strings.TrimSpace(c.MergeSHA), strings.TrimSpace(c.HeadSHA))
 }
 
 func nextAttempt(old Attempt, c model.VanadisChunk, start time.Time, retry bool) Attempt {
@@ -132,7 +138,7 @@ func eligible(c model.VanadisChunk) bool {
 func buildActive(status string) bool { return status == "" || status == statusRunning }
 
 func startAt(now time.Time, ev *pubsub.PRLifecycleEvent, c model.VanadisChunk) time.Time {
-	if ev != nil && ev.Repo == c.Repo && ev.PRNumber == c.PRNumber && store.FirstNonEmpty(ev.MergeSHA, ev.HeadSHA) == revision(c) && !ev.OccurredAt.IsZero() && ev.OccurredAt.Before(now) {
+	if ev != nil && ev.Repo == c.Repo && ev.PRNumber == c.PRNumber && strutil.FirstNonEmpty(ev.MergeSHA, ev.HeadSHA) == revision(c) && !ev.OccurredAt.IsZero() && ev.OccurredAt.Before(now) {
 		return ev.OccurredAt
 	}
 	return now
@@ -247,6 +253,13 @@ func (g *Gate) ExpireDeadline(rt Runtime, req DeploymentDeadlineRequest) error {
 		rt.ScheduleDeadline(req, a.Deadline.Sub(now))
 		return nil
 	}
+	if g.exec != nil && g.exec.RateLimitDelay(now) > 0 {
+		a.Deadline = now.Add(g.exec.RateLimitDelay(now) + time.Minute)
+		attempts[req.ChunkID] = a
+		rt.SetAttempts(attempts)
+		rt.ScheduleDeadline(req, a.Deadline.Sub(now))
+		return nil
+	}
 	out, err := rt.RunStep("deployment-deadline-delivery", func(ctx context.Context) (StepOutput, error) {
 		return g.DeliverDeadline(ctx, rt.Key(), a)
 	})
@@ -272,17 +285,20 @@ func (g *Gate) RecordDeploymentStart(ctx context.Context, buildID, chunkID strin
 	if err != nil {
 		return false, "", err
 	}
-	if build == nil || build.Status != statusRunning {
+	if build == nil || (build.Status != statusRunning && build.Status != statusFailed) {
 		return false, "", nil
 	}
 	for _, c := range chunks {
-		if c.ID != chunkID || revision(c) != store.FirstNonEmpty(ev.MergeSHA, ev.HeadSHA) {
+		if c.ID != chunkID || revision(c) != strutil.FirstNonEmpty(ev.MergeSHA, ev.HeadSHA) {
 			continue
 		}
 		if c.Status == statusDeployFailed {
 			return true, "", nil
 		}
-		if c.Status != statusMerged && c.Status != statusDeploying {
+		if c.Status == statusFailed && (c.Mode != "pr" || c.PRNumber <= 0) {
+			return false, "", nil
+		}
+		if c.Status != statusMerged && c.Status != statusDeploying && c.Status != statusFailed {
 			return false, "", nil
 		}
 		if ev.RolloutState == nil {
@@ -359,7 +375,19 @@ func (g *Gate) DeliverDeadline(ctx context.Context, buildID string, a Attempt) (
 		// Eri's dedup retention bounds that guarantee; delivery after retention may
 		// duplicate a wake if an earlier acceptance response was lost.
 		id := fmt.Sprintf("vanadis-deploy-deadline-%s-%d-%s-%d", c.ID, a.PRNumber, a.Revision, a.Generation)
-		e = g.exec.EriClient.DispatchAccepted(ctx, executor.BrainDispatchRequest{ID: id, Source: "discord", SessionID: "vanadis-deploy-deadline-" + c.ID, TargetID: build.ThreadID, Prompt: executor.FormatDeployFailurePrompt(ev)})
+		agent := strings.TrimSpace(build.Agent)
+		wakeCtx := ctx
+		if agent != "" {
+			wakeCtx = ericlient.WithAgent(ctx, agent)
+		}
+		e = g.exec.EriClient.DispatchAccepted(wakeCtx, eriwire.BrainDispatchRequest{
+			ID:        id,
+			Source:    "discord",
+			SessionID: "vanadis-deploy-deadline-" + c.ID,
+			TargetID:  build.ThreadID,
+			Prompt:    executor.FormatDeployFailurePrompt(ev),
+			Agent:     agent,
+		})
 		if e != nil {
 			result.Error = e.Error()
 		}

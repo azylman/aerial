@@ -16,6 +16,7 @@ import (
 	"github.com/google/uuid"
 	"go.opentelemetry.io/otel/codes"
 
+	"github.com/azylman/aerial/pkg/discordutil"
 	"github.com/azylman/aerial/pkg/pubsub"
 	"github.com/azylman/aerial/services/eri/pkg/db"
 	"github.com/azylman/aerial/services/eri/pkg/delivery"
@@ -104,33 +105,6 @@ func shouldReplaceWithTranscriptError(currentErr, currentStderr, transcriptErr s
 	return transcriptExact || !currentExact
 }
 
-func (te *turnExecution) handleRetryBackoff(attempt, maxAttempts int, errDetail, currentModel string) (shutdown bool) {
-	te.incrementTurnRetries(errDetail)
-	if attempt >= maxAttempts {
-		return false
-	}
-	backoff := time.Duration(attempt) * te.pool.cfg.BackoffBase
-	if te.statusUpdater != nil {
-		if isRateLimitError(errDetail) {
-			te.statusUpdater.SetCapacityBackoff(backoff)
-		} else {
-			te.statusUpdater.Reset()
-		}
-	}
-	select {
-	case <-time.After(backoff):
-		return false
-	case <-te.turnDone():
-		if te.isInterrupted() {
-			te.finalizeInterruptedTurn(currentModel)
-			return true
-		}
-		metrics.RecordTurnCompleted("cancelled", te.triggerType, currentModel, time.Since(te.execStart))
-		te.cancelBurstOnShutdown(outcomeFailed, true)
-		return true
-	}
-}
-
 func (te *turnExecution) resolveTurnOutcome(runCtx context.Context, turnRes *runner.TurnResult, execErr error) (runner.TurnOutcome, string) {
 	targetSess := ""
 	if te.lease != nil {
@@ -201,7 +175,7 @@ func (te *turnExecution) deliverSuccessAndFinalize(resp *runner.AgyResponse, acc
 }
 
 func compareSnowflakeIDs(a, b string) int {
-	if !IsNumericSnowflake(a) || !IsNumericSnowflake(b) {
+	if !discordutil.IsSnowflake(a) || !discordutil.IsSnowflake(b) {
 		return 0
 	}
 	if len(a) != len(b) {
@@ -223,9 +197,6 @@ func hasNewerSnowflakeInSlice(msgs []db.Message, triggerID string, burstIDs map[
 }
 
 func (te *turnExecution) hasNewerChannelActivity(triggerID string, burstIDs map[string]bool) bool {
-	if te.pool != nil && te.pool.hasNewerEnqueuedDiscordMessage(te.threadID, triggerID) {
-		return true
-	}
 	if s := te.store(); s != nil {
 		if recent, err := s.GetRecentThreadMessages(te.poolCtx(), te.threadID, 10); err == nil {
 			if hasNewerSnowflakeInSlice(recent, triggerID, burstIDs) {
@@ -237,7 +208,7 @@ func (te *turnExecution) hasNewerChannelActivity(triggerID string, burstIDs map[
 }
 
 func (te *turnExecution) resolveReplyToMessageID(deliveryTarget string) string {
-	if te == nil || te.isDispatch() || !IsNumericSnowflake(deliveryTarget) {
+	if te == nil || te.isDispatch() || !discordutil.IsSnowflake(deliveryTarget) {
 		return ""
 	}
 	te.activeSessionMu.Lock()
@@ -249,7 +220,7 @@ func (te *turnExecution) resolveReplyToMessageID(deliveryTarget string) string {
 	burstIDs := make(map[string]bool, len(burst))
 	for _, m := range burst {
 		burstIDs[m.ID] = true
-		if isDiscordMessage(m) && IsNumericSnowflake(m.ID) {
+		if isDiscordMessage(m) && discordutil.IsSnowflake(m.ID) {
 			triggerMsg = m
 			hasTrigger = true
 		}
@@ -346,7 +317,7 @@ func (te *turnExecution) resolveTokenChannel() string {
 	if tokenChannel == "" {
 		if te.triggerType == "http" || strings.HasPrefix(te.triggerType, "dispatch:") {
 			tokenChannel = te.triggerType
-		} else if !IsNumericSnowflake(te.threadID) && te.threadID != "" {
+		} else if !discordutil.IsSnowflake(te.threadID) && te.threadID != "" {
 			tokenChannel = te.threadID
 		}
 	}
@@ -384,39 +355,12 @@ func (te *turnExecution) isQuotaRetry() bool {
 	return strings.Contains(te.turnPrompt, "[QUOTA_RETRY]")
 }
 
-func (te *turnExecution) retryCapacityBlip(errDetail string, resetDur time.Duration, currentModel string, attempt int) bool {
-	te.incrementTurnRetries(errDetail)
-	delay := calculateCapacityBackoff(attempt, resetDur)
-	if te.pool != nil && te.pool.cfg.RetryDelayOverride > 0 {
-		delay = te.pool.cfg.RetryDelayOverride
-	}
-	if te.statusUpdater != nil {
-		te.statusUpdater.SetCapacityBackoff(delay)
-	}
-	cancelChan := te.turnDone()
-	select {
-	case <-time.After(delay):
-		return true
-	case <-cancelChan:
-		if te.isInterrupted() {
-			te.finalizeInterruptedTurn(currentModel)
-			return false
-		}
-		te.logf("[WorkerPool] Context cancelled during capacity blip backoff for thread %s", te.threadID)
-		te.stopIndicators()
-		te.cancelBurstOnShutdown("pending", false)
-		return false
-	}
-}
-
-func (te *turnExecution) handleCapacityBlip(errDetail string, resetDur time.Duration, currentModel string, attempt, maxAttempts int) bool {
-	te.logf("[WorkerPool] Capacity blip detected for thread %s on attempt %d/%d (reset=%v): %s.", te.threadID, attempt, maxAttempts, resetDur, errDetail)
-	if attempt < maxAttempts {
-		return te.retryCapacityBlip(errDetail, resetDur, currentModel, attempt)
-	}
-	te.logf("[WorkerPool] Capacity blip retry budget exhausted for thread %s after %d attempts", te.threadID, maxAttempts)
+// handleCapacityBlip fails a turn whose final attempt hit a capacity blip; earlier blips are
+// retried by the TurnRunner with capacityRetryDelay.
+func (te *turnExecution) handleCapacityBlip(errDetail string, resetDur time.Duration, currentModel string) bool {
+	te.logf("[WorkerPool] Capacity blip retry budget exhausted for thread %s (reset=%v): %s", te.threadID, resetDur, errDetail)
 	te.stopIndicators()
-	reason := fmt.Sprintf("[CAPACITY_EXHAUSTED reset_in=%v] %s", resetDur, sanitizeErrorText(errDetail))
+	reason := fmt.Sprintf("[CAPACITY_EXHAUSTED reset_in=%v] %s", resetDur, errDetail)
 	metrics.RecordRunnerError("capacity_exhausted", currentModel)
 	metrics.RecordTurnCompleted("capacity_exhausted", te.triggerType, currentModel, time.Since(te.execStart))
 	pauseMsg := notifier.FormatQuotaPauseMessage(resetDur, time.Now().UTC().Add(resetDur), false, false)
@@ -428,7 +372,7 @@ func (te *turnExecution) handleCapacityBlip(errDetail string, resetDur time.Dura
 func (te *turnExecution) handleQuotaPause(errDetail, stderr, currentModel, burstEffort string, attempt, maxAttempts int) bool {
 	resetDur, _ := runner.ExtractQuotaResetDuration(errDetail, stderr)
 	if runner.IsCapacityBlip(errDetail, stderr) || resetDur <= 5*time.Second {
-		return te.handleCapacityBlip(errDetail, resetDur, currentModel, attempt, maxAttempts)
+		return te.handleCapacityBlip(errDetail, resetDur, currentModel)
 	}
 	te.isQuotaPaused = true
 	if te.stopTyping != nil {
@@ -463,40 +407,9 @@ func (te *turnExecution) handleQuotaPause(errDetail, stderr, currentModel, burst
 	te.stopIndicators()
 	pauseMsg := notifier.FormatQuotaPauseMessage(resetDur, runAt, scheduled, isAlreadyRetry)
 	te.deliverQuotaNotice(pauseMsg, "quota pause notice")
-	reason := fmt.Sprintf("[QUOTA_PAUSED reset_in=%v scheduled=%t] %s", resetDur, scheduled, sanitizeErrorText(errDetail))
+	reason := fmt.Sprintf("[QUOTA_PAUSED reset_in=%v scheduled=%t] %s", resetDur, scheduled, errDetail)
 	te.failBurstWithStatus(outcomeFailed, reason, currentModel)
 	return false
-}
-
-func (te *turnExecution) handleYieldTrap(resp *runner.AgyResponse, exitCode int, stdout, stderr string, autoResumeCount *int, accumulatedUsage *runner.TokenUsage, promptToSend *string, currentModel string) bool {
-	isYield, taskCount := runner.IsYieldTrap(exitCode, stdout, stderr)
-	if !isYield {
-		return false
-	}
-	detectionSource := "stderr_signature"
-	if *autoResumeCount >= MaxYieldTrapAutoResumes {
-		te.logf("[YieldTrap] Circuit breaker tripped for thread %s in session %s after %d auto-resumptions (source=%s). Delivering final output.",
-			te.threadID, te.currentSessionID, *autoResumeCount, detectionSource)
-		metrics.RecordYieldTrap("circuit_breaker", detectionSource, currentModel)
-		metrics.RecordRunnerError("yield_trap_circuit_breaker", currentModel)
-		return false
-	}
-	*autoResumeCount++
-	accumulatedUsage.InputTokens += resp.Usage.InputTokens
-	accumulatedUsage.OutputTokens += resp.Usage.OutputTokens
-	accumulatedUsage.ThinkingTokens += resp.Usage.ThinkingTokens
-	accumulatedUsage.CacheReadTokens += resp.Usage.CacheReadTokens
-	accumulatedUsage.TotalTokens += resp.Usage.TotalTokens
-	accumulatedUsage.CacheCreationTokens += resp.Usage.CacheCreationTokens
-
-	if *promptToSend != YieldTrapResumePrompt && !strings.Contains(*promptToSend, "<SYSTEM_MESSAGE>") {
-		*promptToSend = YieldTrapResumePrompt
-	}
-	te.logf("[YieldTrap] Intercepted background command exit for thread %s in session %s (auto-resume %d/%d, source=%s, taskCount=%d): suppressing intermediate waiting output and auto-resuming turn.",
-		te.threadID, te.currentSessionID, *autoResumeCount, MaxYieldTrapAutoResumes, detectionSource, taskCount)
-	metrics.RecordYieldTrap("resumed", detectionSource, currentModel)
-	metrics.RecordRunnerError("yield_trap_intercepted", currentModel)
-	return true
 }
 
 func newDiscordTurnSink(statusUpdater *StatusUpdater) *runner.BufferingTurnSink {
@@ -542,6 +455,20 @@ func newDiscordTurnSink(statusUpdater *StatusUpdater) *runner.BufferingTurnSink 
 	})
 }
 
+// retryBackoff is the wait before retrying a transient failure of attempt: attempt * base.
+func retryBackoff(attempt int, base time.Duration) time.Duration {
+	return time.Duration(attempt) * base
+}
+
+// capacityRetryDelay is the wait before retrying a capacity blip of attempt; a positive
+// override (tests) replaces the progressive backoff.
+func capacityRetryDelay(attempt int, resetDur, override time.Duration) time.Duration {
+	if override > 0 {
+		return override
+	}
+	return calculateCapacityBackoff(attempt, resetDur)
+}
+
 // calculateCapacityBackoff computes progressive capacity backoff:
 // attempt * 30s floor (or resetDur if larger) + up to 3000ms jitter.
 func calculateCapacityBackoff(attempt int, resetDur time.Duration) time.Duration {
@@ -568,12 +495,11 @@ func (te *turnExecution) stopIndicators() {
 }
 
 func (te *turnExecution) failBurstWithStatus(turnStatus, errText, model string) {
-	sanitizedErr := sanitizeErrorText(errText)
 	te.turnStatus = turnStatus
-	te.turnError = sanitizedErr
+	te.turnError = errText
 	te.turnDurationMs = time.Since(te.execStart).Milliseconds()
 	te.finalized.Store(true)
-	te.finalizeBurstMessages(te.burst, db.StatusFailed, sanitizedErr, outcomeFailed, sanitizedErr, model, true, false)
+	te.finalizeBurstMessages(te.burst, db.StatusFailed, errText, outcomeFailed, errText, model, true, false)
 }
 
 func (te *turnExecution) completeAmbientMessage(m db.Message, info WakeInfo) {
@@ -597,7 +523,7 @@ func (te *turnExecution) cancelBurstOnShutdown(_ string, failScheduleRun bool) {
 // touching persisted message or dispatch state.
 func (te *turnExecution) markTurnCancelled(reason string) {
 	te.turnStatus = "cancelled"
-	te.turnError = sanitizeErrorText(reason)
+	te.turnError = reason
 	te.turnDurationMs = time.Since(te.execStart).Milliseconds()
 }
 
@@ -605,7 +531,7 @@ func buildFailureNotice(cfg WorkerPoolConfig, agyBin, apiKey, errDetail, stderr,
 	if isRateLimitError(errDetail, stderr) {
 		return notifier.ModelUnavailableMessage()
 	}
-	snippet := sanitizeErrorText(errDetail)
+	snippet := errDetail
 	if len([]rune(snippet)) > 300 {
 		snippet = string([]rune(snippet)[:300])
 	}

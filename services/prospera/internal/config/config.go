@@ -48,6 +48,10 @@ type Config struct {
 	MaxConcurrentCalls    int
 	AllowFrom             []string
 	NATSURL               string
+	RestatePort           string
+	RestateIngressURL     string
+	RestateAdminURL       string
+	RestateAdvertiseURL   string
 }
 
 // ConfigSource yields the live configuration snapshot. Callers read Current()
@@ -80,6 +84,10 @@ type ProsperaYAMLConfig struct {
 	MaxConcurrentCalls    int    `yaml:"max_concurrent_calls"`
 	TwilioAccountSID      string `yaml:"twilio_account_sid"`
 	TwilioFromNumber      string `yaml:"twilio_from_number"`
+	RestatePort           string `yaml:"restate_port"`
+	RestateIngressURL     string `yaml:"restate_ingress_url"`
+	RestateAdminURL       string `yaml:"restate_admin_url"`
+	RestateAdvertiseURL   string `yaml:"restate_advertise_url"`
 }
 
 var e164Regex = regexp.MustCompile(`^\+[1-9]\d{1,14}$`)
@@ -150,11 +158,6 @@ func parseAllowFrom(raw string) ([]string, error) {
 	return allowed, nil
 }
 
-// LoadConfig loads and strictly validates configuration from the file at path using os.Getenv.
-func LoadConfig(path string) (*Config, error) {
-	return LoadConfigFile(path, os.Getenv)
-}
-
 func validateProsperaYAML(ycfg ProsperaYAMLConfig, cleanPath string, eriURL string) error {
 	if strings.TrimSpace(ycfg.Port) == "" {
 		return fmt.Errorf("config: port is required in %s", cleanPath)
@@ -190,6 +193,41 @@ func validateProsperaYAML(ycfg ProsperaYAMLConfig, cleanPath string, eriURL stri
 		return fmt.Errorf("config: max_concurrent_calls must be positive in %s", cleanPath)
 	}
 	return nil
+}
+
+func resolveRestateConfig(ycfg ProsperaYAMLConfig, getenv func(string) string) (port, ingressURL, adminURL, advertiseURL string) {
+	port = strings.TrimSpace(getenv("RESTATE_PORT"))
+	if port == "" {
+		port = strings.TrimSpace(ycfg.RestatePort)
+	}
+	if port == "" {
+		port = "9080"
+	}
+
+	ingressURL = strings.TrimRight(strings.TrimSpace(getenv("RESTATE_INGRESS_URL")), "/")
+	if ingressURL == "" {
+		ingressURL = strings.TrimRight(strings.TrimSpace(ycfg.RestateIngressURL), "/")
+	}
+	if ingressURL == "" {
+		ingressURL = "http://restate.aerial:8080"
+	}
+
+	adminURL = strings.TrimRight(strings.TrimSpace(getenv("RESTATE_ADMIN_URL")), "/")
+	if adminURL == "" {
+		adminURL = strings.TrimRight(strings.TrimSpace(ycfg.RestateAdminURL), "/")
+	}
+	if adminURL == "" {
+		adminURL = "http://restate.aerial:9070"
+	}
+
+	advertiseURL = strings.TrimRight(strings.TrimSpace(getenv("RESTATE_ADVERTISE_URL")), "/")
+	if advertiseURL == "" {
+		advertiseURL = strings.TrimRight(strings.TrimSpace(ycfg.RestateAdvertiseURL), "/")
+	}
+	if advertiseURL == "" {
+		advertiseURL = "http://prospera.default.svc.cluster.local:9080"
+	}
+	return port, ingressURL, adminURL, advertiseURL
 }
 
 // LoadConfigFile loads and strictly validates configuration from the YAML file at path and secrets from getenv.
@@ -255,6 +293,8 @@ func LoadConfigFile(path string, getenv func(string) string) (*Config, error) {
 		natsURL = strings.TrimSpace(ycfg.NATSURL)
 	}
 
+	restatePort, restateIngressURL, restateAdminURL, restateAdvertiseURL := resolveRestateConfig(ycfg, getenv)
+
 	return &Config{
 		Port:                  strings.TrimSpace(ycfg.Port),
 		NATSURL:               natsURL,
@@ -276,6 +316,10 @@ func LoadConfigFile(path string, getenv func(string) string) (*Config, error) {
 		CallbackWindowMinutes: ycfg.CallbackWindowMinutes,
 		MaxConcurrentCalls:    ycfg.MaxConcurrentCalls,
 		AllowFrom:             allowList,
+		RestatePort:           restatePort,
+		RestateIngressURL:     restateIngressURL,
+		RestateAdminURL:       restateAdminURL,
+		RestateAdvertiseURL:   restateAdvertiseURL,
 	}, nil
 }
 
@@ -284,6 +328,7 @@ func LoadConfigFile(path string, getenv func(string) string) (*Config, error) {
 // consult client endpoints) and therefore can only take effect after a restart.
 func RestartRequired(old, next *Config) bool {
 	return old.Port != next.Port ||
+		old.RestatePort != next.RestatePort ||
 		old.DatabaseURL != next.DatabaseURL ||
 		old.TwilioAccountSID != next.TwilioAccountSID ||
 		old.TwilioAuthToken != next.TwilioAuthToken ||

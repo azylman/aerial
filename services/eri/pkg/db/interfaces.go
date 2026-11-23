@@ -16,16 +16,6 @@ type DBTX interface {
 
 var ErrMessageAlreadyClaimed = errors.New("message already claimed")
 
-// SessionActivityStats summarizes database-level activity timestamps for session lifecycle decisions.
-type SessionActivityStats struct {
-	InternalSessionID             string    `json:"internal_session_id"`
-	TurnCount                     int       `json:"turn_count"`
-	SessionUpdatedAt              time.Time `json:"session_updated_at"`
-	CompletedTurns                int64     `json:"completed_turns"`
-	LastMessageAt                 time.Time `json:"last_message_at"`
-	LastCompletedMessageCreatedAt time.Time `json:"last_completed_message_created_at"`
-}
-
 // TurnTelemetry encapsulates execution timing and token breakdown for messages and dispatches.
 type TurnTelemetry struct {
 	DurationMs      int64 `json:"duration_ms,omitempty"`
@@ -36,21 +26,33 @@ type TurnTelemetry struct {
 	TotalTokens     int   `json:"total_tokens,omitempty"`
 }
 
+// AttemptStart reports the result of BeginMessageAttempt / BeginDispatchAttempt.
+// Reentry is true when the row's retry_count already reached the requested ordinal
+// (the attempt started before a crash), in which case restart_count was incremented.
+type AttemptStart struct {
+	Reentry      bool `json:"reentry"`
+	RetryCount   int  `json:"retry_count"`
+	RestartCount int  `json:"restart_count"`
+}
+
+// ErrRecordNotFound is returned by by-ID record operations when the row does not exist.
+var ErrRecordNotFound = errors.New("record not found")
+
 // MessageStore handles message queue lifecycle and turn history.
 type MessageStore interface {
 	InsertMessage(ctx context.Context, msg Message) error
 	UpdateMessageStatus(ctx context.Context, id, status, errorMsg string, telemetry ...TurnTelemetry) error
 	UpdateMessageCompleted(ctx context.Context, id, responseText, conversationID string, telemetry ...TurnTelemetry) error
-	IncrementMessageRetry(ctx context.Context, id, errorMsg string) error
-	ResetMessageToPendingWithRestart(ctx context.Context, id, reason string) error
-	GetPendingOrProcessingMessages(ctx context.Context, limit int) ([]Message, error)
 	GetMessage(ctx context.Context, id string) (*Message, error)
 	MessageExists(ctx context.Context, id string) (bool, error)
 	ClaimPendingMessage(ctx context.Context, id string) (bool, error)
-	GetActiveRecentThreadIDs(ctx context.Context, since time.Duration) ([]string, error)
 	GetRecentThreadMessages(ctx context.Context, threadID string, limit int) ([]Message, error)
-	HasActiveThreadTurn(ctx context.Context, threadID string) (bool, error)
 	GetActiveTasks(ctx context.Context, filter ...TasksFilter) ([]ActiveTask, error)
+	GetMessagesByID(ctx context.Context, ids []string) ([]Message, error)
+	FailMessagesIfActive(ctx context.Context, ids []string, reason string) ([]string, error)
+	FailMessagesIfPending(ctx context.Context, ids []string, reason string) ([]string, error)
+	RequeueProcessingMessages(ctx context.Context, ids []string, reason string) ([]string, error)
+	BeginMessageAttempt(ctx context.Context, id string, ordinal int) (AttemptStart, error)
 }
 
 // DispatchStore handles headless background dispatch execution.
@@ -60,12 +62,11 @@ type DispatchStore interface {
 	ClaimPendingDispatch(ctx context.Context, id string) (bool, error)
 	UpdateDispatchStatus(ctx context.Context, id, status, errorMsg string, telemetry ...TurnTelemetry) error
 	UpdateDispatchCompleted(ctx context.Context, id, responseText, conversationID string, telemetry ...TurnTelemetry) error
-	IncrementDispatchRetry(ctx context.Context, id, errorMsg string) error
-	ResetDispatchToPendingWithRestart(ctx context.Context, id, reason string) error
-	GetPendingOrProcessingDispatches(ctx context.Context, limit int) ([]Dispatch, error)
 	GetRecentSessionDispatches(ctx context.Context, sessionID string, limit int) ([]Dispatch, error)
-	HasActiveDispatchTurn(ctx context.Context, sessionID, id string) (bool, error)
-	CancelPendingDispatches(ctx context.Context, dispatchID, buildID, reason string) ([]string, error)
+	FailDispatchesIfActive(ctx context.Context, ids []string, reason string) ([]string, error)
+	FailDispatchesIfPending(ctx context.Context, ids []string, reason string) ([]string, error)
+	BeginDispatchAttempt(ctx context.Context, id string, ordinal int) (AttemptStart, error)
+	ListActiveDispatchSessionKeys(ctx context.Context, dispatchID, buildID string) ([]string, error)
 }
 
 // SessionStore handles thread turn counts and session rotations.
@@ -79,7 +80,6 @@ type SessionStore interface {
 	RotateSessionID(ctx context.Context, sessionKey, newSessionID string) error
 	GetThreadSummary(ctx context.Context, threadID string) (summary string, lastSummarizedMsgID string, err error)
 	SaveThreadSummary(ctx context.Context, threadID, summary, lastSummarizedMsgID string) error
-	GetSessionActivityStats(ctx context.Context, threadID string) (*SessionActivityStats, error)
 }
 
 // SessionSummary encapsulates macro-level session summaries, embeddings, and sync metadata.
@@ -130,7 +130,6 @@ type TranscriptStore interface {
 	GetSessionSyncStates(ctx context.Context) (map[string]SessionSyncState, error)
 	GetKnownTurnSessionIDs(ctx context.Context) (map[string]bool, error)
 	UpsertSessionSummary(ctx context.Context, summary SessionSummary) error
-	SetSessionEngine(ctx context.Context, sessionID, engine string) error
 	BatchInsertTranscriptSteps(ctx context.Context, steps []TranscriptStep) error
 	BackfillToolKinds(ctx context.Context, mapper func(toolName string) string) (int64, error)
 	BackfillSessionEngines(ctx context.Context, infer func(toolNames []string) string) (int64, error)
@@ -156,5 +155,4 @@ type Store interface {
 	MessageStore
 	DispatchStore
 	SessionStore
-	AcquireLeaderLock(ctx context.Context) (func(), error)
 }

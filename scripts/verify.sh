@@ -33,6 +33,8 @@ case "$0" in
 esac
 SCRIPT_DIR="$(cd "$SCRIPT_DIR" && (pwd -W 2>/dev/null || pwd))"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && (pwd -W 2>/dev/null || pwd))"
+# shellcheck source=lib/hermetic-go-env.sh
+. "$SCRIPT_DIR/lib/hermetic-go-env.sh"
 
 if [ "$MODE" != "staged" ]; then
     echo "⚡ [Aerial Verify] Running $MODE verification checks..."
@@ -275,8 +277,8 @@ run_deadcode() {
             if [ "$svc" = "services/eri" ]; then
                 # services/eri exports shared worker packages (pkg/env, pkg/runner, pkg/mcp) to services/eri-restate,
                 # while legacy queue recovery fallbacks are scheduled for deletion in chunk c09f.
-                # Scope deadcode to services/eri root package during the Restate transition.
-                filter_flag="-filter=^github\.com/azylman/aerial/services/eri$"
+                # Scope deadcode to services/eri root package and its internal domain packages during the Restate transition.
+                filter_flag="-filter=^github\.com/azylman/aerial/services/eri($|/internal/)"
             fi
             # shellcheck disable=SC2086
             dead_prod=$(cd "$svc" && "$DEADCODE_BIN" $filter_flag $main_pkgs 2>&1) || {
@@ -320,31 +322,7 @@ run_go_test() {
             race_flag="-race"
         fi
         if has_cmd go; then
-            (cd "$svc" && env -i \
-                ${PATH:+PATH="$PATH"} \
-                ${HOME:+HOME="$HOME"} \
-                ${GOROOT:+GOROOT="$GOROOT"} \
-                ${GOPATH:+GOPATH="$GOPATH"} \
-                ${GOCACHE:+GOCACHE="$GOCACHE"} \
-                ${GOMODCACHE:+GOMODCACHE="$GOMODCACHE"} \
-                ${GOLANGCI_LINT_CACHE:+GOLANGCI_LINT_CACHE="$GOLANGCI_LINT_CACHE"} \
-                ${GOFLAGS:+GOFLAGS="$GOFLAGS"} \
-                ${TMPDIR:+TMPDIR="$TMPDIR"} \
-                ${SystemRoot:+SystemRoot="$SystemRoot"} \
-                ${SYSTEMROOT:+SYSTEMROOT="$SYSTEMROOT"} \
-                ${USERPROFILE:+USERPROFILE="$USERPROFILE"} \
-                ${HOMEDRIVE:+HOMEDRIVE="$HOMEDRIVE"} \
-                ${HOMEPATH:+HOMEPATH="$HOMEPATH"} \
-                ${TMP:+TMP="$TMP"} \
-                ${TEMP:+TEMP="$TEMP"} \
-                ${LOCALAPPDATA:+LOCALAPPDATA="$LOCALAPPDATA"} \
-                ${APPDATA:+APPDATA="$APPDATA"} \
-                ${COMSPEC:+COMSPEC="$COMSPEC"} \
-                ${PATHEXT:+PATHEXT="$PATHEXT"} \
-                MSYS_NO_PATHCONV=1 \
-                LANG="${LANG:-en_US.UTF-8}" \
-                LC_ALL="${LC_ALL:-en_US.UTF-8}" \
-                GIT_TERMINAL_PROMPT=0 \
+            (cd "$svc" && hermetic_go \
                 CGO_ENABLED="$cgo_val" \
                 go test ${race_flag:+"$race_flag"} -trimpath ./...)
         elif has_docker; then
@@ -386,31 +364,7 @@ run_go_pkg_coverage() {
             race_flag="-race"
         fi
         prof_file=$(mktemp /tmp/aerial-staged-cov.XXXXXX)
-        if ! (cd "$svc" && env -i \
-            ${PATH:+PATH="$PATH"} \
-            ${HOME:+HOME="$HOME"} \
-            ${GOROOT:+GOROOT="$GOROOT"} \
-            ${GOPATH:+GOPATH="$GOPATH"} \
-            ${GOCACHE:+GOCACHE="$GOCACHE"} \
-            ${GOMODCACHE:+GOMODCACHE="$GOMODCACHE"} \
-            ${GOLANGCI_LINT_CACHE:+GOLANGCI_LINT_CACHE="$GOLANGCI_LINT_CACHE"} \
-            ${GOFLAGS:+GOFLAGS="$GOFLAGS"} \
-            ${TMPDIR:+TMPDIR="$TMPDIR"} \
-            ${SystemRoot:+SystemRoot="$SystemRoot"} \
-            ${SYSTEMROOT:+SYSTEMROOT="$SYSTEMROOT"} \
-            ${USERPROFILE:+USERPROFILE="$USERPROFILE"} \
-            ${HOMEDRIVE:+HOMEDRIVE="$HOMEDRIVE"} \
-            ${HOMEPATH:+HOMEPATH="$HOMEPATH"} \
-            ${TMP:+TMP="$TMP"} \
-            ${TEMP:+TEMP="$TEMP"} \
-            ${LOCALAPPDATA:+LOCALAPPDATA="$LOCALAPPDATA"} \
-            ${APPDATA:+APPDATA="$APPDATA"} \
-            ${COMSPEC:+COMSPEC="$COMSPEC"} \
-            ${PATHEXT:+PATHEXT="$PATHEXT"} \
-            MSYS_NO_PATHCONV=1 \
-            LANG="${LANG:-en_US.UTF-8}" \
-            LC_ALL="${LC_ALL:-en_US.UTF-8}" \
-            GIT_TERMINAL_PROMPT=0 \
+        if ! (cd "$svc" && hermetic_go \
             CGO_ENABLED="$cgo_val" \
             go test ${race_flag:+"$race_flag"} -trimpath -timeout "${AERIAL_TEST_TIMEOUT:-180s}" -coverprofile="$prof_file" "$targetPkg"); then
             rm -f "$prof_file"
@@ -598,72 +552,6 @@ check_code_health() {
     fi
 }
 
-# Scan the staged (and branch) diff for registered Infisical secret values and
-# built-in pattern rules via eri's loopback guard endpoint. Only eri can read
-# /secrets, so the scan must go through it; where eri is absent (CI, human
-# machines) the check is skipped. Secret samples, patterns, and the deny reason
-# are never printed — only file:line [category].
-check_staged_secrets() {
-    if [ -z "${AERIAL_INTERNAL_ERI_URL:-}" ]; then
-        echo "ℹ️  [Aerial Verify] Registered-secret scan skipped (no eri: AERIAL_INTERNAL_ERI_URL unset)."
-        return 0
-    fi
-    if ! has_cmd jq || ! has_cmd curl; then
-        echo "🚨 [Aerial Verify] Registered-secret scan requires jq and curl when AERIAL_INTERNAL_ERI_URL is set." >&2
-        exit 1
-    fi
-
-    local base=""
-    if git rev-parse --verify origin/main >/dev/null 2>&1 && [ "$(git rev-parse --abbrev-ref HEAD 2>/dev/null || true)" != "main" ]; then
-        base=$(git merge-base origin/main HEAD 2>/dev/null || true)
-    fi
-
-    local tmp
-    tmp=$(mktemp -d /tmp/aerial-secret-scan.XXXXXX)
-    # shellcheck disable=SC2086 # $base is empty or a single SHA
-    if ! git diff --cached $base > "$tmp/diff"; then
-        rm -rf "$tmp"
-        echo "🚨 [Aerial Verify] Registered-secret scan could not compute the staged diff." >&2
-        exit 1
-    fi
-    if [ ! -s "$tmp/diff" ]; then
-        rm -rf "$tmp"
-        return 0
-    fi
-
-    local code
-    code=$(jq -Rs '{diff: ., source_label: "verify", check_test_files: false, ignore_internal_domain: true}' < "$tmp/diff" |
-        curl -sS --max-time 10 -o "$tmp/resp" -w '%{http_code}' -H 'Content-Type: application/json' \
-            --data-binary @- "${AERIAL_INTERNAL_ERI_URL%/}/internal/guard/scan" 2>"$tmp/err") || code="curl-failed"
-    if [ "$code" != "200" ]; then
-        echo "🚨 [Aerial Verify] Registered-secret scan failed against eri (status: $code)." >&2
-        [ -s "$tmp/err" ] && sed 's/^/   /' "$tmp/err" >&2
-        rm -rf "$tmp"
-        exit 1
-    fi
-
-    local decision
-    decision=$(jq -er '.decision | select(. == "allow" or . == "deny")' < "$tmp/resp" 2>/dev/null) || decision=""
-    case "$decision" in
-        allow)
-            rm -rf "$tmp"
-            return 0
-            ;;
-        deny)
-            echo "🚨 [Aerial Verify] Registered secret or credential pattern detected in staged diff:" >&2
-            jq -r '.violations[]? | "   • \(.file):\(.lineNum) [\(.category)]"' < "$tmp/resp" >&2 || true
-            echo "   Remove the value (sample withheld) and re-stage before submitting." >&2
-            rm -rf "$tmp"
-            exit 1
-            ;;
-        *)
-            echo "🚨 [Aerial Verify] Registered-secret scan returned an unparseable response from eri." >&2
-            rm -rf "$tmp"
-            exit 1
-            ;;
-    esac
-}
-
 run_atlas_validate() {
     has_cmd atlas || return 0
     find . -maxdepth 3 -name "atlas.hcl" 2>/dev/null | sort | while IFS= read -r hcl; do
@@ -709,7 +597,6 @@ if [ "$MODE" = "staged" ]; then
     check_no_imperative_ddl
     check_synapse_zero_vanadis
     check_code_health
-    check_staged_secrets
 
     lint_all_go=0
     if echo "$CHANGED_FILES" | grep -q -E '^(pkg/|\.golangci\.yml|scripts/verify\.sh)$'; then
@@ -725,7 +612,7 @@ if [ "$MODE" = "staged" ]; then
         if [ "$lint_all_go" -eq 1 ]; then
             run_golangci_lint "$svc" "./..."
         elif [ "$svc_staged" -eq 1 ]; then
-            pkgs=$(echo "$CHANGED_FILES" | grep "^$svc/.*\.go$" | sed "s|^$svc/||" | while read -r f; do dirname "$f"; done | sort -u)
+            pkgs=$(echo "$CHANGED_FILES" | grep "^$svc/.*\.go$" | grep -v -E "(^|/)testdata/" | sed "s|^$svc/||" | while read -r f; do dirname "$f"; done | sort -u)
             staged_pkg_targets=""
             for p in $pkgs; do
                 if [ -d "$svc/$p" ]; then
@@ -743,7 +630,7 @@ if [ "$MODE" = "staged" ]; then
             fi
         fi
         if [ "$svc_staged" -eq 1 ]; then
-            pkgs=$(echo "$CHANGED_FILES" | grep "^$svc/.*\.go$" | sed "s|^$svc/||" | while read -r f; do dirname "$f"; done | sort -u)
+            pkgs=$(echo "$CHANGED_FILES" | grep "^$svc/.*\.go$" | grep -v -E "(^|/)testdata/" | sed "s|^$svc/||" | while read -r f; do dirname "$f"; done | sort -u)
             if [ -n "$pkgs" ]; then
                 run_deadcode "$svc"
             fi

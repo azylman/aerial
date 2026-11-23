@@ -143,25 +143,6 @@ const status: ClusterResponse = {
   services,
   deployments,
   quick_launch_links: quickLaunchLinks,
-  git_sync: {
-    status: 'lagging',
-    max_lag_seconds: 75,
-    last_sync_time: iso(-75),
-    repos: {
-      aerial: {
-        repo: 'aerial', github_repo: 'azylman/aerial', disk_commit: 'a1b2c3d', disk_commit_time: iso(-400),
-        remote_commit: 'b2c3d4e', remote_commit_time: iso(-325), time_lag_seconds: 75, sync_status: 'lagging', last_sync_time: iso(-75),
-      },
-      'aerial-config': {
-        repo: 'aerial-config', github_repo: 'azylman/aerial-config', disk_commit: 'f607182', disk_commit_time: iso(-7200),
-        remote_commit: 'f607182', remote_commit_time: iso(-7200), time_lag_seconds: 0, sync_status: 'synced', last_sync_time: iso(-10),
-      },
-    },
-    reconciliation: {
-      active: true, state: 'pulling', stage: 'pulling', trigger: 'image_poll', target_services: ['console'],
-      commit_sha: 'a1b2c3d', started_at: iso(-30), completed_at: '0001-01-01T00:00:00Z',
-    },
-  },
   ongoing_deploy: 'console',
   is_deploying: true,
 };

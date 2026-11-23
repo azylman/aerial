@@ -10,7 +10,7 @@ help: ## Display available targets
 test: ## Run unit tests across all Go microservices and Frontend
 	@for svc in $(SERVICES); do \
 		echo "=== Testing $$svc ==="; \
-		(cd $$svc && go test -v ./...) || exit 1; \
+		(. ./scripts/lib/hermetic-go-env.sh && cd $$svc && hermetic_go go test -v ./...) || exit 1; \
 	done
 	@$(MAKE) --no-print-directory web-theme
 	@$(MAKE) --no-print-directory console-ui

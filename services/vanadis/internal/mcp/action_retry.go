@@ -65,13 +65,14 @@ func (h *Handler) RetryActionChunk(ctx context.Context, req RetryActionChunkRequ
 	if err := validateRetryActionRequest(req); err != nil {
 		return nil, err
 	}
-	if err := h.authorizeBuildMutation(ctx, req.BuildID); err != nil {
+	buildService, err := h.authorizeBuildMutation(ctx, req.BuildID)
+	if err != nil {
 		return nil, err
 	}
 	if h == nil || !h.RestateEnabled || h.Restate == nil || strings.TrimSpace(h.Restate.IngressURL()) == "" {
 		return nil, ErrRetryIngressUnavailable
 	}
-	if err := h.ValidateRetryEligibility(ctx, req); err != nil {
+	if err = h.ValidateRetryEligibility(ctx, req); err != nil {
 		return nil, err
 	}
 	body, err := json.Marshal(req)
@@ -79,7 +80,7 @@ func (h *Handler) RetryActionChunk(ctx context.Context, req RetryActionChunkRequ
 		return nil, err
 	}
 	var result RetryActionChunkResult
-	if err := h.Restate.CallRetryAction(ctx, req.BuildID, body, retryActionIdempotencyKey(req), &result); err != nil {
+	if err := h.Restate.CallRetryAction(ctx, buildService, req.BuildID, body, retryActionIdempotencyKey(req), &result); err != nil {
 		return nil, err
 	}
 	if !result.Accepted || result.BuildID != req.BuildID || result.ChunkID != req.ChunkID || result.DispatchID == "" {
@@ -161,7 +162,7 @@ func (h *Handler) ValidateRetryEligibility(ctx context.Context, req RetryActionC
 	if parseErr == nil && generation >= 0 && generation < c.StallNudges && req.ExpectedDispatchID == fmt.Sprintf("vanadis-%s-turn-%d", c.ID, generation) {
 		return nil
 	}
-	if c.PRNumber != 0 || b.Status != statusFailed || c.Status != statusFailed || c.StallNudges >= 2147483647 || req.ExpectedDispatchID != fmt.Sprintf("vanadis-%s-turn-%d", c.ID, c.StallNudges) {
+	if (b.Status != statusRunning && b.Status != statusFailed) || c.Status != statusFailed || c.StallNudges >= 2147483647 || req.ExpectedDispatchID != fmt.Sprintf("vanadis-%s-turn-%d", c.ID, c.StallNudges) {
 		return model.ErrBuildConflict
 	}
 	if !retryInstructionsMatch(req, c) {
@@ -174,11 +175,6 @@ func validateRetrySiblings(c model.VanadisChunk, chunks []model.VanadisChunk) er
 	descendants := retryDescendants(c.ID, chunks)
 	for _, other := range chunks {
 		if other.ID != c.ID && descendants[other.ID] && other.Status != statusPending {
-			return model.ErrBuildConflict
-		}
-	}
-	for _, other := range chunks {
-		if other.ID != c.ID && other.Status != statusCompleted && other.Status != statusPending {
 			return model.ErrBuildConflict
 		}
 	}

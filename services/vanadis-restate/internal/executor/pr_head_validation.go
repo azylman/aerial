@@ -3,12 +3,15 @@ package executor
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/url"
 	"strings"
 	"time"
 
+	"github.com/azylman/aerial/pkg/githubapi"
+	"github.com/azylman/aerial/pkg/githubauth"
 	"github.com/azylman/aerial/pkg/pubsub"
 	"github.com/azylman/aerial/services/vanadis-restate/internal/model"
 	"github.com/azylman/aerial/services/vanadis-restate/internal/store"
@@ -41,37 +44,39 @@ func (e *Executor) fetchGitHubPullRequest(ctx context.Context, repo string, numb
 	if e == nil || e.HTTPClient == nil {
 		return nil, "", "", fmt.Errorf("PR head verification unavailable")
 	}
-	repo = strings.TrimSpace(repo)
-	if repo != "" && !strings.Contains(repo, "/") {
-		repo = defaultRepoOwner + "/" + repo
-	}
+	repo = githubapi.QualifyRepo(e.gitHubOwner, repo)
 	parts := strings.Split(repo, "/")
 	if len(parts) != 2 || parts[0] == "" || parts[1] == "" || number <= 0 {
 		return nil, "", "", fmt.Errorf("PR head verification requires repository and PR number")
 	}
 	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
-	req, err := e.newGitHubRequest(ctx, http.MethodGet, fmt.Sprintf("/repos/%s/%s/pulls/%d", url.PathEscape(parts[0]), url.PathEscape(parts[1]), number), nil)
+	req, err := githubapi.NewRequest(ctx, e.GitHubAPIURL, e.gitHubToken, http.MethodGet, fmt.Sprintf("/repos/%s/%s/pulls/%d", url.PathEscape(parts[0]), url.PathEscape(parts[1]), number), nil)
 	if err != nil {
 		return nil, "", "", err
 	}
-	resp, err := e.HTTPClient.Do(req)
-	if err != nil {
-		return nil, "", "", fmt.Errorf("verify PR head: %w", err)
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		return nil, "", "", fmt.Errorf("verify PR head: HTTP %d", resp.StatusCode)
-	}
 	var pr gitHubPullRequest
-	if err = json.NewDecoder(resp.Body).Decode(&pr); err != nil {
-		return nil, "", "", fmt.Errorf("decode PR head: %w", err)
+	if err := githubapi.GetJSON(ctx, e.HTTPClient, req, 2<<20, &pr); err != nil {
+		var se *githubapi.StatusError
+		if errors.As(err, &se) && !se.RateLimited && (se.StatusCode == http.StatusNotFound || se.StatusCode == http.StatusGone) {
+			return nil, "", "", store.ErrPRTransitionSkipped
+		}
+		return nil, "", "", err
 	}
 	return &pr, parts[0], parts[0] + "/" + parts[1], nil
 }
 
+// RateLimitDelay returns the remaining duration until the current GitHub rate limit resets, or 0 if not rate-limited.
+func (e *Executor) RateLimitDelay(now time.Time) time.Duration {
+	if e == nil || e.HTTPClient == nil {
+		return 0
+	}
+	resetAt := githubauth.RateLimitResetAt(e.HTTPClient.Transport)
+	return max(0, resetAt.Sub(now))
+}
+
 // ValidatePRHead checks GitHub's current PR rather than trusting webhook delivery
-// order. API errors remain retryable; a superseded event is safely skipped.
+// order. API errors remain retryable; non-existent PRs (404/410) or superseded events are safely skipped.
 func (e *Executor) ValidatePRHead(ctx context.Context, repo string, number int, head string) error {
 	pr, _, _, err := e.fetchGitHubPullRequest(ctx, repo, number)
 	if err != nil {
@@ -91,6 +96,27 @@ func (e *Executor) ValidatePRHead(ctx context.Context, repo string, number int, 
 		return store.ErrPRTransitionSkipped
 	}
 	return nil
+}
+
+// LivePRState reads GitHub's current head SHA and whether the PR is still open
+// and unmerged. A missing PR (404/410) reports closed without an error; other
+// API failures are returned for the caller to classify.
+func (e *Executor) LivePRState(ctx context.Context, repo string, number int) (string, bool, error) {
+	pr, _, _, err := e.fetchGitHubPullRequest(ctx, repo, number)
+	if errors.Is(err, store.ErrPRTransitionSkipped) {
+		return "", false, nil
+	}
+	if err != nil {
+		return "", false, err
+	}
+	open := pr.State == "open" && (pr.Merged == nil || !*pr.Merged)
+	return strings.TrimSpace(pr.Head.SHA), open, nil
+}
+
+// HasRoboRevOverride reports whether `aerial-pr.sh override-roborev` recorded
+// an override for headSHA on the PR.
+func (e *Executor) HasRoboRevOverride(ctx context.Context, repo string, number int, headSHA string) (bool, error) {
+	return e.ciClient().HasRoboRevOverrideChecked(ctx, repo, number, headSHA)
 }
 
 func isTrustedPRAuthor(login, association, owner string) bool {

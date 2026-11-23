@@ -5,10 +5,15 @@ import (
 	"errors"
 	"log/slog"
 	"strings"
+	"time"
 
 	restate "github.com/restatedev/sdk-go"
 
+	"github.com/azylman/aerial/pkg/githubapi"
 	"github.com/azylman/aerial/pkg/pubsub"
+	"github.com/azylman/aerial/pkg/strutil"
+	"github.com/azylman/aerial/services/vanadis-restate/internal/ericlient"
+	"github.com/azylman/aerial/services/vanadis-restate/internal/executor"
 	"github.com/azylman/aerial/services/vanadis-restate/internal/model"
 	"github.com/azylman/aerial/services/vanadis-restate/internal/prflow"
 	"github.com/azylman/aerial/services/vanadis-restate/internal/store"
@@ -31,11 +36,6 @@ func CanFallbackThreadRepoLookup(ev pubsub.PRLifecycleEvent) bool {
 // ExtractChunkIDFromBranch delegates to the canonical internal/model helper.
 func ExtractChunkIDFromBranch(repo, branch string) string {
 	return model.ExtractChunkIDFromBranch(repo, branch)
-}
-
-// GenerateBuildID delegates to the canonical internal/model helper.
-func GenerateBuildID() string {
-	return model.GenerateBuildID()
 }
 
 func actionDispatchID(chunk model.VanadisChunk) string {
@@ -64,7 +64,7 @@ func dispatchCompletionMutation(ev pubsub.DispatchOutcomeEvent) *BuildMutationRe
 			Action:     mutationChunkFailed,
 			ChunkID:    strings.TrimSpace(ev.VanadisChunkID),
 			DispatchID: ev.DispatchID,
-			Reason:     store.FirstNonEmpty(ev.Error, "dispatch outcome failed"),
+			Reason:     strutil.FirstNonEmpty(ev.Error, "dispatch outcome failed"),
 		}
 	default:
 		return nil
@@ -75,26 +75,14 @@ func isActionCompletionMutation(mutation *BuildMutationRequest, chunks []model.V
 	if mutation == nil {
 		return false
 	}
-	switch strings.ToLower(strings.TrimSpace(mutation.Action)) {
-	case mutationActionCompleted, mutationChunkDeploySuccess:
-		for _, chunk := range chunks {
-			if chunk.ID == mutation.ChunkID && chunk.Mode == "action" && chunk.PRNumber == 0 {
-				return true
-			}
-		}
-	}
-	return false
-}
-
-func isFailureCompletionMutation(mutation *BuildMutationRequest, chunks []model.VanadisChunk) bool {
-	if mutation == nil {
-		return false
-	}
-	if strings.ToLower(strings.TrimSpace(mutation.Action)) != mutationChunkFailed {
+	action := strings.ToLower(strings.TrimSpace(mutation.Action))
+	if action != mutationActionCompleted && action != mutationChunkDeploySuccess {
 		return false
 	}
 	for _, chunk := range chunks {
-		if chunk.ID == mutation.ChunkID {
+		// A verdict completes an action chunk even after a repair PR deployed;
+		// a repair PR's deploy_success never completes one.
+		if chunk.ID == mutation.ChunkID && chunk.Mode == "action" && (chunk.PRNumber == 0 || action == mutationActionCompleted) {
 			return true
 		}
 	}
@@ -146,6 +134,31 @@ func findDeployingChunk(chunks []model.VanadisChunk, chunkID string) (model.Vana
 	return model.VanadisChunk{}, false
 }
 
+func prDeploymentEligible(build *model.VanadisBuild, deploying model.VanadisChunk) bool {
+	if build == nil || build.Status == statusCancelled || (build.Status != statusRunning && build.Status != statusFailed) {
+		return false
+	}
+	if deploying.Status == statusCancelled {
+		return false
+	}
+	if deploying.Status == statusFailed && (deploying.Mode != "pr" || deploying.PRNumber <= 0) {
+		return false
+	}
+	return true
+}
+
+func (b *BuildObject) notifyChunkCompleted(ctx context.Context, build *model.VanadisBuild, chunkID string) {
+	if b.executor == nil {
+		return
+	}
+	if cErr := b.executor.CancelChunkDispatch(withBuildOwner(ctx, build), chunkID); cErr != nil {
+		slog.WarnContext(ctx, "[vanadis-restate] cancel chunk dispatch failed", "chunk_id", chunkID, "error", cErr)
+	}
+	if err := b.executor.PublishExternalEvent(ctx, "vanadis_chunk", "completed", []string{chunkID}, ""); err != nil {
+		slog.WarnContext(ctx, "[vanadis-restate] publish event warning", "error", err)
+	}
+}
+
 func (b *BuildObject) completePRDeploymentMutation(ctx context.Context, buildID string, mutation *BuildMutationRequest) error {
 	build, chunks, err := b.store.GetBuild(ctx, buildID)
 	if err != nil {
@@ -159,8 +172,11 @@ func (b *BuildObject) completePRDeploymentMutation(ctx context.Context, buildID 
 	if deploying.Mode == "action" && deploying.PRNumber == 0 {
 		return b.completeActionDeploymentMutation(ctx, mutation)
 	}
-	if deploying.Status == statusFailed || deploying.Status == statusCancelled || build.Status == statusCancelled {
+	if !prDeploymentEligible(build, deploying) {
 		return nil
+	}
+	if deploying.Mode == chunkModeAction {
+		return b.markActionRepairDeployed(ctx, deploying, chunks, mutation)
 	}
 	if err := b.store.CompletePRDeployment(ctx, mutation.ChunkID, mutation.RolloutState); err != nil {
 		if errors.Is(err, errPRTransitionSkipped) {
@@ -169,79 +185,65 @@ func (b *BuildObject) completePRDeploymentMutation(ctx context.Context, buildID 
 		return err
 	}
 	if mutation.RolloutState != nil {
-		// Mirror the evidence just stored: the deploying snapshot above
-		// predates this write, and the cross-build sweep judges shared
-		// deploy jobs from the deploying chunk.
 		deploying.RolloutState = mutation.RolloutState
 	}
-	if b.executor != nil && !alreadyCompleted {
-		if cErr := b.executor.CancelChunkDispatch(ctx, mutation.ChunkID); cErr != nil {
-			slog.WarnContext(ctx, "[vanadis-restate] cancel chunk dispatch failed", "chunk_id", mutation.ChunkID, "error", cErr)
-		}
-		if err := b.executor.PublishExternalEvent(ctx, "vanadis_chunk", "completed", []string{mutation.ChunkID}, ""); err != nil {
-			slog.WarnContext(ctx, "[vanadis-restate] publish event warning", "error", err)
-		}
+	if !alreadyCompleted {
+		b.notifyChunkCompleted(ctx, build, mutation.ChunkID)
 	}
 	if err := b.completeSweptDeployments(ctx, chunks, mutation.ChunkID); err != nil {
 		return err
 	}
-	if err := b.completeCrossBuildSweptDeployments(ctx, deploying); err != nil {
+	return b.completeCrossBuildSweptDeployments(ctx, deploying)
+}
+
+// markActionRepairDeployed handles deploy_success for a repair PR attached to
+// an action chunk. The repair is a step inside the chunk: the chunk moves back
+// to running and completes only on its complete_chunk verdict, so no
+// completed event is published and its dispatch is never cancelled. The
+// landed commit still supersedes earlier merged chunks, so both sweeps run.
+func (b *BuildObject) markActionRepairDeployed(ctx context.Context, deploying model.VanadisChunk, chunks []model.VanadisChunk, mutation *BuildMutationRequest) error {
+	if err := b.store.MarkActionRepairDeployed(ctx, mutation.ChunkID, mutation.RolloutState); err != nil {
+		if errors.Is(err, errPRTransitionSkipped) {
+			return nil
+		}
 		return err
 	}
-
-	return nil
+	if mutation.RolloutState != nil {
+		deploying.RolloutState = mutation.RolloutState
+	}
+	if err := b.completeSweptDeployments(ctx, chunks, mutation.ChunkID); err != nil {
+		return err
+	}
+	return b.completeCrossBuildSweptDeployments(ctx, deploying)
 }
 
 // completeCrossBuildSweptDeployments completes eligible earlier chunks in
-// other builds superseded by the deploying chunk's landed commit, including
-// already-completed chunks re-derived for retry recovery. Skewed or
-// concurrent transitions surface as skipped writes inside the store sweep;
-// other errors return after processing partial progress so the journaled
-// step retries the remainder. Per affected non-terminal foreign build it
-// publishes a completed event per swept chunk, re-syncs the build widget
-// from the store, and applies the existing build-completion transition.
+// other builds superseded by the deploying chunk's landed commit.
+// It queues one Mutate(chunk_deploy_success) per swept chunk for that
+// build's own runner: this object never evaluates another build's terminal
+// status or widget with its own lock, token or eri session.
 func (b *BuildObject) completeCrossBuildSweptDeployments(ctx context.Context, deploying model.VanadisChunk) error {
-	swept, recovered, err := b.store.SweepEarlierDeploymentsAcrossBuilds(ctx, deploying)
-	byBuild := make(map[string][]string)
-	var buildOrder []string
-	for _, sw := range append(swept, recovered...) {
-		if _, ok := byBuild[sw.BuildID]; !ok {
-			buildOrder = append(buildOrder, sw.BuildID)
-		}
-		byBuild[sw.BuildID] = append(byBuild[sw.BuildID], sw.ChunkID)
-	}
-	for _, buildID := range buildOrder {
-		build, foreignChunks, getErr := b.store.GetBuild(ctx, buildID)
-		if getErr != nil {
-			return getErr
-		}
-		if build == nil || build.Status == statusCancelled || build.Status == statusCompleted {
-			continue
-		}
-		if b.executor != nil {
-			for _, sweptID := range byBuild[buildID] {
-				if pubErr := b.executor.PublishExternalEvent(ctx, "vanadis_chunk", "completed", []string{sweptID}, ""); pubErr != nil {
-					slog.WarnContext(ctx, "[vanadis-restate] publish event warning", "error", pubErr)
-				}
-			}
-		}
-		if build.Status == statusFailed {
-			b.refreshFailedPRWidget(ctx, buildID)
-			continue
-		}
-		if _, evalErr := b.evaluateBuildTerminalStatus(ctx, build, foreignChunks); evalErr != nil {
-			return evalErr
-		}
+	swept, err := b.store.SweepEarlierDeploymentsAcrossBuilds(ctx, deploying)
+	for _, sw := range swept {
+		recordCrossBuildReconcile(ctx, sw)
 	}
 	return err
 }
 
-// completeSweptDeployments completes earlier chunks superseded by the
+// completeSweptDeployments completes earlier PR chunks superseded by the
 // deploying chunk's landed commit, publishing a completed event per chunk.
+// Superseded action chunks only have their repair marked deployed.
 // Skipped transitions (a concurrent completion, failure, or cancellation)
 // are harmless; other errors abort so the journaled step retries the sweep.
 func (b *BuildObject) completeSweptDeployments(ctx context.Context, chunks []model.VanadisChunk, chunkID string) error {
-	for _, sweptID := range store.EarlierDeploymentSweepIDs(chunks, chunkID) {
+	for _, sweptID := range store.EarlierDeploymentSweepIDs(b.executor.GitHubOwner(), chunks, chunkID) {
+		if idx := findChunkIndex(chunks, sweptID); idx >= 0 && chunks[idx].Mode == chunkModeAction {
+			// A swept action chunk's repair deployed; it stays running.
+			if err := b.store.MarkActionRepairDeployed(ctx, sweptID, nil); err != nil && !errors.Is(err, errPRTransitionSkipped) {
+				return err
+			}
+			continue
+		}
 		if err := b.store.CompletePRDeployment(ctx, sweptID, nil); err != nil {
 			if errors.Is(err, errPRTransitionSkipped) {
 				continue
@@ -258,16 +260,22 @@ func (b *BuildObject) completeSweptDeployments(ctx context.Context, chunks []mod
 }
 
 func (b *BuildObject) validateActionBuild(ctx context.Context, buildID, chunkID string) error {
+	_, err := b.buildChunk(ctx, buildID, chunkID)
+	return err
+}
+
+// buildChunk returns the chunk snapshot when it belongs to the build.
+func (b *BuildObject) buildChunk(ctx context.Context, buildID, chunkID string) (model.VanadisChunk, error) {
 	_, chunks, err := b.store.GetBuild(ctx, buildID)
 	if err != nil {
-		return err
+		return model.VanadisChunk{}, err
 	}
 	for _, c := range chunks {
 		if c.ID == chunkID && c.BuildID == buildID {
-			return nil
+			return c, nil
 		}
 	}
-	return ErrChunkNotFound
+	return model.VanadisChunk{}, ErrChunkNotFound
 }
 
 func (b *BuildObject) completeActionDeploymentMutation(ctx context.Context, mutation *BuildMutationRequest) error {
@@ -296,7 +304,7 @@ func (b *BuildObject) failMutation(ctx context.Context, buildID string, mutation
 		return err
 	}
 	if !failed {
-		if bld != nil && chk != nil && chk.Status == statusFailed && bld.Status == statusFailed && (chk.Mode != chunkModeAction || actionFailureAccepted(*chk, bld.Status, mutation.DispatchID)) {
+		if bld != nil && chk != nil && chk.Status == statusFailed && (bld.Status == statusRunning || bld.Status == statusFailed) && (chk.Mode != chunkModeAction || actionFailureAccepted(*chk, bld.Status, mutation.DispatchID)) {
 			return nil
 		}
 		return errActionCompletionSkipped
@@ -312,17 +320,64 @@ func (b *BuildObject) locateOrAttachPRChunk(ctx context.Context, buildID string,
 	return b.flow().LocateOrAttachPRChunk(ctx, buildID, ev)
 }
 
-func (b *BuildObject) dispatchPREvent(rc restate.RunContext, buildID, chunkID, event string, ev pubsub.PRLifecycleEvent) error {
+// dispatchPREvent applies one PR event and returns the other builds a
+// deploy_success sweep changed, for reconciliation by their own runners.
+func (b *BuildObject) dispatchPREvent(ctx context.Context, buildID, chunkID, event string, ev pubsub.PRLifecycleEvent) ([]store.SweptChunk, error) {
 	if event == "deploy_success" {
-		return b.applyMutation(rc, buildID, &BuildMutationRequest{Action: mutationChunkDeploySuccess, ChunkID: chunkID, RolloutState: ev.RolloutState})
+		cctx, crossBuild := withCrossBuildReconciles(ctx)
+		err := b.applyMutation(cctx, buildID, &BuildMutationRequest{Action: mutationChunkDeploySuccess, ChunkID: chunkID, RolloutState: ev.RolloutState})
+		return crossBuild.list(), err
 	}
-	return b.handlePREventType(rc, buildID, chunkID, event, ev)
+	return nil, b.handlePREventType(ctx, buildID, chunkID, event, ev)
 }
 
-func (b *BuildObject) recordDeploymentPREvent(rc restate.RunContext, buildID string, ev pubsub.PRLifecycleEvent) (bool, error) {
-	chunkID, cErr := b.locateOrAttachPRChunk(rc, buildID, ev)
-	if cErr != nil || chunkID == "" {
-		return false, cErr
+func retryableGitHubDelay(err error, exec *executor.Executor, now time.Time) (time.Duration, bool) {
+	if err == nil {
+		return 0, false
+	}
+	var se *githubapi.StatusError
+	isStatusErr := errors.As(err, &se)
+	delay, isRL := githubapi.RateLimitDelay(err)
+	var execRL time.Duration
+	if exec != nil {
+		execRL = exec.RateLimitDelay(now)
+	}
+
+	switch {
+	case isRL || execRL > 0:
+	case isStatusErr && se.StatusCode >= 500:
+	case !isStatusErr && (errors.Is(err, context.DeadlineExceeded) || strings.Contains(err.Error(), "github api request failed")):
+	default:
+		return 0, false
+	}
+
+	effectiveDelay := delay
+	if effectiveDelay <= 0 {
+		effectiveDelay = execRL
+	}
+	if effectiveDelay <= 0 {
+		effectiveDelay = 15 * time.Second
+	}
+	return effectiveDelay, true
+}
+
+func (b *BuildObject) recordDeploymentPREvent(rc restate.RunContext, buildID string, ev pubsub.PRLifecycleEvent) (prEventOutcome, error) {
+	eventCtx := context.Context(rc)
+	if b.store != nil {
+		if bld, _, gErr := b.store.GetBuild(rc, buildID); gErr == nil && bld != nil && strings.TrimSpace(bld.Agent) != "" {
+			eventCtx = ericlient.WithAgent(rc, bld.Agent)
+		}
+	}
+	chunkID, cErr := b.locateOrAttachPRChunk(eventCtx, buildID, ev)
+	if cErr != nil {
+		if delay, retryable := retryableGitHubDelay(cErr, b.executor, time.Now()); retryable {
+			slog.WarnContext(rc, "[vanadis-restate] retryable github error locating chunk; deferring event", "build_id", buildID, "error", cErr, "retry_after", delay)
+			return prEventOutcome{RetryAfter: delay}, nil
+		}
+		return prEventOutcome{}, cErr
+	}
+	if chunkID == "" {
+		return prEventOutcome{}, nil
 	}
 	rolloutStatus := ""
 	event := strings.ToLower(strings.TrimSpace(ev.Event))
@@ -330,28 +385,39 @@ func (b *BuildObject) recordDeploymentPREvent(rc restate.RunContext, buildID str
 		valid, status, e := b.recordDeploymentStart(rc, buildID, chunkID, ev)
 		rolloutStatus = status
 		if e != nil || !valid {
-			return false, e
+			return prEventOutcome{}, e
 		}
 	}
 
-	eventErr := b.dispatchPREvent(rc, buildID, chunkID, event, ev)
+	reconcileTargets, eventErr := b.dispatchPREvent(eventCtx, buildID, chunkID, event, ev)
 	if eventErr != nil {
 		if errors.Is(eventErr, errPRTransitionSkipped) {
-			return false, nil
+			return prEventOutcome{}, nil
 		}
-		return false, eventErr
+		if delay, retryable := retryableGitHubDelay(eventErr, b.executor, time.Now()); retryable {
+			slog.WarnContext(rc, "[vanadis-restate] retryable github error dispatching event; deferring event", "build_id", buildID, "error", eventErr, "retry_after", delay)
+			return prEventOutcome{RetryAfter: delay}, nil
+		}
+		return prEventOutcome{}, eventErr
 	}
 	b.refreshFailedPRWidget(rc, buildID)
 	if event != "deploy_success" && ev.RolloutState != nil {
 		if rErr := b.store.RecordPRRolloutState(rc, chunkID, rolloutStatus, ev.RolloutState); rErr != nil {
 			if event == prEventDeployStarted {
-				return false, rErr
+				return prEventOutcome{}, rErr
 			}
 			slog.WarnContext(rc, "[vanadis-restate] record rollout state warning", "error", rErr)
 		}
 		b.refreshFailedPRWidget(rc, buildID)
 	}
-	return true, nil
+	return prEventOutcome{Applied: true, ReconcileTargets: reconcileTargets}, nil
+}
+
+// prEventOutcome is the journaled result of applying one PR lifecycle event.
+type prEventOutcome struct {
+	Applied          bool               `json:"applied"`
+	ReconcileTargets []store.SweptChunk `json:"reconcile_targets,omitempty"`
+	RetryAfter       time.Duration      `json:"retry_after,omitempty"`
 }
 
 // OnPREvent receives PR lifecycle events for this build.
@@ -360,13 +426,18 @@ func (b *BuildObject) OnPREvent(ctx restate.ObjectContext, ev pubsub.PRLifecycle
 		return nil
 	}
 	buildID := restate.Key(ctx)
-	_, err := RunJournaled(ctx, labelOnPREvent, "handle-pr-event-postgres", func(rc restate.RunContext) (bool, error) {
+	outcome, err := RunJournaled(ctx, labelOnPREvent, "handle-pr-event-postgres", func(rc restate.RunContext) (prEventOutcome, error) {
 		return b.recordDeploymentPREvent(rc, buildID, ev)
 	})
 	if err != nil {
 		return err
 	}
+	if outcome.RetryAfter > 0 {
+		restate.ObjectSend(ctx, b.ServiceName(), buildID, labelOnPREvent).Send(ev, restate.WithDelay(outcome.RetryAfter))
+		return nil
+	}
 	rt := b.getRuntime(ctx)
+	sendCrossBuildReconciles(rt, outcome.ReconcileTargets)
 	if strings.EqualFold(strings.TrimSpace(ev.Event), prEventDeployStarted) {
 		if err := b.armDeploymentStart(rt, buildID, ev); err != nil {
 			return err
@@ -385,36 +456,16 @@ func (b *BuildObject) OnDispatchOutcome(ctx restate.ObjectContext, ev pubsub.Dis
 		return nil
 	}
 	applied, err := RunJournaled(ctx, labelOnDispatchOutcome, "handle-dispatch-outcome-postgres", func(rc restate.RunContext) (bool, error) {
-		chunkID := strings.TrimSpace(ev.VanadisChunkID)
-		if chunkID == "" {
-			return false, nil
-		}
-		status := strings.ToLower(strings.TrimSpace(ev.Status))
-		switch status {
-		case "completed", dispatchStatusSuccess:
-			if err := b.validateActionBuild(rc, restate.Key(ctx), chunkID); err != nil {
-				return false, err
-			}
-			res, err := b.store.CompleteActionChunk(rc, chunkID, ev.DispatchID)
-			if err != nil {
-				return false, err
-			}
-			return res != nil && res.CompletionAccepted, nil
-		case statusFailed, statusTimeout, statusCrashed:
-			reason := store.FirstNonEmpty(ev.Error, "dispatch outcome failed")
-			if err := b.validateActionBuild(rc, restate.Key(ctx), chunkID); err != nil {
-				return false, err
-			}
-			_, _, failed, err := b.store.FailChunk(rc, chunkID, reason, ev.DispatchID)
-			return failed, err
-		}
-		return true, nil
+		return b.applyDispatchOutcome(rc, restate.Key(ctx), ev)
 	})
 	if err != nil {
 		return err
 	}
 	if !applied {
-		if b.executor != nil && isCompletedDispatchStatus(ev.Status) {
+		if b.executor != nil && isVerdictlessDispatchStatus(ev.Status) {
+			if _, _, ok := executor.ParseCIRemediationDispatchID(ev.VanadisChunkID, ev.DispatchID); ok {
+				return b.handleCIRemediationTurnEnded(ctx, ev)
+			}
 			return b.handleNoPRTurnOutcome(ctx, ev)
 		}
 		return nil
@@ -427,14 +478,89 @@ func (b *BuildObject) OnDispatchOutcome(ctx restate.ObjectContext, ev pubsub.Dis
 	return nil
 }
 
+// handleCIRemediationTurnEnded pauses a PR chunk whose CI fix-up turn ended
+// without a push, RoboRev override, or fail_chunk, then reconciles so the
+// chunk failure wake fires. GitHub and store I/O run inside one journaled step.
+func (b *BuildObject) handleCIRemediationTurnEnded(ctx restate.ObjectContext, ev pubsub.DispatchOutcomeEvent) error {
+	buildID := restate.Key(ctx)
+	chunkID := strings.TrimSpace(ev.VanadisChunkID)
+	if _, err := RunJournaled(ctx, labelOnDispatchOutcome, "handle-cifail-turn-ended", func(rc restate.RunContext) (bool, error) {
+		return true, githubClientErrToTerminal(b.flow().HandleCIRemediationTurnEnded(rc, buildID, chunkID, ev.DispatchID))
+	}); err != nil {
+		return err
+	}
+	if _, tErr := b.executeObjectTransition(b.getRuntime(ctx), labelReconcileAfterDispatch, nil); tErr != nil {
+		return ToTerminalErr(tErr)
+	}
+	return nil
+}
+
+// githubClientErrToTerminal makes non-rate-limited GitHub 4xx responses
+// terminal; transport, 5xx and rate-limit failures stay retryable.
+func githubClientErrToTerminal(err error) error {
+	var se *githubapi.StatusError
+	if errors.As(err, &se) && !se.RateLimited && se.StatusCode >= 400 && se.StatusCode < 500 {
+		return restate.ToTerminalError(err, restate.WithErrorCode(restate.Code(se.StatusCode)))
+	}
+	return err
+}
+
+// applyDispatchOutcome applies a dispatch outcome inside the journaled
+// handle-dispatch-outcome-postgres step and reports whether it changed the
+// chunk. Completed and timeout outcomes never complete an action chunk: only
+// the CompleteChunk verdict does.
+func (b *BuildObject) applyDispatchOutcome(rc context.Context, buildID string, ev pubsub.DispatchOutcomeEvent) (bool, error) {
+	chunkID := strings.TrimSpace(ev.VanadisChunkID)
+	if chunkID == "" {
+		return false, nil
+	}
+	status := strings.ToLower(strings.TrimSpace(ev.Status))
+	switch status {
+	case "completed", dispatchStatusSuccess:
+		chunk, err := b.buildChunk(rc, buildID, chunkID)
+		if err != nil {
+			return false, err
+		}
+		// Action chunks complete only through the CompleteChunk verdict.
+		if chunk.Mode == chunkModeAction {
+			return false, nil
+		}
+		res, err := b.store.CompleteActionChunk(rc, chunkID, ev.DispatchID)
+		if err != nil {
+			return false, err
+		}
+		return res != nil && res.CompletionAccepted, nil
+	case statusTimeout:
+		chunk, err := b.buildChunk(rc, buildID, chunkID)
+		if err != nil {
+			return false, err
+		}
+		// A timed-out action turn is a verdictless turn: resume, never fail.
+		if chunk.Mode == chunkModeAction {
+			return false, nil
+		}
+		_, _, failed, err := b.store.FailChunk(rc, chunkID, strutil.FirstNonEmpty(ev.Error, "dispatch outcome failed"), ev.DispatchID)
+		return failed, err
+	case statusFailed, statusCrashed:
+		reason := strutil.FirstNonEmpty(ev.Error, "dispatch outcome failed")
+		if err := b.validateActionBuild(rc, buildID, chunkID); err != nil {
+			return false, err
+		}
+		_, _, failed, err := b.store.FailChunk(rc, chunkID, reason, ev.DispatchID)
+		return failed, err
+	}
+	return true, nil
+}
+
 // noPRAction aliases the prflow recovery decision so existing callers keep
 // compiling against the thin build surface.
 type noPRAction = prflow.NoPRAction
 
 const (
-	noPRActionNone   = prflow.NoPRActionNone
-	noPRActionResume = prflow.NoPRActionResume
-	noPRActionFail   = prflow.NoPRActionFail
+	noPRActionNone       = prflow.NoPRActionNone
+	noPRActionResume     = prflow.NoPRActionResume
+	noPRActionFail       = prflow.NoPRActionFail
+	noPRActionFailAction = prflow.NoPRActionFailAction
 )
 
 const noPRFailureReason = prflow.NoPRFailureReason
@@ -445,6 +571,12 @@ func isCompletedDispatchStatus(status string) bool {
 		return true
 	}
 	return false
+}
+
+// isVerdictlessDispatchStatus reports outcomes that end a turn without a
+// verdict: completed turns and turns eri stopped at its time limit.
+func isVerdictlessDispatchStatus(status string) bool {
+	return isCompletedDispatchStatus(status) || strings.EqualFold(strings.TrimSpace(status), statusTimeout)
 }
 
 // noPRTurnAction decides how to react when a PR chunk's turn completes. The
@@ -462,6 +594,17 @@ func (b *BuildObject) resumeNoPRChunk(ctx context.Context, bld *model.VanadisBui
 	return b.flow().ResumeNoPRChunk(ctx, bld, chunks, idx)
 }
 
+// resumeVerdictlessChunk dispatches the next automatic resume: the counted
+// action resume for action chunks, the single no-PR resume for PR chunks.
+func (b *BuildObject) resumeVerdictlessChunk(ctx context.Context, bld *model.VanadisBuild, chunks []model.VanadisChunk, idx int, dispatchID string) error {
+	if chunks[idx].Mode != chunkModeAction {
+		return b.resumeNoPRChunk(ctx, bld, chunks, idx)
+	}
+	// noPRTurnAction only resumes current-generation IDs below the cap.
+	k, _ := prflow.NextActionResume(chunks[idx], dispatchID)
+	return b.flow().ResumeActionChunk(ctx, bld, chunks, idx, k)
+}
+
 // handleNoPRTurnOutcome resumes a PR chunk whose launch turn ended without a PR
 // once, then fails it loudly when the resume turn also ends without one.
 func (b *BuildObject) handleNoPRTurnOutcome(ctx restate.ObjectContext, ev pubsub.DispatchOutcomeEvent) error {
@@ -476,9 +619,15 @@ func (b *BuildObject) handleNoPRTurnOutcome(ctx restate.ObjectContext, ev pubsub
 		if bld == nil || idx < 0 {
 			return noPRActionNone, nil
 		}
-		action := noPRTurnAction(chunks[idx], bld.Status, ev.DispatchID)
+		chunk := chunks[idx]
+		// Only action turns treat a time-limit stop as verdictless; PR chunks keep
+		// their failed-outcome handling.
+		if chunk.Mode != chunkModeAction && !isCompletedDispatchStatus(ev.Status) {
+			return noPRActionNone, nil
+		}
+		action := noPRTurnAction(chunk, bld.Status, ev.DispatchID)
 		if action == noPRActionResume {
-			if err := b.resumeNoPRChunk(rc, bld, chunks, idx); err != nil {
+			if err := b.resumeVerdictlessChunk(rc, bld, chunks, idx, ev.DispatchID); err != nil {
 				return noPRActionNone, err
 			}
 		}
@@ -487,10 +636,15 @@ func (b *BuildObject) handleNoPRTurnOutcome(ctx restate.ObjectContext, ev pubsub
 	if err != nil {
 		return err
 	}
-	if action != noPRActionFail {
+	reason := noPRFailureReason
+	switch action {
+	case noPRActionFail:
+	case noPRActionFailAction:
+		reason = prflow.ActionResumeFailureReason
+	default:
 		return nil
 	}
-	mutation := &BuildMutationRequest{Action: mutationChunkFailed, ChunkID: chunkID, DispatchID: ev.DispatchID, Reason: noPRFailureReason}
+	mutation := &BuildMutationRequest{Action: mutationChunkFailed, ChunkID: chunkID, DispatchID: ev.DispatchID, Reason: reason}
 	if _, tErr := b.executeObjectTransition(b.getRuntime(ctx), labelReconcileAfterNoPRFail, mutation); tErr != nil {
 		return ToTerminalErr(tErr)
 	}

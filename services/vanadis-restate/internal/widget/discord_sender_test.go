@@ -5,6 +5,8 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -33,13 +35,7 @@ type mockWidgetSender struct {
 	lastSendData      *discordgo.MessageSend
 	lastEditData      *discordgo.MessageEdit
 	lastDeleteID      string
-}
-
-func clearAllChunkActiveStepsForTest() {
-	chunkActiveStepsMu.Lock()
-	defer chunkActiveStepsMu.Unlock()
-	chunkActiveSteps = make(map[string]string)
-	chunkActiveOrder = nil
+	lastDeleteChannel string
 }
 
 func extractTestComponentsText(components []discordgo.MessageComponent) string {
@@ -90,7 +86,8 @@ func (m *mockWidgetSender) ChannelMessages(_ string, _ int, _, _, _ string, _ ..
 	return m.msgs, nil
 }
 
-func (m *mockWidgetSender) ChannelMessageDelete(_ string, messageID string, _ ...discordgo.RequestOption) error {
+func (m *mockWidgetSender) ChannelMessageDelete(channelID, messageID string, _ ...discordgo.RequestOption) error {
+	m.lastDeleteChannel = channelID
 	m.lastDeleteID = messageID
 	return m.deleteErr
 }
@@ -102,108 +99,95 @@ func (m *mockWidgetSender) Channel(_ string, _ ...discordgo.RequestOption) (*dis
 	return m.channel, nil
 }
 
+// widgetSenderNow is the fixed clock shared by the sender tables below.
+var widgetSenderNow = time.Date(2026, 11, 19, 12, 0, 0, 0, time.UTC)
+
+// widgetReq builds a status widget request with the given build status and one chunk per chunk status.
+func widgetReq(status string, chunkStatuses ...string) ericlient.StatusWidgetRequest {
+	req := ericlient.StatusWidgetRequest{Status: status}
+	for _, s := range chunkStatuses {
+		req.Chunks = append(req.Chunks, ericlient.StatusWidgetChunk{Status: s})
+	}
+	return req
+}
+
+// timedWidgetReq stamps req and its chunks as started at start; non-running chunks complete at end.
+func timedWidgetReq(req ericlient.StatusWidgetRequest, start, end time.Time) ericlient.StatusWidgetRequest {
+	req.StartedAt = start
+	for i := range req.Chunks {
+		req.Chunks[i].StartedAt = start
+		if req.Chunks[i].Status != "running" {
+			req.Chunks[i].CompletedAt = end
+		}
+	}
+	return req
+}
+
+// msgs builds n channel messages m1..mn posted age before widgetSenderNow with the given flags.
+func msgs(n int, age time.Duration, flags discordgo.MessageFlags) []*discordgo.Message {
+	out := make([]*discordgo.Message, 0, n)
+	for i := 1; i <= n; i++ {
+		out = append(out, &discordgo.Message{ID: fmt.Sprintf("m%d", i), Timestamp: widgetSenderNow.Add(-age), Flags: flags})
+	}
+	return out
+}
+
+// newSenderDeliverer builds a deliverer whose default agent sends through sender (none when nil) and whose
+// channel policy redirects every channel to redirectTo when it is set.
+func newSenderDeliverer(sender *mockWidgetSender, redirectTo string) *DiscordWidgetDeliverer {
+	senders := map[string]DiscordWidgetSender{}
+	if sender != nil {
+		senders[defaultAgent] = sender
+	}
+	return &DiscordWidgetDeliverer{
+		agentSenders:          senders,
+		nowFn:                 func() time.Time { return widgetSenderNow },
+		channelPolicyResolver: func(string) (bool, string) { return redirectTo != "", redirectTo },
+		resolvedChannels:      make(map[string]cachedResolvedChannel),
+		channelMetaCache:      make(map[string]cachedChannelMeta),
+	}
+}
+
+// senderMock returns the mock sender d routes agent to, or nil when there is none.
+func senderMock(d *DiscordWidgetDeliverer, agent string) *mockWidgetSender {
+	if d == nil {
+		return nil
+	}
+	m, _ := d.agentSenders[normalizeRunnerAgent(agent)].(*mockWidgetSender)
+	return m
+}
+
 func TestShouldSinkWidget(t *testing.T) {
 	t.Parallel()
-	now := time.Date(2026, 11, 19, 12, 0, 0, 0, time.UTC)
-	twentyMinsAgo := now.Add(-20 * time.Minute)
-	fiveMinsAgo := now.Add(-5 * time.Minute)
-
+	cv2 := discordgo.MessageFlagsIsComponentsV2
 	tests := []struct {
-		name       string
-		nilSender  bool
-		channelID  string
-		messageID  string
-		msgsErr    error
-		msgs       []*discordgo.Message
-		expectSink bool
+		name    string
+		sender  *mockWidgetSender
+		channel string
+		msgID   string
+		want    bool
 	}{
+		{name: "nil sender returns false", channel: "chan-1", msgID: "msg-1"},
+		{name: "empty channel ID returns false", sender: &mockWidgetSender{}, msgID: "msg-1"},
+		{name: "empty message ID returns false", sender: &mockWidgetSender{}, channel: "chan-1"},
+		{name: "messages error returns false", sender: &mockWidgetSender{msgsErr: errors.New("fetch error")}, channel: "chan-1", msgID: "msg-1"},
+		{name: "empty messages returns false", sender: &mockWidgetSender{msgs: msgs(0, 0, 0)}, channel: "chan-1", msgID: "msg-1"},
 		{
-			name:       "nil sender returns false",
-			nilSender:  true,
-			channelID:  "chan-1",
-			messageID:  "msg-1",
-			expectSink: false,
+			name: "fewer than threshold and recent returns false", sender: &mockWidgetSender{msgs: msgs(2, 5*time.Minute, 0)}, channel: "chan-1",
+			msgID: "msg-1",
 		},
 		{
-			name:       "empty channel ID returns false",
-			channelID:  "",
-			messageID:  "msg-1",
-			expectSink: false,
+			name: "exactly 4 regular messages triggers sink", sender: &mockWidgetSender{msgs: msgs(4, 5*time.Minute, 0)}, channel: "chan-1",
+			msgID: "msg-1", want: true,
 		},
 		{
-			name:       "empty message ID returns false",
-			channelID:  "chan-1",
-			messageID:  "",
-			expectSink: false,
+			name:   "Components V2 messages are ignored from count",
+			sender: &mockWidgetSender{msgs: append(msgs(2, 5*time.Minute, cv2), msgs(2, 5*time.Minute, 0)...)}, channel: "chan-1", msgID: "msg-1",
 		},
+		{name: "self message ID is ignored from count", sender: &mockWidgetSender{msgs: msgs(4, 5*time.Minute, 0)}, channel: "chan-1", msgID: "m1"},
 		{
-			name:       "messages error returns false",
-			channelID:  "chan-1",
-			messageID:  "msg-1",
-			msgsErr:    errors.New("fetch error"),
-			expectSink: false,
-		},
-		{
-			name:       "empty messages returns false",
-			channelID:  "chan-1",
-			messageID:  "msg-1",
-			msgs:       []*discordgo.Message{},
-			expectSink: false,
-		},
-		{
-			name:      "fewer than threshold and recent returns false",
-			channelID: "chan-1",
-			messageID: "msg-1",
-			msgs: []*discordgo.Message{
-				{ID: "m2", Timestamp: fiveMinsAgo},
-				{ID: "m3", Timestamp: fiveMinsAgo},
-			},
-			expectSink: false,
-		},
-		{
-			name:      "exactly 4 regular messages triggers sink",
-			channelID: "chan-1",
-			messageID: "msg-1",
-			msgs: []*discordgo.Message{
-				{ID: "m2", Timestamp: fiveMinsAgo},
-				{ID: "m3", Timestamp: fiveMinsAgo},
-				{ID: "m4", Timestamp: fiveMinsAgo},
-				{ID: "m5", Timestamp: fiveMinsAgo},
-			},
-			expectSink: true,
-		},
-		{
-			name:      "Components V2 messages are ignored from count",
-			channelID: "chan-1",
-			messageID: "msg-1",
-			msgs: []*discordgo.Message{
-				{ID: "m2", Timestamp: fiveMinsAgo, Flags: discordgo.MessageFlagsIsComponentsV2},
-				{ID: "m3", Timestamp: fiveMinsAgo},
-				{ID: "m4", Timestamp: fiveMinsAgo, Flags: discordgo.MessageFlagsIsComponentsV2},
-				{ID: "m5", Timestamp: fiveMinsAgo},
-			},
-			expectSink: false,
-		},
-		{
-			name:      "self message ID is ignored from count",
-			channelID: "chan-1",
-			messageID: "msg-1",
-			msgs: []*discordgo.Message{
-				{ID: "msg-1", Timestamp: fiveMinsAgo},
-				{ID: "m2", Timestamp: fiveMinsAgo},
-				{ID: "m3", Timestamp: fiveMinsAgo},
-				{ID: "m4", Timestamp: fiveMinsAgo},
-			},
-			expectSink: false,
-		},
-		{
-			name:      "idle threshold exceeded triggers sink with fewer messages",
-			channelID: "chan-1",
-			messageID: "msg-1",
-			msgs: []*discordgo.Message{
-				{ID: "m2", Timestamp: twentyMinsAgo},
-			},
-			expectSink: true,
+			name: "idle threshold exceeded triggers sink with fewer messages", sender: &mockWidgetSender{msgs: msgs(1, 20*time.Minute, 0)},
+			channel: "chan-1", msgID: "msg-1", want: true,
 		},
 	}
 
@@ -211,96 +195,124 @@ func TestShouldSinkWidget(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			var sender DiscordWidgetSender
-			if !tc.nilSender {
-				sender = &mockWidgetSender{msgs: tc.msgs, msgsErr: tc.msgsErr}
+			if tc.sender != nil {
+				sender = tc.sender
 			}
-			result := shouldSinkWidget(sender, tc.channelID, tc.messageID, now)
-			assert.Equal(t, tc.expectSink, result)
+			assert.Equal(t, tc.want, shouldSinkWidget(sender, tc.channel, tc.msgID, widgetSenderNow))
 		})
 	}
 }
 
-func TestDeliverStatusWidgetFunction(t *testing.T) {
+func TestDeliverStatusWidget(t *testing.T) {
 	t.Parallel()
-	now := time.Date(2026, 11, 19, 12, 0, 0, 0, time.UTC)
 	notFoundErr := &discordgo.RESTError{Response: &http.Response{StatusCode: http.StatusNotFound}}
+	forbidden := &http.Response{StatusCode: http.StatusForbidden}
+	foreignAuthor := &discordgo.APIErrorMessage{Code: 50005, Message: "Cannot edit a message authored by another user"}
+	foreignAuthorErr := &discordgo.RESTError{Response: forbidden, Message: foreignAuthor}
+	missingPermsErr := &discordgo.RESTError{Response: forbidden, Message: &discordgo.APIErrorMessage{Code: 50013, Message: "Missing Permissions"}}
+	missingAccessErr := &discordgo.RESTError{Response: forbidden, Message: &discordgo.APIErrorMessage{Code: 50001, Message: "Missing Access"}}
+	buried := msgs(1, 20*time.Minute, 0)
+	errBoom := errors.New("boom")
 
 	tests := []struct {
-		name          string
-		nilSender     bool
-		req           ericlient.StatusWidgetRequest
-		nilSendMsg    bool
-		sendErr       error
-		sendMsg       *discordgo.Message
-		editErr       error
-		editMsg       *discordgo.Message
-		deleteErr     error
-		msgs          []*discordgo.Message
-		expectID      string
-		expectErrSub  string
-		expectDeleted bool
+		name         string
+		sender       *mockWidgetSender
+		channel      string
+		msgID        string
+		skipSink     bool
+		wantID       string
+		wantErr      string
+		wantSent     bool
+		wantDeleteID string
 	}{
+		{name: "nil sender returns error", channel: "chan-1", wantErr: "discord widget sender is nil"},
+		{name: "empty channel ID returns error", sender: &mockWidgetSender{}, wantErr: "channel_id is required"},
 		{
-			name:         "nil sender returns error",
-			nilSender:    true,
-			req:          ericlient.StatusWidgetRequest{ChannelID: "chan-1"},
-			expectErrSub: "discord widget sender is nil",
+			name: "new message success", sender: &mockWidgetSender{sendMsg: &discordgo.Message{ID: "msg-new-123"}}, channel: "chan-1",
+			wantID: "msg-new-123", wantSent: true,
 		},
 		{
-			name:         "empty channel ID returns error",
-			req:          ericlient.StatusWidgetRequest{ChannelID: ""},
-			expectErrSub: "channel_id is required",
+			name: "new message send failure", sender: &mockWidgetSender{sendErr: errors.New("network failure")}, channel: "chan-1",
+			wantErr: "failed to send status widget message", wantSent: true,
 		},
 		{
-			name:     "new message success",
-			req:      ericlient.StatusWidgetRequest{ChannelID: "chan-1", Title: "Build 1", Status: "running"},
-			sendMsg:  &discordgo.Message{ID: "msg-new-123"},
-			expectID: "msg-new-123",
+			name: "new message send nil message returns error", sender: &mockWidgetSender{nilSendMsg: true}, channel: "chan-1",
+			wantErr: "received nil message", wantSent: true,
 		},
 		{
-			name:         "new message send failure",
-			req:          ericlient.StatusWidgetRequest{ChannelID: "chan-1", Title: "Build 1"},
-			sendErr:      errors.New("network failure"),
-			expectErrSub: "failed to send status widget message",
+			name: "edit existing message success", sender: &mockWidgetSender{editMsg: &discordgo.Message{ID: "msg-orig-1"}}, channel: "chan-1",
+			msgID: "msg-orig-1", wantID: "msg-orig-1",
 		},
 		{
-			name:         "new message send nil message returns error",
-			req:          ericlient.StatusWidgetRequest{ChannelID: "chan-1", Title: "Build 1"},
-			nilSendMsg:   true,
-			expectErrSub: "received nil message",
+			name:   "edit existing message 404 recovers by creating new",
+			sender: &mockWidgetSender{editErr: notFoundErr, sendMsg: &discordgo.Message{ID: "msg-recreated-2"}}, channel: "chan-1",
+			msgID: "msg-deleted-1", wantID: "msg-recreated-2", wantSent: true,
 		},
 		{
-			name:     "edit existing message success",
-			req:      ericlient.StatusWidgetRequest{ChannelID: "chan-1", MessageID: "msg-orig-1", Title: "Build 1"},
-			editMsg:  &discordgo.Message{ID: "msg-orig-1"},
-			expectID: "msg-orig-1",
+			name:   "edit existing message 404 recreate error fails",
+			sender: &mockWidgetSender{editErr: notFoundErr, sendErr: errors.New("recreate error")}, channel: "chan-1", msgID: "msg-deleted-1",
+			wantErr: "failed to send new status widget message after 404 edit", wantSent: true,
 		},
 		{
-			name:     "edit existing message 404 recovers by creating new",
-			req:      ericlient.StatusWidgetRequest{ChannelID: "chan-1", MessageID: "msg-deleted-1", Title: "Build 1"},
-			editErr:  notFoundErr,
-			sendMsg:  &discordgo.Message{ID: "msg-recreated-2"},
-			expectID: "msg-recreated-2",
+			name: "edit existing message 404 recreate nil message fails", sender: &mockWidgetSender{editErr: notFoundErr, nilSendMsg: true},
+			channel: "chan-1", msgID: "msg-deleted-1", wantErr: "received nil message", wantSent: true,
 		},
 		{
-			name:         "edit existing message 404 recreate error fails",
-			req:          ericlient.StatusWidgetRequest{ChannelID: "chan-1", MessageID: "msg-deleted-1", Title: "Build 1"},
-			editErr:      notFoundErr,
-			sendErr:      errors.New("recreate error"),
-			expectErrSub: "failed to send new status widget message after 404 edit",
+			name: "edit existing non-404 error fails", sender: &mockWidgetSender{editErr: errors.New("edit permission denied")}, channel: "chan-1",
+			msgID: "msg-err-1", wantErr: "failed to edit status widget message",
 		},
 		{
-			name:         "edit existing message 404 recreate nil message fails",
-			req:          ericlient.StatusWidgetRequest{ChannelID: "chan-1", MessageID: "msg-deleted-1", Title: "Build 1"},
-			editErr:      notFoundErr,
-			nilSendMsg:   true,
-			expectErrSub: "received nil message",
+			name:   "edit foreign-authored message re-posts and deletes old",
+			sender: &mockWidgetSender{editErr: foreignAuthorErr, sendMsg: &discordgo.Message{ID: "msg-reposted-1"}}, channel: "chan-1",
+			msgID: "msg-foreign-1", wantID: "msg-reposted-1", wantSent: true, wantDeleteID: "msg-foreign-1",
 		},
 		{
-			name:         "edit existing non-404 error fails",
-			req:          ericlient.StatusWidgetRequest{ChannelID: "chan-1", MessageID: "msg-err-1", Title: "Build 1"},
-			editErr:      errors.New("edit permission denied"),
-			expectErrSub: "failed to edit status widget message",
+			name:    "edit foreign-authored message delete missing permissions still returns new ID",
+			sender:  &mockWidgetSender{editErr: foreignAuthorErr, sendMsg: &discordgo.Message{ID: "msg-reposted-2"}, deleteErr: missingPermsErr},
+			channel: "chan-1", msgID: "msg-foreign-2", wantID: "msg-reposted-2", wantSent: true, wantDeleteID: "msg-foreign-2",
+		},
+		{
+			name:    "edit foreign-authored message delete 404 still returns new ID",
+			sender:  &mockWidgetSender{editErr: foreignAuthorErr, sendMsg: &discordgo.Message{ID: "msg-reposted-3"}, deleteErr: notFoundErr},
+			channel: "chan-1", msgID: "msg-foreign-3", wantID: "msg-reposted-3", wantSent: true, wantDeleteID: "msg-foreign-3",
+		},
+		{
+			name:    "edit foreign-authored message delete other error still returns new ID",
+			sender:  &mockWidgetSender{editErr: foreignAuthorErr, sendMsg: &discordgo.Message{ID: "msg-reposted-4"}, deleteErr: errBoom},
+			channel: "chan-1", msgID: "msg-foreign-4", wantID: "msg-reposted-4", wantSent: true, wantDeleteID: "msg-foreign-4",
+		},
+		{
+			name:   "edit foreign-authored message re-post error fails",
+			sender: &mockWidgetSender{editErr: foreignAuthorErr, sendErr: errors.New("repost error")}, channel: "chan-1", msgID: "msg-foreign-5",
+			wantErr: "failed to send new status widget message after foreign-author edit", wantSent: true,
+		},
+		{
+			name: "edit foreign-authored message re-post nil message fails", sender: &mockWidgetSender{editErr: foreignAuthorErr, nilSendMsg: true},
+			channel: "chan-1", msgID: "msg-foreign-6", wantErr: "after foreign-author edit: received nil message", wantSent: true,
+		},
+		{
+			name: "edit missing access 403 fails without re-posting", sender: &mockWidgetSender{editErr: missingAccessErr}, channel: "chan-1",
+			msgID: "msg-noaccess-1", wantErr: "failed to edit status widget message msg-noaccess-1",
+		},
+		{
+			name:   "buried message sinks by creating new and deleting old",
+			sender: &mockWidgetSender{msgs: buried, sendMsg: &discordgo.Message{ID: "msg-sunk-new"}}, channel: "chan-1", msgID: "msg-buried-1",
+			wantID: "msg-sunk-new", wantSent: true, wantDeleteID: "msg-buried-1",
+		},
+		{
+			name:    "buried message sink delete failure still succeeds",
+			sender:  &mockWidgetSender{msgs: buried, sendMsg: &discordgo.Message{ID: "msg-sunk-new-2"}, deleteErr: errors.New("delete failed")},
+			channel: "chan-1", msgID: "msg-buried-del-fail", wantID: "msg-sunk-new-2", wantSent: true, wantDeleteID: "msg-buried-del-fail",
+		},
+		{
+			name:    "buried message sink send failure falls back to edit in place",
+			sender:  &mockWidgetSender{msgs: buried, sendErr: errors.New("sink failed"), editMsg: &discordgo.Message{ID: "msg-sink-fail"}},
+			channel: "chan-1", msgID: "msg-sink-fail", wantID: "msg-sink-fail", wantSent: true,
+		},
+		{
+			name:   "buried message with skip_sink edits in place",
+			sender: &mockWidgetSender{msgs: buried, editMsg: &discordgo.Message{ID: "msg-buried-2"}}, channel: "chan-1", msgID: "msg-buried-2",
+			skipSink: true, wantID: "msg-buried-2",
 		},
 	}
 
@@ -308,258 +320,296 @@ func TestDeliverStatusWidgetFunction(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			var sender DiscordWidgetSender
-			if !tc.nilSender {
-				sender = &mockWidgetSender{
-					sendMsg:    tc.sendMsg,
-					nilSendMsg: tc.nilSendMsg,
-					sendErr:    tc.sendErr,
-					editMsg:    tc.editMsg,
-					editErr:    tc.editErr,
-					deleteErr:  tc.deleteErr,
-					msgs:       tc.msgs,
-				}
+			if tc.sender != nil {
+				sender = tc.sender
 			}
-
-			id, err := DeliverStatusWidget(sender, tc.req, now)
-			if tc.expectErrSub != "" {
+			req := ericlient.StatusWidgetRequest{ChannelID: tc.channel, MessageID: tc.msgID, Title: "Build 1", SkipSink: tc.skipSink}
+			id, err := DeliverStatusWidget(sender, "example-owner", req, widgetSenderNow)
+			if tc.wantErr != "" {
 				require.Error(t, err)
-				assert.Contains(t, err.Error(), tc.expectErrSub)
+				assert.Contains(t, err.Error(), tc.wantErr)
 			} else {
 				require.NoError(t, err)
-				assert.Equal(t, tc.expectID, id)
 			}
+			assert.Equal(t, tc.wantID, id)
+			var mock mockWidgetSender
+			if tc.sender != nil {
+				mock = *tc.sender
+			}
+			assert.Equal(t, tc.wantSent, mock.lastSendData != nil)
+			assert.Equal(t, tc.wantDeleteID, mock.lastDeleteID)
 		})
 	}
 }
 
-func TestDeliverStatusWidgetSinking(t *testing.T) {
+func TestDelivererDeliverStatusWidget(t *testing.T) {
 	t.Parallel()
-	now := time.Date(2026, 11, 19, 12, 0, 0, 0, time.UTC)
-	twentyMinsAgo := now.Add(-20 * time.Minute)
-
 	tests := []struct {
-		name          string
-		req           ericlient.StatusWidgetRequest
-		sendErr       error
-		sendMsg       *discordgo.Message
-		editMsg       *discordgo.Message
-		deleteErr     error
-		msgs          []*discordgo.Message
-		expectID      string
-		expectDeleted bool
+		name     string
+		d        *DiscordWidgetDeliverer
+		req      ericlient.StatusWidgetRequest
+		wantID   string
+		wantErr  string
+		wantText []string
 	}{
+		{name: "nil deliverer returns error", req: ericlient.StatusWidgetRequest{ChannelID: "c1"}, wantErr: "discord widget deliverer is nil"},
 		{
-			name: "buried message sinks by creating new and deleting old",
-			req:  ericlient.StatusWidgetRequest{ChannelID: "chan-1", MessageID: "msg-buried-1", Title: "Build 1"},
-			msgs: []*discordgo.Message{
-				{ID: "m2", Timestamp: twentyMinsAgo},
-			},
-			sendMsg:       &discordgo.Message{ID: "msg-sunk-new"},
-			expectID:      "msg-sunk-new",
-			expectDeleted: true,
+			name: "missing sender returns error", d: newSenderDeliverer(nil, ""), req: ericlient.StatusWidgetRequest{ChannelID: "c1"},
+			wantErr: `no discord sender configured for agent "aerial"`,
 		},
+		{name: "empty channel returns error", d: newSenderDeliverer(&mockWidgetSender{}, ""), wantErr: "channel_id is required"},
 		{
-			name: "buried message sink delete failure still succeeds",
-			req:  ericlient.StatusWidgetRequest{ChannelID: "chan-1", MessageID: "msg-buried-del-fail", Title: "Build 1"},
-			msgs: []*discordgo.Message{
-				{ID: "m2", Timestamp: twentyMinsAgo},
-			},
-			sendMsg:       &discordgo.Message{ID: "msg-sunk-new-2"},
-			deleteErr:     errors.New("delete failed"),
-			expectID:      "msg-sunk-new-2",
-			expectDeleted: true,
-		},
-		{
-			name: "buried message sink send failure falls back to edit in place",
-			req:  ericlient.StatusWidgetRequest{ChannelID: "chan-1", MessageID: "msg-buried-sink-fail", Title: "Build 1"},
-			msgs: []*discordgo.Message{
-				{ID: "m2", Timestamp: twentyMinsAgo},
-			},
-			sendErr:  errors.New("sink send failed"),
-			editMsg:  &discordgo.Message{ID: "msg-buried-sink-fail"},
-			expectID: "msg-buried-sink-fail",
-		},
-		{
-			name: "buried message with skip_sink edits in place",
-			req:  ericlient.StatusWidgetRequest{ChannelID: "chan-1", MessageID: "msg-buried-2", Title: "Build 1", SkipSink: true},
-			msgs: []*discordgo.Message{
-				{ID: "m2", Timestamp: twentyMinsAgo},
-			},
-			editMsg:  &discordgo.Message{ID: "msg-buried-2"},
-			expectID: "msg-buried-2",
+			name: "send stamps the deliverer clock and suppresses mentions",
+			d:    newSenderDeliverer(&mockWidgetSender{sendMsg: &discordgo.Message{ID: "m-clock"}}, ""),
+			req:  ericlient.StatusWidgetRequest{ChannelID: "chan-1", Title: "Build Clock @everyone"}, wantID: "m-clock",
+			wantText: []string{"<t:1795089600:R>", "@everyone"},
 		},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			mock := &mockWidgetSender{
-				sendMsg:   tc.sendMsg,
-				sendErr:   tc.sendErr,
-				editMsg:   tc.editMsg,
-				deleteErr: tc.deleteErr,
-				msgs:      tc.msgs,
+			id, err := tc.d.DeliverStatusWidget(context.Background(), tc.req)
+			if tc.wantErr != "" {
+				require.Error(t, err)
+				assert.Contains(t, err.Error(), tc.wantErr)
+			} else {
+				require.NoError(t, err)
 			}
-
-			id, err := DeliverStatusWidget(mock, tc.req, now)
-			require.NoError(t, err)
-			assert.Equal(t, tc.expectID, id)
-			if tc.expectDeleted {
-				assert.Equal(t, tc.req.MessageID, mock.lastDeleteID)
+			assert.Equal(t, tc.wantID, id)
+			mock := senderMock(tc.d, tc.req.Agent)
+			if mock == nil || mock.lastSendData == nil {
+				assert.Empty(t, tc.wantText)
+				return
+			}
+			require.NotNil(t, mock.lastSendData.AllowedMentions)
+			assert.Empty(t, mock.lastSendData.AllowedMentions.Parse)
+			text := extractTestComponentsText(mock.lastSendData.Components)
+			for _, want := range tc.wantText {
+				assert.Contains(t, text, want)
 			}
 		})
 	}
 }
 
-func TestDelivererNilAndEmptyGuards(t *testing.T) {
+func TestDelivererDeliverStatusWidget_ReplacedMessageIDTracking(t *testing.T) {
 	t.Parallel()
-	var nilDeliverer *DiscordWidgetDeliverer
-	_, err := nilDeliverer.DeliverStatusWidget(context.Background(), ericlient.StatusWidgetRequest{ChannelID: "c1"})
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "discord widget deliverer is nil")
-
-	d, nErr := NewDiscordWidgetDeliverer("")
-	require.NoError(t, nErr)
-	_, dErr := d.DeliverStatusWidget(context.Background(), ericlient.StatusWidgetRequest{ChannelID: "c1"})
-	require.Error(t, dErr)
-	assert.Contains(t, dErr.Error(), "discord widget sender is nil")
-
-	assert.Equal(t, "", d.redirectChannelIfNoBuildUpdates(""))
-	assert.Equal(t, "fallback", d.resolveChannelID("", "fallback"))
-	assert.Equal(t, "123456789012345678", d.resolveChannelID("123456789012345678", "fallback"))
-	assert.Equal(t, "fallback", d.resolveChannelID("nonexistent-chan", "fallback"))
-
-	sess, err := discordgo.New("Bot fake-token")
-	require.NoError(t, err)
-	dWithSession := &DiscordWidgetDeliverer{
-		session: sess,
+	buried := msgs(1, 20*time.Minute, 0)
+	tests := []struct {
+		name         string
+		firstReq     ericlient.StatusWidgetRequest
+		secondReq    ericlient.StatusWidgetRequest
+		firstSender  *mockWidgetSender
+		secondSender *mockWidgetSender
+		wantFirstID  string
+		wantSecondID string
+		wantEditID   string
+	}{
+		{
+			name: "sunk message forwards stale id to new id on subsequent call",
+			firstReq: ericlient.StatusWidgetRequest{
+				ID: "b-sink", ChannelID: "chan-1", MessageID: "old-sunk", Title: "Build 1",
+			},
+			secondReq: ericlient.StatusWidgetRequest{
+				ID: "b-sink", ChannelID: "chan-1", MessageID: "old-sunk", Title: "Build 1",
+			},
+			firstSender: &mockWidgetSender{
+				msgs:    buried,
+				sendMsg: &discordgo.Message{ID: "new-sunk-msg", ChannelID: "chan-1"},
+			},
+			secondSender: &mockWidgetSender{
+				editMsg: &discordgo.Message{ID: "new-sunk-msg", ChannelID: "chan-1"},
+			},
+			wantFirstID:  "new-sunk-msg",
+			wantSecondID: "new-sunk-msg",
+			wantEditID:   "new-sunk-msg",
+		},
+		{
+			name: "404 recovered message forwards stale id on subsequent call",
+			firstReq: ericlient.StatusWidgetRequest{
+				ID: "b-404", ChannelID: "chan-1", MessageID: "old-404", Title: "Build 1",
+			},
+			secondReq: ericlient.StatusWidgetRequest{
+				ID: "b-404", ChannelID: "chan-1", MessageID: "old-404", Title: "Build 1",
+			},
+			firstSender: &mockWidgetSender{
+				editErr: &discordgo.RESTError{Response: &http.Response{StatusCode: http.StatusNotFound}},
+				sendMsg: &discordgo.Message{ID: "new-404-msg", ChannelID: "chan-1"},
+			},
+			secondSender: &mockWidgetSender{
+				editMsg: &discordgo.Message{ID: "new-404-msg", ChannelID: "chan-1"},
+			},
+			wantFirstID:  "new-404-msg",
+			wantSecondID: "new-404-msg",
+			wantEditID:   "new-404-msg",
+		},
+		{
+			name: "build id forwards empty message id to newly created message",
+			firstReq: ericlient.StatusWidgetRequest{
+				ID: "b-new", ChannelID: "chan-1", MessageID: "", Title: "Build 1",
+			},
+			secondReq: ericlient.StatusWidgetRequest{
+				ID: "b-new", ChannelID: "chan-1", MessageID: "", Title: "Build 1",
+			},
+			firstSender: &mockWidgetSender{
+				sendMsg: &discordgo.Message{ID: "created-build-msg", ChannelID: "chan-1"},
+			},
+			secondSender: &mockWidgetSender{
+				editMsg: &discordgo.Message{ID: "created-build-msg", ChannelID: "chan-1"},
+			},
+			wantFirstID:  "created-build-msg",
+			wantSecondID: "created-build-msg",
+			wantEditID:   "created-build-msg",
+		},
 	}
-	_, sErr := dWithSession.DeliverStatusWidget(context.Background(), ericlient.StatusWidgetRequest{})
-	require.Error(t, sErr)
-	assert.Contains(t, sErr.Error(), "channel_id is required")
 
-	assert.NoError(t, dWithSession.DeliverDirectMessage(context.Background(), "", ""))
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			d := newSenderDeliverer(tc.firstSender, "")
+			id1, err1 := d.DeliverStatusWidget(context.Background(), tc.firstReq)
+			require.NoError(t, err1)
+			assert.Equal(t, tc.wantFirstID, id1)
+
+			d.agentSenders[defaultAgent] = tc.secondSender
+			id2, err2 := d.DeliverStatusWidget(context.Background(), tc.secondReq)
+			require.NoError(t, err2)
+			assert.Equal(t, tc.wantSecondID, id2)
+			require.NotNil(t, tc.secondSender.lastEditData)
+			assert.Equal(t, tc.wantEditID, tc.secondSender.lastEditData.ID)
+		})
+	}
+}
+
+func TestDeliverDirectMessageWithAgent(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name        string
+		d           *DiscordWidgetDeliverer
+		agent       string
+		channelID   string
+		content     string
+		wantErr     string
+		wantChannel string
+		wantContent string
+	}{
+		{name: "nil deliverer returns error", channelID: "123456", content: "alert", wantErr: "discord widget deliverer is nil"},
+		{
+			name: "missing sender returns error", d: newSenderDeliverer(nil, ""), channelID: "123456", content: "alert",
+			wantErr: `no discord sender configured for agent "aerial"`,
+		},
+		{name: "empty channel is no-op", d: newSenderDeliverer(&mockWidgetSender{}, ""), channelID: "   ", content: "alert"},
+		{name: "empty content is no-op", d: newSenderDeliverer(&mockWidgetSender{}, ""), agent: "aerial", channelID: "123456", content: "   "},
+		{
+			name: "channel policy redirect when no_build_updates", d: newSenderDeliverer(&mockWidgetSender{}, "999888"), channelID: "123456",
+			content: "alert msg", wantChannel: "999888", wantContent: "alert msg",
+		},
+		{
+			name: "successful send suppresses allowed mentions", d: newSenderDeliverer(&mockWidgetSender{}, ""), channelID: " 123456 ",
+			content: " hello world ", wantChannel: "123456", wantContent: "hello world",
+		},
+		{
+			name: "send error propagates", d: newSenderDeliverer(&mockWidgetSender{sendErr: errors.New("discord rate limited")}, ""),
+			channelID: "123456", content: "hello world", wantErr: "failed to send direct discord message: discord rate limited",
+			wantChannel: "123456", wantContent: "hello world",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			err := tc.d.DeliverDirectMessageWithAgent(context.Background(), tc.agent, tc.channelID, tc.content)
+			if tc.wantErr != "" {
+				require.Error(t, err)
+				assert.Contains(t, err.Error(), tc.wantErr)
+			} else {
+				require.NoError(t, err)
+			}
+			var mock mockWidgetSender
+			if m := senderMock(tc.d, tc.agent); m != nil {
+				mock = *m
+			}
+			assert.Equal(t, tc.wantChannel, mock.lastSendChannelID)
+			if mock.lastSendData == nil {
+				assert.Empty(t, tc.wantContent)
+				return
+			}
+			assert.Equal(t, tc.wantContent, mock.lastSendData.Content)
+			require.NotNil(t, mock.lastSendData.AllowedMentions)
+			assert.Empty(t, mock.lastSendData.AllowedMentions.Parse)
+		})
+	}
+}
+
+func TestDeleteStatusWidget(t *testing.T) {
+	t.Parallel()
+	notFound := &discordgo.RESTError{Response: &http.Response{StatusCode: http.StatusNotFound}}
+	missingPerms := &discordgo.RESTError{Response: &http.Response{StatusCode: http.StatusForbidden}, Message: &discordgo.APIErrorMessage{Code: 50013}}
+	tests := []struct {
+		name        string
+		d           *DiscordWidgetDeliverer
+		channelID   string
+		messageID   string
+		wantErr     string
+		wantChannel string
+		wantDeleted string
+	}{
+		{name: "nil deliverer returns error", channelID: "123456", messageID: "m1", wantErr: "discord widget deliverer is nil"},
+		{name: "missing sender returns error", d: newSenderDeliverer(nil, ""), channelID: "123456", messageID: "m1", wantErr: `no discord sender configured for agent "aerial"`},
+		{name: "empty message id is a no-op", d: newSenderDeliverer(&mockWidgetSender{}, ""), channelID: "123456", messageID: " "},
+		{name: "empty channel is a no-op", d: newSenderDeliverer(&mockWidgetSender{}, ""), channelID: " ", messageID: "m1"},
+		{name: "deletes in the channel", d: newSenderDeliverer(&mockWidgetSender{}, ""), channelID: " 123456 ", messageID: " m1 ", wantChannel: "123456", wantDeleted: "m1"},
+		{name: "deletes in the redirected channel", d: newSenderDeliverer(&mockWidgetSender{}, "999888"), channelID: "123456", messageID: "m1", wantChannel: "999888", wantDeleted: "m1"},
+		{name: "already deleted message is a success", d: newSenderDeliverer(&mockWidgetSender{deleteErr: notFound}, ""), channelID: "123456", messageID: "m1", wantChannel: "123456", wantDeleted: "m1"},
+		{name: "missing permission is logged not returned", d: newSenderDeliverer(&mockWidgetSender{deleteErr: missingPerms}, ""), channelID: "123456", messageID: "m1", wantChannel: "123456", wantDeleted: "m1"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			err := tc.d.DeleteStatusWidget(context.Background(), "", tc.channelID, tc.messageID)
+			if tc.wantErr != "" {
+				require.Error(t, err)
+				assert.Contains(t, err.Error(), tc.wantErr)
+			} else {
+				require.NoError(t, err)
+			}
+			var mock mockWidgetSender
+			if m := senderMock(tc.d, ""); m != nil {
+				mock = *m
+			}
+			assert.Equal(t, tc.wantChannel, mock.lastDeleteChannel)
+			assert.Equal(t, tc.wantDeleted, mock.lastDeleteID)
+		})
+	}
 }
 
 func TestDeliverDirectMessage(t *testing.T) {
 	t.Parallel()
-	now := time.Date(2026, 11, 20, 10, 0, 0, 0, time.UTC)
-
 	tests := []struct {
-		name            string
-		nilDeliverer    bool
-		nilSender       bool
-		channelID       string
-		content         string
-		noBuildUpdates  bool
-		sysChannel      string
-		sendErr         error
-		wantErr         bool
-		errContain      string
-		expectSent      bool
-		expectChannelID string
-		expectContent   string
+		name        string
+		d           *DiscordWidgetDeliverer
+		wantErr     string
+		wantChannel string
 	}{
-		{
-			name:         "nil deliverer returns error",
-			nilDeliverer: true,
-			channelID:    "123456",
-			content:      "alert",
-			wantErr:      true,
-			errContain:   "discord widget deliverer is nil",
-		},
-		{
-			name:       "nil sender returns error",
-			nilSender:  true,
-			channelID:  "123456",
-			content:    "alert",
-			wantErr:    true,
-			errContain: "discord widget sender is nil",
-		},
-		{
-			name:       "empty channel is no-op",
-			channelID:  "   ",
-			content:    "alert",
-			expectSent: false,
-		},
-		{
-			name:       "empty content is no-op",
-			channelID:  "123456",
-			content:    "   ",
-			expectSent: false,
-		},
-		{
-			name:            "channel policy redirect when no_build_updates",
-			channelID:       "123456",
-			content:         "alert msg",
-			noBuildUpdates:  true,
-			sysChannel:      "999888",
-			expectSent:      true,
-			expectChannelID: "999888",
-			expectContent:   "alert msg",
-		},
-		{
-			name:            "successful send suppresses allowed mentions",
-			channelID:       "123456",
-			content:         "hello world",
-			expectSent:      true,
-			expectChannelID: "123456",
-			expectContent:   "hello world",
-		},
-		{
-			name:       "send error propagates",
-			channelID:  "123456",
-			content:    "hello world",
-			sendErr:    errors.New("discord rate limited"),
-			wantErr:    true,
-			errContain: "failed to send direct discord message: discord rate limited",
-		},
+		{name: "nil deliverer returns error", wantErr: "discord widget deliverer is nil"},
+		{name: "routes through the default agent sender", d: newSenderDeliverer(&mockWidgetSender{}, ""), wantChannel: "123456"},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			var d *DiscordWidgetDeliverer
-			var mock *mockWidgetSender
-			var sender DiscordWidgetSender
-
-			if !tc.nilDeliverer {
-				if !tc.nilSender {
-					mock = &mockWidgetSender{sendErr: tc.sendErr}
-					sender = mock
-				}
-				d = &DiscordWidgetDeliverer{
-					sender: sender,
-					nowFn:  func() time.Time { return now },
-					channelPolicyResolver: func(channelID string) (bool, string) {
-						return tc.noBuildUpdates, tc.sysChannel
-					},
-					resolvedChannels: make(map[string]cachedResolvedChannel),
-					channelMetaCache: make(map[string]cachedChannelMeta),
-				}
-			}
-
-			err := d.DeliverDirectMessage(context.Background(), tc.channelID, tc.content)
-			if tc.wantErr {
+			err := tc.d.DeliverDirectMessage(context.Background(), "123456", "alert")
+			if tc.wantErr != "" {
 				require.Error(t, err)
-				if tc.errContain != "" {
-					assert.Contains(t, err.Error(), tc.errContain)
-				}
-				return
+				assert.Contains(t, err.Error(), tc.wantErr)
+			} else {
+				require.NoError(t, err)
 			}
-			require.NoError(t, err)
-			if !tc.expectSent {
-				if mock != nil {
-					assert.Nil(t, mock.lastSendData)
-				}
-				return
+			var mock mockWidgetSender
+			if m := senderMock(tc.d, defaultAgent); m != nil {
+				mock = *m
 			}
-			require.NotNil(t, mock)
-			require.NotNil(t, mock.lastSendData)
-			assert.Equal(t, tc.expectChannelID, mock.lastSendChannelID)
-			assert.Equal(t, tc.expectContent, mock.lastSendData.Content)
-			require.NotNil(t, mock.lastSendData.AllowedMentions)
-			assert.Empty(t, mock.lastSendData.AllowedMentions.Parse)
+			assert.Equal(t, tc.wantChannel, mock.lastSendChannelID)
 		})
 	}
 }
@@ -612,202 +662,6 @@ func TestAccentColorAndStatusBadgeTable(t *testing.T) {
 			t.Parallel()
 			assert.Equal(t, tc.expectHex, AccentColor(tc.status))
 			assert.Equal(t, tc.expectIcon, statusBadge(tc.status))
-		})
-	}
-}
-
-func TestActiveStepRegistryOwnedRules(t *testing.T) {
-	clearAllChunkActiveStepsForTest()
-	t.Cleanup(clearAllChunkActiveStepsForTest)
-
-	tests := []struct {
-		name       string
-		setupStep  string
-		setStep    string
-		expectStep string
-	}{
-		{
-			name:       "trimmed text is stored",
-			setStep:    "  ⚡ Compiling...  ",
-			expectStep: "⚡ Compiling...",
-		},
-		{
-			name:       "empty string deletes existing entry",
-			setupStep:  "⚡ Running",
-			setStep:    "",
-			expectStep: "",
-		},
-		{
-			name:       "whitespace only string deletes existing entry",
-			setupStep:  "⚡ Running",
-			setStep:    "   \t\n  ",
-			expectStep: "",
-		},
-		{
-			name:       "missing chunk returns empty",
-			expectStep: "",
-		},
-	}
-
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			chunkID := "chunk-" + tc.name
-			if tc.setupStep != "" {
-				SetChunkActiveStep(chunkID, tc.setupStep)
-			}
-			if tc.setStep != "" || tc.setupStep != "" {
-				SetChunkActiveStep(chunkID, tc.setStep)
-			}
-			assert.Equal(t, tc.expectStep, GetChunkActiveStep(chunkID))
-		})
-	}
-}
-
-func TestActiveStepRegistryBounding(t *testing.T) {
-	clearAllChunkActiveStepsForTest()
-	t.Cleanup(clearAllChunkActiveStepsForTest)
-
-	for i := range MaxChunkActiveSteps + 20 {
-		SetChunkActiveStep(fmt.Sprintf("bounded-chunk-%04d", i), fmt.Sprintf("step-%d", i))
-	}
-
-	chunkActiveStepsMu.RLock()
-	total := len(chunkActiveSteps)
-	orderTotal := len(chunkActiveOrder)
-	chunkActiveStepsMu.RUnlock()
-
-	assert.Equal(t, MaxChunkActiveSteps, total)
-	assert.Equal(t, MaxChunkActiveSteps, orderTotal)
-
-	// Oldest chunks should be evicted
-	assert.Equal(t, "", GetChunkActiveStep("bounded-chunk-0000"))
-	assert.Equal(t, "", GetChunkActiveStep("bounded-chunk-0010"))
-
-	// Latest chunks should exist
-	assert.Equal(t, fmt.Sprintf("step-%d", MaxChunkActiveSteps+19), GetChunkActiveStep(fmt.Sprintf("bounded-chunk-%04d", MaxChunkActiveSteps+19)))
-
-	// Clearing removes from both map and order slice
-	SetChunkActiveStep("bounded-chunk-to-clear", "some-step")
-	ClearChunkActiveStep("bounded-chunk-to-clear")
-	assert.Equal(t, "", GetChunkActiveStep("bounded-chunk-to-clear"))
-
-	SetChunkActiveStep("bounded-chunk-empty", "some-step")
-	SetChunkActiveStep("bounded-chunk-empty", "")
-	assert.Equal(t, "", GetChunkActiveStep("bounded-chunk-empty"))
-
-	chunkActiveStepsMu.RLock()
-	assert.Equal(t, len(chunkActiveSteps), len(chunkActiveOrder))
-	chunkActiveStepsMu.RUnlock()
-}
-
-func TestBuildStatusWidgetComponentsTable(t *testing.T) {
-	t.Parallel()
-	now := time.Date(2026, 11, 19, 12, 0, 0, 0, time.UTC)
-	started := now.Add(-10 * time.Minute)
-
-	tests := []struct {
-		name          string
-		req           ericlient.StatusWidgetRequest
-		expectBanner  bool
-		expectSummary string
-		expectTextSub string
-	}{
-		{
-			name: "single pr widget with banner",
-			req: ericlient.StatusWidgetRequest{
-				ID:        "pr-aerial-100",
-				Title:     "Add widget",
-				Banner:    "Important note",
-				Status:    "running",
-				StartedAt: started,
-				Chunks: []ericlient.StatusWidgetChunk{
-					{ID: "c1", Title: "Step 1", Status: "running", PRNumber: 100, Repo: "aerial"},
-				},
-			},
-			expectBanner:  true,
-			expectTextSub: "Important note",
-		},
-		{
-			name: "multi-chunk completed build without banner",
-			req: ericlient.StatusWidgetRequest{
-				ID:        "build-12345",
-				Title:     "Multi-chunk build",
-				Status:    "completed",
-				StartedAt: started,
-				Chunks: []ericlient.StatusWidgetChunk{
-					{ID: "c1", Title: "Chunk 1", Status: "completed"},
-					{ID: "c2", Title: "Chunk 2", Status: "completed"},
-				},
-			},
-			expectBanner:  false,
-			expectTextSub: "Multi-chunk build",
-		},
-		{
-			name: "build without title and earlier chunk start and action mode",
-			req: ericlient.StatusWidgetRequest{
-				ID:     "build-empty-title",
-				Status: "completed",
-				Chunks: []ericlient.StatusWidgetChunk{
-					{
-						ID:          "c1",
-						Title:       "Action chunk",
-						Status:      "completed",
-						Mode:        "action",
-						StartedAt:   started.Add(-5 * time.Minute),
-						CompletedAt: started.Add(10 * time.Minute),
-						ActiveStep:  "Step 1\n\n  \nStep 2",
-					},
-					{
-						ID:          "c2",
-						Title:       "Standard chunk",
-						Status:      "deployed",
-						Repo:        "azylman/mirrormere/sub",
-						StartedAt:   started,
-						CompletedAt: started.Add(20 * time.Minute),
-					},
-				},
-			},
-			expectBanner:  false,
-			expectTextSub: "`action`",
-		},
-		{
-			name: "collapsing build with more than ten chunks",
-			req: ericlient.StatusWidgetRequest{
-				ID:        "build-many-chunks",
-				Title:     "Mega Build",
-				Status:    "running",
-				StartedAt: started,
-				Chunks:    collapseFixture(15, 9, "merged"),
-			},
-			expectBanner:  false,
-			expectSummary: "✅ ***7/15** earlier chunks completed and merged*",
-		},
-	}
-
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			comps, err := BuildStatusWidgetComponents(tc.req, now)
-			require.NoError(t, err)
-			require.Len(t, comps, 1)
-
-			container, ok := comps[0].(*discordgo.Container)
-			require.True(t, ok)
-			assert.NotNil(t, container.AccentColor)
-			assert.NotEmpty(t, container.Components)
-
-			fullText := extractTestComponentsText(comps)
-			if tc.expectBanner {
-				assert.Contains(t, fullText, tc.req.Banner)
-			} else if tc.req.Banner != "" {
-				assert.NotContains(t, fullText, tc.req.Banner)
-			}
-			if tc.expectSummary != "" {
-				assert.Contains(t, fullText, tc.expectSummary)
-			}
-			if tc.expectTextSub != "" {
-				assert.Contains(t, fullText, tc.expectTextSub)
-			}
 		})
 	}
 }
@@ -977,161 +831,31 @@ func TestFormatChunkActiveStepLines(t *testing.T) {
 	}
 }
 
-func TestDelivererWithNow(t *testing.T) {
-	t.Parallel()
-	fixedTime := time.Date(2026, 11, 19, 15, 0, 0, 0, time.UTC)
-	mockSender := &mockWidgetSender{sendMsg: &discordgo.Message{ID: "m-clock"}}
-	d, err := NewDiscordWidgetDeliverer("")
-	require.NoError(t, err)
-	d.sender = mockSender
-	d.nowFn = func() time.Time { return fixedTime }
-
-	req := ericlient.StatusWidgetRequest{ChannelID: "chan-1", Title: "Build Clock @everyone"}
-	id, dErr := d.DeliverStatusWidget(context.Background(), req)
-	require.NoError(t, dErr)
-	assert.Equal(t, "m-clock", id)
-	require.NotNil(t, mockSender.lastSendData)
-	require.NotNil(t, mockSender.lastSendData.AllowedMentions)
-	assert.Empty(t, mockSender.lastSendData.AllowedMentions.Parse)
-	footerText := extractTestComponentsText(mockSender.lastSendData.Components)
-	assert.Contains(t, footerText, fmt.Sprintf("<t:%d:R>", fixedTime.Unix()))
-	assert.Contains(t, footerText, "@everyone")
-}
-
 func TestIsWidgetCompletedTable(t *testing.T) {
 	t.Parallel()
-
 	tests := []struct {
-		name     string
-		req      ericlient.StatusWidgetRequest
-		expected bool
+		name string
+		req  ericlient.StatusWidgetRequest
+		want bool
 	}{
-		{
-			name: "completed build with completed and merged chunks",
-			req: ericlient.StatusWidgetRequest{
-				Status: "completed",
-				Chunks: []ericlient.StatusWidgetChunk{
-					{Status: "completed"},
-					{Status: "merged"},
-				},
-			},
-			expected: true,
-		},
-		{
-			name: "failed build with terminal chunks",
-			req: ericlient.StatusWidgetRequest{
-				Status: "failed",
-				Chunks: []ericlient.StatusWidgetChunk{
-					{Status: "failed"},
-					{Status: "cancelled"},
-				},
-			},
-			expected: true,
-		},
-		{
-			name: "error build with terminal chunks",
-			req: ericlient.StatusWidgetRequest{
-				Status: "error",
-				Chunks: []ericlient.StatusWidgetChunk{
-					{Status: "error"},
-				},
-			},
-			expected: true,
-		},
-		{
-			name: "running build with terminal chunks returns false",
-			req: ericlient.StatusWidgetRequest{
-				Status: "running",
-				Chunks: []ericlient.StatusWidgetChunk{
-					{Status: "completed"},
-				},
-			},
-			expected: false,
-		},
-		{
-			name: "coding build with terminal chunks returns false",
-			req: ericlient.StatusWidgetRequest{
-				Status: "coding",
-				Chunks: []ericlient.StatusWidgetChunk{
-					{Status: "completed"},
-				},
-			},
-			expected: false,
-		},
-		{
-			name: "open pr build returns false",
-			req: ericlient.StatusWidgetRequest{
-				Status: "open",
-				Chunks: []ericlient.StatusWidgetChunk{
-					{Status: "completed"},
-				},
-			},
-			expected: false,
-		},
-		{
-			name: "pending build returns false",
-			req: ericlient.StatusWidgetRequest{
-				Status: "pending",
-				Chunks: []ericlient.StatusWidgetChunk{
-					{Status: "completed"},
-				},
-			},
-			expected: false,
-		},
-		{
-			name: "paused build returns false",
-			req: ericlient.StatusWidgetRequest{
-				Status: "paused",
-				Chunks: []ericlient.StatusWidgetChunk{
-					{Status: "completed"},
-				},
-			},
-			expected: false,
-		},
-		{
-			name: "stalled build returns false",
-			req: ericlient.StatusWidgetRequest{
-				Status: "stalled",
-				Chunks: []ericlient.StatusWidgetChunk{
-					{Status: "completed"},
-				},
-			},
-			expected: false,
-		},
-		{
-			name: "failed build with running chunk returns false",
-			req: ericlient.StatusWidgetRequest{
-				Status: "failed",
-				Chunks: []ericlient.StatusWidgetChunk{
-					{Status: "failed"},
-					{Status: "running"},
-				},
-			},
-			expected: false,
-		},
-		{
-			name: "completed build with running chunk returns false",
-			req: ericlient.StatusWidgetRequest{
-				Status: "completed",
-				Chunks: []ericlient.StatusWidgetChunk{
-					{Status: "running"},
-				},
-			},
-			expected: false,
-		},
-		{
-			name: "empty status and chunks returns false",
-			req: ericlient.StatusWidgetRequest{
-				Status: "",
-			},
-			expected: false,
-		},
+		{"completed build with completed and merged chunks", widgetReq("completed", "completed", "merged"), true},
+		{"failed build with terminal chunks", widgetReq("failed", "failed", "cancelled"), true},
+		{"error build with terminal chunks", widgetReq("error", "error"), true},
+		{"running build with terminal chunks returns false", widgetReq("running", "completed"), false},
+		{"coding build with terminal chunks returns false", widgetReq("coding", "completed"), false},
+		{"open pr build returns false", widgetReq("open", "completed"), false},
+		{"pending build returns false", widgetReq("pending", "completed"), false},
+		{"paused build returns false", widgetReq("paused", "completed"), false},
+		{"stalled build returns false", widgetReq("stalled", "completed"), false},
+		{"failed build with running chunk returns false", widgetReq("failed", "failed", "running"), false},
+		{"completed build with running chunk returns false", widgetReq("completed", "running"), false},
+		{"empty status and chunks returns false", widgetReq(""), false},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			assert.Equal(t, tc.expected, isWidgetCompleted(tc.req))
+			assert.Equal(t, tc.want, isWidgetCompleted(tc.req))
 		})
 	}
 }
@@ -1141,69 +865,22 @@ func TestFormatWidgetFooterTextTable(t *testing.T) {
 	start := time.Date(2026, 11, 19, 10, 0, 0, 0, time.UTC)
 	end := start.Add(45 * time.Minute)
 	now := start.Add(60 * time.Minute)
+	updated := "*Started <t:1795082400:R> · Updated <t:1795086000:R>*"
+	duration := "*Started <t:1795082400:R> · Duration 45m*"
 
 	tests := []struct {
-		name      string
-		req       ericlient.StatusWidgetRequest
-		expectSub string
-		rejectSub string
+		name   string
+		req    ericlient.StatusWidgetRequest
+		want   string
+		reject string
 	}{
+		{"zero started at returns updated only", widgetReq("running"), "*Updated <t:1795086000:R>*", "Duration"},
+		{"running build shows started and updated", timedWidgetReq(widgetReq("running", "running"), start, end), updated, "Duration"},
+		{"completed build shows duration footer", timedWidgetReq(widgetReq("completed", "completed"), start, end), duration, "Updated"},
+		{"failed build with terminal chunks shows duration footer", timedWidgetReq(widgetReq("failed", "failed"), start, end), duration, "Updated"},
 		{
-			name: "zero started at returns updated only",
-			req: ericlient.StatusWidgetRequest{
-				Status: "running",
-			},
-			expectSub: fmt.Sprintf("*Updated <t:%d:R>*", now.Unix()),
-			rejectSub: "Duration",
-		},
-		{
-			name: "running build shows started and updated",
-			req: ericlient.StatusWidgetRequest{
-				Status:    "running",
-				StartedAt: start,
-				Chunks: []ericlient.StatusWidgetChunk{
-					{Status: "running", StartedAt: start},
-				},
-			},
-			expectSub: fmt.Sprintf("*Started <t:%d:R> · Updated <t:%d:R>*", start.Unix(), now.Unix()),
-			rejectSub: "Duration",
-		},
-		{
-			name: "completed build shows duration footer",
-			req: ericlient.StatusWidgetRequest{
-				Status:    "completed",
-				StartedAt: start,
-				Chunks: []ericlient.StatusWidgetChunk{
-					{Status: "completed", StartedAt: start, CompletedAt: end},
-				},
-			},
-			expectSub: fmt.Sprintf("*Started <t:%d:R> · Duration 45m*", start.Unix()),
-			rejectSub: "Updated",
-		},
-		{
-			name: "failed build with terminal chunks shows duration footer",
-			req: ericlient.StatusWidgetRequest{
-				Status:    "failed",
-				StartedAt: start,
-				Chunks: []ericlient.StatusWidgetChunk{
-					{Status: "failed", StartedAt: start, CompletedAt: end},
-				},
-			},
-			expectSub: fmt.Sprintf("*Started <t:%d:R> · Duration 45m*", start.Unix()),
-			rejectSub: "Updated",
-		},
-		{
-			name: "failed build with running chunk shows started and updated",
-			req: ericlient.StatusWidgetRequest{
-				Status:    "failed",
-				StartedAt: start,
-				Chunks: []ericlient.StatusWidgetChunk{
-					{Status: "failed", StartedAt: start, CompletedAt: end},
-					{Status: "running", StartedAt: start},
-				},
-			},
-			expectSub: fmt.Sprintf("*Started <t:%d:R> · Updated <t:%d:R>*", start.Unix(), now.Unix()),
-			rejectSub: "Duration",
+			"failed build with running chunk shows started and updated", timedWidgetReq(widgetReq("failed", "failed", "running"), start, end),
+			updated, "Duration",
 		},
 	}
 
@@ -1211,46 +888,50 @@ func TestFormatWidgetFooterTextTable(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			got := formatWidgetFooterText(tc.req, now)
-			assert.Contains(t, got, tc.expectSub)
-			if tc.rejectSub != "" {
-				assert.NotContains(t, got, tc.rejectSub)
-			}
+			assert.Contains(t, got, tc.want)
+			assert.NotContains(t, got, tc.reject)
 		})
 	}
 }
 
 func TestNewDiscordWidgetDelivererTokens(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
-		name       string
-		token      string
-		envToken   string
-		configPath string
-		hasSession bool
+		name           string
+		agent          string
+		token          string
+		environ        []string
+		configPath     string
+		wantOwner      string
+		wantConfigPath string
+		hasSession     bool
 	}{
-		{"token with Bot prefix", "Bot test-token", "", "", true},
-		{"token without Bot prefix", "test-token-raw", "", "/custom/path", true},
-		{"token from env", "", "env-token", "", true},
-		{"empty token", "", "", "", false},
+		{"token with Bot prefix", "", "Bot test-token", nil, "", "aerial", "", true},
+		{"token without Bot prefix", "aerial", "test-token-raw", nil, " /custom/path ", "aerial", "/custom/path", true},
+		{"token from environ", "", "", []string{"DISCORD_TOKEN=env-token"}, "", "aerial", "", true},
+		{"empty token", "", "", nil, "", "aerial", "", false},
+		{"blank environ token ignored", "", "", []string{"DISCORD_TOKEN=  "}, "", "aerial", "", false},
+		{"sibling runner keys environ token under own agent", " Agent-Alpha ", "", []string{"DISCORD_TOKEN=env-token"}, "/share/agent-alpha/config.yaml", "agent-alpha", "/share/agent-alpha/config.yaml", true},
+		{"sibling runner keys explicit token under own agent", "agent-alpha", "alpha-token", nil, "", "agent-alpha", "", true},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			if tc.envToken != "" {
-				t.Setenv("DISCORD_TOKEN", tc.envToken)
-			} else {
-				t.Setenv("DISCORD_TOKEN", "")
-			}
-			d, err := NewDiscordWidgetDeliverer(tc.token, tc.configPath)
+			t.Parallel()
+			d, err := NewDiscordWidgetDeliverer(tc.agent, tc.token, "example-owner", tc.environ, tc.configPath)
 			require.NoError(t, err)
 			assert.NotNil(t, d)
-			if tc.hasSession {
-				assert.NotNil(t, d.session)
-			} else {
+			assert.Equal(t, tc.wantConfigPath, d.configPath)
+			if !tc.hasSession {
 				assert.Nil(t, d.session)
+				assert.NotContains(t, d.agentSenders, tc.wantOwner)
+				return
 			}
-			if tc.configPath != "" {
-				assert.Equal(t, tc.configPath, d.configPath)
-			}
+			require.NotNil(t, d.session)
+			assert.Same(t, d.session, d.agentSenders[tc.wantOwner])
+			got, sErr := d.senderForAgent(tc.wantOwner)
+			require.NoError(t, sErr)
+			assert.Same(t, d.session, got)
 		})
 	}
 }
@@ -1285,8 +966,8 @@ func TestDeliverStatusWidgetChannelSerialization(t *testing.T) {
 				sendMsg: &discordgo.Message{ID: "msg-sync"},
 			}
 			deliverer := &DiscordWidgetDeliverer{
-				sender: mock,
-				nowFn:  func() time.Time { return now },
+				agentSenders: map[string]DiscordWidgetSender{"aerial": mock},
+				nowFn:        func() time.Time { return now },
 			}
 
 			chStarted := make(chan struct{})
@@ -1306,15 +987,21 @@ func TestDeliverStatusWidgetChannelSerialization(t *testing.T) {
 					mu.Unlock()
 				},
 			}
-			deliverer.sender = firstSender
+			deliverer.agentSenders = map[string]DiscordWidgetSender{"aerial": firstSender}
 
 			doneFirst := make(chan struct{})
 			go func() {
-				_, _ = deliverer.DeliverStatusWidget(context.Background(), ericlient.StatusWidgetRequest{
+				defer close(doneFirst)
+				msgID, err := deliverer.DeliverStatusWidget(context.Background(), ericlient.StatusWidgetRequest{
 					ChannelID: tc.channelA,
 					Title:     "Build First",
 				})
-				close(doneFirst)
+				if err != nil {
+					t.Errorf("DeliverStatusWidget first failed: %v", err)
+				}
+				if msgID == "" {
+					t.Errorf("DeliverStatusWidget first returned empty msgID")
+				}
 			}()
 
 			<-chStarted
@@ -1327,15 +1014,21 @@ func TestDeliverStatusWidgetChannelSerialization(t *testing.T) {
 					mu.Unlock()
 				},
 			}
-			deliverer.sender = secondSender
+			deliverer.agentSenders = map[string]DiscordWidgetSender{"aerial": secondSender}
 
 			doneSecond := make(chan struct{})
 			go func() {
-				_, _ = deliverer.DeliverStatusWidget(context.Background(), ericlient.StatusWidgetRequest{
+				defer close(doneSecond)
+				msgID, err := deliverer.DeliverStatusWidget(context.Background(), ericlient.StatusWidgetRequest{
 					ChannelID: tc.channelB,
 					Title:     "Build Second",
 				})
-				close(doneSecond)
+				if err != nil {
+					t.Errorf("DeliverStatusWidget second failed: %v", err)
+				}
+				if msgID == "" {
+					t.Errorf("DeliverStatusWidget second returned empty msgID")
+				}
 			}()
 
 			close(chRelease)
@@ -1375,28 +1068,6 @@ func (m *mockSerializedSender) ChannelMessageDelete(channelID, messageID string,
 	return m.mock.ChannelMessageDelete(channelID, messageID, options...)
 }
 
-func TestIsNotFoundError(t *testing.T) {
-	t.Parallel()
-	tests := []struct {
-		name     string
-		err      error
-		expected bool
-	}{
-		{"nil error", nil, false},
-		{"standard error", errors.New("boom"), false},
-		{"404 RESTError", &discordgo.RESTError{Response: &http.Response{StatusCode: http.StatusNotFound}}, true},
-		{"code 10008 RESTError", &discordgo.RESTError{Message: &discordgo.APIErrorMessage{Code: 10008}}, true},
-		{"other RESTError", &discordgo.RESTError{Response: &http.Response{StatusCode: http.StatusInternalServerError}}, false},
-	}
-
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			assert.Equal(t, tc.expected, isNotFoundError(tc.err))
-		})
-	}
-}
-
 func TestDiscordWidgetDeliverer_AgentRouting(t *testing.T) {
 	t.Parallel()
 
@@ -1409,52 +1080,253 @@ func TestDiscordWidgetDeliverer_AgentRouting(t *testing.T) {
 			"agent-alpha": mockAlpha,
 		},
 	}
+	alphaOnly := &DiscordWidgetDeliverer{
+		agentSenders: map[string]DiscordWidgetSender{"agent-alpha": mockAlpha},
+	}
+	nilEntry := &DiscordWidgetDeliverer{
+		agentSenders: map[string]DiscordWidgetSender{"aerial": nil},
+	}
 
 	tests := []struct {
 		name       string
 		deliverer  *DiscordWidgetDeliverer
 		agent      string
 		wantSender DiscordWidgetSender
+		wantErr    bool
 	}{
-		{name: "nil deliverer returns nil", deliverer: nil, agent: "aerial", wantSender: nil},
+		{name: "nil deliverer errors", deliverer: nil, agent: "aerial", wantErr: true},
 		{name: "empty agent resolves aerial", deliverer: d, agent: "", wantSender: mockAerial},
 		{name: "aerial agent resolves aerial", deliverer: d, agent: "aerial", wantSender: mockAerial},
+		{name: "agent is normalized", deliverer: d, agent: " Agent-Alpha ", wantSender: mockAlpha},
 		{name: "agent-alpha resolves alpha", deliverer: d, agent: "agent-alpha", wantSender: mockAlpha},
-		{name: "unknown agent falls back to aerial", deliverer: d, agent: "agent-unknown", wantSender: mockAerial},
+		{name: "unknown agent never falls back to aerial", deliverer: d, agent: "agent-unknown", wantErr: true},
+		{name: "default agent never falls back to a sibling", deliverer: alphaOnly, agent: "", wantErr: true},
+		{name: "nil sender entry errors", deliverer: nilEntry, agent: "aerial", wantErr: true},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			got := tc.deliverer.senderForAgent(tc.agent)
-			if got != tc.wantSender {
-				t.Fatalf("senderForAgent(%q) = %v, want %v", tc.agent, got, tc.wantSender)
+			got, err := tc.deliverer.senderForAgent(tc.agent)
+			if tc.wantErr {
+				require.ErrorIs(t, err, ErrNoSenderForAgent)
+				assert.Nil(t, got)
+				return
 			}
+			require.NoError(t, err)
+			assert.Same(t, tc.wantSender, got)
 		})
 	}
 
-	var nilDeliverer *DiscordWidgetDeliverer
-	nilDeliverer.SetAgentSender("agent-beta", mockAlpha)
+	newD := &DiscordWidgetDeliverer{agentSenders: map[string]DiscordWidgetSender{"aerial": mockAerial, "agent-beta": mockAlpha}}
+	got, err := newD.senderForAgent("aerial")
+	require.NoError(t, err)
+	assert.Same(t, mockAerial, got)
 
-	newD := &DiscordWidgetDeliverer{}
-	newD.SetAgentSender("", mockAerial)
-	if got := newD.senderForAgent("aerial"); got != mockAerial {
-		t.Fatalf("expected aerial sender after SetAgentSender, got %v", got)
+	got, err = newD.senderForAgent("agent-beta")
+	require.NoError(t, err)
+	assert.Same(t, mockAlpha, got)
+}
+
+func newAlphaOnlyDeliverer(alpha DiscordWidgetSender, now time.Time) *DiscordWidgetDeliverer {
+	return &DiscordWidgetDeliverer{
+		agentSenders:          map[string]DiscordWidgetSender{"agent-alpha": alpha},
+		nowFn:                 func() time.Time { return now },
+		channelPolicyResolver: func(string) (bool, string) { return false, "" },
+		resolvedChannels:      make(map[string]cachedResolvedChannel),
+		channelMetaCache:      make(map[string]cachedChannelMeta),
 	}
+}
 
-	newD.SetAgentSender("agent-beta", mockAlpha)
-	if got := newD.senderForAgent("agent-beta"); got != mockAlpha {
-		t.Fatalf("expected agent-beta sender after SetAgentSender, got %v", got)
+func TestDeliverStatusWidget_NoCrossAgentSender(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, 11, 20, 10, 0, 0, 0, time.UTC)
+	tests := []struct {
+		name  string
+		agent string
+	}{
+		{name: "unconfigured sibling agent", agent: "agent-beta"},
+		{name: "empty agent on sibling runner", agent: ""},
+		{name: "default agent on sibling runner", agent: "aerial"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			alpha := &mockWidgetSender{sendMsg: &discordgo.Message{ID: "msg-alpha"}}
+			d := newAlphaOnlyDeliverer(alpha, now)
+			_, err := d.DeliverStatusWidget(context.Background(), ericlient.StatusWidgetRequest{Agent: tc.agent, ChannelID: "123456", MessageID: "msg-old", Title: "Build"})
+			require.ErrorIs(t, err, ErrNoSenderForAgent)
+			assert.Nil(t, alpha.lastSendData)
+			assert.Nil(t, alpha.lastEditData)
+			assert.Empty(t, alpha.lastDeleteID)
+		})
+	}
+}
+
+func TestDeliverDirectMessageWithAgent_NoCrossAgentSender(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, 11, 20, 10, 0, 0, 0, time.UTC)
+	tests := []struct {
+		name  string
+		agent string
+	}{
+		{name: "unconfigured sibling agent", agent: "agent-beta"},
+		{name: "empty agent on sibling runner", agent: ""},
+		{name: "default agent on sibling runner", agent: "aerial"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			alpha := &mockWidgetSender{sendMsg: &discordgo.Message{ID: "msg-alpha"}}
+			d := newAlphaOnlyDeliverer(alpha, now)
+			err := d.DeliverDirectMessageWithAgent(context.Background(), tc.agent, "123456", "hello")
+			require.ErrorIs(t, err, ErrNoSenderForAgent)
+			assert.Nil(t, alpha.lastSendData)
+		})
 	}
 }
 
 func TestDiscoverAgentTokens(t *testing.T) {
-	t.Setenv("DISCORD_TOKEN_AGENT_ALPHA", "token-alpha")
-	t.Setenv("DISCORD_TOKEN", "token-aerial")
-	tokens := discoverAgentTokens()
-	if tokens["agent-alpha"] != "token-alpha" {
-		t.Errorf("expected token-alpha, got %q", tokens["agent-alpha"])
+	t.Parallel()
+	tests := []struct {
+		name    string
+		runner  string
+		environ []string
+		want    map[string]string
+	}{
+		{"default runner keys plain token under aerial", "", []string{"DISCORD_TOKEN=token-plain", "DISCORD_TOKEN_AGENT_ALPHA=token-alpha"}, map[string]string{"aerial": "token-plain", "agent-alpha": "token-alpha"}},
+		{"explicit aerial runner keys plain token under aerial", "aerial", []string{"DISCORD_TOKEN=token-plain"}, map[string]string{"aerial": "token-plain"}},
+		{"sibling runner keys plain token under itself", "agent-beta", []string{"DISCORD_TOKEN=token-plain"}, map[string]string{"agent-beta": "token-plain"}},
+		{"sibling runner keeps explicit per-agent token", "agent-beta", []string{"DISCORD_TOKEN=token-plain", "DISCORD_TOKEN_AGENT_BETA=token-beta"}, map[string]string{"agent-beta": "token-beta"}},
+		{"sibling runner without plain token", "agent-alpha", []string{"DISCORD_TOKEN_AGENT_ALPHA=token-alpha"}, map[string]string{"agent-alpha": "token-alpha"}},
+		{"bot token fallback when plain token absent", "", []string{"DISCORD_BOT_TOKEN= token-bot "}, map[string]string{"aerial": "token-bot"}},
+		{"plain token wins over bot token", "", []string{"DISCORD_BOT_TOKEN=token-bot", "DISCORD_TOKEN=token-plain"}, map[string]string{"aerial": "token-plain"}},
+		{"malformed blank and empty-suffix entries skipped", "", []string{"NOEQUALS", "DISCORD_TOKEN_AGENT_ALPHA=", "DISCORD_TOKEN_=token-empty", "HOME=/root"}, map[string]string{}},
+		{"nil environ yields no tokens", "", nil, map[string]string{}},
 	}
-	if tokens["aerial"] != "token-aerial" {
-		t.Errorf("expected token-aerial, got %q", tokens["aerial"])
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			assert.Equal(t, tc.want, discoverAgentTokens(tc.runner, tc.environ))
+		})
+	}
+}
+
+func TestDiscordWidgetDeliverer_PerAgentConfigRedirection(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	rootCfgPath := filepath.Join(dir, "config.yaml")
+	require.NoError(t, os.WriteFile(rootCfgPath, []byte("system_channel: aerial-dev\n"), 0o600))
+	agentAlphaDir := filepath.Join(dir, "services", "agent-alpha")
+	require.NoError(t, os.MkdirAll(agentAlphaDir, 0o755))
+	alphaCfg := "system_channel: agent-alpha-dev\nchannels:\n  general:\n    no_build_updates: true\n"
+	require.NoError(t, os.WriteFile(filepath.Join(agentAlphaDir, "config.yaml"), []byte(alphaCfg), 0o600))
+	channelIDs := map[string]string{"agent-alpha-dev": "111111111111111111", "aerial-dev": "222222222222222222"}
+
+	tests := []struct {
+		name          string
+		agent         string
+		channelID     string
+		wantChannelID string
+	}{
+		{name: "default agent uses root config without redirect", agent: "aerial", channelID: "general", wantChannelID: "general"},
+		{name: "unspecified agent uses root config without redirect", agent: "", channelID: "general", wantChannelID: "general"},
+		{
+			name: "agent-alpha redirects no_build_updates to agent-alpha-dev", agent: "agent-alpha", channelID: "general",
+			wantChannelID: "111111111111111111",
+		},
+		{name: "agent-alpha does not redirect regular channel", agent: "agent-alpha", channelID: "lounge", wantChannelID: "lounge"},
+		{name: "unconfigured sibling agent falls back to root config", agent: "agent-beta", channelID: "general", wantChannelID: "general"},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			d, err := NewDiscordWidgetDeliverer("", "", "example-owner", nil, rootCfgPath)
+			require.NoError(t, err)
+			d.channelResolver = func(nameOrID string) (string, error) {
+				if id, ok := channelIDs[nameOrID]; ok {
+					return id, nil
+				}
+				return "", errors.New("channel not found")
+			}
+			d.agentSenders = map[string]DiscordWidgetSender{
+				"agent-alpha": &mockWidgetSender{sendMsg: &discordgo.Message{ID: "msg-alpha"}},
+				"aerial":      &mockWidgetSender{sendMsg: &discordgo.Message{ID: "msg-aerial"}},
+				"agent-beta":  &mockWidgetSender{sendMsg: &discordgo.Message{ID: "msg-beta"}},
+			}
+
+			assert.Equal(t, tc.wantChannelID, d.redirectChannelIfNoBuildUpdates(tc.agent, tc.channelID))
+			req := ericlient.StatusWidgetRequest{Agent: tc.agent, ChannelID: tc.channelID, Title: "Build"}
+			_, sErr := d.DeliverStatusWidget(context.Background(), req)
+			require.NoError(t, sErr)
+			require.NoError(t, d.DeliverDirectMessageWithAgent(context.Background(), tc.agent, tc.channelID, "alert"))
+			active := senderMock(d, tc.agent)
+			require.NotNil(t, active)
+			assert.Equal(t, tc.wantChannelID, active.lastSendChannelID)
+		})
+	}
+}
+
+func TestDiscordWidgetDeliverer_SessionResolutionForAgent(t *testing.T) {
+	t.Parallel()
+	alphaSess, err := discordgo.New("Bot fake-alpha-token")
+	require.NoError(t, err)
+	alphaSess.State = discordgo.NewState()
+	require.NoError(t, alphaSess.State.GuildAdd(&discordgo.Guild{
+		ID: "g-alpha",
+		Channels: []*discordgo.Channel{
+			{ID: "111111111111111111", Name: "agent-alpha-dev"},
+		},
+	}))
+	for _, ch := range alphaSess.State.Guilds[0].Channels {
+		require.NoError(t, alphaSess.State.ChannelAdd(ch))
+	}
+
+	aerialSess, err := discordgo.New("Bot fake-aerial-token")
+	require.NoError(t, err)
+	aerialSess.State = discordgo.NewState()
+	require.NoError(t, aerialSess.State.GuildAdd(&discordgo.Guild{
+		ID: "g-aerial",
+		Channels: []*discordgo.Channel{
+			{ID: "222222222222222222", Name: "aerial-dev"},
+		},
+	}))
+	for _, ch := range aerialSess.State.Guilds[0].Channels {
+		require.NoError(t, aerialSess.State.ChannelAdd(ch))
+	}
+
+	d := &DiscordWidgetDeliverer{
+		session: aerialSess,
+		agentSenders: map[string]DiscordWidgetSender{
+			"aerial":      aerialSess,
+			"agent-alpha": alphaSess,
+		},
+	}
+
+	noSession := &DiscordWidgetDeliverer{}
+
+	tests := []struct {
+		name          string
+		d             *DiscordWidgetDeliverer
+		agent         string
+		target        string
+		wantChannelID string
+	}{
+		{
+			name: "agent-alpha resolves from its own session", d: d, agent: "agent-alpha", target: "agent-alpha-dev",
+			wantChannelID: "111111111111111111",
+		},
+		{name: "aerial resolves from default session", d: d, agent: "aerial", target: "aerial-dev", wantChannelID: "222222222222222222"},
+		{name: "unknown agent falls back to default session", d: d, agent: "agent-beta", target: "aerial-dev", wantChannelID: "222222222222222222"},
+		{name: "empty target returns fallback", d: noSession, target: " # ", wantChannelID: "fb"},
+		{name: "snowflake target returns itself", d: noSession, target: "123456789012345678", wantChannelID: "123456789012345678"},
+		{name: "name without any session returns fallback", d: noSession, target: "nonexistent-chan", wantChannelID: "fb"},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			assert.Equal(t, tc.wantChannelID, tc.d.resolveChannelID(tc.agent, tc.target, "fb"))
+		})
 	}
 }

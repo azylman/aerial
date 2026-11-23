@@ -85,7 +85,6 @@ type FakeStore struct {
 
 	sessionSummaries map[string]*db.SessionSummary
 	transcriptSteps  map[string][]db.TranscriptStep
-	leaderLockHook   func(ctx context.Context) (func(), error)
 }
 
 // NewFakeStore constructs an initialized, empty in-memory FakeStore.
@@ -117,30 +116,6 @@ func (f *FakeStore) FailNext(method string, err error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.failNext[method] = err
-}
-
-// SetLeaderLockHook configures an optional callback invoked by AcquireLeaderLock.
-func (f *FakeStore) SetLeaderLockHook(hook func(ctx context.Context) (func(), error)) {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	f.leaderLockHook = hook
-}
-
-// AcquireLeaderLock simulates acquiring the session-level advisory leader lock.
-func (f *FakeStore) AcquireLeaderLock(ctx context.Context) (func(), error) {
-	hook, err := withFakeLock(f, "AcquireLeaderLock", func() (func(context.Context) (func(), error), error) {
-		return f.leaderLockHook, nil
-	})
-	if err != nil {
-		return nil, err
-	}
-	if ctx != nil && ctx.Err() != nil {
-		return nil, ctx.Err()
-	}
-	if hook != nil {
-		return hook(ctx)
-	}
-	return func() {}, nil
 }
 
 func (f *FakeStore) checkClosedAndFail(method string) error {
@@ -223,13 +198,6 @@ func cloneSessionSummary(s *db.SessionSummary) *db.SessionSummary {
 	cp := *s
 	cp.Embedding = cloneSlice(s.Embedding)
 	return &cp
-}
-
-func cloneSliceNonNil[T any](s []T) []T {
-	if s == nil {
-		return []T{}
-	}
-	return cloneSlice(s)
 }
 
 func textMatchScore(text, qLower string, words []string) float64 {
@@ -344,34 +312,6 @@ func (f *FakeStore) UpdateMessageCompleted(ctx context.Context, id, responseText
 	})
 }
 
-func (f *FakeStore) IncrementMessageRetry(ctx context.Context, id, errorMsg string) error {
-	return f.mutateMessage("IncrementMessageRetry", id, func(m *db.Message) {
-		m.RetryCount++
-		m.ErrorMessage = errorMsg
-	})
-}
-
-func (f *FakeStore) ResetMessageToPendingWithRestart(ctx context.Context, id, reason string) error {
-	return f.mutateMessage("ResetMessageToPendingWithRestart", id, func(m *db.Message) {
-		m.Status, m.RestartCount, m.ErrorMessage = db.StatusPending, m.RestartCount+1, reason
-	})
-}
-
-func (f *FakeStore) GetPendingOrProcessingMessages(ctx context.Context, limit int) ([]db.Message, error) {
-	return withFakeLock(f, "GetPendingOrProcessingMessages", func() ([]db.Message, error) {
-		var results []db.Message
-		for _, id := range f.messageOrder {
-			if m := f.messages[id]; m != nil && (m.Status == db.StatusPending || m.Status == db.StatusProcessing) {
-				results = append(results, *cloneMessage(m))
-				if limit > 0 && len(results) >= limit {
-					break
-				}
-			}
-		}
-		return results, nil
-	})
-}
-
 func (f *FakeStore) GetMessage(ctx context.Context, id string) (*db.Message, error) {
 	return withFakeLock(f, "GetMessage", func() (*db.Message, error) {
 		m, ok := f.messages[id]
@@ -400,29 +340,6 @@ func (f *FakeStore) ClaimPendingMessage(ctx context.Context, id string) (bool, e
 	})
 }
 
-func (f *FakeStore) GetActiveRecentThreadIDs(ctx context.Context, since time.Duration) ([]string, error) {
-	return withFakeLock(f, "GetActiveRecentThreadIDs", func() ([]string, error) {
-		cutoff, seen := time.Now().UTC().Add(-since), make(map[string]bool)
-		var threadIDs []string
-		for _, v := range slices.Backward(f.messageOrder) {
-			if m := f.messages[v]; m != nil && m.ThreadID != "" && m.UpdatedAt.After(cutoff) && !seen[m.ThreadID] {
-				seen[m.ThreadID] = true
-				threadIDs = append(threadIDs, m.ThreadID)
-			}
-		}
-		for key, s := range f.sessions {
-			if s != nil && strings.HasPrefix(key, "discord-") && s.UpdatedAt.After(cutoff) {
-				tid := strings.TrimPrefix(key, "discord-")
-				if tid != "" && !seen[tid] {
-					seen[tid] = true
-					threadIDs = append(threadIDs, tid)
-				}
-			}
-		}
-		return threadIDs, nil
-	})
-}
-
 func (f *FakeStore) GetRecentThreadMessages(ctx context.Context, threadID string, limit int) ([]db.Message, error) {
 	return withFakeLock(f, "GetRecentThreadMessages", func() ([]db.Message, error) {
 		limit = defaultVal(limit, 10)
@@ -437,21 +354,6 @@ func (f *FakeStore) GetRecentThreadMessages(ctx context.Context, threadID string
 		}
 		slices.Reverse(matches)
 		return matches, nil
-	})
-}
-
-func (f *FakeStore) HasActiveThreadTurn(ctx context.Context, threadID string) (bool, error) {
-	return withFakeLock(f, "HasActiveThreadTurn", func() (bool, error) {
-		trimmed := strings.TrimSpace(threadID)
-		if trimmed == "" {
-			return false, nil
-		}
-		for _, m := range f.messages {
-			if m != nil && m.ThreadID == trimmed && (m.Status == db.StatusPending || m.Status == db.StatusProcessing) {
-				return true, nil
-			}
-		}
-		return false, nil
 	})
 }
 
@@ -765,44 +667,6 @@ func (f *FakeStore) UpdateDispatchCompleted(ctx context.Context, id, responseTex
 	})
 }
 
-func (f *FakeStore) IncrementDispatchRetry(ctx context.Context, id, errorMsg string) error {
-	return f.withLockErr("IncrementDispatchRetry", func() error {
-		if d, ok := f.dispatches[id]; ok {
-			d.RetryCount++
-			d.ErrorMessage, d.UpdatedAt = errorMsg, time.Now().UTC()
-		}
-		return nil
-	})
-}
-
-func (f *FakeStore) ResetDispatchToPendingWithRestart(ctx context.Context, id, reason string) error {
-	return f.withLockErr("ResetDispatchToPendingWithRestart", func() error {
-		if d, ok := f.dispatches[id]; ok && d.Status == db.StatusProcessing {
-			d.RestartCount++
-			d.Status, d.ErrorMessage, d.UpdatedAt = db.StatusPending, reason, time.Now().UTC()
-		}
-		return nil
-	})
-}
-
-func (f *FakeStore) GetPendingOrProcessingDispatches(ctx context.Context, limit int) ([]db.Dispatch, error) {
-	return withFakeLock(f, "GetPendingOrProcessingDispatches", func() ([]db.Dispatch, error) {
-		var results []db.Dispatch
-		for _, id := range f.dispatchOrder {
-			if d := f.dispatches[id]; d != nil && (d.Status == db.StatusPending || d.Status == db.StatusProcessing) {
-				results = append(results, *cloneDispatch(d))
-			}
-		}
-		sort.Slice(results, func(i, j int) bool {
-			return results[i].CreatedAt.Before(results[j].CreatedAt)
-		})
-		if limit > 0 && len(results) > limit {
-			results = results[:limit]
-		}
-		return results, nil
-	})
-}
-
 func (f *FakeStore) GetRecentSessionDispatches(ctx context.Context, sessionID string, limit int) ([]db.Dispatch, error) {
 	return withFakeLock(f, "GetRecentSessionDispatches", func() ([]db.Dispatch, error) {
 		if strings.TrimSpace(sessionID) == "" {
@@ -820,50 +684,6 @@ func (f *FakeStore) GetRecentSessionDispatches(ctx context.Context, sessionID st
 		}
 		slices.Reverse(matches)
 		return matches, nil
-	})
-}
-
-func (f *FakeStore) HasActiveDispatchTurn(ctx context.Context, sessionID, id string) (bool, error) {
-	return withFakeLock(f, "HasActiveDispatchTurn", func() (bool, error) {
-		sID := strings.TrimSpace(sessionID)
-		tID := strings.TrimSpace(id)
-		if sID == "" && tID == "" {
-			return false, nil
-		}
-		for _, d := range f.dispatches {
-			if d != nil && (d.Status == db.StatusPending || d.Status == db.StatusProcessing) {
-				if (sID != "" && d.SessionID == sID) || (tID != "" && d.ID == tID) {
-					return true, nil
-				}
-			}
-		}
-		return false, nil
-	})
-}
-
-func (f *FakeStore) CancelPendingDispatches(ctx context.Context, dispatchID, buildID, reason string) ([]string, error) {
-	return withFakeLock(f, "CancelPendingDispatches", func() ([]string, error) {
-		dID := strings.TrimSpace(dispatchID)
-		bID := strings.TrimSpace(buildID)
-		if dID == "" && bID == "" {
-			return nil, nil
-		}
-		var cancelled []string
-		now := time.Now().UTC()
-		for _, id := range f.dispatchOrder {
-			d := f.dispatches[id]
-			if d == nil || (d.Status != db.StatusPending && d.Status != db.StatusProcessing) {
-				continue
-			}
-			match := (dID != "" && d.ID == dID) || (bID != "" && (strings.Contains(d.Prompt, "Build ID: "+bID+"\n") || strings.HasPrefix(d.SessionID, "vanadis-"+bID+"-chunk-") || strings.Contains(d.Prompt, "Chunk ID: "+bID+"-chunk-") || strings.TrimSpace(d.VanadisChunkID) == bID || d.SessionID == "vanadis-"+bID))
-			if match {
-				d.Status = db.StatusFailed
-				d.ErrorMessage = reason
-				d.UpdatedAt = now
-				cancelled = append(cancelled, d.ID)
-			}
-		}
-		return cancelled, nil
 	})
 }
 
@@ -972,32 +792,6 @@ func (f *FakeStore) SaveThreadSummary(ctx context.Context, threadID, summary, la
 	return f.withLockErr("SaveThreadSummary", func() error {
 		f.threadSummaries[db.DiscordSessionID(threadID)] = threadSummaryRecord{summary: summary, watermark: lastSummarizedMsgID}
 		return nil
-	})
-}
-
-func maxTime(dst *time.Time, t time.Time) {
-	if t.After(*dst) {
-		*dst = t
-	}
-}
-
-func (f *FakeStore) GetSessionActivityStats(ctx context.Context, threadID string) (*db.SessionActivityStats, error) {
-	return withFakeLock(f, "GetSessionActivityStats", func() (*db.SessionActivityStats, error) {
-		stats := &db.SessionActivityStats{}
-		sessKey := db.DiscordSessionID(threadID)
-		rawMsgThreadID := strings.TrimPrefix(strings.TrimSpace(threadID), "discord-")
-		if s := f.sessions[sessKey]; s != nil {
-			stats.InternalSessionID, stats.TurnCount, stats.SessionUpdatedAt = s.InternalSessionID, s.TurnCount, s.UpdatedAt
-		}
-		for _, id := range f.messageOrder {
-			m := f.messages[id]
-			if m != nil && m.ThreadID == rawMsgThreadID && m.Status == db.StatusCompleted && !strings.HasPrefix(m.ResponseText, "[EXPIRED_STALE]") && !strings.HasPrefix(m.ResponseText, "[AMBIENT") && !strings.HasPrefix(m.ResponseText, "[IGNORED") {
-				stats.CompletedTurns++
-				maxTime(&stats.LastMessageAt, m.UpdatedAt)
-				maxTime(&stats.LastCompletedMessageCreatedAt, m.CreatedAt)
-			}
-		}
-		return stats, nil
 	})
 }
 
@@ -1123,19 +917,6 @@ func (f *FakeStore) UpsertSessionSummary(ctx context.Context, summary db.Session
 		}
 		cp.UpdatedAt = now
 		f.sessionSummaries[summary.SessionID] = cloneSessionSummary(&cp)
-		return nil
-	})
-}
-
-func (f *FakeStore) SetSessionEngine(ctx context.Context, sessionID, engine string) error {
-	return f.withLockErr("SetSessionEngine", func() error {
-		sessionID, engine = strings.TrimSpace(sessionID), strings.TrimSpace(engine)
-		if sessionID == "" || engine == "" {
-			return fmt.Errorf("session ID and engine cannot be empty")
-		}
-		if existing := f.sessionSummaries[sessionID]; existing != nil {
-			existing.Engine = engine
-		}
 		return nil
 	})
 }

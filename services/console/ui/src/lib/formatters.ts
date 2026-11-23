@@ -41,19 +41,6 @@ export function formatElapsedTicker(seconds: number | null | undefined): string 
   return `${pad2(mins)}:${pad2(secs)}s`;
 }
 
-/** Git-sync lag badge text: `Δ 45s`, `Δ 2m 5s`, `Δ 1h`. */
-export function formatGitSyncDelta(seconds: number | null | undefined): string {
-  if (isMissingSeconds(seconds)) return 'Δ 0s';
-  const s = Math.floor(seconds);
-  if (s < 60) return `Δ ${s}s`;
-  const mins = Math.floor(s / 60);
-  const secs = s % 60;
-  if (mins < 60) return secs > 0 ? `Δ ${mins}m ${secs}s` : `Δ ${mins}m`;
-  const hrs = Math.floor(mins / 60);
-  const remMins = mins % 60;
-  return remMins > 0 ? `Δ ${hrs}h ${remMins}m` : `Δ ${hrs}h`;
-}
-
 export interface TriggerBadge {
   readonly icon: IconName;
   readonly text: string;

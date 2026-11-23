@@ -83,32 +83,35 @@ func TestResolveConfigPath(t *testing.T) {
 }
 
 type loadConfigFileTestCase struct {
-	name                   string
-	path                   string
-	env                    map[string]string
-	nilEnv                 bool
-	callLoadConfig         bool
-	wantErr                bool
-	wantPort               string
-	wantDatabaseURL        string
-	wantTwilioAccountSID   string
-	wantTwilioAuthToken    string
-	wantTwilioFromNumber   string
-	wantPublicWebhookBase  string
-	wantGeminiAPIKey       string
-	wantGeminiLiveModel    string
-	wantGeminiFallback     string
-	wantGeminiVoiceName    string
-	wantBrainURL           string
-	wantGoogleMCPURL       string
-	wantCovenURL           string
-	wantWhisperURL         string
-	wantDiscordChannel     string
-	wantCallbackWindowMins int
-	wantMaxConcurrent      int
-	wantAllowFromLen       int
-	wantFirstAllowFrom     string
-	wantNATSURL            string
+	name                    string
+	path                    string
+	env                     map[string]string
+	nilEnv                  bool
+	wantErr                 bool
+	wantPort                string
+	wantDatabaseURL         string
+	wantTwilioAccountSID    string
+	wantTwilioAuthToken     string
+	wantTwilioFromNumber    string
+	wantPublicWebhookBase   string
+	wantGeminiAPIKey        string
+	wantGeminiLiveModel     string
+	wantGeminiFallback      string
+	wantGeminiVoiceName     string
+	wantBrainURL            string
+	wantGoogleMCPURL        string
+	wantCovenURL            string
+	wantWhisperURL          string
+	wantDiscordChannel      string
+	wantCallbackWindowMins  int
+	wantMaxConcurrent       int
+	wantAllowFromLen        int
+	wantFirstAllowFrom      string
+	wantNATSURL             string
+	wantRestatePort         string
+	wantRestateIngressURL   string
+	wantRestateAdminURL     string
+	wantRestateAdvertiseURL string
 }
 
 func TestLoadConfigFile_TableDriven(t *testing.T) {
@@ -159,6 +162,11 @@ twilio_from_number: "(510) 555-0999"
 `,
 		"nats": validYAML + `nats_url: "nats://nats.aerial:4222"
 `,
+		"restate": validYAML + `restate_port: "9081"
+restate_ingress_url: "http://restate-custom.aerial:8080"
+restate_admin_url: "http://restate-custom.aerial:9070"
+restate_advertise_url: "http://prospera-custom:9080"
+`,
 	}
 
 	paths := make(map[string]string, len(files))
@@ -177,6 +185,10 @@ func loadConfigFileTestCases(paths map[string]string, tmpDir string) []loadConfi
 }
 
 func loadConfigValidCases(paths map[string]string) []loadConfigFileTestCase {
+	return append(loadConfigValidBaseCases(paths), loadConfigValidOverrideCases(paths)...)
+}
+
+func loadConfigValidBaseCases(paths map[string]string) []loadConfigFileTestCase {
 	return []loadConfigFileTestCase{
 		{
 			name: "valid complete configuration",
@@ -189,26 +201,30 @@ func loadConfigValidCases(paths map[string]string) []loadConfigFileTestCase {
 				"TWILIO_FROM_NUMBER":     "(510) 555-0100",
 				"ALLOW_FROM":             "+15105550101, +15105550102",
 			},
-			wantErr:                false,
-			wantPort:               "4019",
-			wantDatabaseURL:        "postgres://user:pass@localhost:5432/testdb",
-			wantTwilioAccountSID:   "AC123",
-			wantTwilioAuthToken:    "tok-123",
-			wantTwilioFromNumber:   "+15105550100",
-			wantPublicWebhookBase:  "https://webhooks.example.com",
-			wantGeminiAPIKey:       "key-123",
-			wantGeminiLiveModel:    "gemini-3.8-live",
-			wantGeminiFallback:     "gemini-3.1-flash-live-preview",
-			wantGeminiVoiceName:    "Kore",
-			wantBrainURL:           "http://eri.aerial",
-			wantGoogleMCPURL:       "http://google-mcp.aerial/mcp",
-			wantCovenURL:           "http://coven.aerial",
-			wantWhisperURL:         "http://voice.aerial",
-			wantDiscordChannel:     "prospera",
-			wantCallbackWindowMins: 10080,
-			wantMaxConcurrent:      2,
-			wantAllowFromLen:       2,
-			wantFirstAllowFrom:     "+15105550101",
+			wantErr:                 false,
+			wantPort:                "4019",
+			wantDatabaseURL:         "postgres://user:pass@localhost:5432/testdb",
+			wantTwilioAccountSID:    "AC123",
+			wantTwilioAuthToken:     "tok-123",
+			wantTwilioFromNumber:    "+15105550100",
+			wantPublicWebhookBase:   "https://webhooks.example.com",
+			wantGeminiAPIKey:        "key-123",
+			wantGeminiLiveModel:     "gemini-3.8-live",
+			wantGeminiFallback:      "gemini-3.1-flash-live-preview",
+			wantGeminiVoiceName:     "Kore",
+			wantBrainURL:            "http://eri.aerial",
+			wantGoogleMCPURL:        "http://google-mcp.aerial/mcp",
+			wantCovenURL:            "http://coven.aerial",
+			wantWhisperURL:          "http://voice.aerial",
+			wantDiscordChannel:      "prospera",
+			wantCallbackWindowMins:  10080,
+			wantMaxConcurrent:       2,
+			wantAllowFromLen:        2,
+			wantFirstAllowFrom:      "+15105550101",
+			wantRestatePort:         "9080",
+			wantRestateIngressURL:   "http://restate.aerial:8080",
+			wantRestateAdminURL:     "http://restate.aerial:9070",
+			wantRestateAdvertiseURL: "http://prospera.default.svc.cluster.local:9080",
 		},
 		{
 			name: "gemini harness fallback and allow_from with spaces",
@@ -226,9 +242,9 @@ func loadConfigValidCases(paths map[string]string) []loadConfigFileTestCase {
 			wantTwilioFromNumber: "",
 		},
 		{
-			name:           "load config wrapper with env",
-			path:           paths["valid"],
-			callLoadConfig: true,
+			name:   "nil getenv falls back to process env",
+			path:   paths["valid"],
+			nilEnv: true,
 			env: map[string]string{
 				"DATABASE_URL": "postgres://user:pass@localhost:5432/testdb",
 			},
@@ -266,6 +282,11 @@ func loadConfigValidCases(paths map[string]string) []loadConfigFileTestCase {
 			wantPort:     "4019",
 			wantBrainURL: "http://env-eri.aerial:8088",
 		},
+	}
+}
+
+func loadConfigValidOverrideCases(paths map[string]string) []loadConfigFileTestCase {
+	return []loadConfigFileTestCase{
 		{
 			name: "twilio fields loaded from yaml when env unset",
 			path: paths["twilio"],
@@ -310,6 +331,36 @@ func loadConfigValidCases(paths map[string]string) []loadConfigFileTestCase {
 			wantErr:     false,
 			wantPort:    "4019",
 			wantNATSURL: "nats://override.aerial:4222",
+		},
+		{
+			name: "restate settings loaded from yaml",
+			path: paths["restate"],
+			env: map[string]string{
+				"DATABASE_URL": "postgres://user:pass@localhost:5432/testdb",
+			},
+			wantErr:                 false,
+			wantPort:                "4019",
+			wantRestatePort:         "9081",
+			wantRestateIngressURL:   "http://restate-custom.aerial:8080",
+			wantRestateAdminURL:     "http://restate-custom.aerial:9070",
+			wantRestateAdvertiseURL: "http://prospera-custom:9080",
+		},
+		{
+			name: "restate settings in env override yaml",
+			path: paths["restate"],
+			env: map[string]string{
+				"DATABASE_URL":          "postgres://user:pass@localhost:5432/testdb",
+				"RESTATE_PORT":          "9082",
+				"RESTATE_INGRESS_URL":   "http://restate-env.aerial:8080/",
+				"RESTATE_ADMIN_URL":     "http://restate-env.aerial:9070/",
+				"RESTATE_ADVERTISE_URL": "http://prospera-env:9080/",
+			},
+			wantErr:                 false,
+			wantPort:                "4019",
+			wantRestatePort:         "9082",
+			wantRestateIngressURL:   "http://restate-env.aerial:8080",
+			wantRestateAdminURL:     "http://restate-env.aerial:9070",
+			wantRestateAdvertiseURL: "http://prospera-env:9080",
 		},
 	}
 }
@@ -415,26 +466,11 @@ func loadConfigErrorCases(paths map[string]string, tmpDir string) []loadConfigFi
 
 func runLoadConfigFileCase(t *testing.T, tc loadConfigFileTestCase) {
 	t.Helper()
-	if tc.callLoadConfig {
+	var getenv func(string) string
+	if tc.nilEnv {
 		for k, v := range tc.env {
 			t.Setenv(k, v)
 		}
-		cfg, err := LoadConfig(tc.path)
-		if (err != nil) != tc.wantErr {
-			t.Fatalf("LoadConfig() error = %v, wantErr = %v", err, tc.wantErr)
-		}
-		if tc.wantErr {
-			return
-		}
-		if cfg.Port != tc.wantPort {
-			t.Errorf("cfg.Port = %q, want %q", cfg.Port, tc.wantPort)
-		}
-		return
-	}
-
-	var getenv func(string) string
-	if tc.nilEnv {
-		getenv = nil
 	} else {
 		getenv = func(key string) string {
 			if tc.env == nil {
@@ -474,6 +510,10 @@ func assertLoadedConfig(t *testing.T, tc loadConfigFileTestCase, cfg *Config) {
 		{cfg.WhisperURL, tc.wantWhisperURL, "WhisperURL"},
 		{cfg.DefaultDiscordChannel, tc.wantDiscordChannel, "DefaultDiscordChannel"},
 		{cfg.NATSURL, tc.wantNATSURL, "NATSURL"},
+		{cfg.RestatePort, tc.wantRestatePort, "RestatePort"},
+		{cfg.RestateIngressURL, tc.wantRestateIngressURL, "RestateIngressURL"},
+		{cfg.RestateAdminURL, tc.wantRestateAdminURL, "RestateAdminURL"},
+		{cfg.RestateAdvertiseURL, tc.wantRestateAdvertiseURL, "RestateAdvertiseURL"},
 	}
 	for _, c := range strChecks {
 		if c.want != "" && c.got != c.want {
@@ -494,5 +534,33 @@ func assertLoadedConfig(t *testing.T, tc loadConfigFileTestCase, cfg *Config) {
 	}
 	if tc.wantFirstAllowFrom != "" && len(cfg.AllowFrom) > 0 && cfg.AllowFrom[0] != tc.wantFirstAllowFrom {
 		t.Errorf("cfg.AllowFrom[0] = %q, want %q", cfg.AllowFrom[0], tc.wantFirstAllowFrom)
+	}
+}
+
+func TestRestartRequired(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name string
+		next Config
+		want bool
+	}{
+		{"identical", Config{}, false},
+		{"live fields change", Config{GeminiLiveModel: "live-2", DefaultDiscordChannel: "chan", MaxConcurrentCalls: 9}, false},
+		{"port change", Config{Port: "9090"}, true},
+		{"restate port change", Config{RestatePort: "9081"}, true},
+		{"database change", Config{DatabaseURL: "postgres://db2/app"}, true},
+		{"twilio account change", Config{TwilioAccountSID: "AC2"}, true},
+		{"twilio token change", Config{TwilioAuthToken: "tok2"}, true},
+		{"google mcp change", Config{GoogleMCPURL: "http://google-mcp-2"}, true},
+		{"coven change", Config{CovenURL: "http://coven-2"}, true},
+		{"nats url change", Config{NATSURL: "nats://nats.example.com:4222"}, true},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got := RestartRequired(&Config{}, &tc.next); got != tc.want {
+				t.Fatalf("RestartRequired() = %v, want %v", got, tc.want)
+			}
+		})
 	}
 }

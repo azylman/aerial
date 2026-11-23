@@ -1,0 +1,373 @@
+{
+  "name": "06-merge-watcher-multi-kustomization",
+  "description": "A merged PR whose image promotion requests two Kustomizations publishes deploy_started, reconciles both, publishes rollout_updated for the first completion and deploy_success exactly once, when the last Kustomization completes.",
+  "github_routes": {
+    "GET /repos/azylman/aerial/git/commits/m106": "{\"sha\":\"m106\",\"committer\":{\"date\":\"2026-11-20T09:59:00Z\"}}"
+  },
+  "synapse": [
+    {
+      "kind": "register",
+      "register": {
+        "repo": "azylman/aerial",
+        "pr_number": 106,
+        "branch": "feat/watch",
+        "head_sha": "h106",
+        "target_id": "100000000000000001",
+        "title": "Watcher PR",
+        "agent": "aerial"
+      }
+    },
+    {
+      "kind": "github",
+      "event": "pull_request",
+      "payload": {
+        "action": "closed",
+        "number": 106,
+        "repository": {
+          "full_name": "azylman/aerial"
+        },
+        "pull_request": {
+          "number": 106,
+          "title": "Watcher PR",
+          "state": "closed",
+          "merged": true,
+          "head": {
+            "ref": "feat/watch",
+            "sha": "h106"
+          },
+          "base": {
+            "ref": "main"
+          },
+          "merge_commit_sha": "m106"
+        }
+      }
+    },
+    {
+      "kind": "rollout_requested",
+      "rollout": {
+        "repo": "azylman/aerial",
+        "pr_number": 106,
+        "head_sha": "m106",
+        "branch": "main",
+        "target_id": "100000000000000001",
+        "jobs": [
+          "apps",
+          "core"
+        ],
+        "requests": {
+          "apps": {
+            "namespace": "flux-system",
+            "requested_at": "2026-11-20T10:00:00Z"
+          },
+          "core": {
+            "namespace": "flux-system",
+            "requested_at": "2026-11-20T10:00:00Z"
+          }
+        }
+      }
+    },
+    {
+      "kind": "kustomization",
+      "observation": {
+        "namespace": "flux-system",
+        "name": "apps",
+        "requested_at": "2026-11-20T10:00:00Z",
+        "last_handled_reconcile_at": "2026-11-20T10:00:00Z",
+        "last_applied_revision": "main@sha1:m106"
+      }
+    },
+    {
+      "kind": "kustomization",
+      "observation": {
+        "namespace": "flux-system",
+        "name": "core",
+        "requested_at": "2026-11-20T10:00:00Z",
+        "last_handled_reconcile_at": "2026-11-20T10:00:00Z",
+        "last_applied_revision": "main@sha1:m106"
+      }
+    }
+  ],
+  "restate": [
+    {
+      "object": "PRObject",
+      "handler": "Register",
+      "event": {
+        "repo": "azylman/aerial",
+        "pr_number": 106,
+        "branch": "feat/watch",
+        "head_sha": "h106",
+        "target_id": "100000000000000001",
+        "title": "Watcher PR",
+        "agent": "aerial",
+        "bot_id": "aerial",
+        "metadata": {
+          "agent": "aerial",
+          "bot_id": "aerial"
+        }
+      }
+    },
+    {
+      "object": "PRObject",
+      "handler": "HandleMerged",
+      "event": {
+        "pr_number": 106,
+        "head_sha": "h106",
+        "merge_sha": "m106",
+        "branch": "feat/watch",
+        "facts": [
+          {
+            "event": "merged",
+            "repo": "azylman/aerial",
+            "pr_number": 106,
+            "head_sha": "h106",
+            "merge_sha": "m106"
+          }
+        ],
+        "repo": "azylman/aerial"
+      }
+    },
+    {
+      "object": "PRObject",
+      "handler": "HandleKustomizationRequested",
+      "event": {
+        "pr_number": 106,
+        "head_sha": "m106",
+        "branch": "main",
+        "jobs": [
+          "apps",
+          "core"
+        ],
+        "kustomization_requests": {
+          "apps": {
+            "namespace": "flux-system",
+            "requested_at": "2026-11-20T10:00:00Z"
+          },
+          "core": {
+            "namespace": "flux-system",
+            "requested_at": "2026-11-20T10:00:00Z"
+          }
+        },
+        "facts": [
+          {
+            "event": "deploy_started",
+            "repo": "azylman/aerial",
+            "pr_number": 106,
+            "head_sha": "m106"
+          }
+        ],
+        "repo": "azylman/aerial"
+      }
+    },
+    {
+      "object": "PRObject",
+      "handler": "HandleRolloutProgress",
+      "event": {
+        "pr_number": 106,
+        "head_sha": "h106",
+        "merge_sha": "m106",
+        "job_name": "apps",
+        "deployed_jobs": [
+          "apps"
+        ],
+        "deployed_kustomizations": [
+          "apps"
+        ],
+        "facts": [
+          {
+            "event": "rollout_updated",
+            "repo": "azylman/aerial",
+            "pr_number": 106,
+            "head_sha": "h106",
+            "merge_sha": "m106",
+            "job_name": "apps"
+          }
+        ],
+        "repo": "azylman/aerial"
+      }
+    },
+    {
+      "object": "PRObject",
+      "handler": "HandleDeploySuccess",
+      "event": {
+        "pr_number": 106,
+        "head_sha": "h106",
+        "merge_sha": "m106",
+        "job_name": "apps",
+        "facts": [
+          {
+            "event": "deploy_success",
+            "repo": "azylman/aerial",
+            "pr_number": 106,
+            "head_sha": "h106",
+            "merge_sha": "m106",
+            "job_name": "apps"
+          }
+        ],
+        "repo": "azylman/aerial"
+      }
+    },
+    {
+      "object": "PRObject",
+      "handler": "HandleRolloutProgress",
+      "event": {
+        "pr_number": 106,
+        "head_sha": "h106",
+        "merge_sha": "m106",
+        "job_name": "core",
+        "deployed_jobs": [
+          "core"
+        ],
+        "deployed_kustomizations": [
+          "core"
+        ],
+        "facts": [
+          {
+            "event": "rollout_updated",
+            "repo": "azylman/aerial",
+            "pr_number": 106,
+            "head_sha": "h106",
+            "merge_sha": "m106",
+            "job_name": "core"
+          }
+        ],
+        "repo": "azylman/aerial"
+      }
+    },
+    {
+      "object": "PRObject",
+      "handler": "HandleDeploySuccess",
+      "event": {
+        "pr_number": 106,
+        "head_sha": "h106",
+        "merge_sha": "m106",
+        "job_name": "core",
+        "facts": [
+          {
+            "event": "deploy_success",
+            "repo": "azylman/aerial",
+            "pr_number": 106,
+            "head_sha": "h106",
+            "merge_sha": "m106",
+            "job_name": "core"
+          }
+        ],
+        "repo": "azylman/aerial"
+      }
+    }
+  ],
+  "effects": [
+    {
+      "kind": "pr_fact_merged",
+      "key": "azylman/aerial#106@h106:pr_fact_merged"
+    },
+    {
+      "kind": "pr_fact_deploy_started",
+      "key": "azylman/aerial#106@m106:pr_fact_deploy_started"
+    },
+    {
+      "kind": "flux_reconcile",
+      "key": "azylman/aerial#106@m106:flux_reconcile"
+    },
+    {
+      "kind": "pr_fact_rollout_updated",
+      "key": "azylman/aerial#106@h106:pr_fact_rollout_updated:job=apps"
+    },
+    {
+      "kind": "pr_fact_deploy_success",
+      "key": "azylman/aerial#106@h106:pr_fact_deploy_success:job=core"
+    }
+  ],
+  "fact_rollout_states": [
+    {
+      "key": "azylman/aerial#106@h106:pr_fact_merged",
+      "rollout_state": null
+    },
+    {
+      "key": "azylman/aerial#106@m106:pr_fact_deploy_started",
+      "rollout_state": {
+        "expected_jobs": [
+          "apps",
+          "core"
+        ],
+        "started_jobs": [
+          "apps",
+          "core"
+        ]
+      }
+    },
+    {
+      "key": "azylman/aerial#106@h106:pr_fact_rollout_updated:job=apps",
+      "rollout_state": {
+        "expected_jobs": [
+          "apps",
+          "core"
+        ],
+        "started_jobs": [
+          "apps",
+          "core"
+        ],
+        "deployed_jobs": [
+          "apps"
+        ]
+      }
+    },
+    {
+      "key": "azylman/aerial#106@h106:pr_fact_deploy_success:job=core",
+      "rollout_state": {
+        "expected_jobs": [
+          "apps",
+          "core"
+        ],
+        "started_jobs": [
+          "apps",
+          "core"
+        ],
+        "deployed_jobs": [
+          "apps",
+          "core"
+        ]
+      }
+    }
+  ],
+  "rows": [
+    {
+      "repo": "azylman/aerial",
+      "pr_number": 106,
+      "branch": "feat/watch",
+      "head_sha": "h106",
+      "merge_sha": "m106",
+      "target_id": "100000000000000001",
+      "status": "deployed",
+      "title": "Watcher PR",
+      "metadata": {
+        "agent": "aerial",
+        "jobs": [
+          "apps",
+          "core"
+        ],
+        "started_jobs": [
+          "apps",
+          "core"
+        ],
+        "deployed_jobs": [
+          "apps",
+          "core"
+        ],
+        "deployed_kustomizations": [
+          "apps",
+          "core"
+        ],
+        "kustomization_requests": {
+          "apps": {
+            "namespace": "flux-system",
+            "requested_at": "2026-11-20T10:00:00Z"
+          },
+          "core": {
+            "namespace": "flux-system",
+            "requested_at": "2026-11-20T10:00:00Z"
+          }
+        }
+      }
+    }
+  ]
+}

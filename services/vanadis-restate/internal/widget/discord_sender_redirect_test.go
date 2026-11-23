@@ -47,8 +47,16 @@ channels:
 		channelID     string
 		resolverSysID string
 		resolverErr   error
+		customPolicy  bool
+		policyNoBuild bool
+		policySysChan string
 		expectTarget  string
 	}{
+		{name: "custom policy no_build_updates false", cfgPath: nonexistentPath, channelID: "chan-normal", customPolicy: true, policySysChan: "sys-123", expectTarget: "chan-normal"},
+		{
+			name: "custom policy no_build_updates true with snowflake", cfgPath: nonexistentPath, channelID: "chan-quiet", customPolicy: true, policyNoBuild: true,
+			policySysChan: "1564150557705248879", expectTarget: "1564150557705248879",
+		},
 		{
 			name:         "regular channel without no_build_updates stays on target",
 			cfgPath:      configPath,
@@ -107,13 +115,17 @@ channels:
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			mockSender := &mockWidgetSender{sendMsg: &discordgo.Message{ID: "msg-123"}}
-			d, err := NewDiscordWidgetDeliverer("", tc.cfgPath)
+			d, err := NewDiscordWidgetDeliverer("", "", "azylman", nil, tc.cfgPath)
 			require.NoError(t, err)
-			d.sender = mockSender
+			d.agentSenders = map[string]DiscordWidgetSender{"aerial": mockSender}
 			if tc.resolverSysID != "" || tc.resolverErr != nil {
 				d.channelResolver = func(_ string) (string, error) {
 					return tc.resolverSysID, tc.resolverErr
 				}
+			}
+
+			if tc.customPolicy {
+				d.channelPolicyResolver = func(_ string) (bool, string) { return tc.policyNoBuild, tc.policySysChan }
 			}
 
 			req := ericlient.StatusWidgetRequest{
@@ -125,51 +137,6 @@ channels:
 			require.NoError(t, dErr)
 			assert.Equal(t, "msg-123", msgID)
 			assert.Equal(t, tc.expectTarget, mockSender.lastSendChannelID)
-		})
-	}
-}
-
-func TestDelivererChannelRedirectionCustomPolicy(t *testing.T) {
-	t.Parallel()
-
-	tests := []struct {
-		name          string
-		channelID     string
-		noBuild       bool
-		sysChan       string
-		expectChannel string
-	}{
-		{
-			name:          "custom resolver no_build_updates false",
-			channelID:     "chan-normal",
-			noBuild:       false,
-			sysChan:       "sys-123",
-			expectChannel: "chan-normal",
-		},
-		{
-			name:          "custom resolver no_build_updates true with snowflake",
-			channelID:     "chan-quiet",
-			noBuild:       true,
-			sysChan:       "1564150557705248879",
-			expectChannel: "1564150557705248879",
-		},
-	}
-
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			mockSender := &mockWidgetSender{sendMsg: &discordgo.Message{ID: "m-1"}}
-			d, err := NewDiscordWidgetDeliverer("")
-			require.NoError(t, err)
-			d.sender = mockSender
-			d.channelPolicyResolver = func(_ string) (bool, string) {
-				return tc.noBuild, tc.sysChan
-			}
-
-			req := ericlient.StatusWidgetRequest{ChannelID: tc.channelID, Title: "Build"}
-			_, dErr := d.DeliverStatusWidget(context.Background(), req)
-			require.NoError(t, dErr)
-			assert.Equal(t, tc.expectChannel, mockSender.lastSendChannelID)
 		})
 	}
 }
@@ -187,7 +154,7 @@ channels:
 	require.NoError(t, os.WriteFile(cfgPath, []byte(initialYAML), 0o644))
 
 	resolveCount := 0
-	d, err := NewDiscordWidgetDeliverer("", cfgPath)
+	d, err := NewDiscordWidgetDeliverer("", "", "azylman", nil, cfgPath)
 	require.NoError(t, err)
 	d.channelResolver = func(target string) (string, error) {
 		resolveCount++
@@ -200,7 +167,7 @@ channels:
 	t0 := time.Date(2026, 11, 19, 12, 0, 0, 0, time.UTC)
 
 	// First call: reads file and resolves target channel
-	res1 := d.redirectChannelIfNoBuildUpdates("chan-test", t0)
+	res1 := d.redirectChannelIfNoBuildUpdates("", "chan-test", t0)
 	assert.Equal(t, "999888777666555444", res1)
 	assert.Equal(t, 1, resolveCount)
 
@@ -209,26 +176,26 @@ channels:
 
 	// Second call at t0 + 10s (before 1m TTL): does not hit disk or resolver
 	t1 := t0.Add(10 * time.Second)
-	res2 := d.redirectChannelIfNoBuildUpdates("chan-test", t1)
+	res2 := d.redirectChannelIfNoBuildUpdates("", "chan-test", t1)
 	assert.Equal(t, "999888777666555444", res2)
 	assert.Equal(t, 1, resolveCount)
 
 	// Repeated uncached thread policy lookup is cached in channelMetaCache
-	resUnmatched1 := d.redirectChannelIfNoBuildUpdates("uncached-thread-999", t1)
+	resUnmatched1 := d.redirectChannelIfNoBuildUpdates("", "uncached-thread-999", t1)
 	assert.Equal(t, "uncached-thread-999", resUnmatched1)
 	_, metaCached := d.getCachedChannelMeta("uncached-thread-999", t1)
 	assert.True(t, metaCached)
-	resUnmatched2 := d.redirectChannelIfNoBuildUpdates("uncached-thread-999", t1)
+	resUnmatched2 := d.redirectChannelIfNoBuildUpdates("", "uncached-thread-999", t1)
 	assert.Equal(t, "uncached-thread-999", resUnmatched2)
 
 	// Direct resolveChannelID caching check
-	r1 := d.resolveChannelID("sys-chan-target", "fallback", t1)
+	r1 := d.resolveChannelID("", "sys-chan-target", "fallback", t1)
 	assert.Equal(t, "999888777666555444", r1)
 	assert.Equal(t, 1, resolveCount)
 
 	// After resolution cache expires at t0 + 6m: resolver called again
 	t2 := t0.Add(6 * time.Minute)
-	r2 := d.resolveChannelID("sys-chan-target", "fallback", t2)
+	r2 := d.resolveChannelID("", "sys-chan-target", "fallback", t2)
 	assert.Equal(t, "999888777666555444", r2)
 	assert.Equal(t, 2, resolveCount)
 }
@@ -254,8 +221,8 @@ func TestSessionStateChannelResolution(t *testing.T) {
 
 	mockSender := &mockWidgetSender{sendMsg: &discordgo.Message{ID: "m-res"}}
 	d := &DiscordWidgetDeliverer{
-		session: sess,
-		sender:  mockSender,
+		session:      sess,
+		agentSenders: map[string]DiscordWidgetSender{"aerial": mockSender},
 	}
 
 	tests := []struct {
@@ -288,9 +255,9 @@ func TestSessionStateChannelResolution(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			noBuild := d.checkNoBuildUpdates(tc.channelID, tc.channels)
+			noBuild := d.checkNoBuildUpdates("", tc.channelID, tc.channels)
 			assert.True(t, noBuild)
-			resolved := d.resolveChannelID(tc.targetSysChan, tc.channelID)
+			resolved := d.resolveChannelID("", tc.targetSysChan, tc.channelID)
 			assert.Equal(t, tc.expectChannel, resolved)
 		})
 	}

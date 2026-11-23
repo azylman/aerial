@@ -18,17 +18,15 @@ import (
 	"time"
 
 	"github.com/bwmarrin/discordgo"
-	"github.com/google/uuid"
 	"go.opentelemetry.io/otel/trace"
 	"golang.org/x/sync/singleflight"
 
+	"github.com/azylman/aerial/pkg/discordutil"
 	"github.com/azylman/aerial/pkg/pubsub"
-	"github.com/azylman/aerial/pkg/sanitizer"
 	"github.com/azylman/aerial/services/eri/pkg/classifier"
 	"github.com/azylman/aerial/services/eri/pkg/config"
 	"github.com/azylman/aerial/services/eri/pkg/db"
 	"github.com/azylman/aerial/services/eri/pkg/delivery"
-	"github.com/azylman/aerial/services/eri/pkg/metrics"
 	"github.com/azylman/aerial/services/eri/pkg/notifier"
 	"github.com/azylman/aerial/services/eri/pkg/runner"
 	"github.com/azylman/aerial/services/eri/pkg/session"
@@ -38,17 +36,12 @@ import (
 const (
 	DefaultMaxQuotaPauseDBBytes = session.DefaultMaxQuotaPauseDBBytes
 	DefaultMaxSessionIdleTime   = 24 * time.Hour
-	DefaultTimeoutMinutes       = 60
 	DefaultMaxRestarts          = 3
 	ContinuationPromptTemplate  = "Your previous execution timed out or was interrupted while working. Please inspect where you left off in the conversation transcript and continue the task to completion.\n\nOriginal user request:\n%s"
 	MaxYieldTrapAutoResumes     = 2
 	YieldTrapResumePrompt       = "[SYSTEM NOTICE]: Your previous turn yielded prematurely while background task(s) were still running, causing the runtime to terminate them. Inspect current status (check git status, PR state, or process logs) and continue your workflow to completion. Do NOT end the turn with waiting text."
 	InterruptedByOperatorReason = "interrupted by operator via slash command"
 )
-
-func sanitizeErrorText(errStr string) string {
-	return sanitizer.SanitizeLog(errStr)
-}
 
 // testPoolHook is an optional hook injected by tests to wrap custom test runners without compiling test adapters into production.
 var testPoolHook func(cfg WorkerPoolConfig) runner.AgentPool
@@ -91,7 +84,7 @@ type WorkerPoolConfig struct {
 	Store                                                                        db.Store
 	DiscordSession                                                               *discordgo.Session
 	AgyBin, APIKey, Model, LowEffortModel, MediumEffortModel, SystemPrompt       string
-	TimeoutMinutes, MaxAttempts                                                  int
+	MaxAttempts                                                                  int
 	BackoffBase, IdleTimeout, RetryDelayOverride                                 time.Duration
 	SessionManager                                                               *session.Manager
 	Pools                                                                        map[PoolKey]runner.AgentPool
@@ -133,41 +126,28 @@ type WorkerPoolConfig struct {
 	SATokenPath                      string
 }
 
-type queueItem struct {
-	msg      *db.Message
-	dispatch *db.Dispatch
-}
-
-type threadWorkerState struct {
-	ch                       chan queueItem
-	activeEnqueuers          int
-	inFlight                 bool
-	lastEnqueuedDiscordMsgID string
-}
-
 type WorkerPool struct {
-	appCfg              *config.Config
-	hasExplicitAppCfg   bool
-	overrideModel       string
-	cfg                 WorkerPoolConfig
-	sessionMgr          *session.Manager
-	mu                  sync.Mutex
-	threadChs           map[string]*threadWorkerState
-	activeTurns         map[string]*turnExecution
-	wg                  sync.WaitGroup
-	ctx                 context.Context
-	cancel              context.CancelFunc
-	stopped, leaderHold bool
-	quotaLockedUntil    atomic.Int64
-	scopeLocks          sync.Map
-	webhookDispatcher   WebhookDispatcher
-	summaryGroup        singleflight.Group
-	pools               map[PoolKey]runner.AgentPool
-	voiceProcessPool    runner.AgentPool
-	eventBus            pubsub.Bus
-	createThreadFn      func(channelID, title string) (string, error)
-	startedAt           time.Time // anchors queue.wait for rows resumed after a restart
-	agentName           string
+	appCfg            *config.Config
+	hasExplicitAppCfg bool
+	overrideModel     string
+	cfg               WorkerPoolConfig
+	sessionMgr        *session.Manager
+	mu                sync.Mutex
+	turns             *TurnRegistry // Restate TurnRunner attempts live on this pod, by turn ID
+	wg                sync.WaitGroup
+	ctx               context.Context
+	cancel            context.CancelFunc
+	stopped           bool
+	quotaLockedUntil  atomic.Int64
+	vanadisURLWarned  atomic.Bool // set once the unconfigured-vanadis_url skip has been logged
+	scopeLocks        sync.Map
+	webhookDispatcher WebhookDispatcher
+	summaryGroup      singleflight.Group
+	pools             map[PoolKey]runner.AgentPool
+	voiceProcessPool  runner.AgentPool
+	eventBus          pubsub.Bus
+	createThreadFn    func(channelID, title string) (string, error)
+	agentName         string
 
 	TranscriptStore         db.TranscriptStore
 	TranscriptsIndexerURL   string
@@ -367,9 +347,6 @@ func resolveDefaultAppConfig(appCfg *config.Config, cfg WorkerPoolConfig) (*conf
 
 // applyWorkerPoolTimingDefaults applies default timeouts, retry limits, and intervals to WorkerPoolConfig.
 func applyWorkerPoolTimingDefaults(cfg *WorkerPoolConfig) {
-	if cfg.TimeoutMinutes <= 0 {
-		cfg.TimeoutMinutes = DefaultTimeoutMinutes
-	}
 	if cfg.MaxAttempts <= 0 {
 		cfg.MaxAttempts = 3
 	}
@@ -521,8 +498,8 @@ func New(appCfg *config.Config, cfg WorkerPoolConfig) *WorkerPool {
 	p := &WorkerPool{
 		appCfg: resolvedAppCfg, hasExplicitAppCfg: isExplicitAppCfg, cfg: cfg, pools: pools, voiceProcessPool: cfg.VoiceProcessPool,
 		eventBus:   cfg.EventBus,
-		sessionMgr: cfg.SessionManager, threadChs: make(map[string]*threadWorkerState),
-		activeTurns: make(map[string]*turnExecution), ctx: ctx, cancel: cancel, startedAt: time.Now().UTC(),
+		sessionMgr: cfg.SessionManager,
+		ctx:        ctx, cancel: cancel,
 		agentName:         cfg.AgentName,
 		webhookDispatcher: cfg.WebhookDispatcher, createThreadFn: cfg.CreateThreadFunc,
 
@@ -536,6 +513,7 @@ func New(appCfg *config.Config, cfg WorkerPoolConfig) *WorkerPool {
 		}
 	}
 
+	p.turns = NewTurnRegistry(p.closeTurnExecution)
 	p.registerClassifierAlertHandlers()
 
 	return p
@@ -562,8 +540,7 @@ func (p *WorkerPool) makeDebouncedAlertHandler(mu *sync.Mutex, lastAlert *time.T
 			return
 		}
 		sysChan := p.systemChannel()
-		sanitizedAlert := sanitizeErrorText(buildMsg())
-		if err := p.cfg.SystemAlertFunc(sess, sysChan, title, sanitizedAlert); err != nil {
+		if err := p.cfg.SystemAlertFunc(sess, sysChan, title, buildMsg()); err != nil {
 			log.Printf("[WorkerPool] Warning: failed to send %s alert to system channel %q: %v", title, sysChan, err)
 		}
 	}()
@@ -610,7 +587,7 @@ func (p *WorkerPool) AppConfig() *config.Config {
 func (p *WorkerPool) ResolveChannelID(nameOrID string) (string, error) {
 	trimmed := strings.TrimSpace(nameOrID)
 	trimmed = strings.TrimPrefix(trimmed, "#")
-	if IsNumericSnowflake(trimmed) {
+	if discordutil.IsSnowflake(trimmed) {
 		return trimmed, nil
 	}
 	if p == nil {
@@ -688,31 +665,6 @@ func (p *WorkerPool) Start() {
 	// WorkerPool starts workers lazily per active thread
 	log.Printf("[WorkerPool] Started queue worker pool with max %d attempts per turn", p.cfg.MaxAttempts)
 	p.wg.Go(p.runTranscriptPublishWorker)
-}
-
-// HoldUntilLeader gates worker spawning on EnqueueBurst and EnqueueDispatch
-// until ReleaseLeaderHold is called after acquiring the leader lock.
-//
-// TODO(c09f-purge-dead-eri-job-fallbacks): Deprecated; leader locks are superseded by Restate durable execution in services/eri-restate.
-func (p *WorkerPool) HoldUntilLeader() {
-	if p == nil {
-		return
-	}
-	p.mu.Lock()
-	p.leaderHold = true
-	p.mu.Unlock()
-}
-
-// ReleaseLeaderHold clears the canary leader hold and returns true if the pool was held.
-func (p *WorkerPool) ReleaseLeaderHold() bool {
-	if p == nil {
-		return false
-	}
-	p.mu.Lock()
-	wasHeld := p.leaderHold
-	p.leaderHold = false
-	p.mu.Unlock()
-	return wasHeld
 }
 
 func unwrapUnifiedPool(pool runner.AgentPool) *runner.UnifiedProcessPool {
@@ -842,331 +794,37 @@ func (p *WorkerPool) AgentPool() runner.AgentPool {
 	return p.Pool(PoolKey{Ephemeral: false, Effort: config.EffortHigh})
 }
 
-func (p *WorkerPool) registerActiveTurn(scopeKey string, te *turnExecution) {
-	p.mu.Lock()
-	if p.activeTurns == nil {
-		p.activeTurns = make(map[string]*turnExecution)
-	}
-	p.activeTurns[scopeKey] = te
-	p.mu.Unlock()
-}
-
-func (p *WorkerPool) unregisterActiveTurn(scopeKey string, te *turnExecution) {
-	p.mu.Lock()
-	if p.activeTurns[scopeKey] == te {
-		delete(p.activeTurns, scopeKey)
-	}
-	p.mu.Unlock()
-}
-
-// ActiveTurnSessionID returns the live session ID for an in-flight message ID if the message
-// belongs to an active turn in the worker pool.
-func (p *WorkerPool) ActiveTurnSessionID(msgID string) (string, bool) {
-	if p == nil || msgID == "" {
-		return "", false
-	}
-	p.mu.Lock()
-	turns := make([]*turnExecution, 0, len(p.activeTurns))
-	for _, te := range p.activeTurns {
-		if te != nil {
-			turns = append(turns, te)
-		}
-	}
-	p.mu.Unlock()
-	for _, te := range turns {
-		if sessID, ok := te.liveSessionIDForMessage(msgID); ok {
-			return sessID, true
-		}
-	}
-	return "", false
-}
-
-func isScopeKeyForThread(scopeKey, threadID string) bool {
-	norm := db.DiscordSessionID(threadID)
-	return scopeKey == threadID || scopeKey == norm || strings.HasSuffix(scopeKey, ":"+threadID) || strings.HasSuffix(scopeKey, ":"+norm)
-}
-
-func (p *WorkerPool) hasNewerEnqueuedDiscordMessage(threadID, triggerID string) bool {
-	if p == nil || threadID == "" || !IsNumericSnowflake(triggerID) {
-		return false
-	}
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	for scopeKey, state := range p.threadChs {
-		if state != nil && isScopeKeyForThread(scopeKey, threadID) && compareSnowflakeIDs(state.lastEnqueuedDiscordMsgID, triggerID) > 0 {
-			return true
-		}
-	}
-	return false
-}
-
 func logInterruptWarning(op string, err error) {
 	if err != nil {
 		log.Printf("[WorkerPool] Warning on %s: %v", op, err)
 	}
 }
 
-// CloseThreadProcesses marks any active turn for threadID as interrupted, cancels its per-turn context,
-// and terminates any active StreamingDaemon processes for threadID across all pools.
-func (p *WorkerPool) CloseThreadProcesses(threadID, reason string) {
-	if p == nil || threadID == "" {
+// closeSessionDaemons terminates the StreamingDaemon processes leased under sessionKey across all pools.
+func (p *WorkerPool) closeSessionDaemons(sessionKey, reason string) {
+	if p == nil || sessionKey == "" {
 		return
 	}
-	p.mu.Lock()
-	var active []*turnExecution
-	for scopeKey, te := range p.activeTurns {
-		if te != nil && (te.threadID == threadID || isScopeKeyForThread(scopeKey, threadID)) {
-			te.interrupted.Store(true)
-			active = append(active, te)
-		}
-	}
-	p.mu.Unlock()
-
-	for _, te := range active {
-		te.cancelTurn()
-	}
-
 	for _, target := range append(p.StatefulProcessPools(), p.ProcessPool(), p.LowEffortProcessPool(), p.MediumEffortProcessPool()) {
 		if target != nil {
-			if d, ok := target.Get(db.DiscordSessionID(threadID)); ok && d != nil {
+			if d, ok := target.Get(sessionKey); ok && d != nil {
 				logInterruptWarning(reason, d.Close())
 			}
 		}
 	}
 }
 
-// DrainThreadPendingMessages marks all pending or processing DB messages for targetThreadID as FAILED.
-func DrainThreadPendingMessages(ctx context.Context, store db.Store, targetThreadID, reason string) {
-	if store == nil || targetThreadID == "" {
+// closeTurnExecution interrupts one execution: it cancels its turn context and terminates the
+// daemon leased under its session key. TurnRegistry.Stop calls it for the stopped turn only.
+func (p *WorkerPool) closeTurnExecution(te *turnExecution, reason string) {
+	if te == nil {
 		return
 	}
-	msgs, err := store.GetPendingOrProcessingMessages(ctx, 100)
-	if err != nil {
-		return
-	}
-	for _, m := range msgs {
-		if m.ThreadID == targetThreadID {
-			logInterruptWarning("drain pending message", store.UpdateMessageStatus(ctx, m.ID, db.StatusFailed, reason))
-		}
-	}
-}
-
-func matchesDispatchTarget(d *db.Dispatch, dispatchID, buildID string) bool {
-	if d == nil {
-		return false
-	}
-	if dispatchID != "" && d.ID == dispatchID {
-		return true
-	}
-	if buildID == "" {
-		return false
-	}
-	targetID := strings.TrimSpace(d.TargetID)
-	chunkID := strings.TrimSpace(d.VanadisChunkID)
-	sessionID := strings.TrimSpace(d.SessionID)
-	if targetID == buildID || strings.HasPrefix(chunkID, buildID+"-chunk-") || chunkID == buildID || sessionID == "vanadis-"+buildID {
-		return true
-	}
-	cID, bID := extractVanadisDispatchInfo(d)
-	return bID == buildID || cID == buildID
-}
-
-type activeDispatchCancelTarget struct {
-	te       *turnExecution
-	threadID string
-}
-
-func drainMatchingDispatchesFromChannel(ch chan queueItem, dID, bID string) []string {
-	var drainedIDs []string
-	var nonMatching []queueItem
-drainLoop:
-	for {
-		select {
-		case item := <-ch:
-			if item.dispatch != nil && matchesDispatchTarget(item.dispatch, dID, bID) {
-				metrics.QueueDepth.Dec()
-				drainedIDs = append(drainedIDs, item.dispatch.ID)
-			} else {
-				nonMatching = append(nonMatching, item)
-			}
-		default:
-			break drainLoop
-		}
-	}
-	for _, item := range nonMatching {
-		ch <- item
-	}
-	return drainedIDs
-}
-
-func (p *WorkerPool) interruptMatchingActiveDispatchesLocked(dID, bID, reason string) ([]string, []activeDispatchCancelTarget) {
-	var cancelledIDs []string
-	var activeToCancel []activeDispatchCancelTarget
-	for _, te := range p.activeTurns {
-		if te != nil && te.isDispatch() && matchesDispatchTarget(te.dispatch, dID, bID) {
-			te.interrupted.Store(true)
-			te.setInterruptReason(reason)
-			if te.dispatch != nil && !slices.Contains(cancelledIDs, te.dispatch.ID) {
-				cancelledIDs = append(cancelledIDs, te.dispatch.ID)
-			}
-			activeToCancel = append(activeToCancel, activeDispatchCancelTarget{te: te, threadID: te.threadID})
-		}
-	}
-	return cancelledIDs, activeToCancel
-}
-
-// CancelDispatches drains queued dispatches and interrupts active in-flight dispatch turns
-// matching either dispatchID or buildID.
-func (p *WorkerPool) CancelDispatches(dispatchID, buildID, reason string) []string {
-	if p == nil || (strings.TrimSpace(dispatchID) == "" && strings.TrimSpace(buildID) == "") {
-		return nil
-	}
-	dID := strings.TrimSpace(dispatchID)
-	bID := strings.TrimSpace(buildID)
-	if strings.TrimSpace(reason) == "" {
-		reason = "dispatch cancelled by operator"
-	}
-
-	var cancelledIDs []string
-
-	p.mu.Lock()
-	for _, state := range p.threadChs {
-		if state != nil && state.ch != nil {
-			for _, id := range drainMatchingDispatchesFromChannel(state.ch, dID, bID) {
-				if !slices.Contains(cancelledIDs, id) {
-					cancelledIDs = append(cancelledIDs, id)
-				}
-			}
-		}
-	}
-
-	activeIDs, activeTargets := p.interruptMatchingActiveDispatchesLocked(dID, bID, reason)
-	for _, id := range activeIDs {
-		if !slices.Contains(cancelledIDs, id) {
-			cancelledIDs = append(cancelledIDs, id)
-		}
-	}
-	p.mu.Unlock()
-
-	for _, target := range activeTargets {
-		target.te.cancelTurn()
-		if target.threadID != "" {
-			p.CloseThreadProcesses(target.threadID, reason)
-		}
-	}
-
-	return cancelledIDs
-}
-
-func (p *WorkerPool) latchActiveTurnsLocked(threadID string) ([]*turnExecution, []string) {
-	var active []*turnExecution
-	var burstMsgIDs []string
-
-	for scopeKey, te := range p.activeTurns {
-		if te == nil || (te.threadID != threadID && !isScopeKeyForThread(scopeKey, threadID)) {
-			continue
-		}
-		active = append(active, te)
-		if te.finalized.Load() {
-			// The burst already completed; only its post-turn work (summary refresh) is cancelled.
-			continue
-		}
-		te.interrupted.Store(true)
-
-		te.activeSessionMu.Lock()
-		for i := range te.burst {
-			burstMsgIDs = append(burstMsgIDs, te.burst[i].ID)
-		}
-		te.activeSessionMu.Unlock()
-	}
-	return active, burstMsgIDs
-}
-
-func drainChannelMessages(ch chan queueItem) []db.Message {
-	var drainedMsgs []db.Message
-	var nonMsgItems []queueItem
-drainCh:
-	for {
-		select {
-		case item := <-ch:
-			if item.msg == nil {
-				nonMsgItems = append(nonMsgItems, item)
-				continue
-			}
-			metrics.QueueDepth.Dec()
-			drainedMsgs = append(drainedMsgs, *item.msg)
-		default:
-			break drainCh
-		}
-	}
-	for _, nmi := range nonMsgItems {
-		ch <- nmi
-	}
-	return drainedMsgs
-}
-
-func (p *WorkerPool) drainQueuedThreadMessagesLocked(threadID string) []db.Message {
-	var drained []db.Message
-	for scopeKey, state := range p.threadChs {
-		if !isScopeKeyForThread(scopeKey, threadID) || state == nil {
-			continue
-		}
-		drained = append(drained, drainChannelMessages(state.ch)...)
-	}
-	return drained
-}
-
-func (p *WorkerPool) latchInterruptAndDrainLocked(threadID string, drainQueue bool) ([]*turnExecution, []string, []db.Message) {
-	active, burstMsgIDs := p.latchActiveTurnsLocked(threadID)
-	var drainedMsgs []db.Message
-	if drainQueue {
-		drainedMsgs = append(drainedMsgs, p.drainQueuedThreadMessagesLocked(threadID)...)
-	}
-	return active, burstMsgIDs, drainedMsgs
-}
-
-// InterruptThread interrupts an active turn for threadID in 4 ordered steps:
-// 1. Latch in-memory interrupt gate on active turns and drain queued channel/trailing messages.
-// 2. Commit terminal FAILED status (and optional session rotation) in Postgres.
-// 3. Cancel per-turn context to wake any in-flight execution or retry/capacity sleep.
-// 4. Terminate active StreamingDaemon processes for threadID.
-func (p *WorkerPool) InterruptThread(ctx context.Context, threadID string, drainQueue bool, reset ...bool) {
-	if p == nil || threadID == "" {
-		return
-	}
-	shouldReset := len(reset) > 0 && reset[0]
-
-	// Step 1: Latch In-Memory Interrupt Gate & Drain Channel Buffer under p.mu
-	p.mu.Lock()
-	active, burstMsgIDs, drainedMsgs := p.latchInterruptAndDrainLocked(threadID, drainQueue)
-	p.mu.Unlock()
-
-	// Step 2: Commit Terminal FAILED State & Optional Session Rotation in Postgres
-	if store := p.Store(); store != nil {
-		for _, id := range burstMsgIDs {
-			logInterruptWarning("interrupt active message", store.UpdateMessageStatus(ctx, id, db.StatusFailed, InterruptedByOperatorReason))
-		}
-		for _, m := range drainedMsgs {
-			logInterruptWarning("interrupt drained message", store.UpdateMessageStatus(ctx, m.ID, db.StatusFailed, InterruptedByOperatorReason))
-			if p.cfg.OnMessageCompleted != nil {
-				p.cfg.OnMessageCompleted(m, db.StatusFailed)
-			}
-		}
-		if drainQueue {
-			DrainThreadPendingMessages(ctx, store, threadID, InterruptedByOperatorReason)
-		}
-		if shouldReset {
-			logInterruptWarning("interrupt rotate session", store.RotateSessionID(ctx, threadID, uuid.New().String()))
-		}
-	}
-
-	// Step 3: Cancel Per-Turn Context
-	for _, te := range active {
-		te.cancelTurn()
-	}
-
-	// Step 4: Terminate Daemon Process Group
-	p.CloseThreadProcesses(threadID, "interrupt")
+	te.cancelTurn()
+	te.activeSessionMu.Lock()
+	key := te.leaseKey()
+	te.activeSessionMu.Unlock()
+	p.closeSessionDaemons(key, reason)
 }
 
 func (p *WorkerPool) poolModelForEffort(effort string) string {
@@ -1277,22 +935,4 @@ func (p *WorkerPool) MediumEffortModel() string {
 		return strings.TrimSpace(p.cfg.MediumEffortModel)
 	}
 	return def
-}
-
-func (p *WorkerPool) runnerCredentials() (string, string) {
-	agyBin, apiKey := p.cfg.AgyBin, p.cfg.APIKey
-	if p == nil || p.appCfg == nil {
-		return agyBin, apiKey
-	}
-	cur := p.appCfg.Current()
-	if cur == nil {
-		return agyBin, apiKey
-	}
-	if cur.AgyBin != "" {
-		agyBin = cur.AgyBin
-	}
-	if cur.APIKey != "" {
-		apiKey = cur.APIKey
-	}
-	return agyBin, apiKey
 }

@@ -44,7 +44,7 @@ metadata:
 spec:
   telemetry:
     exporter:
-      endpoint: victoriatraces.default.svc.cluster.local:4317
+      endpoint: otel-collector.default.svc.cluster.local:4317
 ---
 apiVersion: gateway.nginx.org/v1alpha2
 kind: NginxProxy
@@ -57,7 +57,7 @@ spec:
       type: ClusterIP
   telemetry:
     exporter:
-      endpoint: victoriatraces.default.svc.cluster.local:4317
+      endpoint: otel-collector.default.svc.cluster.local:4317
 ---
 apiVersion: gateway.networking.k8s.io/v1
 kind: Gateway
@@ -361,7 +361,7 @@ spec:
       to:
         - podSelector:
             matchLabels:
-              app.kubernetes.io/name: victoriatraces
+              app.kubernetes.io/name: otel-collector
     - ports:
         - port: 443
           protocol: TCP
@@ -400,6 +400,49 @@ spec:
   policyTypes:
     - Ingress
     - Egress
+---
+# The redacting otel-collector is the only trace writer. OTLP gRPC (4317) is
+# collector-only. The HTTP port (10428) serves both OTLP HTTP ingest and the
+# query API, so it is limited to the collector plus read-only consumers:
+# Grafana, victoriatraces-mcp, the lan-gateway data plane (vtraces.lan), the
+# vmsingle scraper, and the gatus/homepage health probes.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: victoriatraces-ingress-netpol
+  namespace: default
+spec:
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: otel-collector
+      ports:
+        - port: 4317
+          protocol: TCP
+    - from:
+        - podSelector:
+            matchExpressions:
+              - key: app.kubernetes.io/name
+                operator: In
+                values:
+                  - otel-collector
+                  - grafana
+                  - victoriatraces-mcp
+                  - vmsingle
+                  - gatus
+                  - homepage
+        - podSelector:
+            matchLabels:
+              gateway.networking.k8s.io/gateway-name: lan-gateway
+      ports:
+        - port: 10428
+          protocol: TCP
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: victoriatraces
+  policyTypes:
+    - Ingress
 ---
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
@@ -488,13 +531,7 @@ spec:
                 values:
                   - eri
                   - eri-restate
-                  - eri-miorine
-                  - eri-miorine-restate
-                  - eri-suletta
-                  - eri-suletta-restate
                   - coven
-                  - coven-miorine
-                  - coven-suletta
                   - vmsingle
                   - victoriametrics
                   - gatus
@@ -580,10 +617,6 @@ spec:
                 values:
                   - eri
                   - eri-restate
-                  - eri-miorine
-                  - eri-miorine-restate
-                  - eri-suletta
-                  - eri-suletta-restate
                   - synapse
                   - haro
                   - vanadis-restate
@@ -606,6 +639,29 @@ metadata:
 spec:
   ingress:
     - from:
+        - namespaceSelector:
+            matchExpressions:
+              - key: kubernetes.io/metadata.name
+                operator: In
+                values:
+                  - restate-green
+                  - restate
+        - podSelector:
+            matchExpressions:
+              - key: app
+                operator: In
+                values:
+                  - restate-operator
+        - podSelector:
+            matchExpressions:
+              - key: app.kubernetes.io/name
+                operator: In
+                values:
+                  - restate-operator
+      ports:
+        - port: 9080
+          protocol: TCP
+    - from:
         - podSelector:
             matchExpressions:
               - key: app.kubernetes.io/name
@@ -613,10 +669,6 @@ spec:
                 values:
                   - eri
                   - eri-restate
-                  - eri-miorine
-                  - eri-miorine-restate
-                  - eri-suletta
-                  - eri-suletta-restate
                   - synapse
                   - console
                   - vision
@@ -637,6 +689,29 @@ metadata:
 spec:
   ingress:
     - from:
+        - namespaceSelector:
+            matchExpressions:
+              - key: kubernetes.io/metadata.name
+                operator: In
+                values:
+                  - restate-green
+                  - restate
+        - podSelector:
+            matchExpressions:
+              - key: app
+                operator: In
+                values:
+                  - restate-operator
+        - podSelector:
+            matchExpressions:
+              - key: app.kubernetes.io/name
+                operator: In
+                values:
+                  - restate-operator
+      ports:
+        - port: 9080
+          protocol: TCP
+    - from:
         - podSelector:
             matchExpressions:
               - key: app.kubernetes.io/name
@@ -644,8 +719,6 @@ spec:
                 values:
                   - eri
                   - eri-restate
-                  - eri-miorine
-                  - eri-suletta
                   - synapse
                   - gatus
                   - coverage-ingest
@@ -760,19 +833,11 @@ spec:
                   - vanadis
                   - vanadis-nats
                   - vanadis-restate
-                  - vanadis-miorine
-                  - vanadis-miorine-nats
-                  - vanadis-miorine-restate
-                  - vanadis-suletta
-                  - vanadis-suletta-nats
-                  - vanadis-suletta-restate
                   - haro
-                  - haro-miorine
-                  - haro-suletta
+                  - prospera
+                  - coven
                   - synapse
                   - eri
-                  - eri-miorine
-                  - eri-suletta
                   - console
                   - vmsingle
                   - victoriametrics
@@ -785,6 +850,33 @@ spec:
         - port: 8080
           protocol: TCP
         - port: 9070
+          protocol: TCP
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: restate
+  policyTypes:
+    - Ingress
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: restate-metrics-ingress-netpol
+  namespace: restate-green
+spec:
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: default
+          podSelector:
+            matchExpressions:
+              - key: app.kubernetes.io/name
+                operator: In
+                values:
+                  - vmsingle
+                  - victoriametrics
+      ports:
+        - port: 5122
           protocol: TCP
   podSelector:
     matchLabels:

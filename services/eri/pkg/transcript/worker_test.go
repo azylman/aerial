@@ -1,964 +1,14 @@
 package transcript
 
 import (
-	"context"
 	"encoding/json"
-	"errors"
-	"fmt"
-	"net"
+	"maps"
 	"os"
 	"path/filepath"
 	"slices"
-	"strings"
-	"sync/atomic"
 	"testing"
 	"time"
-
-	"github.com/azylman/aerial/services/eri/pkg/db"
-	"github.com/azylman/aerial/services/eri/pkg/db/dbtest"
 )
-
-func writeTranscriptFile(t *testing.T, baseDir, sessionID, content string, mtime time.Time) string {
-	t.Helper()
-	logDir := filepath.Join(baseDir, sessionID, ".system_generated", "logs")
-	if err := os.MkdirAll(logDir, 0o755); err != nil {
-		t.Fatalf("mkdir failed: %v", err)
-	}
-	tPath := filepath.Join(logDir, "transcript.jsonl")
-	if err := os.WriteFile(tPath, []byte(content), 0o644); err != nil {
-		t.Fatalf("write file failed: %v", err)
-	}
-	if !mtime.IsZero() {
-		mtime = mtime.Truncate(time.Second)
-		if err := os.Chtimes(tPath, mtime, mtime); err != nil {
-			t.Fatalf("chtimes failed: %v", err)
-		}
-	}
-	return tPath
-}
-
-type sessionFileFixture struct {
-	sessionID string
-	content   string
-	age       time.Duration
-}
-
-type syncTranscriptsScenarioCase struct {
-	name                  string
-	files                 []sessionFileFixture
-	seedMessages          []db.Message
-	seedSessions          []db.SessionInfo
-	seedDispatches        []db.Dispatch
-	priorSummary          *db.SessionSummary
-	llmMode               string
-	withEmbedder          bool
-	idleThreshold         time.Duration
-	batchLimit            int
-	secondPassFiles       []sessionFileFixture
-	secondPassAge         time.Duration
-	wantScanned           int
-	wantSynced            int
-	wantStepsInserted     int
-	wantSummaries         int
-	wantSummariesZero     bool
-	wantSkippedUnchanged  int
-	wantErrors            int
-	wantSettled           *bool
-	wantLastIndexed       int
-	wantSummaryText       string
-	wantSessionSummaries  map[string]string
-	wantMaxLLMCalls       int
-	secondPassSteps       int
-	secondPassLastIndexed int
-}
-
-func standardScenarioCases() []syncTranscriptsScenarioCase {
-	return []syncTranscriptsScenarioCase{
-		{
-			name: "basic sweep and settled with embedder and llm",
-			files: []sessionFileFixture{
-				{
-					sessionID: "sess-alpha-001",
-					content: strings.Join([]string{
-						`{"step_index":0,"source":"USER_EXPLICIT","type":"USER_INPUT","status":"DONE","created_at":"2026-10-01T10:00:00Z","content":"Please check system health and memory usage"}`,
-						`{"step_index":1,"source":"MODEL","type":"PLANNER_RESPONSE","status":"DONE","created_at":"2026-10-01T10:00:02Z","tool_calls":[{"name":"run_command","args":{"CommandLine":"free -m"}},{"name":"manage_task","args":{"Action":"status"}}]}`,
-						`{"step_index":2,"source":"MODEL","type":"GENERIC","status":"DONE","created_at":"2026-10-01T10:00:05Z","content":"total: 32000, used: 8000, free: 24000"}`,
-						`{"step_index":3,"source":"MODEL","type":"GENERIC","status":"DONE","created_at":"2026-10-01T10:00:06Z","content":"{\"status\":\"running\"}"}`,
-					}, "\n") + "\n",
-					age: 1 * time.Hour,
-				},
-			},
-			llmMode:           "success",
-			withEmbedder:      true,
-			wantScanned:       1,
-			wantSynced:        1,
-			wantStepsInserted: 3,
-			wantSummaries:     1,
-			wantSettled:       new(true),
-			wantLastIndexed:   3,
-			wantSummaryText:   "Checked system health and free memory: 24GB available.",
-		},
-		{
-			name: "unchanged mtime skipped on second sweep",
-			files: []sessionFileFixture{
-				{
-					sessionID: "sess-skip-002",
-					content:   `{"step_index":0,"source":"USER_EXPLICIT","type":"USER_INPUT","status":"DONE","created_at":"2026-10-01T10:00:00Z","content":"Hello world"}` + "\n",
-					age:       2 * time.Hour,
-				},
-			},
-			wantScanned:          1,
-			wantSynced:           1,
-			wantSkippedUnchanged: 1,
-		},
-		{
-			name: "partial line at EOF tolerated without error",
-			files: []sessionFileFixture{
-				{
-					sessionID: "sess-partial-003",
-					content: strings.Join([]string{
-						`{"step_index":0,"source":"USER_EXPLICIT","type":"USER_INPUT","status":"DONE","created_at":"2026-10-01T10:00:00Z","content":"Run long command"}`,
-						`{"step_index":1,"source":"MODEL","type":"PLANNER_RESPONSE","status":"DONE","created_at":"2026-10-01T10:00:02Z","tool_calls":[{"name":"run_command","args":{"CommandLine":"sleep 5"}}]}`,
-						`{"step_index":2,"source":"MODEL","type":"TOOL","stat`,
-					}, "\n"),
-					age: 1 * time.Hour,
-				},
-			},
-			wantStepsInserted: 2,
-			wantErrors:        0,
-		},
-		{
-			name: "corrupted intermediate line recorded as error and continues",
-			files: []sessionFileFixture{
-				{
-					sessionID: "sess-corrupt-004",
-					content: strings.Join([]string{
-						`{"step_index":0,"source":"USER_EXPLICIT","type":"USER_INPUT","status":"DONE","created_at":"2026-10-01T10:00:00Z","content":"Valid start"}`,
-						`{corrupt_intermediate_json_line_here`,
-						`{"step_index":2,"source":"MODEL","type":"PLANNER_RESPONSE","status":"DONE","created_at":"2026-10-01T10:00:04Z","content":"Recovered valid line"}`,
-					}, "\n") + "\n",
-					age: 1 * time.Hour,
-				},
-			},
-			wantStepsInserted: 2,
-			wantErrors:        1,
-		},
-		{
-			name: "truncation detected resets watermark and reindexes steps",
-			priorSummary: &db.SessionSummary{
-				SessionID:       "sess-trunc-005",
-				Summary:         "Old prior session summary",
-				LastIndexedStep: 10,
-				LastMtime:       time.Now().Add(-2 * time.Hour),
-				IsSettled:       true,
-				CreatedAt:       time.Now().Add(-3 * time.Hour),
-			},
-			files: []sessionFileFixture{
-				{
-					sessionID: "sess-trunc-005",
-					content: strings.Join([]string{
-						`{"step_index":0,"source":"USER_EXPLICIT","type":"USER_INPUT","status":"DONE","created_at":"2026-10-01T11:00:00Z","content":"Rotated session restart"}`,
-						`{"step_index":1,"source":"MODEL","type":"PLANNER_RESPONSE","status":"DONE","created_at":"2026-10-01T11:00:02Z","content":"Fresh start acknowledged"}`,
-					}, "\n") + "\n",
-					age: 10 * time.Minute,
-				},
-			},
-			idleThreshold:     5 * time.Minute,
-			wantStepsInserted: 2,
-			wantLastIndexed:   1,
-		},
-	}
-}
-
-func advancedScenarioCases() []syncTranscriptsScenarioCase {
-	return append(advancedBasicScenarioCases(), advancedExtendedScenarioCases()...)
-}
-
-func advancedBasicScenarioCases() []syncTranscriptsScenarioCase {
-	return []syncTranscriptsScenarioCase{
-		{
-			name: "historical session without LLM falls back to step 0 prompt",
-			files: []sessionFileFixture{
-				{
-					sessionID: "sess-hist-006",
-					content:   `{"step_index":0,"source":"USER_EXPLICIT","type":"USER_INPUT","status":"DONE","created_at":"2026-09-01T10:00:00Z","content":"Deploy mirrormere dashboard v2"}` + "\n",
-					age:       48 * time.Hour,
-				},
-			},
-			wantSummaries:   1,
-			wantSummaryText: "Deploy mirrormere dashboard v2",
-		},
-		{
-			name: "LLM error falls back to step 0 prompt",
-			files: []sessionFileFixture{
-				{
-					sessionID: "sess-fallback-007",
-					content: strings.Join([]string{
-						`{"step_index":0,"source":"USER_EXPLICIT","type":"USER_INPUT","status":"DONE","created_at":"2026-10-01T10:00:00Z","content":"Initial prompt before LLM error"}`,
-						`{"step_index":1,"source":"MODEL","type":"PLANNER_RESPONSE","status":"DONE","created_at":"2026-10-01T10:00:02Z","content":"Some model reply"}`,
-					}, "\n") + "\n",
-					age: 1 * time.Hour,
-				},
-			},
-			llmMode:           "error",
-			idleThreshold:     5 * time.Minute,
-			wantSummaries:     0,
-			wantSummariesZero: true,
-			wantSettled:       new(false),
-			wantSummaryText:   "Initial prompt before LLM error",
-		},
-		{
-			name: "ephemeral prompts filtered: thread summary, thread title, and fact extraction",
-			seedMessages: []db.Message{
-				{ID: "m-valid-1", ConversationID: "sess-valid-real-task"},
-			},
-			files: []sessionFileFixture{
-				{sessionID: "sess-valid-real-task", content: `{"step_index":0,"source":"USER_EXPLICIT","type":"USER_INPUT","status":"DONE","content":"Normal user task that should be indexed"}` + "\n", age: 1 * time.Hour},
-				{sessionID: "sess-ephemeral-thread-summary", content: `{"step_index":0,"source":"USER_EXPLICIT","type":"USER_INPUT","status":"DONE","content":"Synthesize the following Discord thread transcript into a concise memory block. Focus on context."}` + "\n", age: 1 * time.Hour},
-				{sessionID: "sess-ephemeral-thread-title", content: `{"step_index":0,"source":"USER_EXPLICIT","type":"USER_INPUT","status":"DONE","content":"Summarize the following message into a concise 3 to 5 word phrase for a Discord thread topic title."}` + "\n", age: 1 * time.Hour},
-				{sessionID: "sess-ephemeral-coven-facts", content: `{"step_index":0,"source":"USER_EXPLICIT","type":"USER_INPUT","status":"DONE","content":"Analyze the following conversation transcript and extract any key durable atomic facts from this session."}` + "\n", age: 1 * time.Hour},
-			},
-			wantScanned: 4, wantSynced: 1, wantStepsInserted: 1, wantSummaries: 1, wantSummaryText: "Normal user task that should be indexed",
-		},
-		{
-			name: "multi-session LLM error short-circuits to step 0 prompt and unsettled",
-			files: []sessionFileFixture{
-				{sessionID: "sess-err-multi-001", content: `{"step_index":0,"source":"USER_EXPLICIT","type":"USER_INPUT","status":"DONE","created_at":"2026-10-01T10:00:00Z","content":"Alpha task prompt"}` + "\n" + `{"step_index":1,"source":"MODEL","type":"PLANNER_RESPONSE","status":"DONE","created_at":"2026-10-01T10:00:02Z","content":"Alpha reply"}` + "\n", age: 1 * time.Hour},
-				{sessionID: "sess-err-multi-002", content: `{"step_index":0,"source":"USER_EXPLICIT","type":"USER_INPUT","status":"DONE","created_at":"2026-10-01T10:00:00Z","content":"Beta task prompt"}` + "\n" + `{"step_index":1,"source":"MODEL","type":"PLANNER_RESPONSE","status":"DONE","created_at":"2026-10-01T10:00:02Z","content":"Beta reply"}` + "\n", age: 1 * time.Hour},
-				{sessionID: "sess-err-multi-003", content: `{"step_index":0,"source":"USER_EXPLICIT","type":"USER_INPUT","status":"DONE","created_at":"2026-10-01T10:00:00Z","content":"Gamma task prompt"}` + "\n" + `{"step_index":1,"source":"MODEL","type":"PLANNER_RESPONSE","status":"DONE","created_at":"2026-10-01T10:00:02Z","content":"Gamma reply"}` + "\n", age: 1 * time.Hour},
-			},
-			llmMode: "error", idleThreshold: 5 * time.Minute, wantMaxLLMCalls: 1, wantScanned: 3, wantSynced: 3, wantSummaries: 0, wantSummariesZero: true, wantSettled: new(false),
-			wantSessionSummaries: map[string]string{
-				"sess-err-multi-001": "Alpha task prompt",
-				"sess-err-multi-002": "Beta task prompt",
-				"sess-err-multi-003": "Gamma task prompt",
-			},
-		},
-		{
-			name:              "active session not settled",
-			files:             []sessionFileFixture{{sessionID: "sess-active-008", content: `{"step_index":0,"source":"USER_EXPLICIT","type":"USER_INPUT","status":"DONE","created_at":"2026-10-01T12:00:00Z","content":"Active work in progress"}` + "\n", age: 10 * time.Second}},
-			idleThreshold:     10 * time.Minute,
-			wantStepsInserted: 1,
-			wantSettled:       new(false),
-		},
-		{
-			name: "subagent transcripts with SYSTEM_MESSAGE sender skipped",
-			seedMessages: []db.Message{
-				{ID: "m-valid-sub-1", ConversationID: "sess-valid-primary-task"},
-			},
-			files: []sessionFileFixture{
-				{sessionID: "sess-valid-primary-task", content: `{"step_index":0,"source":"USER_EXPLICIT","type":"USER_INPUT","status":"DONE","content":"Primary conversation prompt"}` + "\n", age: 1 * time.Hour},
-				{sessionID: "sess-subagent-worker", content: `{"step_index":0,"source":"SYSTEM","type":"SYSTEM_MESSAGE","status":"DONE","created_at":"2026-10-01T10:00:00Z","content":"The following is a <SYSTEM_MESSAGE> from your parent agent: inspect files. sender=parent-123"}` + "\n" + `{"step_index":1,"source":"MODEL","type":"PLANNER_RESPONSE","status":"DONE","created_at":"2026-10-01T10:00:02Z","content":"Inspecting files","tool_calls":[{"name":"view_file","args":{"Path":"/share/aerial/go.mod"}}]}` + "\n", age: 1 * time.Hour},
-			},
-			wantScanned: 2, wantSynced: 1, wantStepsInserted: 1, wantSummaries: 1, wantSummaryText: "Primary conversation prompt",
-		},
-		{
-			name: "silent heartbeat transcripts with non-prompt tool calls skipped",
-			seedMessages: []db.Message{
-				{ID: "m-valid-hb-1", ConversationID: "sess-valid-primary-task-2"},
-			},
-			seedDispatches: []db.Dispatch{
-				{ID: "disp-silent-hb-1", Source: "heartbeat", ConversationID: "sess-silent-heartbeat-instructions"},
-			},
-			seedSessions: []db.SessionInfo{
-				{ThreadID: "heartbeat-test", InternalSessionID: "sess-silent-heartbeat-watermark"},
-			},
-			files: []sessionFileFixture{
-				{sessionID: "sess-valid-primary-task-2", content: `{"step_index":0,"source":"USER_EXPLICIT","type":"USER_INPUT","status":"DONE","content":"Regular user request"}` + "\n", age: 1 * time.Hour},
-				{sessionID: "sess-silent-heartbeat-instructions", content: `{"step_index":0,"source":"USER_EXPLICIT","type":"USER_INPUT","status":"DONE","created_at":"2026-10-01T10:00:00Z","content":"<\\HEARTBEAT_INSTRUCTIONS>\nYour direct text response is suppressed.\n</\\HEARTBEAT_INSTRUCTIONS>\n<HEARTBEAT_WATERMARK>\nLast check: 2026-10-01T09:00:00Z\n</HEARTBEAT_WATERMARK>\nCheck cluster health"}` + "\n" + `{"step_index":1,"source":"MODEL","type":"PLANNER_RESPONSE","status":"DONE","created_at":"2026-10-01T10:00:02Z","content":"Checking metrics","tool_calls":[{"name":"mcp_victoriametrics_query","args":{"query":"up"}}]}` + "\n" + `{"step_index":2,"source":"MODEL","type":"PLANNER_RESPONSE","status":"DONE","created_at":"2026-10-01T10:00:04Z","content":"All systems nominal, remaining silent."}` + "\n", age: 1 * time.Hour},
-				{sessionID: "sess-silent-heartbeat-watermark", content: `{"step_index":0,"source":"USER_EXPLICIT","type":"USER_INPUT","status":"DONE","created_at":"2026-10-01T10:00:00Z","content":"<HEARTBEAT_WATERMARK>\nLast check: 2026-10-01T09:00:00Z\n</HEARTBEAT_WATERMARK>\nCheck disk usage"}` + "\n" + `{"step_index":1,"source":"MODEL","type":"PLANNER_RESPONSE","status":"DONE","created_at":"2026-10-01T10:00:02Z","content":"Checking disk","tool_calls":[{"name":"run_command","args":{"CommandLine":"df -h"}}]}` + "\n", age: 1 * time.Hour},
-			},
-			wantScanned: 3, wantSynced: 1, wantStepsInserted: 1, wantSummaries: 1, wantSummaryText: "Regular user request",
-		},
-		{
-			name: "escalating heartbeat transcripts with prompt tool call indexed",
-			seedDispatches: []db.Dispatch{
-				{ID: "disp-esc-1", Source: "cron", ConversationID: "sess-escalating-heartbeat"},
-			},
-			files: []sessionFileFixture{
-				{sessionID: "sess-escalating-heartbeat", content: `{"step_index":0,"source":"USER_EXPLICIT","type":"USER_INPUT","status":"DONE","created_at":"2026-10-01T10:00:00Z","content":"<\\HEARTBEAT_INSTRUCTIONS>\nEvaluate check\n</\\HEARTBEAT_INSTRUCTIONS>\n<HEARTBEAT_WATERMARK>\nLast check: 2026-10-01T09:00:00Z\n</HEARTBEAT_WATERMARK>\nAlert check"}` + "\n" + `{"step_index":1,"source":"MODEL","type":"PLANNER_RESPONSE","status":"DONE","created_at":"2026-10-01T10:00:02Z","tool_calls":[{"name":"run_command","args":{"CommandLine":"curl -sS -f -X POST http://eri.aerial/prompt -H \"Content-Type: application/json\" -d '{\"title\":\"Escalated Issue\"}'"}}]}` + "\n", age: 1 * time.Hour},
-			},
-			wantScanned: 1, wantSynced: 1, wantStepsInserted: 2, wantSummaries: 1,
-		},
-		{
-			name: "codex preamble steps skipped when extracting step0Prompt",
-			files: []sessionFileFixture{
-				{sessionID: "sess-codex-preamble", content: `{"type":"session_meta","payload":{"id":"sess-codex-preamble"}}` + "\n" + `{"type":"response_item","timestamp":"2026-10-01T10:00:00Z","payload":{"type":"message","role":"user","content":[{"type":"text","text":"# AGENTS.md instructions for system operation\nStrict rules follow."}]}}` + "\n" + `{"type":"response_item","timestamp":"2026-10-01T10:00:01Z","payload":{"type":"message","role":"user","content":[{"type":"text","text":"<environment_context>\nHostname: calibarn\n</environment_context>"}]}}` + "\n" + `{"type":"response_item","timestamp":"2026-10-01T10:00:02Z","payload":{"type":"message","role":"user","content":[{"type":"text","text":"Inspect files in repository"}]}}` + "\n" + `{"type":"response_item","timestamp":"2026-10-01T10:00:03Z","payload":{"type":"message","role":"assistant","content":[{"type":"text","text":"Inspecting repository files now."}]}}` + "\n", age: 1 * time.Hour},
-			},
-			wantScanned: 1, wantSynced: 1, wantSummaries: 1, wantSummaryText: "Inspect files in repository",
-		},
-	}
-}
-
-func advancedExtendedScenarioCases() []syncTranscriptsScenarioCase {
-	return []syncTranscriptsScenarioCase{
-		{
-			name: "batch limit caps synced sessions and skips summarizer transcripts",
-			seedMessages: []db.Message{
-				{ID: "m-b1", ConversationID: "sess-batch-001"},
-				{ID: "m-b2", ConversationID: "sess-batch-002"},
-				{ID: "m-b3", ConversationID: "sess-batch-003"},
-			},
-			files: []sessionFileFixture{
-				{sessionID: "sess-batch-000-summarizer", content: `{"step_index":0,"source":"USER_EXPLICIT","type":"USER_INPUT","status":"DONE","content":"<USER_REQUEST>\nSummarize the following agent conversation transcript in 2-3 concise sentences. Focus on technical entities, tools executed, and outcomes.\n</USER_REQUEST>"}` + "\n", age: 1 * time.Hour},
-				{sessionID: "sess-batch-001", content: `{"step_index":0,"source":"USER_EXPLICIT","type":"USER_INPUT","status":"DONE","content":"Batch task 1"}` + "\n", age: 1 * time.Hour},
-				{sessionID: "sess-batch-002", content: `{"step_index":0,"source":"USER_EXPLICIT","type":"USER_INPUT","status":"DONE","content":"Batch task 2"}` + "\n", age: 1 * time.Hour},
-				{sessionID: "sess-batch-003", content: `{"step_index":0,"source":"USER_EXPLICIT","type":"USER_INPUT","status":"DONE","content":"Batch task 3"}` + "\n", age: 1 * time.Hour},
-			},
-			batchLimit: 1,
-			wantSynced: 1,
-		},
-		{
-			name: "timestamps filtering and incremental watermark skipping",
-			files: []sessionFileFixture{
-				{
-					sessionID: "sess-timestamps-001",
-					content: strings.Join([]string{
-						"",
-						`{"step_index":0,"source":"MODEL","type":"PLANNER_RESPONSE","status":"DONE","created_at":"2026-10-01T12:00:00Z","content":"Initial thinking before user"}`,
-						`{"step_index":1,"source":"USER_EXPLICIT","type":"USER_INPUT","status":"DONE","created_at":"2026-10-01T12:00:01.123456789Z","content":"User follow-up prompt"}`,
-						`{"step_index":2,"source":"MODEL","type":"HEARTBEAT","status":"DONE","created_at":"invalid-timestamp","content":"heartbeat ping"}`,
-						"",
-					}, "\n") + "\n",
-					age: 1 * time.Hour,
-				},
-			},
-			secondPassFiles: []sessionFileFixture{
-				{
-					sessionID: "sess-timestamps-001",
-					content: strings.Join([]string{
-						`{"step_index":2,"source":"MODEL","type":"GENERIC","status":"DONE","created_at":"2026-10-01T12:00:02Z","content":"Old step 2"}`,
-						`{"step_index":3,"source":"MODEL","type":"PLANNER_RESPONSE","status":"DONE","created_at":"2026-10-01T12:00:03Z","content":"New step 3"}`,
-					}, "\n") + "\n",
-					age: 30 * time.Minute,
-				},
-			},
-			wantStepsInserted:     2,
-			secondPassSteps:       1,
-			secondPassLastIndexed: 3,
-		},
-		{
-			name: "settled session re-summarization when delta > 10",
-			priorSummary: &db.SessionSummary{
-				SessionID:            "sess-resummarize",
-				Summary:              "Initial settled summary",
-				LastIndexedStep:      2,
-				SummaryStepWatermark: 2,
-				LastMtime:            time.Now().Add(-2 * time.Hour),
-				IsSettled:            true,
-			},
-			files: []sessionFileFixture{
-				{
-					sessionID: "sess-resummarize",
-					content: func() string {
-						stepLines := make([]string, 0, 16)
-						for i := range 16 {
-							stepLines = append(stepLines, fmt.Sprintf(`{"step_index":%d,"source":"MODEL","type":"PLANNER_RESPONSE","status":"DONE","content":"Step %d"}`, i, i))
-						}
-						return strings.Join(stepLines, "\n") + "\n"
-					}(),
-					age: 1 * time.Hour,
-				},
-			},
-			idleThreshold: 10 * time.Minute,
-			wantSummaries: 1,
-		},
-		{
-			name: "unsettled session revisited once idle threshold passes even if mtime unchanged",
-			priorSummary: &db.SessionSummary{
-				SessionID:       "sess-unsettled-revisit",
-				Summary:         "Initial prompt before settling",
-				LastIndexedStep: 0,
-				LastMtime:       time.Now().Add(-2 * time.Hour),
-				IsSettled:       false,
-			},
-			files: []sessionFileFixture{
-				{
-					sessionID: "sess-unsettled-revisit",
-					content: strings.Join([]string{
-						`{"step_index":0,"source":"USER_EXPLICIT","type":"USER_INPUT","status":"DONE","created_at":"2026-10-01T10:00:00Z","content":"Initial prompt before settling"}`,
-						`{"step_index":1,"source":"MODEL","type":"PLANNER_RESPONSE","status":"DONE","created_at":"2026-10-01T10:00:02Z","content":"Task complete"}`,
-					}, "\n") + "\n",
-					age: 2 * time.Hour,
-				},
-			},
-			idleThreshold:     10 * time.Minute,
-			wantSummaries:     1,
-			wantSettled:       new(true),
-			wantStepsInserted: 1,
-			wantLastIndexed:   1,
-		},
-	}
-}
-
-func setupScenarioLLM(tc syncTranscriptsScenarioCase, callCounter ...*atomic.Int32) func(context.Context, string) (string, error) {
-	var counter *atomic.Int32
-	if len(callCounter) > 0 && callCounter[0] != nil {
-		counter = callCounter[0]
-	} else {
-		counter = new(atomic.Int32)
-	}
-	switch tc.llmMode {
-	case "success":
-		return func(ctx context.Context, prompt string) (string, error) {
-			counter.Add(1)
-			return "Checked system health and free memory: 24GB available.", nil
-		}
-	case "error":
-		return func(ctx context.Context, prompt string) (string, error) {
-			counter.Add(1)
-			return "", errors.New("rate limit exceeded")
-		}
-	default:
-		return nil
-	}
-}
-
-func setupScenarioEmbedder(tc syncTranscriptsScenarioCase) func(context.Context, string) ([]float32, error) {
-	if !tc.withEmbedder {
-		return nil
-	}
-	return func(ctx context.Context, text string) ([]float32, error) {
-		vec := make([]float32, db.ExpectedEmbeddingDim)
-		vec[0] = 0.88
-		return vec, nil
-	}
-}
-
-func assertScenarioSyncStats(t *testing.T, stats SyncStats, tc syncTranscriptsScenarioCase) {
-	t.Helper()
-	if tc.wantScanned != 0 && stats.Scanned != tc.wantScanned {
-		t.Errorf("Scanned = %d, want %d", stats.Scanned, tc.wantScanned)
-	}
-	if tc.wantSynced != 0 && stats.Synced != tc.wantSynced {
-		t.Errorf("Synced = %d, want %d", stats.Synced, tc.wantSynced)
-	}
-	if tc.wantStepsInserted != 0 && stats.StepsInserted != tc.wantStepsInserted {
-		t.Errorf("StepsInserted = %d, want %d", stats.StepsInserted, tc.wantStepsInserted)
-	}
-	if (tc.wantSummaries != 0 || tc.wantSummariesZero) && stats.SummariesGenerated != tc.wantSummaries {
-		t.Errorf("SummariesGenerated = %d, want %d", stats.SummariesGenerated, tc.wantSummaries)
-	}
-	if stats.Errors != tc.wantErrors {
-		t.Errorf("Errors = %d, want %d", stats.Errors, tc.wantErrors)
-	}
-}
-
-func runSecondPassScenarioSync(ctx context.Context, t *testing.T, store db.TranscriptStore, tempDir string, embedder func(context.Context, string) ([]float32, error), llm func(context.Context, string) (string, error), opts SyncOptions, tc syncTranscriptsScenarioCase) {
-	t.Helper()
-	if len(tc.secondPassFiles) == 0 && tc.wantSkippedUnchanged == 0 {
-		return
-	}
-	for _, f := range tc.secondPassFiles {
-		age := f.age
-		if tc.secondPassAge != 0 {
-			age = tc.secondPassAge
-		}
-		writeTranscriptFile(t, tempDir, f.sessionID, f.content, time.Now().Add(-age))
-	}
-	stats2, err := SyncTranscripts(ctx, store, tempDir, embedder, llm, opts)
-	if err != nil {
-		t.Fatalf("SyncTranscripts second pass failed: %v", err)
-	}
-	if tc.wantSkippedUnchanged != 0 && stats2.SkippedUnchanged != tc.wantSkippedUnchanged {
-		t.Errorf("second pass SkippedUnchanged = %d, want %d", stats2.SkippedUnchanged, tc.wantSkippedUnchanged)
-	}
-	if tc.secondPassSteps != 0 && stats2.StepsInserted != tc.secondPassSteps {
-		t.Errorf("second pass StepsInserted = %d, want %d", stats2.StepsInserted, tc.secondPassSteps)
-	}
-}
-
-func assertScenarioSessionState(ctx context.Context, t *testing.T, store db.TranscriptStore, embedder func(context.Context, string) ([]float32, error), tc syncTranscriptsScenarioCase) {
-	t.Helper()
-	if len(tc.files) == 0 {
-		return
-	}
-	states, err := store.GetSessionSyncStates(ctx)
-	if err != nil {
-		t.Fatalf("GetSessionSyncStates: %v", err)
-	}
-	assertScenarioSyncStateValues(t, states, tc)
-	assertScenarioSearchSummaries(ctx, t, store, embedder, tc)
-}
-
-func assertScenarioSyncStateValues(t *testing.T, states map[string]db.SessionSyncState, tc syncTranscriptsScenarioCase) {
-	t.Helper()
-	expectedLastIndexed := tc.wantLastIndexed
-	if tc.secondPassLastIndexed != 0 {
-		expectedLastIndexed = tc.secondPassLastIndexed
-	}
-	if tc.wantSettled == nil && expectedLastIndexed == 0 {
-		return
-	}
-	for _, f := range tc.files {
-		st, ok := states[f.sessionID]
-		if !ok {
-			t.Fatalf("session %q missing from sync states", f.sessionID)
-		}
-		if tc.wantSettled != nil && st.IsSettled != *tc.wantSettled {
-			t.Errorf("session %q IsSettled = %v, want %v", f.sessionID, st.IsSettled, *tc.wantSettled)
-		}
-	}
-	primarySession := tc.files[0].sessionID
-	if expectedLastIndexed != 0 && states[primarySession].LastIndexedStep != expectedLastIndexed {
-		t.Errorf("LastIndexedStep = %d, want %d", states[primarySession].LastIndexedStep, expectedLastIndexed)
-	}
-}
-
-func assertScenarioSearchSummaries(ctx context.Context, t *testing.T, store db.TranscriptStore, embedder func(context.Context, string) ([]float32, error), tc syncTranscriptsScenarioCase) {
-	t.Helper()
-	if tc.wantSummaryText != "" {
-		res, err := ExecuteTranscriptSearch(ctx, store, embedder, SearchOptions{Query: tc.wantSummaryText, Mode: "sessions", Limit: 10})
-		if err != nil || len(res.Sessions) == 0 {
-			t.Fatalf("ExecuteTranscriptSearch(%q) err=%v, sessions=%d", tc.wantSummaryText, err, len(res.Sessions))
-		}
-		if res.Sessions[0].Summary != tc.wantSummaryText {
-			t.Errorf("summary = %q, want %q", res.Sessions[0].Summary, tc.wantSummaryText)
-		}
-	}
-	for sessID, wantText := range tc.wantSessionSummaries {
-		assertSingleSessionSummary(ctx, t, store, embedder, sessID, wantText)
-	}
-}
-
-func assertSingleSessionSummary(ctx context.Context, t *testing.T, store db.TranscriptStore, embedder func(context.Context, string) ([]float32, error), sessID, wantText string) {
-	t.Helper()
-	res, err := ExecuteTranscriptSearch(ctx, store, embedder, SearchOptions{Query: wantText, Mode: "sessions", Limit: 10})
-	if err != nil || len(res.Sessions) == 0 {
-		t.Fatalf("ExecuteTranscriptSearch(%q) err=%v, sessions=%d", wantText, err, len(res.Sessions))
-	}
-	for _, s := range res.Sessions {
-		if s.SessionID == sessID {
-			if s.Summary != wantText {
-				t.Errorf("session %q summary = %q, want %q", sessID, s.Summary, wantText)
-			}
-			return
-		}
-	}
-	t.Errorf("session %q with summary %q not found in search results", sessID, wantText)
-}
-
-func runSyncTranscriptsScenarioCase(t *testing.T, tc syncTranscriptsScenarioCase) {
-	t.Helper()
-	ctx := context.Background()
-	tempDir := t.TempDir()
-	store := dbtest.NewFakeStore()
-
-	if tc.priorSummary != nil {
-		if err := store.UpsertSessionSummary(ctx, *tc.priorSummary); err != nil {
-			t.Fatalf("upsert prior summary: %v", err)
-		}
-	}
-
-	for _, m := range tc.seedMessages {
-		if err := store.InsertMessage(ctx, m); err != nil {
-			t.Fatalf("seed message: %v", err)
-		}
-	}
-	for _, s := range tc.seedSessions {
-		store.SetSessionInfo(s)
-	}
-	for _, d := range tc.seedDispatches {
-		if _, err := store.InsertDispatch(ctx, d); err != nil {
-			t.Fatalf("seed dispatch: %v", err)
-		}
-	}
-
-	for _, f := range tc.files {
-		writeTranscriptFile(t, tempDir, f.sessionID, f.content, time.Now().Add(-f.age))
-	}
-
-	var llmCalls atomic.Int32
-	llm := setupScenarioLLM(tc, &llmCalls)
-	embedder := setupScenarioEmbedder(tc)
-
-	batchLimit := tc.batchLimit
-	if batchLimit == 0 {
-		batchLimit = 10
-	}
-	idle := tc.idleThreshold
-	if idle == 0 {
-		idle = 10 * time.Minute
-	}
-
-	opts := SyncOptions{
-		BatchLimit:    batchLimit,
-		IdleThreshold: idle,
-		BrainDir:      tempDir,
-		HeadLimit:     1000,
-		TailLimit:     1000,
-	}
-
-	stats, err := SyncTranscripts(ctx, store, tempDir, embedder, llm, opts)
-	if err != nil {
-		t.Fatalf("SyncTranscripts failed: %v", err)
-	}
-
-	if tc.wantMaxLLMCalls > 0 && int(llmCalls.Load()) > tc.wantMaxLLMCalls {
-		t.Errorf("llmFunc called %d times, want at most %d", llmCalls.Load(), tc.wantMaxLLMCalls)
-	}
-
-	assertScenarioSyncStats(t, stats, tc)
-	runSecondPassScenarioSync(ctx, t, store, tempDir, embedder, llm, opts, tc)
-	assertScenarioSessionState(ctx, t, store, embedder, tc)
-}
-
-func TestSyncTranscripts_Scenarios(t *testing.T) {
-	t.Parallel()
-
-	tests := append(standardScenarioCases(), advancedScenarioCases()...)
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			runSyncTranscriptsScenarioCase(t, tc)
-		})
-	}
-}
-
-type mockTranscriptStore struct {
-	db.TranscriptStore
-
-	failGetSyncStates    bool
-	failGetKnownSessions bool
-	failBatchInsert      bool
-	failUpsertSummary    bool
-}
-
-func (m *mockTranscriptStore) GetSessionSyncStates(ctx context.Context) (map[string]db.SessionSyncState, error) {
-	if m.failGetSyncStates {
-		return nil, errors.New("simulated sync states query failure")
-	}
-	return m.TranscriptStore.GetSessionSyncStates(ctx)
-}
-
-func (m *mockTranscriptStore) GetKnownTurnSessionIDs(ctx context.Context) (map[string]bool, error) {
-	if m.failGetKnownSessions {
-		return nil, errors.New("simulated known turn session ids failure")
-	}
-	return m.TranscriptStore.GetKnownTurnSessionIDs(ctx)
-}
-
-func (m *mockTranscriptStore) UpsertSessionSummary(ctx context.Context, summary db.SessionSummary) error {
-	if m.failUpsertSummary {
-		return errors.New("simulated upsert summary error")
-	}
-	return m.TranscriptStore.UpsertSessionSummary(ctx, summary)
-}
-
-func (m *mockTranscriptStore) BatchInsertTranscriptSteps(ctx context.Context, steps []db.TranscriptStep) error {
-	if m.failBatchInsert {
-		return errors.New("simulated batch insert error")
-	}
-	return m.TranscriptStore.BatchInsertTranscriptSteps(ctx, steps)
-}
-
-func newMockTranscriptStore(base db.TranscriptStore, failGetSyncStates, failGetKnownSessions, failBatchInsert, failUpsertSummary bool) *mockTranscriptStore {
-	return &mockTranscriptStore{
-		TranscriptStore:      base,
-		failGetSyncStates:    failGetSyncStates,
-		failGetKnownSessions: failGetKnownSessions,
-		failBatchInsert:      failBatchInsert,
-		failUpsertSummary:    failUpsertSummary,
-	}
-}
-
-type syncTranscriptsErrorCase struct {
-	name                 string
-	nilStore             bool
-	emptyBrainDir        bool
-	nonExistentBrainDir  bool
-	cancelCtx            bool
-	hasSession           bool
-	socketFile           bool
-	emptyFile            bool
-	prePopActive         bool
-	activeFile           bool
-	failGetSyncStates    bool
-	failGetKnownSessions bool
-	failBatchInsert      bool
-	failUpsertSummary    bool
-	opts                 SyncOptions
-	zeroOpts             bool
-	wantErr              bool
-	isContextCanceled    bool
-	wantSubstr           string
-	wantSweepErrors      int
-	wantSynced           int
-	wantSummaries        int
-	wantStepsInserted    int
-}
-
-func syncTranscriptsErrorCases() []syncTranscriptsErrorCase {
-	return []syncTranscriptsErrorCase{
-		{name: "nil store returns error", nilStore: true, wantErr: true, wantSubstr: "transcript store cannot be nil"},
-		{name: "empty brain dir returns error", emptyBrainDir: true, wantErr: true, wantSubstr: "brain directory cannot be empty"},
-		{name: "non-existent brain dir returns error", nonExistentBrainDir: true, wantErr: true},
-		{name: "context cancelled returns context canceled error", hasSession: true, cancelCtx: true, zeroOpts: true, wantErr: true, isContextCanceled: true},
-		{name: "error loading session sync states propagated", hasSession: true, failGetSyncStates: true, wantErr: true, wantSubstr: "load session sync states"},
-		{name: "error loading known turn session ids propagated", hasSession: true, failGetKnownSessions: true, wantErr: true, wantSubstr: "load known turn session ids"},
-		{name: "unopenable socket file recorded as error in sweep", socketFile: true, wantSweepErrors: 1},
-		{name: "batch insert error increments errors and inserts 0 steps", hasSession: true, failBatchInsert: true, wantSweepErrors: 1, wantStepsInserted: 0},
-		{name: "upsert settled session error increments errors and generates 0 summaries", hasSession: true, failUpsertSummary: true, wantSweepErrors: 1, wantSummaries: 0},
-		{name: "empty transcript file is skipped without summary", emptyFile: true, wantSummaries: 0, wantSynced: 0},
-		{name: "upsert active session progress error increments errors", prePopActive: true, activeFile: true, failUpsertSummary: true, wantSweepErrors: 1},
-	}
-}
-
-func setupErrorCaseStore(tc syncTranscriptsErrorCase) db.TranscriptStore {
-	if tc.nilStore {
-		return nil
-	}
-	fakeStore := dbtest.NewFakeStore()
-	if tc.prePopActive {
-		_ = fakeStore.UpsertSessionSummary(context.Background(), db.SessionSummary{
-			SessionID:       "sess-active-err",
-			Summary:         "Initial active session",
-			LastIndexedStep: 0,
-			LastMtime:       time.Now().Add(-5 * time.Minute),
-			IsSettled:       false,
-		})
-	}
-	if tc.failGetSyncStates || tc.failGetKnownSessions || tc.failBatchInsert || tc.failUpsertSummary {
-		return newMockTranscriptStore(fakeStore, tc.failGetSyncStates, tc.failGetKnownSessions, tc.failBatchInsert, tc.failUpsertSummary)
-	}
-	return fakeStore
-}
-
-func setupErrorCaseFiles(t *testing.T, tempDir string, tc syncTranscriptsErrorCase) {
-	t.Helper()
-	switch {
-	case tc.hasSession:
-		writeTranscriptFile(t, tempDir, "sess-err-01", `{"step_index":0,"source":"USER_EXPLICIT","type":"USER_INPUT","status":"DONE","created_at":"2026-10-01T12:00:00Z","content":"Err test"}`+"\n", time.Now().Add(-1*time.Hour))
-	case tc.socketFile:
-		sockPath := filepath.Join(os.TempDir(), fmt.Sprintf("ae_t_%d.sock", time.Now().UnixNano()))
-		l, err := net.Listen("unix", sockPath)
-		if err != nil {
-			t.Fatalf("net.Listen failed: %v", err)
-		}
-		t.Cleanup(func() {
-			_ = l.Close()
-			_ = os.Remove(sockPath)
-		})
-
-		sockDir := filepath.Join(tempDir, "sess-sock-err", ".system_generated", "logs")
-		if err := os.MkdirAll(sockDir, 0o755); err != nil {
-			t.Fatalf("mkdir failed: %v", err)
-		}
-		if err := os.Symlink(sockPath, filepath.Join(sockDir, "transcript.jsonl")); err != nil {
-			t.Fatalf("symlink failed: %v", err)
-		}
-	case tc.emptyFile:
-		writeTranscriptFile(t, tempDir, "sess-empty-file", "", time.Now().Add(-1*time.Hour))
-	case tc.activeFile:
-		content := strings.Join([]string{
-			`{"step_index":0,"source":"USER_EXPLICIT","type":"USER_INPUT","status":"DONE","created_at":"2026-10-01T12:00:00Z","content":"Step 0"}`,
-			`{"step_index":1,"source":"MODEL","type":"PLANNER_RESPONSE","status":"DONE","created_at":"2026-10-01T12:00:05Z","content":"Step 1"}`,
-		}, "\n") + "\n"
-		writeTranscriptFile(t, tempDir, "sess-active-err", content, time.Now().Add(-5*time.Second))
-	}
-}
-
-func setupErrorCaseContext(tc syncTranscriptsErrorCase) (context.Context, context.CancelFunc) {
-	ctx := context.Background()
-	if tc.cancelCtx {
-		cctx, cancel := context.WithCancel(ctx)
-		cancel()
-		return cctx, func() {}
-	}
-	return ctx, func() {}
-}
-
-func assertErrorCaseStats(t *testing.T, store db.TranscriptStore, stats SyncStats, tc syncTranscriptsErrorCase) {
-	t.Helper()
-	if stats.Errors != tc.wantSweepErrors {
-		t.Errorf("Errors = %d, want %d", stats.Errors, tc.wantSweepErrors)
-	}
-	if tc.wantSynced != 0 && stats.Synced != tc.wantSynced {
-		t.Errorf("Synced = %d, want %d", stats.Synced, tc.wantSynced)
-	}
-	if (tc.wantSummaries != 0 || tc.failUpsertSummary) && stats.SummariesGenerated != tc.wantSummaries {
-		t.Errorf("SummariesGenerated = %d, want %d", stats.SummariesGenerated, tc.wantSummaries)
-	}
-	if (tc.wantStepsInserted != 0 || tc.failBatchInsert) && stats.StepsInserted != tc.wantStepsInserted {
-		t.Errorf("StepsInserted = %d, want %d", stats.StepsInserted, tc.wantStepsInserted)
-	}
-
-	if tc.emptyFile && store != nil {
-		states, err := store.GetSessionSyncStates(context.Background())
-		if err != nil {
-			t.Fatalf("GetSessionSyncStates: %v", err)
-		}
-		if state, ok := states["sess-empty-file"]; ok {
-			t.Errorf("sess-empty-file should be absent from sync states, got %+v", state)
-		}
-	}
-}
-
-func runSyncTranscriptsErrorCase(t *testing.T, tc syncTranscriptsErrorCase) {
-	t.Helper()
-	tempDir := t.TempDir()
-	store := setupErrorCaseStore(tc)
-
-	brainDir := tempDir
-	if tc.emptyBrainDir {
-		brainDir = ""
-	} else if tc.nonExistentBrainDir {
-		brainDir = "/non/existent/path/for/transcripts/test"
-	}
-
-	setupErrorCaseFiles(t, tempDir, tc)
-	ctx, cancel := setupErrorCaseContext(tc)
-	defer cancel()
-
-	opts := tc.opts
-	if opts.BrainDir == "" {
-		opts.BrainDir = brainDir
-	}
-	if !tc.zeroOpts {
-		if opts.BatchLimit == 0 {
-			opts.BatchLimit = 10
-		}
-		if opts.IdleThreshold == 0 {
-			opts.IdleThreshold = 10 * time.Minute
-		}
-	}
-
-	stats, err := SyncTranscripts(ctx, store, brainDir, nil, nil, opts)
-	if tc.wantErr {
-		if err == nil {
-			t.Fatalf("expected error, got nil")
-		}
-		if tc.isContextCanceled && !errors.Is(err, context.Canceled) {
-			t.Fatalf("expected context.Canceled, got %v", err)
-		}
-		if tc.wantSubstr != "" && !strings.Contains(err.Error(), tc.wantSubstr) {
-			t.Fatalf("expected error containing %q, got %v", tc.wantSubstr, err)
-		}
-		return
-	}
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-
-	assertErrorCaseStats(t, store, stats, tc)
-}
-
-func TestSyncTranscripts_ErrorsAndEdgeCases(t *testing.T) {
-	t.Parallel()
-
-	for _, tc := range syncTranscriptsErrorCases() {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			runSyncTranscriptsErrorCase(t, tc)
-		})
-	}
-}
-
-func TestFindTranscriptFile_AlternativeLocations(t *testing.T) {
-	t.Parallel()
-	ctx := context.Background()
-	tempDir := t.TempDir()
-	store := dbtest.NewFakeStore()
-
-	// 1. system_generated/logs/transcript.jsonl (without leading dot)
-	sess1 := "sess-nodot"
-	dir1 := filepath.Join(tempDir, sess1, "system_generated", "logs")
-	_ = os.MkdirAll(dir1, 0o755)
-	_ = os.WriteFile(filepath.Join(dir1, "transcript.jsonl"), []byte(`{"step_index":0,"content":"no dot"}`+"\n"), 0o644)
-
-	// 2. transcript.jsonl directly under session dir
-	sess2 := "sess-root"
-	dir2 := filepath.Join(tempDir, sess2)
-	_ = os.MkdirAll(dir2, 0o755)
-	_ = os.WriteFile(filepath.Join(dir2, "transcript.jsonl"), []byte(`{"step_index":0,"content":"root"}`+"\n"), 0o644)
-
-	// 3. Hidden directory and regular file (should be ignored)
-	_ = os.MkdirAll(filepath.Join(tempDir, ".hidden-dir"), 0o755)
-	_ = os.WriteFile(filepath.Join(tempDir, "regular-file.txt"), []byte("not a dir"), 0o644)
-
-	// 4. Session directory without any transcript file (should be ignored)
-	_ = os.MkdirAll(filepath.Join(tempDir, "sess-empty-dir"), 0o755)
-
-	stats, err := SyncTranscripts(ctx, store, tempDir, nil, nil, DefaultSyncOptions())
-	if err != nil {
-		t.Fatalf("SyncTranscripts failed: %v", err)
-	}
-	if stats.Synced != 2 {
-		t.Errorf("expected 2 synced from alternative locations, got %d", stats.Synced)
-	}
-}
-
-func TestIsAllowedTranscriptSession(t *testing.T) {
-	t.Parallel()
-
-	tests := []struct {
-		name      string
-		sessionID string
-		exists    bool
-		known     map[string]bool
-		want      bool
-	}{
-		{
-			name:      "already exists in sync states with nil known",
-			sessionID: "sess-1",
-			exists:    true,
-			known:     nil,
-			want:      true,
-		},
-		{
-			name:      "already exists in sync states with populated known not containing id",
-			sessionID: "sess-1",
-			exists:    true,
-			known:     map[string]bool{"sess-2": true},
-			want:      true,
-		},
-		{
-			name:      "new session with nil known (hermetic test fixtures / no turn rows)",
-			sessionID: "sess-hermetic",
-			exists:    false,
-			known:     nil,
-			want:      true,
-		},
-		{
-			name:      "new session in known turn session ids",
-			sessionID: "sess-turn-active",
-			exists:    false,
-			known:     map[string]bool{"sess-turn-active": true, "sess-turn-prev": true},
-			want:      true,
-		},
-		{
-			name:      "new session not in known turn session ids",
-			sessionID: "sess-untracked-ephemeral",
-			exists:    false,
-			known:     map[string]bool{"sess-other": true},
-			want:      false,
-		},
-		{
-			name:      "new session with empty known map",
-			sessionID: "sess-empty-known",
-			exists:    false,
-			known:     map[string]bool{},
-			want:      false,
-		},
-		{
-			name:      "new session with false in known map",
-			sessionID: "sess-disallowed",
-			exists:    false,
-			known:     map[string]bool{"sess-disallowed": false},
-			want:      false,
-		},
-	}
-
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			got := isAllowedTranscriptSession(tc.sessionID, tc.exists, tc.known)
-			if got != tc.want {
-				t.Fatalf("isAllowedTranscriptSession(%q, %v, %v) = %v, want %v", tc.sessionID, tc.exists, tc.known, got, tc.want)
-			}
-		})
-	}
-}
 
 func TestParseTranscriptTimestamp(t *testing.T) {
 	fallback := time.Date(2026, 11, 7, 12, 0, 0, 0, time.UTC)
@@ -1031,357 +81,12 @@ func TestFindTranscriptFile_PathResolution(t *testing.T) {
 				_ = os.WriteFile(fullPath, []byte("content"), 0o644)
 			}
 
-			got := findTranscriptFile(brainDir, tc.sessionID)
+			got := FindTranscriptFile(brainDir, tc.sessionID)
 			if tc.wantFound && got == "" {
 				t.Fatalf("expected to find transcript file for %q", tc.sessionID)
 			} else if !tc.wantFound && got != "" {
 				t.Fatalf("expected not to find transcript file, got %q", got)
 			}
-		})
-	}
-}
-
-type syncTranscriptsClaudeCase struct {
-	name                 string
-	sessionID            string
-	content              string
-	customClaudeDir      bool
-	withLLM              bool
-	withEmbedder         bool
-	secondPassContent    string
-	wantSteps            int
-	wantSummaries        int
-	wantSettled          bool
-	wantSkippedUnchanged int
-	secondPassSteps      int
-	wantStoredTools      []string
-	wantToolResults      []string
-}
-
-func syncTranscriptsClaudeCases() []syncTranscriptsClaudeCase {
-	return []syncTranscriptsClaudeCase{
-		{
-			name:      "claude transcript with prompt thinking tool use tool result and reply",
-			sessionID: "sess-claude-full",
-			content: strings.Join([]string{
-				`{"type":"user","timestamp":"2026-10-01T10:00:00Z","message":{"role":"user","content":"Inspect disk usage"}}`,
-				`{"type":"assistant","timestamp":"2026-10-01T10:00:02Z","message":{"role":"assistant","content":[{"type":"thinking","thinking":"Checking storage"},{"type":"tool_use","name":"run_command","input":{"CommandLine":"df -h"}}]}}`,
-				`{"type":"user","timestamp":"2026-10-01T10:00:05Z","message":{"role":"user","content":[{"type":"tool_result","is_error":false,"content":"/dev/sda1 50G 20G 30G"}]}}`,
-				`{"type":"assistant","timestamp":"2026-10-01T10:00:08Z","message":{"role":"assistant","content":[{"type":"text","text":"Disk usage is at 40%."}]}}`,
-			}, "\n") + "\n",
-			withLLM: true, withEmbedder: true, wantSteps: 4, wantSummaries: 1, wantSettled: true, wantSkippedUnchanged: 1,
-		},
-		{
-			name:      "claude transcript with tool error and raw assistant string and custom claude dir",
-			sessionID: "sess-claude-custom-dir",
-			content: strings.Join([]string{
-				`{"type":"user","timestamp":"2026-10-01T10:00:00Z","message":{"role":"user","content":"Test failing command"}}`,
-				`{"type":"user","timestamp":"2026-10-01T10:00:02Z","message":{"role":"user","content":[{"type":"tool_result","is_error":true,"content":[{"type":"text","text":"command failed with code 1"}]}]}}`,
-				`{"type":"assistant","timestamp":"2026-10-01T10:00:04Z","message":{"role":"assistant","content":"Recovering from error"}}`,
-			}, "\n") + "\n",
-			customClaudeDir: true, wantSteps: 3, wantSummaries: 1, wantSettled: true,
-			secondPassContent: strings.Join([]string{
-				`{"type":"user","timestamp":"2026-10-01T10:00:00Z","message":{"role":"user","content":"Test failing command"}}`,
-				`{"type":"user","timestamp":"2026-10-01T10:00:02Z","message":{"role":"user","content":[{"type":"tool_result","is_error":true,"content":[{"type":"text","text":"command failed with code 1"}]}]}}`,
-				`{"type":"assistant","timestamp":"2026-10-01T10:00:04Z","message":{"role":"assistant","content":"Recovering from error"}}`,
-				`{"type":"assistant","timestamp":"2026-10-01T10:00:06Z","message":{"role":"assistant","content":[{"type":"text","text":"Extra resolution step"}]}}`,
-			}, "\n") + "\n",
-			secondPassSteps: 4,
-		},
-		{
-			name:      "claude parallel tool calls paired to shuffled tool results by id",
-			sessionID: "sess-claude-parallel",
-			content: strings.Join([]string{
-				`{"type":"user","timestamp":"2026-10-01T10:00:00Z","message":{"role":"user","content":"Survey the repo"}}`,
-				`{"type":"assistant","timestamp":"2026-10-01T10:00:01Z","message":{"id":"msg_1","role":"assistant","content":[{"type":"tool_use","id":"toolu_a","name":"Bash","input":{"command":"ls"}}]}}`,
-				`{"type":"assistant","timestamp":"2026-10-01T10:00:01Z","message":{"id":"msg_1","role":"assistant","content":[{"type":"tool_use","id":"toolu_b","name":"Read","input":{"file_path":"go.mod"}}]}}`,
-				`{"type":"assistant","timestamp":"2026-10-01T10:00:01Z","message":{"id":"msg_1","role":"assistant","content":[{"type":"tool_use","id":"toolu_c","name":"Grep","input":{"pattern":"TODO"}}]}}`,
-				`{"type":"user","timestamp":"2026-10-01T10:00:03Z","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_c","content":"main.go:12: TODO"},{"type":"tool_result","tool_use_id":"toolu_a","content":"go.mod main.go"},{"type":"tool_result","tool_use_id":"toolu_b","is_error":true,"content":[{"type":"text","text":"permission denied"}]}]}}`,
-				`{"type":"assistant","timestamp":"2026-10-01T10:00:05Z","message":{"role":"assistant","content":[{"type":"text","text":"Survey complete."}]}}`,
-			}, "\n") + "\n",
-			wantSteps:       8,
-			wantSummaries:   1,
-			wantSettled:     true,
-			wantStoredTools: []string{"", "Bash", "Read", "Grep", "Grep", "Bash", "Read", ""},
-			wantToolResults: []string{"toolu_c|Grep|DONE|main.go:12: TODO", "toolu_a|Bash|DONE|go.mod main.go", "toolu_b|Read|ERROR|permission denied"},
-		},
-		{
-			name:      "claude tool result with unknown tool use id keeps empty name",
-			sessionID: "sess-claude-unknown-id",
-			content: strings.Join([]string{
-				`{"type":"user","timestamp":"2026-10-01T10:00:00Z","message":{"role":"user","content":"Resume work"}}`,
-				`{"type":"user","timestamp":"2026-10-01T10:00:02Z","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_gone","content":"stale output"}]}}`,
-			}, "\n") + "\n",
-			wantSteps: 2, wantSummaries: 1, wantSettled: true, wantStoredTools: []string{"", ""}, wantToolResults: []string{"toolu_gone||DONE|stale output"},
-		},
-		{
-			name:      "claude transcript with unparseable or ambient messages skipped",
-			sessionID: "sess-claude-skips",
-			content: strings.Join([]string{
-				`{"type":"other","message":{}}`,
-				`{"type":"user","timestamp":"2026-10-01T10:00:00Z","message":{"role":"user","content":12345}}`,
-				`{"type":"user","timestamp":"2026-10-01T10:00:02Z","message":{"role":"user","content":"Valid prompt"}}`,
-				`{"type":"assistant","timestamp":"2026-10-01T10:00:04Z","message":{"role":"assistant","content":12345}}`,
-			}, "\n") + "\n",
-			wantSteps: 1, wantSummaries: 1, wantSettled: true,
-		},
-	}
-}
-
-func assertClaudeStoredToolsAndResults(ctx context.Context, t *testing.T, store db.TranscriptStore, filePath string, tc syncTranscriptsClaudeCase) {
-	t.Helper()
-	if tc.wantStoredTools != nil {
-		stored, err := store.GetTranscriptStepRange(ctx, "", tc.sessionID, 0, 1000)
-		if err != nil {
-			t.Fatalf("GetTranscriptStepRange failed: %v", err)
-		}
-		gotTools := make([]string, 0, len(stored))
-		for _, s := range stored {
-			gotTools = append(gotTools, s.ToolName)
-		}
-		if !slices.Equal(gotTools, tc.wantStoredTools) {
-			t.Fatalf("stored tool names = %q, want %q", gotTools, tc.wantStoredTools)
-		}
-	}
-	if tc.wantToolResults != nil {
-		scan, err := scanSessionTranscriptFile(filePath, nil)
-		if err != nil {
-			t.Fatalf("scanSessionTranscriptFile failed: %v", err)
-		}
-		var gotResults []string
-		for _, s := range scan.parsedSteps {
-			if s.Type == "TOOL" {
-				gotResults = append(gotResults, strings.Join([]string{s.ToolCallID, s.ToolName, s.Status, s.Content}, "|"))
-			}
-		}
-		if !slices.Equal(gotResults, tc.wantToolResults) {
-			t.Fatalf("parsed tool results = %q, want %q", gotResults, tc.wantToolResults)
-		}
-	}
-}
-
-func runClaudeSecondPass(ctx context.Context, t *testing.T, store db.TranscriptStore, brainDir, filePath string, embedder func(context.Context, string) ([]float32, error), llm func(context.Context, string) (string, error), opts SyncOptions, tc syncTranscriptsClaudeCase) {
-	t.Helper()
-	if tc.secondPassContent == "" && tc.wantSkippedUnchanged == 0 {
-		return
-	}
-	if tc.secondPassContent != "" {
-		_ = os.WriteFile(filePath, []byte(tc.secondPassContent), 0o644)
-		t1 := time.Now().Add(-30 * time.Minute).Truncate(time.Second)
-		_ = os.Chtimes(filePath, t1, t1)
-	}
-	stats2, err := SyncTranscripts(ctx, store, brainDir, embedder, llm, opts)
-	if err != nil {
-		t.Fatalf("SyncTranscripts second pass failed: %v", err)
-	}
-	if tc.wantSkippedUnchanged > 0 && stats2.SkippedUnchanged != tc.wantSkippedUnchanged {
-		t.Fatalf("second pass SkippedUnchanged = %d, want %d", stats2.SkippedUnchanged, tc.wantSkippedUnchanged)
-	}
-	if tc.secondPassSteps > 0 && stats2.StepsInserted != tc.secondPassSteps {
-		t.Fatalf("second pass StepsInserted = %d, want %d", stats2.StepsInserted, tc.secondPassSteps)
-	}
-}
-
-func runSyncTranscriptsClaudeCase(t *testing.T, tc syncTranscriptsClaudeCase) {
-	t.Helper()
-	ctx := context.Background()
-	tmp := t.TempDir()
-	brainDir := filepath.Join(tmp, "brain")
-	_ = os.MkdirAll(brainDir, 0o755)
-	store := dbtest.NewFakeStore()
-
-	claudeProjectDir := filepath.Join(brainDir, "..", "claude", "projects")
-	if tc.customClaudeDir {
-		claudeProjectDir = filepath.Join(tmp, "custom-claude-projects")
-	}
-	projDir := filepath.Join(claudeProjectDir, "-test-project")
-	_ = os.MkdirAll(projDir, 0o755)
-
-	filePath := filepath.Join(projDir, tc.sessionID+".jsonl")
-	_ = os.WriteFile(filePath, []byte(tc.content), 0o644)
-	t0 := time.Now().Add(-time.Hour).Truncate(time.Second)
-	_ = os.Chtimes(filePath, t0, t0)
-
-	opts := SyncOptions{
-		BrainDir:      brainDir,
-		BatchLimit:    10,
-		IdleThreshold: 10 * time.Minute,
-		HeadLimit:     1000,
-		TailLimit:     1000,
-	}
-	if tc.customClaudeDir {
-		opts.ClaudeProjectsDir = claudeProjectDir
-	}
-
-	var llm func(ctx context.Context, prompt string) (string, error)
-	if tc.withLLM {
-		llm = func(ctx context.Context, prompt string) (string, error) {
-			return "Claude session summary: analyzed disk.", nil
-		}
-	}
-
-	var embedder func(ctx context.Context, text string) ([]float32, error)
-	if tc.withEmbedder {
-		embedder = func(ctx context.Context, text string) ([]float32, error) {
-			vec := make([]float32, db.ExpectedEmbeddingDim)
-			vec[0] = 0.55
-			return vec, nil
-		}
-	}
-
-	stats, err := SyncTranscripts(ctx, store, brainDir, embedder, llm, opts)
-	if err != nil {
-		t.Fatalf("SyncTranscripts failed: %v", err)
-	}
-	if stats.StepsInserted != tc.wantSteps {
-		t.Fatalf("StepsInserted = %d, want %d", stats.StepsInserted, tc.wantSteps)
-	}
-	if stats.SummariesGenerated != tc.wantSummaries {
-		t.Fatalf("SummariesGenerated = %d, want %d", stats.SummariesGenerated, tc.wantSummaries)
-	}
-
-	assertClaudeStoredToolsAndResults(ctx, t, store, filePath, tc)
-
-	states, err := store.GetSessionSyncStates(ctx)
-	if err != nil {
-		t.Fatalf("GetSessionSyncStates failed: %v", err)
-	}
-	st, ok := states[tc.sessionID]
-	if !ok {
-		t.Fatalf("expected state for session %q", tc.sessionID)
-	}
-	if st.IsSettled != tc.wantSettled {
-		t.Fatalf("IsSettled = %v, want %v", st.IsSettled, tc.wantSettled)
-	}
-
-	runClaudeSecondPass(ctx, t, store, brainDir, filePath, embedder, llm, opts, tc)
-}
-
-func TestSyncTranscripts_ClaudeScenarios(t *testing.T) {
-	t.Parallel()
-
-	for _, tc := range syncTranscriptsClaudeCases() {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			runSyncTranscriptsClaudeCase(t, tc)
-		})
-	}
-}
-
-type syncTranscriptsEngineCase struct {
-	name         string
-	brainFiles   []sessionFileFixture
-	claudeFiles  []sessionFileFixture
-	codexFiles   []sessionFileFixture
-	priorSummary *db.SessionSummary
-	priorSteps   []db.TranscriptStep
-	mcpServers   []string
-	failMethod   string
-	session      string
-	wantEngine   string
-	wantKinds    []string // "tool_name=tool_kind|tool_call_id" per stored step with a tool name
-}
-
-func syncTranscriptsEngineCases() []syncTranscriptsEngineCase {
-	agyMCP := strings.Join([]string{
-		`{"step_index":0,"source":"USER_EXPLICIT","type":"USER_INPUT","status":"DONE","created_at":"2026-10-01T10:00:00Z","content":"Turn on the lights"}`,
-		`{"step_index":1,"source":"MODEL","type":"PLANNER_RESPONSE","status":"DONE","created_at":"2026-10-01T10:00:02Z","tool_calls":[{"name":"mcp_home_assistant_turn_on","args":{"entity":"light.desk"}}]}`,
-		`{"step_index":2,"source":"MODEL","type":"PLANNER_RESPONSE","status":"DONE","created_at":"2026-10-01T10:00:03Z","tool_calls":[{"name":"view_file","args":{"Path":"/etc/hosts"}}]}`,
-	}, "\n") + "\n"
-	claudeBash := strings.Join([]string{
-		`{"type":"user","timestamp":"2026-10-01T10:00:00Z","message":{"role":"user","content":"Inspect disk usage"}}`,
-		`{"type":"assistant","timestamp":"2026-10-01T10:00:02Z","message":{"role":"assistant","content":[{"type":"tool_use","id":"toolu_disk","name":"Bash","input":{"command":"df -h"}}]}}`,
-		`{"type":"user","timestamp":"2026-10-01T10:00:05Z","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_disk","is_error":false,"content":"/dev/sda1 50G 20G 30G"}]}}`,
-	}, "\n") + "\n"
-	codexRollout := strings.Join([]string{
-		`{"type":"session_meta","payload":{"id":"sess-codex-kinds"}}`,
-		`{"type":"turn_context","payload":{"model":"o3-mini"}}`,
-		`{"type":"event_msg","payload":{"type":"status"}}`,
-		`{"type":"response_item","timestamp":"2026-10-01T10:00:00Z","payload":{"type":"message","role":"user","content":[{"type":"text","text":"Inspect files"}]}}`,
-		`{"type":"response_item","timestamp":"2026-10-01T10:00:01Z","payload":{"type":"reasoning","text":"Thinking about inspection"}}`,
-		`{"type":"response_item","timestamp":"2026-10-01T10:00:02Z","payload":{"type":"local_shell_call","call_id":"call_1","command":"ls -la"}}`,
-		`{"type":"response_item","timestamp":"2026-10-01T10:00:04Z","payload":{"type":"function_call_output","call_id":"call_1","output":"total 0"}}`,
-		`{"type":"response_item","timestamp":"2026-10-01T10:00:05Z","payload":{"type":"web_search_call","call_id":"call_2","query":"golang docs"}}`,
-		`{"type":"response_item","timestamp":"2026-10-01T10:00:06Z","payload":{"type":"custom_tool_call_output","call_id":"call_2","output":"golang.org"}}`,
-		`{"type":"response_item","timestamp":"2026-10-01T10:00:07Z","payload":{"type":"function_call","name":"apply_patch","call_id":"call_3","arguments":"{}"}}`,
-		`{"type":"response_item","timestamp":"2026-10-01T10:00:08Z","payload":{"type":"function_call_output","call_id":"call_3","output":"ok"}}`,
-		`{"type":"response_item","timestamp":"2026-10-01T10:00:09Z","payload":{"type":"message","role":"assistant","content":[{"type":"text","text":"All done."}]}}`,
-	}, "\n") + "\n"
-	future := time.Now().Add(time.Hour).UTC()
-
-	return []syncTranscriptsEngineCase{
-		{name: "agy session records engine and longest-prefix mcp kind", brainFiles: []sessionFileFixture{{sessionID: "sess-agy-kinds", content: agyMCP, age: time.Hour}}, mcpServers: []string{"home", "home_assistant"}, session: "sess-agy-kinds", wantEngine: "agy", wantKinds: []string{"mcp_home_assistant_turn_on=mcp:home_assistant|", "view_file=read|"}},
-		{name: "claude session records engine, kind and tool call id", claudeFiles: []sessionFileFixture{{sessionID: "sess-claude-kinds", content: claudeBash, age: time.Hour}}, session: "sess-claude-kinds", wantEngine: "claude", wantKinds: []string{"Bash=shell|", "Bash=shell|toolu_disk"}},
-		{name: "codex session records engine, kind and tool call id", codexFiles: []sessionFileFixture{{sessionID: "sess-codex-kinds", content: codexRollout, age: time.Hour}}, session: "sess-codex-kinds", wantEngine: "codex", wantKinds: []string{"local_shell=shell|", "local_shell=shell|call_1", "web_search=web|", "web_search=web|call_2", "apply_patch=edit|", "apply_patch=edit|call_3"}},
-		{name: "unchanged legacy session gets its engine stamped and kinds backfilled", brainFiles: []sessionFileFixture{{sessionID: "sess-legacy", content: agyMCP, age: time.Hour}}, priorSummary: &db.SessionSummary{SessionID: "sess-legacy", LastIndexedStep: 2, LastMtime: future, SummaryStepWatermark: 2, IsSettled: true}, priorSteps: []db.TranscriptStep{{SessionID: "sess-legacy", StepIndex: 2, StepType: "PLANNER_RESPONSE", ToolName: "run_command", Content: "ls"}}, session: "sess-legacy", wantEngine: "agy", wantKinds: []string{"run_command=shell|"}},
-		{name: "engine stamp failure is logged and the sweep completes", brainFiles: []sessionFileFixture{{sessionID: "sess-legacy", content: agyMCP, age: time.Hour}}, priorSummary: &db.SessionSummary{SessionID: "sess-legacy", LastIndexedStep: 2, LastMtime: future, SummaryStepWatermark: 2, IsSettled: true}, priorSteps: []db.TranscriptStep{{SessionID: "sess-legacy", StepIndex: 2, StepType: "PLANNER_RESPONSE", ToolName: "run_command", Content: "ls"}}, failMethod: "SetSessionEngine", session: "sess-legacy", wantEngine: "agy", wantKinds: []string{"run_command=shell|"}},
-		{name: "session without a raw log gets its engine inferred from tool steps", priorSummary: &db.SessionSummary{SessionID: "sess-orphan", LastIndexedStep: 1, LastMtime: future, SummaryStepWatermark: 1, IsSettled: true}, priorSteps: []db.TranscriptStep{{SessionID: "sess-orphan", StepIndex: 0, StepType: "assistant", ToolName: "Bash", Content: "ls"}, {SessionID: "sess-orphan", StepIndex: 1, StepType: "assistant", ToolName: "mcp__github__get_me", Content: "{}"}}, session: "sess-orphan", wantEngine: "claude", wantKinds: []string{"Bash=shell|", "mcp__github__get_me=mcp:github|"}},
-		{name: "session without a raw log gets its engine inferred as codex from tool steps", priorSummary: &db.SessionSummary{SessionID: "sess-orphan-codex", LastIndexedStep: 1, LastMtime: future, SummaryStepWatermark: 1, IsSettled: true}, priorSteps: []db.TranscriptStep{{SessionID: "sess-orphan-codex", StepIndex: 0, StepType: "assistant", ToolName: "local_shell", Content: "ls"}, {SessionID: "sess-orphan-codex", StepIndex: 1, StepType: "assistant", ToolName: "apply_patch", Content: "{}"}}, session: "sess-orphan-codex", wantEngine: "codex", wantKinds: []string{"local_shell=shell|", "apply_patch=edit|"}},
-		{name: "engine backfill failure is logged and leaves the engine empty", priorSummary: &db.SessionSummary{SessionID: "sess-orphan", LastIndexedStep: 0, LastMtime: future, SummaryStepWatermark: 0, IsSettled: true}, priorSteps: []db.TranscriptStep{{SessionID: "sess-orphan", StepIndex: 0, StepType: "assistant", ToolName: "Bash", Content: "ls"}}, failMethod: "BackfillSessionEngines", session: "sess-orphan", wantKinds: []string{"Bash=shell|"}},
-		{name: "backfill failure is logged and leaves kinds empty", brainFiles: []sessionFileFixture{{sessionID: "sess-legacy", content: agyMCP, age: time.Hour}}, priorSummary: &db.SessionSummary{SessionID: "sess-legacy", Engine: "agy", LastIndexedStep: 2, LastMtime: future, SummaryStepWatermark: 2, IsSettled: true}, priorSteps: []db.TranscriptStep{{SessionID: "sess-legacy", StepIndex: 2, StepType: "PLANNER_RESPONSE", ToolName: "run_command", Content: "ls"}}, failMethod: "BackfillToolKinds", session: "sess-legacy", wantEngine: "agy", wantKinds: []string{"run_command=|"}},
-		{name: "migrated purge failure is logged and the sweep completes", brainFiles: []sessionFileFixture{{sessionID: "sess-legacy", content: agyMCP, age: time.Hour}}, priorSummary: &db.SessionSummary{SessionID: "sess-legacy", LastIndexedStep: 2, LastMtime: future, SummaryStepWatermark: 2, IsSettled: true}, priorSteps: []db.TranscriptStep{{SessionID: "sess-legacy", StepIndex: 2, StepType: "PLANNER_RESPONSE", ToolName: "run_command", Content: "ls"}}, failMethod: "PurgeMigratedLocalTranscripts", session: "sess-legacy", wantEngine: "agy", wantKinds: []string{"run_command=shell|"}},
-	}
-}
-
-func runSyncTranscriptsEngineAndKindsCase(t *testing.T, tc syncTranscriptsEngineCase) {
-	t.Helper()
-	ctx := context.Background()
-	tmp := t.TempDir()
-	brainDir := filepath.Join(tmp, "brain")
-	projDir := filepath.Join(tmp, "claude", "projects", "-test-project")
-	for _, dir := range []string{brainDir, projDir} {
-		if err := os.MkdirAll(dir, 0o755); err != nil {
-			t.Fatalf("mkdir: %v", err)
-		}
-	}
-	store := dbtest.NewFakeStore()
-	if tc.priorSummary != nil {
-		if err := store.UpsertSessionSummary(ctx, *tc.priorSummary); err != nil {
-			t.Fatalf("seed summary: %v", err)
-		}
-		if err := store.BatchInsertTranscriptSteps(ctx, tc.priorSteps); err != nil {
-			t.Fatalf("seed steps: %v", err)
-		}
-	}
-	populateSyncTranscriptsEngineFixtures(t, tmp, brainDir, projDir, tc)
-
-	if tc.failMethod != "" {
-		store.FailNext(tc.failMethod, errors.New("simulated "+tc.failMethod+" failure"))
-	}
-	opts := SyncOptions{BrainDir: brainDir, BatchLimit: 10, IdleThreshold: 10 * time.Minute, HeadLimit: 1000, TailLimit: 1000, MCPServers: tc.mcpServers}
-	if _, err := SyncTranscripts(ctx, store, brainDir, nil, nil, opts); err != nil {
-		t.Fatalf("SyncTranscripts: %v", err)
-	}
-
-	states, err := store.GetSessionSyncStates(ctx)
-	if err != nil {
-		t.Fatalf("GetSessionSyncStates: %v", err)
-	}
-	if got := states[tc.session].Engine; got != tc.wantEngine {
-		t.Errorf("engine = %q, want %q", got, tc.wantEngine)
-	}
-	stored, err := store.GetTranscriptStepRange(ctx, "", tc.session, 0, 1000)
-	if err != nil {
-		t.Fatalf("GetTranscriptStepRange: %v", err)
-	}
-	var gotKinds []string
-	for _, st := range stored {
-		if st.ToolName != "" {
-			gotKinds = append(gotKinds, st.ToolName+"="+st.ToolKind+"|"+st.ToolCallID)
-		}
-	}
-	if !slices.Equal(gotKinds, tc.wantKinds) {
-		t.Errorf("kinds = %q, want %q", gotKinds, tc.wantKinds)
-	}
-}
-
-func TestSyncTranscripts_EngineAndToolKinds(t *testing.T) {
-	t.Parallel()
-
-	for _, tc := range syncTranscriptsEngineCases() {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			runSyncTranscriptsEngineAndKindsCase(t, tc)
 		})
 	}
 }
@@ -1404,6 +109,170 @@ func TestEngineForPath(t *testing.T) {
 			t.Parallel()
 			if got := engineForPath(tc.brainDir, tc.path); got != tc.want {
 				t.Errorf("engineForPath(%q, %q) = %q, want %q", tc.brainDir, tc.path, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestScanSessionTranscriptFile(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name       string
+		content    string
+		missing    bool
+		wantErr    bool
+		wantSteps  []string // Type|Status|ToolName|Content|Thinking
+		wantErrors int
+	}{
+		{
+			name: "claude prompt, tool use, id-paired results and plain reply",
+			content: `{"type":"user","timestamp":"2026-11-07T10:00:00Z","message":{"role":"user","content":"Hello"}}
+{"type":"assistant","timestamp":"2026-11-07T10:00:01Z","message":{"role":"assistant","content":[{"type":"thinking","thinking":"plan"},{"type":"text","text":"Running"},{"type":"tool_use","id":"tu-1","name":"Bash","input":{"command":"ls"}}]}}
+{"type":"user","timestamp":"2026-11-07T10:00:02Z","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"tu-1","content":"file.txt"}]}}
+{"type":"user","timestamp":"2026-11-07T10:00:03Z","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"tu-1","is_error":true,"content":[{"type":"text","text":"boom"}]}]}}
+{"type":"assistant","timestamp":"2026-11-07T10:00:04Z","message":{"role":"assistant","content":"Done"}}
+{"type":"assistant","message":{"role":"assistant","content":[{"type":"tool_use","name":"Read","input":{}}]}}
+{"type":"user","message":{"role":"user","content":[{"type":"text","text":"not a tool result"}]}}
+`,
+			wantSteps: []string{"USER_INPUT|DONE||Hello|", "PLANNER_RESPONSE|DONE|Bash|Running|plan", "TOOL|DONE|Bash|file.txt|", "TOOL|ERROR|Bash|boom|", "PLANNER_RESPONSE|DONE||Done|", "PLANNER_RESPONSE|DONE|Read||", "user||||"},
+		},
+		{
+			name: "codex tool calls resolve output tool names by call id",
+			content: `{"type":"response_item","payload":{"type":"local_shell_call","id":"ls-1","cmd":"pwd"}}
+{"type":"response_item","payload":{"type":"function_call_output","call_id":"ls-1","output":"/root"}}
+{"type":"response_item","payload":{"type":"local_shell_call","call_id":"ls-2","arguments":{"command":["ls"]}}}
+{"type":"response_item","payload":{"type":"local_shell_call","call_id":"ls-3","input":{"command":"ls"}}}
+{"type":"response_item","payload":{"type":"web_search_call","call_id":"ws-1","query":"go"}}
+{"type":"response_item","payload":{"type":"web_search_call","id":"ws-2","input":{"q":"x"}}}
+{"type":"response_item","payload":{"type":"web_search_call","call_id":"ws-3","arguments":{"q":"y"}}}
+{"type":"response_item","payload":{"type":"custom_tool_call_output","call_id":"ws-3","status":"failed","output":{"e":1}}}
+{"type":"response_item","payload":{"type":"function_call","name":"shell","call_id":"fc-1","arguments":"{\"cmd\":\"ls\"}"}}
+{"type":"response_item","payload":{"type":"custom_tool_call","name":"apply_patch","id":"ct-1","input":"patch"}}
+`,
+			wantSteps: []string{"PLANNER_RESPONSE|DONE|local_shell||", "TOOL|DONE|local_shell|/root|", "PLANNER_RESPONSE|DONE|local_shell||", "PLANNER_RESPONSE|DONE|local_shell||", "PLANNER_RESPONSE|DONE|web_search||", "PLANNER_RESPONSE|DONE|web_search||", "PLANNER_RESPONSE|DONE|web_search||", `TOOL|ERROR|web_search|{"e":1}|`, "PLANNER_RESPONSE|DONE|shell||", "PLANNER_RESPONSE|DONE|apply_patch||"},
+		},
+		{
+			name: "codex messages, reasoning summary and raw content fallback",
+			content: `{"type":"session_meta","payload":{"id":"codex-1"}}
+{"type":"response_item","timestamp":"2026-11-07T10:00:00Z","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"Build it"},{"type":"image","text":"ignored"}]}}
+{"type":"response_item","payload":{"type":"message","role":"developer","content":"skipped"}}
+{"type":"response_item","payload":{"type":"reasoning","summary":"thinking hard"}}
+{"type":"response_item","payload":{"type":"message","role":"assistant","content":"Plain"}}
+{"type":"response_item","payload":{"type":"message","role":"assistant","content":{"k":1}}}
+`,
+			wantSteps: []string{"USER_INPUT|DONE||Build it|", "PLANNER_RESPONSE|DONE|||thinking hard", "PLANNER_RESPONSE|DONE||Plain|", `PLANNER_RESPONSE|DONE||{"k":1}|`},
+		},
+		{
+			name: "agy steps count a malformed line and ignore a partial last line",
+			content: `{"step_index":0,"type":"USER_INPUT","content":"Hi"}
+
+not-json
+{"step_index":1,"type":"PLANNER_RESPONSE","content":"Yo"}
+{"step_inde`,
+			wantSteps:  []string{"USER_INPUT|||Hi|", "PLANNER_RESPONSE|||Yo|"},
+			wantErrors: 1,
+		},
+		{name: "missing file errors", missing: true, wantErr: true},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			path := filepath.Join(t.TempDir(), "transcript.jsonl")
+			if !tc.missing {
+				if err := os.WriteFile(path, []byte(tc.content), 0o644); err != nil {
+					t.Fatal(err)
+				}
+			}
+			var stats SyncStats
+			st, err := scanSessionTranscriptFile(path, &stats)
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("scanSessionTranscriptFile() err = %v, wantErr %v", err, tc.wantErr)
+			}
+			got := make([]string, 0, len(st.parsedSteps))
+			for _, s := range st.parsedSteps {
+				got = append(got, s.Type+"|"+s.Status+"|"+s.ToolName+"|"+s.Content+"|"+s.Thinking)
+			}
+			if !slices.Equal(got, tc.wantSteps) {
+				t.Errorf("steps = %q, want %q", got, tc.wantSteps)
+			}
+			if stats.Errors != tc.wantErrors {
+				t.Errorf("stats.Errors = %d, want %d", stats.Errors, tc.wantErrors)
+			}
+		})
+	}
+}
+
+func TestDiscoverSessions(t *testing.T) {
+	t.Parallel()
+	// Paths are relative to the test root; the brain dir is root/x/y/brain, so "x/y/<engine>"
+	// and the three-levels-up "<engine>" locations are both default search bases.
+	tests := []struct {
+		name       string
+		files      map[string]string
+		customDirs bool
+		want       map[string]string
+	}{
+		{
+			name: "default bases for every engine, brain dir wins collisions",
+			files: map[string]string{
+				"x/y/brain/agy-1/transcript.jsonl":                         "",
+				"x/y/brain/.hidden/transcript.jsonl":                       "",
+				"x/y/brain/empty-dir/notes.txt":                            "",
+				"x/y/brain/stray.txt":                                      "",
+				"x/y/claude/projects/p1/claude-1.jsonl":                    "",
+				"x/y/claude/projects/p1/agy-1.jsonl":                       "",
+				"x/y/claude/projects/p1/.dot.jsonl":                        "",
+				"x/y/claude/projects/p1/notes.txt":                         "",
+				"x/y/claude/projects/stray.jsonl":                          "",
+				"claude/projects/p2/claude-2.jsonl":                        "",
+				"x/y/codex/sessions/2026/11/15/rollout-test-codex-1.jsonl": "",
+				"x/y/codex/sessions/plain-codex.jsonl":                     "",
+				"x/y/codex/sessions/notes.txt":                             "",
+				"x/y/codex/sessions/rollout-meta.jsonl":                    `{"type":"session_meta","payload":{"id":"codex-meta"}}` + "\n",
+				"x/y/muse/sessions/muse-1.jsonl":                           "",
+				"x/y/muse/sessions/m2/session.jsonl":                       "",
+			},
+			want: map[string]string{"agy-1": "agy", "claude-1": "claude", "claude-2": "claude", "codex-1": "codex", "plain-codex": "codex", "codex-meta": "codex", "muse-1": "muse", "m2": "muse"},
+		},
+		{
+			name: "custom claude, codex and muse dirs",
+			files: map[string]string{
+				"custom-claude/p/claude-c.jsonl":     "",
+				"custom-codex/rollout-codex-c.jsonl": "",
+				"custom-muse/muse-c.jsonl":           "",
+			},
+			customDirs: true,
+			want:       map[string]string{"claude-c": "claude", "codex-c": "codex", "muse-c": "muse"},
+		},
+		{name: "nothing on disk", want: map[string]string{}},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			root := t.TempDir()
+			brainDir := filepath.Join(root, "x", "y", "brain")
+			for rel, content := range tc.files {
+				full := filepath.Join(root, rel)
+				if err := os.MkdirAll(filepath.Dir(full), 0o755); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(full, []byte(content), 0o644); err != nil {
+					t.Fatal(err)
+				}
+			}
+			entries, _ := os.ReadDir(brainDir)
+			var claudeDir string
+			var dirs []string
+			if tc.customDirs {
+				claudeDir = filepath.Join(root, "custom-claude")
+				dirs = []string{filepath.Join(root, "custom-codex"), filepath.Join(root, "custom-muse")}
+			}
+			got := map[string]string{}
+			for id, s := range discoverSessions(brainDir, entries, claudeDir, dirs...) {
+				got[id] = s.engine
+			}
+			if !maps.Equal(got, tc.want) {
+				t.Errorf("discoverSessions() engines = %v, want %v", got, tc.want)
 			}
 		})
 	}

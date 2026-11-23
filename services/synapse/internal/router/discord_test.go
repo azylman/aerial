@@ -49,7 +49,7 @@ func TestProcessDiscordIngress(t *testing.T) {
 			if tc.dispatchErr {
 				disp.discordMessageErr = errors.New("downstream error")
 			}
-			srv := newTestRouter(Config{}, nil, nil, disp)
+			srv := newTestRouter(Config{}, nil, disp)
 			if tc.nilDispatcher {
 				srv.SetDispatcher(nil)
 			}
@@ -120,7 +120,7 @@ func TestProcessDiscordInteraction(t *testing.T) {
 			if tc.dispatchErr {
 				disp.discordInteractionErr = errors.New("downstream error")
 			}
-			srv := newTestRouter(Config{}, nil, nil, disp)
+			srv := newTestRouter(Config{}, nil, disp)
 			if tc.nilDispatcher {
 				srv.SetDispatcher(nil)
 			}
@@ -154,32 +154,58 @@ func TestProcessDiscordInteraction(t *testing.T) {
 	}
 }
 
-func TestDiscordDelegations(t *testing.T) {
-	ctx := context.Background()
-
-	// 1. startDiscordGateway delegation with empty token (disabled)
-	srv := newTestRouter(Config{}, nil, nil, nil)
-	stopFn, err := startDiscordGateway(ctx, srv, "")
+func TestStartDiscordGatewayWithoutTokenIsNoop(t *testing.T) {
+	t.Parallel()
+	stop, err := startDiscordGateway(context.Background(), newTestRouter(Config{}, nil, nil), "")
 	if err != nil {
-		t.Fatalf("startDiscordGateway(empty) err = %v", err)
+		t.Fatalf("startDiscordGateway() err = %v", err)
 	}
-	stopFn()
+	stop()
+}
 
-	// 2. Server Config and PublishJob methods
-	var nilSrv *RouterServer
-	if cfg := nilSrv.Config(); cfg != nil {
-		t.Errorf("nil RouterServer Config() = %v, want nil", cfg)
+func TestRouterServerConfig(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name    string
+		srv     *RouterServer
+		wantNil bool
+	}{
+		{"nil router", nil, true},
+		{"nil config source", &RouterServer{}, true},
+		{"configured router", newTestRouter(Config{SystemChannelID: "1"}, nil, nil), false},
 	}
-	if cfg := srv.Config(); cfg == nil {
-		t.Error("expected non-nil Config() from configured router")
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got := tc.srv.Config(); (got == nil) != tc.wantNil {
+				t.Errorf("Config() = %v, want nil %v", got, tc.wantNil)
+			}
+		})
 	}
+}
 
-	bus := &mockEventBus{}
-	srv.SetEventBus(bus)
-	if err := srv.PublishJob(ctx, DiscordIngressArgs{MessageID: "m1", Message: &discordgo.Message{ID: "m1"}}); err != nil {
-		t.Fatalf("PublishJob err = %v", err)
+func TestPublishJob(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name     string
+		bus      *mockEventBus
+		wantErr  bool
+		wantJobs int
+	}{
+		{name: "publishes the job on the bus", bus: &mockEventBus{}, wantJobs: 1},
+		{name: "bus publish error is returned", bus: &mockEventBus{err: errors.New("nats down")}, wantErr: true},
 	}
-	if len(bus.insertedDiscordJobs) != 1 {
-		t.Errorf("insertedDiscordJobs = %d, want 1", len(bus.insertedDiscordJobs))
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			srv := newTestRouter(Config{}, nil, nil, tc.bus)
+			err := srv.PublishJob(context.Background(), DiscordIngressArgs{MessageID: "m1", Message: &discordgo.Message{ID: "m1"}})
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("PublishJob() err = %v, wantErr %v", err, tc.wantErr)
+			}
+			if got := len(tc.bus.insertedDiscordJobs); got != tc.wantJobs {
+				t.Errorf("insertedDiscordJobs = %d, want %d", got, tc.wantJobs)
+			}
+		})
 	}
 }

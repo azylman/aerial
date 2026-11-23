@@ -9,23 +9,9 @@ import (
 
 	"github.com/prometheus/client_golang/prometheus/testutil"
 
+	"github.com/azylman/aerial/pkg/pubsubtest"
 	"github.com/azylman/aerial/services/synapse/internal/model"
 )
-
-type mockConsumerStatsQuerier struct {
-	stats map[string][2]int64
-	err   error
-}
-
-func (m *mockConsumerStatsQuerier) ConsumerStats(ctx context.Context, stream, consumer string) (int64, int64, error) {
-	if m.err != nil {
-		return 0, 0, m.err
-	}
-	if v, ok := m.stats[stream+"/"+consumer]; ok {
-		return v[0], v[1], nil
-	}
-	return 0, 0, nil
-}
 
 func TestCollectJetStreamQueueMetrics(t *testing.T) {
 	ctx := context.Background()
@@ -33,36 +19,82 @@ func TestCollectJetStreamQueueMetrics(t *testing.T) {
 	tests := []struct {
 		name           string
 		nilQuerier     bool
-		querierErr     error
-		stats          map[string][2]int64
+		bots           []string
+		defaultAgent   string
+		stats          pubsubtest.ConsumerStats
 		wantErr        bool
 		wantSubstr     string
-		wantDepthQueue string
-		wantDepthState string
-		wantDepthVal   float64
+		wantDepth      map[[2]string]float64
+		wantAgentDepth map[[3]string]float64
 	}{
 		{
-			name:       "nil querier returns nil without error",
-			nilQuerier: true,
-			wantErr:    false,
-		},
-		{
-			name:       "querier error returns wrapped error",
-			querierErr: errors.New("nats down"),
-			wantErr:    true,
-			wantSubstr: "consumer stats",
-		},
-		{
-			name: "aggregates pending and in_flight across consumers",
-			stats: map[string][2]int64{
-				"AERIAL_JOBS/synapse-github":              {3, 1},
-				"AERIAL_JOBS/synapse-deploy":              {4, 2},
-				"AERIAL_JOBS/synapse-discord-ingress":     {5, 3},
-				"AERIAL_JOBS/synapse-discord-interaction": {2, 1},
+			name:         "nil querier zeroes known queues without error",
+			nilQuerier:   true,
+			defaultAgent: "alpha",
+			wantDepth: map[[2]string]float64{
+				{"discord_ingress", "pending"}:       0,
+				{"discord_interaction", "in_flight"}: 0,
 			},
-			wantDepthQueue: QueueDefault,
-			wantDepthState: "pending",
-			wantDepthVal:   7,
+		},
+		{
+			name:         "querier error returns wrapped error",
+			stats:        pubsubtest.ConsumerStats{Err: errors.New("nats down")},
+			defaultAgent: "alpha",
+			wantErr:      true,
+			wantSubstr:   "consumer stats",
+		},
+		{
+			name:         "aggregates pending and in_flight across static and default-agent consumers",
+			defaultAgent: "alpha",
+			stats: pubsubtest.ConsumerStats{
+				Pending:  map[string]int64{"synapse-github": 3, "synapse-deploy": 4, "synapse-discord-ingress-alpha": 5, "synapse-discord-interaction-alpha": 2},
+				Inflight: map[string]int64{"synapse-github": 1, "synapse-deploy": 2, "synapse-discord-ingress-alpha": 3, "synapse-discord-interaction-alpha": 1},
+			},
+			wantDepth: map[[2]string]float64{
+				{"default", "pending"}:               7,
+				{"default", "in_flight"}:             3,
+				{"discord_ingress", "pending"}:       5,
+				{"discord_interaction", "in_flight"}: 1,
+			},
+		},
+		{
+			name:         "sums per-agent durables into existing discord series",
+			bots:         []string{"beta", "alpha"},
+			defaultAgent: "alpha",
+			stats: pubsubtest.ConsumerStats{
+				Pending:  map[string]int64{"synapse-discord-ingress-alpha": 2, "synapse-discord-ingress-beta": 7, "synapse-discord-interaction-alpha": 0, "synapse-discord-interaction-beta": 3},
+				Inflight: map[string]int64{"synapse-discord-ingress-alpha": 1, "synapse-discord-ingress-beta": 1, "synapse-discord-interaction-alpha": 0, "synapse-discord-interaction-beta": 2},
+			},
+			wantDepth: map[[2]string]float64{
+				{"discord_ingress", "pending"}:       9,
+				{"discord_ingress", "in_flight"}:     2,
+				{"discord_interaction", "pending"}:   3,
+				{"discord_interaction", "in_flight"}: 2,
+			},
+			wantAgentDepth: map[[3]string]float64{
+				{"discord_ingress", "alpha", "pending"}:       2,
+				{"discord_ingress", "beta", "pending"}:        7,
+				{"discord_ingress", "beta", "in_flight"}:      1,
+				{"discord_interaction", "beta", "pending"}:    3,
+				{"discord_interaction", "alpha", "in_flight"}: 0,
+			},
+		},
+		{
+			name:         "default owner outside bots and sanitized agent get their own durables",
+			bots:         []string{" Ops.Bot "},
+			defaultAgent: "gamma",
+			stats: pubsubtest.ConsumerStats{
+				Pending:  map[string]int64{"synapse-discord-ingress-ops_bot": 4, "synapse-discord-ingress-gamma": 6},
+				Inflight: map[string]int64{"synapse-discord-ingress-ops_bot": 0, "synapse-discord-ingress-gamma": 2},
+			},
+			wantDepth: map[[2]string]float64{
+				{"discord_ingress", "pending"}:   10,
+				{"discord_ingress", "in_flight"}: 2,
+			},
+			wantAgentDepth: map[[3]string]float64{
+				{"discord_ingress", "ops_bot", "pending"}: 4,
+				{"discord_ingress", "gamma", "in_flight"}: 2,
+			},
 		},
 	}
 
@@ -70,19 +102,23 @@ func TestCollectJetStreamQueueMetrics(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			var q ConsumerStatsQuerier
 			if !tc.nilQuerier {
-				q = &mockConsumerStatsQuerier{stats: tc.stats, err: tc.querierErr}
+				q = tc.stats
 			}
-			err := CollectJetStreamQueueMetrics(ctx, q)
+			err := CollectJetStreamQueueMetrics(ctx, q, NewDiscordRouting(tc.bots, tc.defaultAgent))
 			if (err != nil) != tc.wantErr {
 				t.Fatalf("CollectJetStreamQueueMetrics() err = %v, wantErr = %v", err, tc.wantErr)
 			}
 			if tc.wantSubstr != "" && (err == nil || !strings.Contains(err.Error(), tc.wantSubstr)) {
 				t.Errorf("err = %v, want substr %q", err, tc.wantSubstr)
 			}
-			if tc.wantDepthQueue != "" {
-				gotDepth := testutil.ToFloat64(QueueDepth.WithLabelValues(tc.wantDepthQueue, tc.wantDepthState))
-				if gotDepth != tc.wantDepthVal {
-					t.Errorf("QueueDepth[%s, %s] = %v, want %v", tc.wantDepthQueue, tc.wantDepthState, gotDepth, tc.wantDepthVal)
+			for labels, want := range tc.wantDepth {
+				if got := testutil.ToFloat64(QueueDepth.WithLabelValues(labels[0], labels[1])); got != want {
+					t.Errorf("QueueDepth%v = %v, want %v", labels, got, want)
+				}
+			}
+			for labels, want := range tc.wantAgentDepth {
+				if got := testutil.ToFloat64(DiscordAgentQueueDepth.WithLabelValues(labels[0], labels[1], labels[2])); got != want {
+					t.Errorf("DiscordAgentQueueDepth%v = %v, want %v", labels, got, want)
 				}
 			}
 		})
@@ -180,49 +216,322 @@ func TestResolveJetStreamJobCoords(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
-		name        string
-		in          any
-		wantSubject string
-		wantMsgID   string
+		name         string
+		in           any
+		bots         []string
+		defaultAgent string
+		wantSubject  string
+		wantMsgID    string
 	}{
 		{
-			name:        "github args",
-			in:          model.GitHubWebhookArgs{Delivery: "d123"},
-			wantSubject: "aerial.jobs.synapse.github",
-			wantMsgID:   "github:d123",
+			name:         "github args",
+			in:           model.GitHubWebhookArgs{Delivery: "d123"},
+			defaultAgent: "alpha",
+			wantSubject:  "aerial.jobs.synapse.github",
+			wantMsgID:    "github:d123",
 		},
 		{
-			name:        "deploy args",
-			in:          model.DeployWebhookArgs{IdempotencyKey: "dep123"},
-			wantSubject: "aerial.jobs.synapse.deploy",
-			wantMsgID:   "deploy:dep123",
+			name:         "deploy args",
+			in:           model.DeployWebhookArgs{IdempotencyKey: "dep123"},
+			defaultAgent: "alpha",
+			wantSubject:  "aerial.jobs.synapse.deploy",
+			wantMsgID:    "deploy:dep123",
 		},
 		{
-			name:        "ingress args",
-			in:          model.DiscordIngressArgs{MessageID: "msg123"},
-			wantSubject: "aerial.jobs.synapse.discord_ingress",
-			wantMsgID:   "discord:msg:msg123",
+			name:         "ingress args without agent route to default owner",
+			in:           model.DiscordIngressArgs{MessageID: "msg123"},
+			bots:         []string{"alpha", "beta"},
+			defaultAgent: "beta",
+			wantSubject:  "aerial.jobs.synapse.discord_ingress.beta",
+			wantMsgID:    "discord:msg:msg123",
 		},
 		{
-			name:        "interaction args",
-			in:          model.DiscordInteractionArgs{InteractionID: "int123"},
-			wantSubject: "aerial.jobs.synapse.discord_interaction",
-			wantMsgID:   "discord:ix:int123",
+			name:         "ingress args with agent",
+			in:           model.DiscordIngressArgs{MessageID: "msg123", Agent: "alpha"},
+			bots:         []string{"alpha", "beta"},
+			defaultAgent: "beta",
+			wantSubject:  "aerial.jobs.synapse.discord_ingress.alpha",
+			wantMsgID:    "discord:msg:alpha:msg123",
 		},
 		{
-			name:        "unknown",
-			in:          12345,
-			wantSubject: "",
-			wantMsgID:   "",
+			name:         "ingress args with padded mixed-case agent keep raw dedup id",
+			in:           model.DiscordIngressArgs{MessageID: "msg123", Agent: " Alpha "},
+			bots:         []string{"alpha"},
+			defaultAgent: "alpha",
+			wantSubject:  "aerial.jobs.synapse.discord_ingress.alpha",
+			wantMsgID:    "discord:msg:Alpha:msg123",
+		},
+		{
+			name:         "ingress args with unconfigured agent route to default owner",
+			in:           model.DiscordIngressArgs{MessageID: "msg123", Agent: "delta"},
+			bots:         []string{"alpha", "beta"},
+			defaultAgent: "alpha",
+			wantSubject:  "aerial.jobs.synapse.discord_ingress.alpha",
+			wantMsgID:    "discord:msg:delta:msg123",
+		},
+		{
+			name:         "ingress args with agent needing sanitization",
+			in:           model.DiscordIngressArgs{MessageID: "msg123", Agent: "ops.bot>*"},
+			bots:         []string{"ops.bot>*"},
+			defaultAgent: "alpha",
+			wantSubject:  "aerial.jobs.synapse.discord_ingress.ops_bot__",
+			wantMsgID:    "discord:msg:ops.bot>*:msg123",
+		},
+		{
+			name:         "interaction args without agent route to default owner",
+			in:           model.DiscordInteractionArgs{InteractionID: "int123"},
+			bots:         []string{"alpha", "beta"},
+			defaultAgent: "alpha",
+			wantSubject:  "aerial.jobs.synapse.discord_interaction.alpha",
+			wantMsgID:    "discord:ix:int123",
+		},
+		{
+			name:         "interaction args with agent",
+			in:           model.DiscordInteractionArgs{InteractionID: "int123", Agent: "beta"},
+			bots:         []string{"alpha", "beta"},
+			defaultAgent: "alpha",
+			wantSubject:  "aerial.jobs.synapse.discord_interaction.beta",
+			wantMsgID:    "discord:ix:beta:int123",
+		},
+		{
+			name:         "interaction pointer args with no bots use default owner",
+			in:           &model.DiscordInteractionArgs{InteractionID: "int456", Agent: "beta"},
+			defaultAgent: "beta",
+			wantSubject:  "aerial.jobs.synapse.discord_interaction.beta",
+			wantMsgID:    "discord:ix:beta:int456",
+		},
+		{
+			name:        "blank default owner falls back to unknown token",
+			in:          model.DiscordIngressArgs{MessageID: "msg789"},
+			wantSubject: "aerial.jobs.synapse.discord_ingress.unknown",
+			wantMsgID:   "discord:msg:msg789",
+		},
+		{
+			name:         "unknown",
+			in:           12345,
+			defaultAgent: "alpha",
+			wantSubject:  "",
+			wantMsgID:    "",
 		},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			subj, msgID := ResolveJetStreamJobCoords(tc.in)
+			subj, msgID := ResolveJetStreamJobCoords(tc.in, NewDiscordRouting(tc.bots, tc.defaultAgent))
 			if subj != tc.wantSubject || msgID != tc.wantMsgID {
 				t.Errorf("ResolveJetStreamJobCoords() = (%q, %q), want (%q, %q)", subj, msgID, tc.wantSubject, tc.wantMsgID)
+			}
+		})
+	}
+}
+
+func TestDiscordAgentNames(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name               string
+		agent              string
+		wantSanitized      string
+		wantIngressSubject string
+		wantIxSubject      string
+		wantIngressDurable string
+		wantIxDurable      string
+	}{
+		{
+			name:               "plain lowercase agent",
+			agent:              "alpha",
+			wantSanitized:      "alpha",
+			wantIngressSubject: "aerial.jobs.synapse.discord_ingress.alpha",
+			wantIxSubject:      "aerial.jobs.synapse.discord_interaction.alpha",
+			wantIngressDurable: "synapse-discord-ingress-alpha",
+			wantIxDurable:      "synapse-discord-interaction-alpha",
+		},
+		{
+			name:               "trimmed and lowercased",
+			agent:              "  Beta-2_x ",
+			wantSanitized:      "beta-2_x",
+			wantIngressSubject: "aerial.jobs.synapse.discord_ingress.beta-2_x",
+			wantIxSubject:      "aerial.jobs.synapse.discord_interaction.beta-2_x",
+			wantIngressDurable: "synapse-discord-ingress-beta-2_x",
+			wantIxDurable:      "synapse-discord-interaction-beta-2_x",
+		},
+		{
+			name:               "subject metacharacters and whitespace replaced",
+			agent:              "a.b*c>d e/f",
+			wantSanitized:      "a_b_c_d_e_f",
+			wantIngressSubject: "aerial.jobs.synapse.discord_ingress.a_b_c_d_e_f",
+			wantIxSubject:      "aerial.jobs.synapse.discord_interaction.a_b_c_d_e_f",
+			wantIngressDurable: "synapse-discord-ingress-a_b_c_d_e_f",
+			wantIxDurable:      "synapse-discord-interaction-a_b_c_d_e_f",
+		},
+		{
+			name:               "blank agent uses unknown token",
+			agent:              "   ",
+			wantSanitized:      "",
+			wantIngressSubject: "aerial.jobs.synapse.discord_ingress.unknown",
+			wantIxSubject:      "aerial.jobs.synapse.discord_interaction.unknown",
+			wantIngressDurable: "synapse-discord-ingress-unknown",
+			wantIxDurable:      "synapse-discord-interaction-unknown",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			got := []string{
+				SanitizeDiscordAgent(tc.agent),
+				DiscordIngressSubject(tc.agent),
+				DiscordInteractionSubject(tc.agent),
+				DiscordIngressDurable(tc.agent),
+				DiscordInteractionDurable(tc.agent),
+			}
+			want := []string{tc.wantSanitized, tc.wantIngressSubject, tc.wantIxSubject, tc.wantIngressDurable, tc.wantIxDurable}
+			if !reflect.DeepEqual(got, want) {
+				t.Errorf("names(%q) = %q, want %q", tc.agent, got, want)
+			}
+		})
+	}
+}
+
+func TestNewDiscordRouting(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name         string
+		bots         []string
+		defaultAgent string
+		resolve      string
+		wantAgents   []string
+		wantResolved string
+	}{
+		{
+			name:         "sorted dedup with default owner included",
+			bots:         []string{"gamma", "Alpha", "alpha", "  "},
+			defaultAgent: "beta",
+			resolve:      "GAMMA",
+			wantAgents:   []string{"alpha", "beta", "gamma"},
+			wantResolved: "gamma",
+		},
+		{
+			name:         "no bots routes to default owner",
+			defaultAgent: "alpha",
+			resolve:      "",
+			wantAgents:   []string{"alpha"},
+			wantResolved: "alpha",
+		},
+		{
+			name:         "unconfigured agent resolves to default owner",
+			bots:         []string{"alpha", "beta"},
+			defaultAgent: "beta",
+			resolve:      "delta",
+			wantAgents:   []string{"alpha", "beta"},
+			wantResolved: "beta",
+		},
+		{
+			name:         "sanitized agent resolves to its own token",
+			bots:         []string{"ops.bot"},
+			defaultAgent: "alpha",
+			resolve:      "Ops.Bot",
+			wantAgents:   []string{"alpha", "ops_bot"},
+			wantResolved: "ops_bot",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			r := NewDiscordRouting(tc.bots, tc.defaultAgent)
+			if got := r.Agents(); !reflect.DeepEqual(got, tc.wantAgents) {
+				t.Errorf("Agents() = %q, want %q", got, tc.wantAgents)
+			}
+			if got := r.Resolve(tc.resolve); got != tc.wantResolved {
+				t.Errorf("Resolve(%q) = %q, want %q", tc.resolve, got, tc.wantResolved)
+			}
+		})
+	}
+}
+
+func TestSetGitHubCredentialConfigured(t *testing.T) {
+	tests := []struct {
+		name       string
+		credential string
+		wantApp    float64
+		wantPAT    float64
+	}{
+		{name: "app", credential: "app", wantApp: 1, wantPAT: 0},
+		{name: "pat", credential: "pat", wantApp: 0, wantPAT: 1},
+		{name: "upper PAT", credential: " PAT ", wantApp: 0, wantPAT: 1},
+		{name: "unset is app", credential: "", wantApp: 1, wantPAT: 0},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			SetGitHubCredentialConfigured(tc.credential)
+			if got := testutil.ToFloat64(GitHubCredentialConfigured.WithLabelValues("app")); got != tc.wantApp {
+				t.Errorf("app = %v, want %v", got, tc.wantApp)
+			}
+			if got := testutil.ToFloat64(GitHubCredentialConfigured.WithLabelValues("pat")); got != tc.wantPAT {
+				t.Errorf("pat = %v, want %v", got, tc.wantPAT)
+			}
+		})
+	}
+}
+
+func TestGitHubAuthMetrics(t *testing.T) {
+	tests := []struct {
+		name          string
+		source        string
+		remaining     float64
+		mintResult    string
+		wantRequests  float64
+		wantRemaining float64
+		wantMints     float64
+	}{
+		{name: "metrics-test-app", source: "metrics-test-app", remaining: 4999, mintResult: "metrics-test-ok", wantRequests: 1, wantRemaining: 4999, wantMints: 1},
+		{name: "metrics-test-pat", source: "metrics-test-pat", remaining: 12, mintResult: "metrics-test-error", wantRequests: 1, wantRemaining: 12, wantMints: 1},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			m := GitHubAuthMetrics{}
+			m.IncRequest(tc.source)
+			m.SetRateLimitRemaining(tc.source, tc.remaining)
+			m.IncTokenMint(tc.mintResult)
+			if got := testutil.ToFloat64(GitHubRequestsBySource.WithLabelValues(tc.source)); got != tc.wantRequests {
+				t.Errorf("requests = %v, want %v", got, tc.wantRequests)
+			}
+			if got := testutil.ToFloat64(GitHubRateLimitRemaining.WithLabelValues(tc.source)); got != tc.wantRemaining {
+				t.Errorf("remaining = %v, want %v", got, tc.wantRemaining)
+			}
+			if got := testutil.ToFloat64(GitHubTokenMints.WithLabelValues(tc.mintResult)); got != tc.wantMints {
+				t.Errorf("mints = %v, want %v", got, tc.wantMints)
+			}
+		})
+	}
+}
+
+func TestRecordRestateSend(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name        string
+		handler     string
+		status      string
+		wantHandler string
+		wantStatus  string
+	}{
+		{name: "labels are recorded", handler: "HandleOpened", status: "sent", wantHandler: "HandleOpened", wantStatus: "sent"},
+		{name: "terminal outcome is recorded", handler: "Register", status: "terminal", wantHandler: "Register", wantStatus: "terminal"},
+		{name: "blank labels fall back to unknown", handler: "", status: "", wantHandler: "unknown", wantStatus: "unknown"},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			counter := RestateSendsTotal.WithLabelValues(tc.wantHandler, tc.wantStatus)
+			before := testutil.ToFloat64(counter)
+			RecordRestateSend(tc.handler, tc.status)
+			if got, want := testutil.ToFloat64(counter), before+1; got != want {
+				t.Errorf("restate sends = %v, want %v", got, want)
 			}
 		})
 	}

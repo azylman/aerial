@@ -8,43 +8,14 @@ import (
 	"slices"
 	"strings"
 	"time"
+
+	"github.com/azylman/aerial/services/eri/pkg/enginefmt"
 )
 
 type museTranscriptEntry struct {
-	PayloadType string      `json:"payload_type"`
-	RecordedAt  int64       `json:"recorded_at"`
-	Payload     musePayload `json:"payload"`
-}
-
-type musePayload struct {
-	Kind  string    `json:"kind"`
-	RunID string    `json:"run_id"`
-	Event museEvent `json:"event"`
-}
-
-type museEvent struct {
-	Kind      string           `json:"kind"`
-	Prompt    string           `json:"prompt,omitempty"`
-	Text      string           `json:"text,omitempty"`
-	Terminal  string           `json:"terminal,omitempty"`
-	Reason    string           `json:"reason,omitempty"`
-	ToolCalls []museToolCall   `json:"tool_calls,omitempty"`
-	Results   []museToolResult `json:"results,omitempty"`
-}
-
-type museToolCall struct {
-	ID     string          `json:"id,omitempty"`
-	CallID string          `json:"call_id,omitempty"`
-	Name   string          `json:"name"`
-	Args   json.RawMessage `json:"args,omitempty"`
-}
-
-type museToolResult struct {
-	ToolCallID string `json:"tool_call_id,omitempty"`
-	CallID     string `json:"call_id,omitempty"`
-	Text       string `json:"text,omitempty"`
-	Output     string `json:"output,omitempty"`
-	IsError    bool   `json:"is_error,omitempty"`
+	PayloadType string                `json:"payload_type"`
+	RecordedAt  int64                 `json:"recorded_at"`
+	Payload     enginefmt.MusePayload `json:"payload"`
 }
 
 func isMuseStepBeforeEntry(entry museTranscriptEntry, since time.Time) bool {
@@ -118,22 +89,6 @@ func (m *Manager) MuseSessionExistsOnDisk(sessionID string) bool {
 		}
 	}
 	return false
-}
-
-func isMuseSessionDir(root string) bool {
-	base := filepath.Base(root)
-	return base == "sessions" || strings.Contains(root, "muse")
-}
-
-func checkMuseSubdirsActivity(root, cleanID string, current time.Time) time.Time {
-	if !isMuseSessionDir(root) {
-		return current
-	}
-	seen := make(map[string]bool)
-	for _, p := range scanMuseBaseForSession(root, cleanID, seen) {
-		current = checkFileMtime(p, current)
-	}
-	return current
 }
 
 const (

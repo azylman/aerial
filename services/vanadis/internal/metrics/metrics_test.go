@@ -6,9 +6,13 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
 	"testing"
 
+	"github.com/prometheus/client_golang/prometheus/promhttp"
+
+	"github.com/azylman/aerial/pkg/pubsubtest"
 	"github.com/azylman/aerial/services/vanadis/internal/model"
 )
 
@@ -24,7 +28,7 @@ func entry(id, queueState string, statuses ...string) model.VanadisBuildEntry {
 func scrapeMetrics(t *testing.T) string {
 	t.Helper()
 	rec := httptest.NewRecorder()
-	NewHandler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/metrics", http.NoBody))
+	promhttp.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/metrics", http.NoBody))
 	if rec.Code != http.StatusOK {
 		t.Fatalf("metrics handler status = %d, want %d", rec.Code, http.StatusOK)
 	}
@@ -101,60 +105,68 @@ func TestCollectBuildMetrics(t *testing.T) {
 	}
 }
 
-type scriptQuerier struct {
-	pending  int64
-	inFlight int64
-	err      error
+var errQueueStatsDown = errors.New("stats down")
+
+// recordingQuerier records each "stream/consumer" pair CollectQueueMetrics asks
+// for, so rows assert the stream wiring, then delegates to the stats fake.
+type recordingQuerier struct {
+	stats pubsubtest.ConsumerStats
+	calls []string
 }
 
-func (q scriptQuerier) ConsumerStats(context.Context, string, string) (int64, int64, error) {
-	return q.pending, q.inFlight, q.err
+func (r *recordingQuerier) ConsumerStats(ctx context.Context, stream, consumer string) (int64, int64, error) {
+	r.calls = append(r.calls, stream+"/"+consumer)
+	return r.stats.ConsumerStats(ctx, stream, consumer)
 }
 
 type queueMetricsCase struct {
-	name     string
-	nilQuery bool
-	pending  int64
-	inFlight int64
-	queryErr error
-	want     []string
+	name      string
+	nilQuery  bool
+	stats     pubsubtest.ConsumerStats
+	want      []string
+	wantCalls []string
 }
 
 func TestCollectQueueMetrics(t *testing.T) {
+	pending := map[string]int64{"vanadis-dispatch": 2, "vanadis-pr-events": 3}
+	inflight := map[string]int64{"vanadis-dispatch": 1, "vanadis-pr-events": 0}
+	allCalls := []string{"AERIAL_EVENTS/vanadis-dispatch", "AERIAL_EVENTS/vanadis-pr-events"}
 	tests := []queueMetricsCase{
 		{
 			name:     "nil querier zeroes depth",
 			nilQuery: true,
-			want: []string{
-				`vanadis_queue_depth{state="pending"} 0`,
-				`vanadis_queue_depth{state="in_flight"} 0`,
-			},
+			want:     []string{`vanadis_queue_depth{state="pending"} 0`, `vanadis_queue_depth{state="in_flight"} 0`},
 		},
 		{
-			name:     "stats populate depth gauges",
-			pending:  2,
-			inFlight: 1,
-			want: []string{
-				`vanadis_queue_depth{state="pending"} 2`,
-				`vanadis_queue_depth{state="in_flight"} 1`,
-			},
+			name:      "sums backlog of the two vanadis-nats consumers",
+			stats:     pubsubtest.ConsumerStats{Pending: pending, Inflight: inflight},
+			want:      []string{`vanadis_queue_depth{state="pending"} 5`, `vanadis_queue_depth{state="in_flight"} 1`},
+			wantCalls: allCalls,
 		},
 		{
-			name:     "query error leaves zeroes",
-			queryErr: errors.New("stats down"),
-			want: []string{
-				`vanadis_queue_depth{state="pending"} 0`,
-				`vanadis_queue_depth{state="in_flight"} 0`,
-			},
+			name:      "failed consumer is skipped and the rest still count",
+			stats:     pubsubtest.ConsumerStats{Pending: pending, Inflight: inflight, Errs: map[string]error{"vanadis-pr-events": errQueueStatsDown}},
+			want:      []string{`vanadis_queue_depth{state="pending"} 2`, `vanadis_queue_depth{state="in_flight"} 1`},
+			wantCalls: allCalls,
+		},
+		{
+			name:      "every query failing leaves zeroes",
+			stats:     pubsubtest.ConsumerStats{Pending: pending, Inflight: inflight, Err: errQueueStatsDown},
+			want:      []string{`vanadis_queue_depth{state="pending"} 0`, `vanadis_queue_depth{state="in_flight"} 0`},
+			wantCalls: allCalls,
 		},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
+			rec := &recordingQuerier{stats: tc.stats}
 			var q ConsumerStatsQuerier
 			if !tc.nilQuery {
-				q = scriptQuerier{pending: tc.pending, inFlight: tc.inFlight, err: tc.queryErr}
+				q = rec
 			}
 			CollectQueueMetrics(context.Background(), q)
+			if !slices.Equal(rec.calls, tc.wantCalls) {
+				t.Errorf("ConsumerStats calls = %v, want %v", rec.calls, tc.wantCalls)
+			}
 			body := scrapeMetrics(t)
 			for _, want := range tc.want {
 				if !strings.Contains(body, want) {

@@ -64,124 +64,68 @@ func TestNewReloadable(t *testing.T) {
 	}
 }
 
-type reloadableTestCase struct {
-	name           string
-	nextCfg        *testCfg
-	loadErr        error
-	restartCheck   bool
-	wantStatus     ReloadStatus
-	wantErr        bool
-	wantCurrent    testCfg
-	wantRestarting bool
-}
-
-func runReloadableReloadCase(t *testing.T, tc reloadableTestCase, initial *testCfg) {
-	t.Helper()
-	var restartRequired func(old, next *testCfg) bool
-	if tc.restartCheck {
-		restartRequired = portChanged
-	}
-	seed := *initial
-	r := NewReloadable(&seed, fixtureLoader(tc.nextCfg, tc.loadErr), restartRequired)
-
-	status, err := r.Reload()
-	if status != tc.wantStatus {
-		t.Errorf("status = %q, want %q", status, tc.wantStatus)
-	}
-	if (err != nil) != tc.wantErr {
-		t.Errorf("err = %v, wantErr %v", err, tc.wantErr)
-	}
-	if got := r.Current(); !reflect.DeepEqual(*got, tc.wantCurrent) {
-		t.Errorf("Current() = %+v, want %+v", *got, tc.wantCurrent)
-	}
-	assertRestartRequested(t, r, tc.wantRestarting)
-	assertSecondReload(t, r, tc.wantStatus)
-}
-
-func assertRestartRequested(t *testing.T, r *Reloadable[testCfg], wantRestarting bool) {
-	t.Helper()
-	select {
-	case <-r.RestartRequested():
-		if !wantRestarting {
-			t.Error("RestartRequested closed unexpectedly")
-		}
-	default:
-		if wantRestarting {
-			t.Error("RestartRequested not closed")
-		}
-	}
-}
-
-func assertSecondReload(t *testing.T, r *Reloadable[testCfg], wantStatus ReloadStatus) {
-	t.Helper()
-	status2, _ := r.Reload()
-	wantSecond := wantStatus
-	if wantStatus == ReloadApplied {
-		wantSecond = ReloadUnchanged
-	}
-	if status2 != wantSecond {
-		t.Errorf("second reload status = %q, want %q", status2, wantSecond)
-	}
-}
-
 func TestReloadable_Reload(t *testing.T) {
 	t.Parallel()
 
-	initial := &testCfg{Port: "8080", Model: "a", Tags: []string{"x"}}
-	tests := []reloadableTestCase{
-		{
-			name:        "load error retains lkgc",
-			loadErr:     errors.New("yaml: bad indent"),
-			wantStatus:  ReloadLKGCRetained,
-			wantErr:     true,
-			wantCurrent: testCfg{Port: "8080", Model: "a", Tags: []string{"x"}},
-		},
-		{
-			name:        "nil snapshot retains lkgc",
-			nextCfg:     nil,
-			wantStatus:  ReloadLKGCRetained,
-			wantErr:     true,
-			wantCurrent: testCfg{Port: "8080", Model: "a", Tags: []string{"x"}},
-		},
-		{
-			name:        "deep equal is unchanged",
-			nextCfg:     &testCfg{Port: "8080", Model: "a", Tags: []string{"x"}},
-			wantStatus:  ReloadUnchanged,
-			wantCurrent: testCfg{Port: "8080", Model: "a", Tags: []string{"x"}},
-		},
-		{
-			name:        "live field change is applied",
-			nextCfg:     &testCfg{Port: "8080", Model: "b", Tags: []string{"x", "y"}},
-			wantStatus:  ReloadApplied,
-			wantCurrent: testCfg{Port: "8080", Model: "b", Tags: []string{"x", "y"}},
-		},
-		{
-			name:        "nil restartRequired applies every change",
-			nextCfg:     &testCfg{Port: "9090", Model: "a", Tags: []string{"x"}},
-			wantStatus:  ReloadApplied,
-			wantCurrent: testCfg{Port: "9090", Model: "a", Tags: []string{"x"}},
-		},
-		{
-			name:           "restart field change is not swapped",
-			nextCfg:        &testCfg{Port: "9090", Model: "b", Tags: []string{"x"}},
-			restartCheck:   true,
-			wantStatus:     ReloadRestarting,
-			wantCurrent:    testCfg{Port: "8080", Model: "a", Tags: []string{"x"}},
-			wantRestarting: true,
-		},
-		{
-			name:         "restart check passes for live change",
-			nextCfg:      &testCfg{Port: "8080", Model: "c", Tags: []string{"x"}},
-			restartCheck: true,
-			wantStatus:   ReloadApplied,
-			wantCurrent:  testCfg{Port: "8080", Model: "c", Tags: []string{"x"}},
-		},
+	base := testCfg{Port: "8080", Model: "a", Tags: []string{"x"}}
+	live := testCfg{Port: "8080", Model: "b", Tags: []string{"x", "y"}}
+	port := testCfg{Port: "9090", Model: "a", Tags: []string{"x"}}
+	modelC := testCfg{Port: "8080", Model: "c", Tags: []string{"x"}}
+	badYAML := errors.New("yaml: bad indent")
+	// Columns: name, nextCfg, loadErr, restartCheck (use portChanged), wantStatus, wantErr, wantCurrent, wantRestarting,
+	// and wantSecond (status of an immediate second Reload with the same loader).
+	tests := []struct {
+		name           string
+		nextCfg        *testCfg
+		loadErr        error
+		restartCheck   bool
+		wantStatus     ReloadStatus
+		wantErr        bool
+		wantCurrent    testCfg
+		wantRestarting bool
+		wantSecond     ReloadStatus
+	}{
+		{"load error retains lkgc", nil, badYAML, false, ReloadLKGCRetained, true, base, false, ReloadLKGCRetained},
+		{"nil snapshot retains lkgc", nil, nil, false, ReloadLKGCRetained, true, base, false, ReloadLKGCRetained},
+		{"deep equal is unchanged", &testCfg{Port: "8080", Model: "a", Tags: []string{"x"}}, nil, false, ReloadUnchanged, false, base, false, ReloadUnchanged},
+		{"live field change is applied", &live, nil, false, ReloadApplied, false, live, false, ReloadUnchanged},
+		{"nil restartRequired applies every change", &port, nil, false, ReloadApplied, false, port, false, ReloadUnchanged},
+		{"restart field change is not swapped", &testCfg{Port: "9090", Model: "b", Tags: []string{"x"}}, nil, true, ReloadRestarting, false, base, true, ReloadRestarting},
+		{"restart check passes for live change", &modelC, nil, true, ReloadApplied, false, modelC, false, ReloadUnchanged},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			runReloadableReloadCase(t, tc, initial)
+			var restartRequired func(old, next *testCfg) bool
+			if tc.restartCheck {
+				restartRequired = portChanged
+			}
+			seed := base
+			r := NewReloadable(&seed, fixtureLoader(tc.nextCfg, tc.loadErr), restartRequired)
+
+			status, err := r.Reload()
+			if status != tc.wantStatus {
+				t.Errorf("status = %q, want %q", status, tc.wantStatus)
+			}
+			if (err != nil) != tc.wantErr {
+				t.Errorf("err = %v, wantErr %v", err, tc.wantErr)
+			}
+			if got := r.Current(); !reflect.DeepEqual(*got, tc.wantCurrent) {
+				t.Errorf("Current() = %+v, want %+v", *got, tc.wantCurrent)
+			}
+			restarting := false
+			select {
+			case <-r.RestartRequested():
+				restarting = true
+			default:
+			}
+			if restarting != tc.wantRestarting {
+				t.Errorf("RestartRequested closed = %v, want %v", restarting, tc.wantRestarting)
+			}
+			if status2, err2 := r.Reload(); status2 != tc.wantSecond || (err2 != nil) != tc.wantErr {
+				t.Errorf("second reload status = %q, err = %v; want status %q, wantErr %v", status2, err2, tc.wantSecond, tc.wantErr)
+			}
 		})
 	}
 }
@@ -204,7 +148,7 @@ func TestReloadable_Handler(t *testing.T) {
 		{name: "ipv6 loopback unchanged", method: http.MethodPost, remoteAddr: "[::1]:5555", nextCfg: &testCfg{Port: "8080", Model: "a"}, wantCode: http.StatusOK, wantStatus: "unchanged", wantPort: "8080"},
 		{name: "bad config still 200", method: http.MethodPost, remoteAddr: "127.0.0.1:5555", loadErr: errors.New("yaml: line 3: bad"), wantCode: http.StatusOK, wantStatus: "lkgc_retained", wantErrBody: "yaml: line 3: bad", wantPort: "8080"},
 		{name: "restart field change", method: http.MethodPost, remoteAddr: "127.0.0.1:5555", nextCfg: &testCfg{Port: "9090", Model: "a"}, wantCode: http.StatusOK, wantStatus: "restarting", wantPort: "8080"},
-		{name: "pod network rejected", method: http.MethodPost, remoteAddr: "10.42.0.9:5555", nextCfg: &testCfg{Port: "8080", Model: "b"}, wantCode: http.StatusForbidden, wantPort: "8080"},
+		{name: "pod network rejected", method: http.MethodPost, remoteAddr: "192.0.2.9:5555", nextCfg: &testCfg{Port: "8080", Model: "b"}, wantCode: http.StatusForbidden, wantPort: "8080"},
 		{name: "get not allowed", method: http.MethodGet, remoteAddr: "127.0.0.1:5555", nextCfg: &testCfg{Port: "8080", Model: "b"}, wantCode: http.StatusMethodNotAllowed, wantPort: "8080"},
 	}
 
@@ -254,7 +198,7 @@ func TestLoopbackOnly(t *testing.T) {
 		{name: "ipv4 loopback passes", remoteAddr: "127.0.0.1:5555", wantCode: http.StatusTeapot, wantBody: "inner"},
 		{name: "ipv4 loopback range passes", remoteAddr: "127.0.0.2:5555", wantCode: http.StatusTeapot, wantBody: "inner"},
 		{name: "ipv6 loopback passes", remoteAddr: "[::1]:5555", wantCode: http.StatusTeapot, wantBody: "inner"},
-		{name: "pod network rejected", remoteAddr: "10.42.0.9:5555", wantCode: http.StatusForbidden, wantBody: "forbidden\n"},
+		{name: "pod network rejected", remoteAddr: "192.0.2.9:5555", wantCode: http.StatusForbidden, wantBody: "forbidden\n"},
 		{name: "ipv6 non-loopback rejected", remoteAddr: "[fd00::1]:5555", wantCode: http.StatusForbidden, wantBody: "forbidden\n"},
 		{name: "unparseable remote rejected", remoteAddr: "garbage", wantCode: http.StatusForbidden, wantBody: "forbidden\n"},
 		{name: "hostname remote rejected", remoteAddr: "localhost:5555", wantCode: http.StatusForbidden, wantBody: "forbidden\n"},

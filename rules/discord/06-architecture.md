@@ -12,10 +12,10 @@ Aerial runs on a 3-node NixOS 26.05 k3s Kubernetes cluster supervised by Flux CD
   - **`coven`**: Semantic fact extraction, ACT-R memory decay, and procedural skill synthesis service.
   - **`vanadis`**: Multi-chunk build queue orchestrator providing HTTP/MCP APIs (`:4025`), JIT symbol line-slice resolution, and NATS JetStream consumers paired with **`vanadis-restate`** (`RestateDeployment` on `:9080` Restate SDK and `:4026` health/metrics) executing durable Restate `Build` Virtual Object and `BuildRouter` DAG workflows.
   - **`nats`**: NATS 2 JetStream broker (`StatefulSet` on `:4222`, HTTP monitoring `:8222`) backing durable cluster streams (`AERIAL_EVENTS`, `AERIAL_JOBS`, `AERIAL_COALESCED`, `VISION_JOBS`) reconciled programmatically on startup via `pkg/pubsub`.
-  - **`restate`**: Official Kubernetes Restate Operator (`restate-operator`) managing `RestateCluster` instances (`:8080` ingress / `:9070` admin with RocksDB state/journal storage across `restate`, `restate-marida`, and `restate-miorine` namespaces).
+  - **`restate`**: Official Kubernetes Restate Operator (`restate-operator`) managing `RestateCluster` instances (`:8080` ingress / `:9070` admin with RocksDB state/journal storage in the restate namespace).
   - **`postgres`**: CloudNativePG 2-instance PostgreSQL 18 + `pgvector` cluster with native `:9187` Prometheus metrics for production persistence (messages, sessions, atomic CAS task queues, schedules, event triggers, vector embeddings, PR registry, and Grafana), also hosting the logical `docket` database for `docket-store` (Vikunja) and `docket-mcp`.
   - **`flux-system` / `git-sync`**: Flux CD (`flux-system`) reconciling `./k8s` Kustomizations and Kubernetes `git-sync` sidecar initContainers mounting `/share/aerial:ro` and `/share/aerial-config:ro` into `eri`.
-  - **`coredns`**: Kubernetes CoreDNS daemon rewriting internal DNS records (`restate.aerial` -> `restate.restate.svc.cluster.local`, `restate-marida.aerial` -> `restate.restate-marida.svc.cluster.local`, `*.aerial`, `*.lan` -> `*.default.svc.cluster.local`).
+  - **`coredns`**: Kubernetes CoreDNS daemon rewriting internal DNS records (`restate.aerial` -> `restate.restate.svc.cluster.local`, `*.aerial`, `*.lan` -> `*.default.svc.cluster.local`).
   - **`infisical`**: Centralized secret management and automated rotation backed by Valkey 9, synced via External Secrets Operator into scoped per-service Kubernetes Secrets and the `shared-secrets` redaction bundle.
 
 - **Outbound Model Context Protocol (MCP) Microservices**:
@@ -48,7 +48,7 @@ Aerial runs on a 3-node NixOS 26.05 k3s Kubernetes cluster supervised by Flux CD
   - **`victoriatraces`**: OTLP trace store (`:10428`, 30-day retention) receiving gateway and service spans. LAN-only (never on the edge gateway).
   - **`vmalert`**: Alert rule evaluator (`:8880`) assessing recording and alerting anomaly rules against VictoriaMetrics.
   - **`grafana`**: Cyberpunk-themed visual telemetry dashboards.
-  - **`senses`**: Unified Rust CUDA ONNX Runtime service handling speech recognition (NeMo Parakeet TDT 0.6B v2 STT), voice synthesis (Kokoro-82M TTS), vector embeddings (BAAI/bge-small-en-v1.5), speaker verification (ECAPA-TDNN), and object detection (YOLO11n).
+  - **`senses`**: Unified Rust CUDA ONNX Runtime service handling speech recognition (NeMo Parakeet TDT 0.6B v2 STT), voice synthesis (Kokoro-82M TTS), vector embeddings (BAAI/bge-small-en-v1.5), and speaker verification (ECAPA-TDNN).
   - **`pjev`**: Local CUDA GGUF LLM and embedding inference service serving System-1 ambient triage (`/v1/systemone`).
   - **`vision`**: Camera vision and multimodal event orchestration service.
   - **`prospera`**: Autonomous PSTN voice call and SMS interaction service.
@@ -66,7 +66,7 @@ Aerial operates on a strict **Multi-Repository Architecture & Separation of Conc
 
 ### 1. Core Engine Monorepo (`azylman/aerial` at `/share/aerial` — `scripts/aerial-pr.sh init aerial`)
 - **Purpose**: Generic, domain-agnostic open-source foundation.
-- **Contents**: Core Go services (`services/eri`, `services/haro`, `services/coven`, `services/vanadis`, `services/vanadis-restate`, `services/vanadis-nats`, `services/migrator`, `services/synapse`, `services/console`, `services/homepage`, `services/docs-service`, `services/prospera`, `services/github-runner`), MCP servers (`mcp/discord-mcp`, `mcp/docket-mcp`, `mcp/github-mcp`, `mcp/infisical-mcp`, `mcp/kubernetes-mcp`, `mcp/kernel-mcp`), shared Go packages (`pkg/` including `pkg/pubsub` and `pkg/tracing`), base system rules (`rules/`), built-in skills (`.agents/skills/`), Kubernetes manifests (`k8s/*.yaml`), Dockerfiles, and CI/verification scripts (`scripts/`).
+- **Contents**: Core Go services (`services/eri`, `services/haro`, `services/coven`, `services/vanadis`, `services/vanadis-restate`, `services/vanadis-nats`, `services/migrator`, `services/synapse`, `services/console`, `services/homepage`, `services/docs-service`, `services/prospera`, `services/github-runner`), MCP servers (`mcp/discord-mcp`, `mcp/docket-mcp`, `mcp/infisical-mcp`, `mcp/kernel-mcp`), shared Go packages (`pkg/` including `pkg/pubsub` and `pkg/tracing`), base system rules (`rules/`), built-in skills (`.agents/skills/`), Kubernetes manifests (`k8s/*.yaml`), Dockerfiles, and CI/verification scripts (`scripts/`).
 - **Strict Invariants**:
   - **100% Generic & Domain-Agnostic**: All prompts, code, error handlers, and schemas must remain completely generic and reusable for any user.
   - **Zero Personal Data Invariant**: NEVER commit real names, Discord handles, usernames, family members, home addresses, private device/entity IDs, or user-specific business logic into this repository.

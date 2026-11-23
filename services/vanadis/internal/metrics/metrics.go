@@ -6,11 +6,10 @@ import (
 	"context"
 	"errors"
 	"log/slog"
-	"net/http"
 
 	"github.com/prometheus/client_golang/prometheus"
-	"github.com/prometheus/client_golang/prometheus/promhttp"
 
+	"github.com/azylman/aerial/pkg/pubsub"
 	"github.com/azylman/aerial/services/vanadis/internal/model"
 )
 
@@ -169,20 +168,36 @@ func ResetQueueMetrics() {
 	QueueOldestAgeSeconds.Set(0)
 }
 
-// CollectQueueMetrics refreshes the queue depth gauges from a consumer stats querier.
+// QueueConsumer names a durable JetStream consumer whose backlog feeds the queue gauges.
+type QueueConsumer struct {
+	Stream   string
+	Consumer string
+}
+
+// QueueConsumers are the durable consumers vanadis-nats binds (bridge.StartConsumers):
+// dispatch outcomes and PR lifecycle events on AERIAL_EVENTS.
+var QueueConsumers = []QueueConsumer{
+	{Stream: pubsub.StreamAerialEvents, Consumer: "vanadis-dispatch"},
+	{Stream: pubsub.StreamAerialEvents, Consumer: "vanadis-pr-events"},
+}
+
+// CollectQueueMetrics refreshes the queue depth gauges with the summed backlog of
+// QueueConsumers. A consumer whose stats query fails is logged and left out of the sum.
 func CollectQueueMetrics(ctx context.Context, q ConsumerStatsQuerier) {
 	ResetQueueMetrics()
 	if q == nil {
 		return
 	}
-	pending, inFlight, err := q.ConsumerStats(ctx, "AERIAL_JOBS", "vanadis-chunk")
-	if err != nil {
-		slog.ErrorContext(ctx, "[vanadis] [metrics] error querying consumer stats", "error", err)
-		return
+	var pending, inFlight int64
+	for _, c := range QueueConsumers {
+		p, f, err := q.ConsumerStats(ctx, c.Stream, c.Consumer)
+		if err != nil {
+			slog.ErrorContext(ctx, "[vanadis] [metrics] error querying consumer stats", "stream", c.Stream, "consumer", c.Consumer, "error", err)
+			continue
+		}
+		pending += p
+		inFlight += f
 	}
-	QueueDepth.WithLabelValues("pending").Set(float64(pending))
+	QueueDepth.WithLabelValues(statePending).Set(float64(pending))
 	QueueDepth.WithLabelValues("in_flight").Set(float64(inFlight))
 }
-
-// NewHandler returns the Prometheus metrics HTTP handler.
-func NewHandler() http.Handler { return promhttp.Handler() }

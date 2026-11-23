@@ -6,342 +6,34 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
-	"slices"
 	"strings"
-	"sync"
 	"testing"
 	"time"
 
-	"github.com/gorilla/websocket"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
 	"github.com/azylman/aerial/services/prospera/internal/config"
 	"github.com/azylman/aerial/services/prospera/internal/delivery"
+	"github.com/azylman/aerial/services/prospera/internal/fakes"
 	"github.com/azylman/aerial/services/prospera/internal/mediastream"
 	"github.com/azylman/aerial/services/prospera/internal/model"
 	"github.com/azylman/aerial/services/prospera/internal/twilio"
 )
 
-// Shared test doubles for the tools package. They mirror the delivery
-// package mocks so tool handler tests stay hermetic to external boundaries.
-type staticTestConfig struct {
-	cfg *config.Config
-}
-
-func (s staticTestConfig) Current() *config.Config { return s.cfg }
-
-type mockStoreForDelivery struct {
-	mu             sync.Mutex
-	calls          map[string]*model.VoiceCall
-	messages       map[string]*model.VoiceMessage
-	advances       int
-	statusTrans    []string
-	vmRecordings   map[string]string
-	opErr          error
-	bindErr        error
-	updateStateErr error
-	transErr       error
-	advanceErr     error
-	vmRecErr       error
-	markErr        error
-	saveErr        error
-	failTrans      map[string]bool
-}
-
-func newMockStoreForDelivery() *mockStoreForDelivery {
-	return &mockStoreForDelivery{
-		calls:        make(map[string]*model.VoiceCall),
-		messages:     make(map[string]*model.VoiceMessage),
-		vmRecordings: make(map[string]string),
-	}
-}
-
-func (m *mockStoreForDelivery) CreateOutboundCall(ctx context.Context, call model.VoiceCall, maxConcurrent int) error {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	if m.opErr != nil {
-		return m.opErr
-	}
-	m.calls[call.CallID] = &call
-	return nil
-}
-
-func (m *mockStoreForDelivery) CreateInboundCall(ctx context.Context, call model.VoiceCall) error {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	m.calls[call.CallID] = &call
-	return nil
-}
-
-func (m *mockStoreForDelivery) BindProviderCallSID(ctx context.Context, callID, providerSID string) error {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	if m.bindErr != nil {
-		return m.bindErr
-	}
-	if c, ok := m.calls[callID]; ok {
-		c.ProviderCallSID = providerSID
-	}
-	return nil
-}
-
-func (m *mockStoreForDelivery) GetCall(ctx context.Context, callID string) (*model.VoiceCall, error) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	if m.opErr != nil {
-		return nil, m.opErr
-	}
-	c, ok := m.calls[callID]
-	if !ok {
-		return nil, nil
-	}
-	cpy := *c
-	return &cpy, nil
-}
-
-func (m *mockStoreForDelivery) GetCallByProviderSID(ctx context.Context, providerSID string) (*model.VoiceCall, error) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	if m.opErr != nil {
-		return nil, m.opErr
-	}
-	for _, c := range m.calls {
-		if c.ProviderCallSID == providerSID {
-			cpy := *c
-			return &cpy, nil
-		}
-	}
-	return nil, nil
-}
-
-func (m *mockStoreForDelivery) ListCalls(ctx context.Context, limit int) ([]model.VoiceCall, error) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	if m.opErr != nil {
-		return nil, m.opErr
-	}
-	var list []model.VoiceCall
-	for _, c := range m.calls {
-		list = append(list, *c)
-	}
-	return list, nil
-}
-
-func (m *mockStoreForDelivery) FindRecentOutboundCall(ctx context.Context, fromE164 string, window time.Duration) (*model.VoiceCall, error) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	for _, c := range m.calls {
-		if c.Direction == "outbound" && c.ToNumber == fromE164 {
-			cpy := *c
-			return &cpy, nil
-		}
-	}
-	return nil, nil
-}
-
-func (m *mockStoreForDelivery) UpdateCallState(ctx context.Context, callID, state, endReason, answeredBy string) error {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	if m.updateStateErr != nil {
-		return m.updateStateErr
-	}
-	if c, ok := m.calls[callID]; ok {
-		c.State = state
-		if endReason != "" {
-			c.EndReason = endReason
-		}
-		if answeredBy != "" {
-			c.AnsweredBy = answeredBy
-		}
-	}
-	return nil
-}
-
-func (m *mockStoreForDelivery) AppendTranscriptTurn(ctx context.Context, callID string, turn model.TranscriptTurn) error {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	if c, ok := m.calls[callID]; ok {
-		c.Transcript = append(c.Transcript, turn)
-	}
-	return nil
-}
-
-func (m *mockStoreForDelivery) AdvanceLiveTranscriptCursor(ctx context.Context, callID string, fromCursor, toCursor int) (bool, error) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	if m.advanceErr != nil {
-		return false, m.advanceErr
-	}
-	if c, ok := m.calls[callID]; ok {
-		if c.LiveTranscriptCursor == fromCursor {
-			c.LiveTranscriptCursor = toCursor
-			m.advances++
-			return true, nil
-		}
-	}
-	return false, nil
-}
-
-func (m *mockStoreForDelivery) AppendOwnerInstruction(ctx context.Context, callID string, instr model.OwnerInstruction) error {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	if c, ok := m.calls[callID]; ok {
-		c.OwnerInstructions = append(c.OwnerInstructions, instr)
-	}
-	return nil
-}
-
-func (m *mockStoreForDelivery) SetVoicemailRecording(ctx context.Context, callID, recordingURL string) error {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	if m.vmRecErr != nil {
-		return m.vmRecErr
-	}
-	m.vmRecordings[callID] = recordingURL
-	if c, ok := m.calls[callID]; ok {
-		c.VoicemailRecordingURL = recordingURL
-	}
-	return nil
-}
-
-func (m *mockStoreForDelivery) TransitionReportStatus(ctx context.Context, callID string, allowedFrom []string, toStatus, summary string) (bool, error) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	if m.transErr != nil {
-		return false, m.transErr
-	}
-	if m.failTrans[toStatus] {
-		return false, errors.New("transition to " + toStatus + " failed")
-	}
-	c, ok := m.calls[callID]
-	if !ok {
-		return false, nil
-	}
-	if len(allowedFrom) > 0 {
-		matched := slices.Contains(allowedFrom, c.ReportStatus)
-		if !matched {
-			return false, nil
-		}
-	}
-	c.ReportStatus = toStatus
-	if summary != "" {
-		c.ReportSummary = summary
-	}
-	m.statusTrans = append(m.statusTrans, toStatus)
-	return true, nil
-}
-
-func (*mockStoreForDelivery) ReconcileOrphanedCalls(ctx context.Context, checkActive func(ctx context.Context, providerSID string) (bool, error)) (int, error) {
-	return 0, nil
-}
-
-func (m *mockStoreForDelivery) SaveVoiceMessage(ctx context.Context, msg model.VoiceMessage) (bool, error) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	if m.saveErr != nil {
-		return false, m.saveErr
-	}
-	m.messages[msg.MessageSID] = &msg
-	return true, nil
-}
-
-func (m *mockStoreForDelivery) MarkVoiceMessageDelivered(ctx context.Context, messageSID string) error {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	if m.markErr != nil {
-		return m.markErr
-	}
-	if msg, ok := m.messages[messageSID]; ok {
-		msg.DiscordDelivered = true
-	}
-	return nil
-}
-
-func (m *mockStoreForDelivery) ListVoiceMessages(ctx context.Context, limit int) ([]model.VoiceMessage, error) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	if m.opErr != nil {
-		return nil, m.opErr
-	}
-	var list []model.VoiceMessage
-	for _, msg := range m.messages {
-		list = append(list, *msg)
-	}
-	return list, nil
-}
-
-func (*mockStoreForDelivery) Close() error {
-	return nil
-}
-
-type mockTwilioForDelivery struct {
-	audioData          []byte
-	contentType        string
-	downloadErr        error
-	createCallErr      error
-	sendSMSErr         error
-	ensurePhoneErr     error
-	hangupErr          error
-	lastWebhookBaseURL string
-	lastCreateCallReq  twilio.CreateCallRequest
-	lastSendSMSFrom    string
-	lastSendSMSTo      string
-}
-
-func (m *mockTwilioForDelivery) CreateCall(ctx context.Context, req twilio.CreateCallRequest) (string, error) {
-	m.lastCreateCallReq = req
-	if m.createCallErr != nil {
-		return "", m.createCallErr
-	}
-	return "CA12345", nil
-}
-
-func (m *mockTwilioForDelivery) HangupCall(ctx context.Context, providerCallSID string) error {
-	if m.hangupErr != nil {
-		return m.hangupErr
-	}
-	return nil
-}
-
-func (*mockTwilioForDelivery) IsCallActive(ctx context.Context, providerCallSID string) (bool, error) {
-	return true, nil
-}
-
-func (m *mockTwilioForDelivery) SendSMS(ctx context.Context, to, from, body string) (string, error) {
-	m.lastSendSMSTo = to
-	m.lastSendSMSFrom = from
-	if m.sendSMSErr != nil {
-		return "", m.sendSMSErr
-	}
-	return "SM12345", nil
-}
-
-func (m *mockTwilioForDelivery) EnsurePhoneNumber(ctx context.Context, areaCode, webhookBaseURL string) (string, error) {
-	m.lastWebhookBaseURL = webhookBaseURL
-	if m.ensurePhoneErr != nil {
-		return "", m.ensurePhoneErr
-	}
-	return "+15105550100", nil
-}
-
-func (m *mockTwilioForDelivery) DownloadRecording(ctx context.Context, recordingURL string) ([]byte, string, error) {
-	return m.audioData, m.contentType, m.downloadErr
-}
-
-func setupTestToolHandler() (*ToolHandler, *mockStoreForDelivery, *mockTwilioForDelivery) {
+func setupTestToolHandler() (*ToolHandler, *fakes.FakeStore, *fakes.FakeTwilio) {
 	cfg := &config.Config{
 		TwilioFromNumber:      "+15105550100",
 		PublicWebhookBaseURL:  "https://webhooks.example.com",
 		DefaultDiscordChannel: "prospera",
 		MaxConcurrentCalls:    5,
 	}
-	store := newMockStoreForDelivery()
-	twilioMock := &mockTwilioForDelivery{}
-	tokenMgr := twilio.NewStreamTokenManager(time.Now)
-	sessionMgr := mediastream.NewCallSessionManager(staticTestConfig{cfg: cfg}, store, twilioMock, nil, tokenMgr)
-	reporter := delivery.NewReporter(staticTestConfig{cfg: cfg}, store, twilioMock)
+	store := fakes.NewFakeStore()
+	twilioMock := &fakes.FakeTwilio{}
+	tokenMgr := twilio.NewStreamTokenManager(time.Now, nil)
+	sessionMgr := mediastream.NewCallSessionManager(fakes.StaticConfig{Cfg: cfg}, store, twilioMock, nil, tokenMgr)
+	reporter := delivery.NewReporter(fakes.StaticConfig{Cfg: cfg}, store, twilioMock)
 
-	handler := NewToolHandler(staticTestConfig{cfg: cfg}, store, twilioMock, sessionMgr, reporter)
+	handler := NewToolHandler(fakes.StaticConfig{Cfg: cfg}, store, twilioMock, sessionMgr, reporter)
 	return handler, store, twilioMock
 }
 
@@ -432,10 +124,10 @@ func runToolHandlerInitiateCallCase(t *testing.T, tc toolHandlerInitiateCallTest
 	t.Helper()
 	handler, store, twilioMock := setupTestToolHandler()
 	if tc.twilioErr != "" {
-		twilioMock.createCallErr = errors.New(tc.twilioErr)
+		twilioMock.CreateCallErr = errors.New(tc.twilioErr)
 	}
 	if tc.updateStateErr != "" {
-		store.updateStateErr = errors.New(tc.updateStateErr)
+		store.UpdateStateErr = errors.New(tc.updateStateErr)
 	}
 
 	out, err := handler.InitiateCall(context.Background(), tc.args)
@@ -454,19 +146,19 @@ func runToolHandlerInitiateCallCase(t *testing.T, tc toolHandlerInitiateCallTest
 	assertToolHandlerInitiateCallSuccess(t, tc, out, store, twilioMock)
 }
 
-func assertToolHandlerInitiateCallSuccess(t *testing.T, tc toolHandlerInitiateCallTestCase, out InitiateCallOutput, store *mockStoreForDelivery, twilioMock *mockTwilioForDelivery) {
+func assertToolHandlerInitiateCallSuccess(t *testing.T, tc toolHandlerInitiateCallTestCase, out InitiateCallOutput, store *fakes.FakeStore, twilioMock *fakes.FakeTwilio) {
 	t.Helper()
 	if out.CallID == "" || out.ProviderCallSID == "" || out.Status != "initiated" {
 		t.Fatalf("InitiateCall() unexpected output: %+v", out)
 	}
-	if !strings.Contains(twilioMock.lastCreateCallReq.TwiMLURL, "?call_id="+out.CallID) {
-		t.Fatalf("TwiMLURL %q does not contain call_id", twilioMock.lastCreateCallReq.TwiMLURL)
+	if !strings.Contains(twilioMock.LastCreateCallReq.TwiMLURL, "?call_id="+out.CallID) {
+		t.Fatalf("TwiMLURL %q does not contain call_id", twilioMock.LastCreateCallReq.TwiMLURL)
 	}
-	if !strings.Contains(twilioMock.lastCreateCallReq.StatusCallback, "?call_id="+out.CallID) {
-		t.Fatalf("StatusCallback %q does not contain call_id", twilioMock.lastCreateCallReq.StatusCallback)
+	if !strings.Contains(twilioMock.LastCreateCallReq.StatusCallback, "?call_id="+out.CallID) {
+		t.Fatalf("StatusCallback %q does not contain call_id", twilioMock.LastCreateCallReq.StatusCallback)
 	}
-	if !strings.Contains(twilioMock.lastCreateCallReq.AsyncAmdStatusCallback, "?call_id="+out.CallID) {
-		t.Fatalf("AsyncAmdStatusCallback %q does not contain call_id", twilioMock.lastCreateCallReq.AsyncAmdStatusCallback)
+	if !strings.Contains(twilioMock.LastCreateCallReq.AsyncAmdStatusCallback, "?call_id="+out.CallID) {
+		t.Fatalf("AsyncAmdStatusCallback %q does not contain call_id", twilioMock.LastCreateCallReq.AsyncAmdStatusCallback)
 	}
 	savedCall, getErr := store.GetCall(context.Background(), out.CallID)
 	if getErr != nil || savedCall == nil || savedCall.Brief.Task != tc.args.Message {
@@ -531,39 +223,14 @@ func TestToolHandler_SteerCall(t *testing.T) {
 	}
 }
 
+// steerableSession is a minimal live session whose Steer succeeds.
+type steerableSession struct{ mediastream.Session }
+
+func (steerableSession) Steer(string, string) error { return nil }
+
 func setupMockGeminiSession(t *testing.T, callID string, handler *ToolHandler) {
 	t.Helper()
-	upgrader := websocket.Upgrader{CheckOrigin: func(r *http.Request) bool { return true }}
-	geminiServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		conn, err := upgrader.Upgrade(w, r, nil)
-		if err != nil {
-			return
-		}
-		defer conn.Close()
-		for {
-			var msg any
-			if err := conn.ReadJSON(&msg); err != nil {
-				return
-			}
-		}
-	}))
-	t.Cleanup(geminiServer.Close)
-
-	wsURL := "ws" + strings.TrimPrefix(geminiServer.URL, "http")
-	wsConn, dialResp, err := websocket.DefaultDialer.Dial(wsURL, nil)
-	if dialResp != nil && dialResp.Body != nil {
-		_ = dialResp.Body.Close()
-	}
-	if err != nil {
-		t.Fatalf("dial mock gemini: %v", err)
-	}
-	t.Cleanup(func() {
-		_ = wsConn.Close()
-	})
-
-	sess := mediastream.NewMediaStreamSession(mediastream.MediaStreamSessionConfig{CallID: callID})
-	sess.SetGeminiConnForTest(wsConn)
-	handler.sessionMgr.RegisterSession(callID, sess)
+	handler.sessionMgr.RegisterSession(callID, steerableSession{})
 }
 
 func runToolHandlerSteerCallCase(t *testing.T, tc toolHandlerSteerCallTestCase) {
@@ -734,7 +401,7 @@ func TestToolHandler_SendSMSStoreError(t *testing.T) {
 			t.Parallel()
 			handler, store, _ := setupTestToolHandler()
 			if tc.saveErr != "" {
-				store.saveErr = errors.New(tc.saveErr)
+				store.SaveErr = errors.New(tc.saveErr)
 			}
 			out, err := handler.SendSMS(context.Background(), SendSMSArgs{
 				To:   "+15105550199",
@@ -781,7 +448,7 @@ func testToolHandlerSendSMS(t *testing.T, handler *ToolHandler) {
 		t.Fatal("expected error for empty body")
 	}
 
-	handlerNoFrom := NewToolHandler(staticTestConfig{cfg: &config.Config{}}, nil, nil, nil, nil)
+	handlerNoFrom := NewToolHandler(fakes.StaticConfig{Cfg: &config.Config{}}, nil, nil, nil, nil)
 	if _, err := handlerNoFrom.SendSMS(context.Background(), SendSMSArgs{To: "+15105550199", Body: "hi"}); err == nil {
 		t.Fatal("expected error for missing from")
 	}
@@ -798,8 +465,8 @@ func testToolHandlerListSMSAndCalls(t *testing.T, handler *ToolHandler) {
 	_, _ = handler.ListCalls(context.Background(), ListCallsArgs{Limit: -1})
 	_, _ = handler.ListCalls(context.Background(), ListCallsArgs{Limit: 100})
 
-	emptyStore := newMockStoreForDelivery()
-	h := NewToolHandler(handler.cfgSrc, emptyStore, &mockTwilioForDelivery{}, nil, nil)
+	emptyStore := fakes.NewFakeStore()
+	h := NewToolHandler(handler.cfgSrc, emptyStore, &fakes.FakeTwilio{}, nil, nil)
 	outCalls, err := h.ListCalls(context.Background(), ListCallsArgs{})
 	if err != nil || outCalls.Calls == nil {
 		t.Fatal("expected empty non-nil calls slice")
@@ -817,8 +484,8 @@ func testToolHandlerEnsurePhone(t *testing.T, handler *ToolHandler) {
 	if err != nil || out.PhoneNumber == "" || out.Status != "configured" {
 		t.Fatalf("EnsurePhoneNumber() err = %v, out = %+v", err, out)
 	}
-	if twilioMock.lastWebhookBaseURL != "https://webhooks.example.com/api/webhooks" {
-		t.Fatalf("lastWebhookBaseURL = %q, want https://webhooks.example.com/api/webhooks", twilioMock.lastWebhookBaseURL)
+	if twilioMock.LastWebhookBaseURL != "https://webhooks.example.com/api/webhooks" {
+		t.Fatalf("lastWebhookBaseURL = %q, want https://webhooks.example.com/api/webhooks", twilioMock.LastWebhookBaseURL)
 	}
 
 	outDef, errDef := handler.EnsurePhoneNumber(context.Background(), EnsurePhoneNumberArgs{AreaCode: ""})
@@ -963,9 +630,9 @@ func TestToolHandler_StoreAndTwilioErrors(t *testing.T) {
 
 	t.Run("initiate call store error", func(t *testing.T) {
 		t.Parallel()
-		store := newMockStoreForDelivery()
-		store.opErr = errors.New("db error")
-		h := NewToolHandler(staticTestConfig{cfg: cfg}, store, &mockTwilioForDelivery{}, nil, nil)
+		store := fakes.NewFakeStore()
+		store.OpErr = errors.New("db error")
+		h := NewToolHandler(fakes.StaticConfig{Cfg: cfg}, store, &fakes.FakeTwilio{}, nil, nil)
 		_, err := h.InitiateCall(context.Background(), InitiateCallArgs{
 			To:      "+15105550199",
 			Message: "hello",
@@ -977,9 +644,9 @@ func TestToolHandler_StoreAndTwilioErrors(t *testing.T) {
 
 	t.Run("initiate call twilio error", func(t *testing.T) {
 		t.Parallel()
-		store := newMockStoreForDelivery()
-		twilioMock := &mockTwilioForDelivery{createCallErr: errors.New("twilio network error")}
-		h := NewToolHandler(staticTestConfig{cfg: cfg}, store, twilioMock, nil, nil)
+		store := fakes.NewFakeStore()
+		twilioMock := &fakes.FakeTwilio{CreateCallErr: errors.New("twilio network error")}
+		h := NewToolHandler(fakes.StaticConfig{Cfg: cfg}, store, twilioMock, nil, nil)
 		_, err := h.InitiateCall(context.Background(), InitiateCallArgs{
 			To:      "+15105550199",
 			Message: "hello",
@@ -991,9 +658,9 @@ func TestToolHandler_StoreAndTwilioErrors(t *testing.T) {
 
 	t.Run("end call store error", func(t *testing.T) {
 		t.Parallel()
-		store := newMockStoreForDelivery()
-		store.opErr = errors.New("db error")
-		h := NewToolHandler(staticTestConfig{cfg: cfg}, store, &mockTwilioForDelivery{}, nil, nil)
+		store := fakes.NewFakeStore()
+		store.OpErr = errors.New("db error")
+		h := NewToolHandler(fakes.StaticConfig{Cfg: cfg}, store, &fakes.FakeTwilio{}, nil, nil)
 		_, err := h.EndCall(context.Background(), EndCallArgs{CallID: "c1"})
 		if err == nil {
 			t.Fatal("expected error on store failure")
@@ -1002,9 +669,9 @@ func TestToolHandler_StoreAndTwilioErrors(t *testing.T) {
 
 	t.Run("get call status store error", func(t *testing.T) {
 		t.Parallel()
-		store := newMockStoreForDelivery()
-		store.opErr = errors.New("db error")
-		h := NewToolHandler(staticTestConfig{cfg: cfg}, store, &mockTwilioForDelivery{}, nil, nil)
+		store := fakes.NewFakeStore()
+		store.OpErr = errors.New("db error")
+		h := NewToolHandler(fakes.StaticConfig{Cfg: cfg}, store, &fakes.FakeTwilio{}, nil, nil)
 		_, err := h.GetCallStatus(context.Background(), GetCallStatusArgs{CallID: "c1"})
 		if err == nil {
 			t.Fatal("expected error on store failure")
@@ -1013,9 +680,9 @@ func TestToolHandler_StoreAndTwilioErrors(t *testing.T) {
 
 	t.Run("list calls store error", func(t *testing.T) {
 		t.Parallel()
-		store := newMockStoreForDelivery()
-		store.opErr = errors.New("db error")
-		h := NewToolHandler(staticTestConfig{cfg: cfg}, store, &mockTwilioForDelivery{}, nil, nil)
+		store := fakes.NewFakeStore()
+		store.OpErr = errors.New("db error")
+		h := NewToolHandler(fakes.StaticConfig{Cfg: cfg}, store, &fakes.FakeTwilio{}, nil, nil)
 		_, err := h.ListCalls(context.Background(), ListCallsArgs{})
 		if err == nil {
 			t.Fatal("expected error on store failure")
@@ -1024,9 +691,9 @@ func TestToolHandler_StoreAndTwilioErrors(t *testing.T) {
 
 	t.Run("send sms twilio error", func(t *testing.T) {
 		t.Parallel()
-		store := newMockStoreForDelivery()
-		twilioMock := &mockTwilioForDelivery{sendSMSErr: errors.New("twilio sms fail")}
-		h := NewToolHandler(staticTestConfig{cfg: cfg}, store, twilioMock, nil, nil)
+		store := fakes.NewFakeStore()
+		twilioMock := &fakes.FakeTwilio{SendSMSErr: errors.New("twilio sms fail")}
+		h := NewToolHandler(fakes.StaticConfig{Cfg: cfg}, store, twilioMock, nil, nil)
 		_, err := h.SendSMS(context.Background(), SendSMSArgs{
 			To:   "+15105550199",
 			Body: "test",
@@ -1038,9 +705,9 @@ func TestToolHandler_StoreAndTwilioErrors(t *testing.T) {
 
 	t.Run("list sms store error", func(t *testing.T) {
 		t.Parallel()
-		store := newMockStoreForDelivery()
-		store.opErr = errors.New("db error")
-		h := NewToolHandler(staticTestConfig{cfg: cfg}, store, &mockTwilioForDelivery{}, nil, nil)
+		store := fakes.NewFakeStore()
+		store.OpErr = errors.New("db error")
+		h := NewToolHandler(fakes.StaticConfig{Cfg: cfg}, store, &fakes.FakeTwilio{}, nil, nil)
 		_, err := h.ListSMS(context.Background(), ListSMSArgs{})
 		if err == nil {
 			t.Fatal("expected error on store failure")
@@ -1049,9 +716,9 @@ func TestToolHandler_StoreAndTwilioErrors(t *testing.T) {
 
 	t.Run("ensure phone number twilio error", func(t *testing.T) {
 		t.Parallel()
-		store := newMockStoreForDelivery()
-		twilioMock := &mockTwilioForDelivery{ensurePhoneErr: errors.New("twilio phone fail")}
-		h := NewToolHandler(staticTestConfig{cfg: cfg}, store, twilioMock, nil, nil)
+		store := fakes.NewFakeStore()
+		twilioMock := &fakes.FakeTwilio{EnsurePhoneErr: errors.New("twilio phone fail")}
+		h := NewToolHandler(fakes.StaticConfig{Cfg: cfg}, store, twilioMock, nil, nil)
 		_, err := h.EnsurePhoneNumber(context.Background(), EnsurePhoneNumberArgs{AreaCode: "510"})
 		if err == nil {
 			t.Fatal("expected error on twilio phone fail")
@@ -1060,8 +727,8 @@ func TestToolHandler_StoreAndTwilioErrors(t *testing.T) {
 
 	t.Run("steer call with nil session manager", func(t *testing.T) {
 		t.Parallel()
-		store := newMockStoreForDelivery()
-		h := NewToolHandler(staticTestConfig{cfg: cfg}, store, &mockTwilioForDelivery{}, nil, nil)
+		store := fakes.NewFakeStore()
+		h := NewToolHandler(fakes.StaticConfig{Cfg: cfg}, store, &fakes.FakeTwilio{}, nil, nil)
 		_, err := h.SteerCall(context.Background(), SteerCallArgs{
 			CallID:  "c1",
 			Message: "msg",
@@ -1075,8 +742,8 @@ func TestToolHandler_StoreAndTwilioErrors(t *testing.T) {
 func TestToolHandler_ValidationErrors(t *testing.T) {
 	t.Parallel()
 	cfg := &config.Config{TwilioFromNumber: "+15105550100"}
-	store := newMockStoreForDelivery()
-	h := NewToolHandler(staticTestConfig{cfg: cfg}, store, &mockTwilioForDelivery{}, nil, nil)
+	store := fakes.NewFakeStore()
+	h := NewToolHandler(fakes.StaticConfig{Cfg: cfg}, store, &fakes.FakeTwilio{}, nil, nil)
 
 	t.Run("initiate call invalid to", func(t *testing.T) {
 		t.Parallel()
@@ -1131,7 +798,7 @@ func TestToolHandler_ValidationErrors(t *testing.T) {
 
 	t.Run("ensure phone number validation", func(t *testing.T) {
 		t.Parallel()
-		hNoTwilio := NewToolHandler(staticTestConfig{cfg: cfg}, store, nil, nil, nil)
+		hNoTwilio := NewToolHandler(fakes.StaticConfig{Cfg: cfg}, store, nil, nil, nil)
 		if _, err := hNoTwilio.EnsurePhoneNumber(context.Background(), EnsurePhoneNumberArgs{AreaCode: ""}); err == nil {
 			t.Fatal("expected err")
 		}
@@ -1144,8 +811,8 @@ func TestToolHandler_SteerEndAndEnsurePhoneFallbacks(t *testing.T) {
 
 	t.Run("list sms zero limit defaults to 20", func(t *testing.T) {
 		t.Parallel()
-		store := newMockStoreForDelivery()
-		h := NewToolHandler(staticTestConfig{cfg: cfg}, store, &mockTwilioForDelivery{}, nil, nil)
+		store := fakes.NewFakeStore()
+		h := NewToolHandler(fakes.StaticConfig{Cfg: cfg}, store, &fakes.FakeTwilio{}, nil, nil)
 		out, err := h.ListSMS(context.Background(), ListSMSArgs{Limit: 0})
 		if err != nil {
 			t.Fatalf("unexpected err: %v", err)
@@ -1157,31 +824,26 @@ func TestToolHandler_SteerEndAndEnsurePhoneFallbacks(t *testing.T) {
 
 	t.Run("end call with twilio hangup error and reporter error", func(t *testing.T) {
 		t.Parallel()
-		store := newMockStoreForDelivery()
+		store := fakes.NewFakeStore()
 		_ = store.CreateOutboundCall(context.Background(), model.VoiceCall{
 			CallID:          "call-hangup-err",
 			ProviderCallSID: "CA-hangup-err",
 			State:           "in-progress",
 		}, 5)
-		twilioMock := &mockTwilioForDelivery{hangupErr: errors.New("hangup failed")}
-		rep := delivery.NewReporter(staticTestConfig{cfg: &config.Config{BrainURL: ""}}, store, twilioMock)
-		h := NewToolHandler(staticTestConfig{cfg: cfg}, store, twilioMock, nil, rep)
+		twilioMock := &fakes.FakeTwilio{HangupErr: errors.New("hangup failed")}
+		rep := delivery.NewReporter(fakes.StaticConfig{Cfg: &config.Config{BrainURL: ""}}, store, twilioMock)
+		h := NewToolHandler(fakes.StaticConfig{Cfg: cfg}, store, twilioMock, nil, rep)
 
 		out, err := h.EndCall(context.Background(), EndCallArgs{CallID: "call-hangup-err"})
-		if err != nil {
-			t.Fatalf("unexpected err: %v", err)
-		}
-		if out.Status != "ended" {
-			t.Fatalf("status = %s, want ended", out.Status)
-		}
+		requireFallbackStatus(t, out.Status, err, "ended")
 	})
 
 	t.Run("initiate call with twilio error and state update error", func(t *testing.T) {
 		t.Parallel()
-		store := newMockStoreForDelivery()
-		twilioMock := &mockTwilioForDelivery{createCallErr: errors.New("dial fail")}
-		h := NewToolHandler(staticTestConfig{cfg: cfg}, store, twilioMock, nil, nil)
-		store.opErr = errors.New("db error")
+		store := fakes.NewFakeStore()
+		twilioMock := &fakes.FakeTwilio{CreateCallErr: errors.New("dial fail")}
+		h := NewToolHandler(fakes.StaticConfig{Cfg: cfg}, store, twilioMock, nil, nil)
+		store.OpErr = errors.New("db error")
 
 		_, err := h.InitiateCall(context.Background(), InitiateCallArgs{
 			To:      "+15105550199",
@@ -1194,56 +856,52 @@ func TestToolHandler_SteerEndAndEnsurePhoneFallbacks(t *testing.T) {
 
 	t.Run("initiate call bind provider sid error", func(t *testing.T) {
 		t.Parallel()
-		store := newMockStoreForDelivery()
-		store.bindErr = errors.New("bind failure")
-		h := NewToolHandler(staticTestConfig{cfg: cfg}, store, &mockTwilioForDelivery{}, nil, nil)
+		store := fakes.NewFakeStore()
+		store.BindErr = errors.New("bind failure")
+		h := NewToolHandler(fakes.StaticConfig{Cfg: cfg}, store, &fakes.FakeTwilio{}, nil, nil)
 
 		out, err := h.InitiateCall(context.Background(), InitiateCallArgs{
 			To:      "+15105550199",
 			Message: "hello",
 		})
-		if err != nil {
-			t.Fatalf("unexpected err: %v", err)
-		}
-		if out.Status != "initiated" {
-			t.Fatalf("status = %s, want initiated", out.Status)
-		}
+		requireFallbackStatus(t, out.Status, err, "initiated")
 	})
 
 	t.Run("end call update state error", func(t *testing.T) {
 		t.Parallel()
-		store := newMockStoreForDelivery()
+		store := fakes.NewFakeStore()
 		_ = store.CreateOutboundCall(context.Background(), model.VoiceCall{
 			CallID: "call-upd-err",
 			State:  "in-progress",
 		}, 5)
-		store.updateStateErr = errors.New("update state failure")
-		h := NewToolHandler(staticTestConfig{cfg: cfg}, store, &mockTwilioForDelivery{}, nil, nil)
+		store.UpdateStateErr = errors.New("update state failure")
+		h := NewToolHandler(fakes.StaticConfig{Cfg: cfg}, store, &fakes.FakeTwilio{}, nil, nil)
 
 		out, err := h.EndCall(context.Background(), EndCallArgs{CallID: "call-upd-err"})
-		if err != nil {
-			t.Fatalf("unexpected err: %v", err)
-		}
-		if out.Status != "ended" {
-			t.Fatalf("status = %s, want ended", out.Status)
-		}
+		requireFallbackStatus(t, out.Status, err, "ended")
 	})
 
 	t.Run("send sms save error", func(t *testing.T) {
 		t.Parallel()
-		store := newMockStoreForDelivery()
-		store.opErr = errors.New("save failure")
-		h := NewToolHandler(staticTestConfig{cfg: cfg}, store, &mockTwilioForDelivery{}, nil, nil)
+		store := fakes.NewFakeStore()
+		store.OpErr = errors.New("save failure")
+		h := NewToolHandler(fakes.StaticConfig{Cfg: cfg}, store, &fakes.FakeTwilio{}, nil, nil)
 
 		out, err := h.SendSMS(context.Background(), SendSMSArgs{
 			To:   "+15105550199",
 			Body: "test message",
 		})
-		if err != nil {
-			t.Fatalf("unexpected err: %v", err)
-		}
-		if out.Status != "sent" {
-			t.Fatalf("status = %s, want sent", out.Status)
-		}
+		requireFallbackStatus(t, out.Status, err, "sent")
 	})
+}
+
+// requireFallbackStatus fails unless a fallback call succeeded with status want.
+func requireFallbackStatus(t *testing.T, got string, err error, want string) {
+	t.Helper()
+	if err != nil {
+		t.Fatalf("unexpected err: %v", err)
+	}
+	if got != want {
+		t.Fatalf("status = %s, want %s", got, want)
+	}
 }

@@ -1,0 +1,1301 @@
+package queue
+
+import (
+	"bufio"
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"strings"
+	"sync"
+	"testing"
+	"time"
+
+	"github.com/bwmarrin/discordgo"
+	"github.com/jackc/pgx/v5/pgconn"
+	restate "github.com/restatedev/sdk-go"
+	"go.opentelemetry.io/otel/attribute"
+	sdktrace "go.opentelemetry.io/otel/sdk/trace"
+	"go.opentelemetry.io/otel/sdk/trace/tracetest"
+	"go.opentelemetry.io/otel/trace"
+
+	"github.com/azylman/aerial/pkg/pubsub"
+	"github.com/azylman/aerial/pkg/tracing"
+	"github.com/azylman/aerial/services/eri/pkg/config"
+	"github.com/azylman/aerial/services/eri/pkg/db"
+	"github.com/azylman/aerial/services/eri/pkg/db/dbtest"
+	"github.com/azylman/aerial/services/eri/pkg/runner"
+	"github.com/azylman/aerial/services/eri/pkg/session"
+)
+
+func stepMsg(id, status string, retry, restart int) db.Message {
+	return db.Message{ID: id, ThreadID: "thread-steps", Content: "hello " + id, Status: status, RetryCount: retry, RestartCount: restart, CreatedAt: time.Now().UTC()}
+}
+
+func doneMsg(id, status, errText, response string) db.Message {
+	m := stepMsg(id, status, 0, 0)
+	m.ErrorMessage, m.ResponseText = errText, response
+	return m
+}
+
+func seedMessages(t *testing.T, store *dbtest.FakeStore, rows []db.Message) {
+	t.Helper()
+	for _, m := range rows {
+		if err := store.InsertMessage(context.Background(), m); err != nil {
+			t.Fatalf("insert %s: %v", m.ID, err)
+		}
+	}
+}
+
+type rowWant struct {
+	status, errText string
+	retry, restart  int
+}
+
+func assertRows(t *testing.T, store db.Store, want map[string]rowWant) {
+	t.Helper()
+	for id, w := range want {
+		m, err := store.GetMessage(context.Background(), id)
+		if err != nil || m == nil {
+			t.Fatalf("GetMessage(%s) = %v, %v", id, m, err)
+		}
+		if m.Status != w.status || m.ErrorMessage != w.errText || m.RetryCount != w.retry || m.RestartCount != w.restart {
+			t.Errorf("row %s = {%s %q retry=%d restart=%d}, want {%s %q retry=%d restart=%d}",
+				id, m.Status, m.ErrorMessage, m.RetryCount, m.RestartCount, w.status, w.errText, w.retry, w.restart)
+		}
+	}
+}
+
+var (
+	errStepTransient = errors.New("connection reset")
+	errStepIntegrity = &pgconn.PgError{Code: "23505", Message: "duplicate key"}
+)
+
+// stepPool builds a pool over store (nil store when noStore) with failMethod armed to fail once.
+func stepPool(store *dbtest.FakeStore, noStore bool, failMethod string, failErr error, cfg WorkerPoolConfig) *WorkerPool {
+	if failMethod != "" {
+		store.FailNext(failMethod, failErr)
+	}
+	cfg.Store = store
+	if noStore {
+		cfg.Store = nil
+	}
+	return NewWorkerPool(cfg)
+}
+
+// assertStepErr checks a step's error presence and terminal tagging.
+func assertStepErr(t *testing.T, err error, wantErr, wantTerminal bool) {
+	t.Helper()
+	if (err != nil) != wantErr {
+		t.Fatalf("err = %v, wantErr %v", err, wantErr)
+	}
+	if err != nil && restate.IsTerminalError(err) != wantTerminal {
+		t.Errorf("terminal = %v, want %v (err %v)", restate.IsTerminalError(err), wantTerminal, err)
+	}
+}
+
+func TestRecordBurstStarted(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name          string
+		rows          []db.Message
+		ids           []string
+		wantIDs       []string
+		wantBaseRetry int
+		wantRows      map[string]rowWant
+		failMethod    string
+		failErr       error
+		noStore       bool
+		wantErr       bool
+		wantTerminal  bool
+	}{
+		{name: "ClaimErrorRetryable", rows: []db.Message{stepMsg("a", db.StatusPending, 0, 0)}, ids: []string{"a"}, failMethod: "ClaimPendingMessage", failErr: errStepTransient, wantErr: true},
+		{name: "ReadIntegrityErrorTerminal", rows: []db.Message{stepMsg("a", db.StatusPending, 0, 0)}, ids: []string{"a"}, failMethod: "GetMessagesByID", failErr: errStepIntegrity, wantErr: true, wantTerminal: true},
+		{name: "NoStoreTerminal", ids: []string{"a"}, noStore: true, wantErr: true, wantTerminal: true},
+		{
+			name:    "AllPendingClaimed",
+			rows:    []db.Message{stepMsg("a", db.StatusPending, 0, 0), stepMsg("b", db.StatusPending, 1, 0)},
+			ids:     []string{"a", "b"},
+			wantIDs: []string{"a", "b"}, wantBaseRetry: 1,
+			wantRows: map[string]rowWant{"a": {status: db.StatusProcessing}, "b": {status: db.StatusProcessing, retry: 1}},
+		},
+		{
+			name:     "RetryAfterPartialClaimAdoptsProcessing",
+			rows:     []db.Message{stepMsg("a", db.StatusProcessing, 0, 1), stepMsg("b", db.StatusProcessing, 0, 0), stepMsg("c", db.StatusPending, 0, 0)},
+			ids:      []string{"a", "b", "c"},
+			wantIDs:  []string{"a", "b", "c"},
+			wantRows: map[string]rowWant{"a": {status: db.StatusProcessing, restart: 1}, "b": {status: db.StatusProcessing}, "c": {status: db.StatusProcessing}},
+		},
+		{
+			name:    "CompletedAndMissingSkipped",
+			rows:    []db.Message{doneMsg("a", db.StatusCompleted, "", "hi"), stepMsg("b", db.StatusPending, 2, 0)},
+			ids:     []string{"a", "b", "missing", "b", " "},
+			wantIDs: []string{"b"}, wantBaseRetry: 2,
+			wantRows: map[string]rowWant{"a": {status: db.StatusCompleted}, "b": {status: db.StatusProcessing, retry: 2}},
+		},
+		{
+			name: "NothingClaimable",
+			rows: []db.Message{doneMsg("a", db.StatusFailed, "boom", "")},
+			ids:  []string{"a"},
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			store := setupTestStore(t)
+			seedMessages(t, store, tc.rows)
+			pool := stepPool(store, tc.noStore, tc.failMethod, tc.failErr, WorkerPoolConfig{})
+			got, err := pool.RecordBurstStarted(context.Background(), "thread-steps", tc.ids)
+			assertStepErr(t, err, tc.wantErr, tc.wantTerminal)
+			if strings.Join(got.IDs, ",") != strings.Join(tc.wantIDs, ",") || got.BaseRetry != tc.wantBaseRetry {
+				t.Errorf("got %+v, want ids=%v base=%d", got, tc.wantIDs, tc.wantBaseRetry)
+			}
+			assertRows(t, store, tc.wantRows)
+		})
+	}
+}
+
+func TestRecordDispatchStarted(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name       string
+		status     string
+		retry      int
+		seed       bool
+		wantIDs    []string
+		wantBase   int
+		wantStatus string
+		dispatchID string
+		failMethod string
+		failErr    error
+		noStore    bool
+		wantErr    bool
+		wantTerm   bool
+	}{
+		{name: "BlankIDNoop", dispatchID: " "},
+		{name: "ClaimErrorRetryable", status: db.StatusPending, seed: true, failMethod: "ClaimPendingDispatch", failErr: errStepTransient, wantErr: true, wantStatus: db.StatusPending},
+		{name: "ReadErrorTerminal", status: db.StatusPending, seed: true, failMethod: "GetDispatch", failErr: errStepIntegrity, wantErr: true, wantTerm: true, wantStatus: db.StatusProcessing},
+		{name: "NoStoreTerminal", noStore: true, wantErr: true, wantTerm: true},
+		{name: "PendingClaimed", status: db.StatusPending, retry: 1, seed: true, wantIDs: []string{"d1"}, wantBase: 1, wantStatus: db.StatusProcessing},
+		{name: "ProcessingAdopted", status: db.StatusProcessing, seed: true, wantIDs: []string{"d1"}, wantStatus: db.StatusProcessing},
+		{name: "CompletedSkipped", status: db.StatusCompleted, seed: true, wantStatus: db.StatusCompleted},
+		{name: "MissingSkipped"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			store := setupTestStore(t)
+			if tc.seed {
+				if _, err := store.InsertDispatch(context.Background(), db.Dispatch{ID: "d1", Source: "test", SessionID: "sess-1", Prompt: "p", Status: tc.status, RetryCount: tc.retry}); err != nil {
+					t.Fatal(err)
+				}
+			}
+			pool := stepPool(store, tc.noStore, tc.failMethod, tc.failErr, WorkerPoolConfig{})
+			id := "d1"
+			if tc.dispatchID != "" {
+				id = tc.dispatchID
+			}
+			got, err := pool.RecordDispatchStarted(context.Background(), "sess-1", id)
+			assertStepErr(t, err, tc.wantErr, tc.wantTerm)
+			if strings.Join(got.IDs, ",") != strings.Join(tc.wantIDs, ",") || got.BaseRetry != tc.wantBase {
+				t.Errorf("got %+v, want ids=%v base=%d", got, tc.wantIDs, tc.wantBase)
+			}
+			if tc.seed {
+				if d, _ := store.GetDispatch(context.Background(), "d1"); d == nil || d.Status != tc.wantStatus {
+					t.Errorf("dispatch = %+v, want status %s", d, tc.wantStatus)
+				}
+			}
+		})
+	}
+}
+
+type prepWant struct {
+	decision, promptSub, injected string
+	delayMs                       int64
+	metadata                      map[string]string
+}
+
+func assertPrep(t *testing.T, got TurnPrep, want prepWant) {
+	t.Helper()
+	if got.Decision != want.decision || got.DelayMs != want.delayMs || got.InjectedContext != want.injected {
+		t.Errorf("prep = %+v, want decision=%s delay=%d injected=%q", got, want.decision, want.delayMs, want.injected)
+	}
+	if !strings.Contains(got.Prompt, want.promptSub) {
+		t.Errorf("prompt %q missing %q", got.Prompt, want.promptSub)
+	}
+	if len(got.HookMetadata) != len(want.metadata) {
+		t.Errorf("metadata = %v, want %v", got.HookMetadata, want.metadata)
+	}
+	for k, v := range want.metadata {
+		if got.HookMetadata[k] != v {
+			t.Errorf("metadata[%s] = %q, want %q", k, got.HookMetadata[k], v)
+		}
+	}
+	b, err := json.Marshal(got)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var back TurnPrep
+	if err := json.Unmarshal(b, &back); err != nil || back.Prompt != got.Prompt || back.Decision != got.Decision || len(back.HookMetadata) != len(got.HookMetadata) {
+		t.Errorf("TurnPrep did not round-trip: %+v err=%v", back, err)
+	}
+}
+
+func TestPrepareBurstTurn(t *testing.T) {
+	t.Parallel()
+	preTurn := &config.WebhookEndpoint{URL: "http://sidecar.local/pre", TimeoutMs: 1000}
+	tests := []struct {
+		name          string
+		rows          []db.Message
+		mode          string
+		hooked        bool
+		preResp       *PreTurnResponse
+		preErr        error
+		runs          int
+		wantDecision  string
+		wantDelayMs   int64
+		wantPromptSub string
+		wantInjected  string
+		wantMetadata  map[string]string
+		wantRows      map[string]rowWant
+		failMethod    string
+		failErr       error
+		wantErr       bool
+	}{
+		{
+			name: "ReadErrorRetryable", mode: "thread", runs: 1, failMethod: "GetMessagesByID", failErr: errStepTransient, wantErr: true,
+			rows:     []db.Message{stepMsg("a", db.StatusProcessing, 0, 0)},
+			wantRows: map[string]rowWant{"a": {status: db.StatusProcessing}},
+		},
+		{
+			name: "RequeueErrorRetryable", mode: "thread", hooked: true, runs: 1, failMethod: "RequeueProcessingMessages", failErr: errStepTransient, wantErr: true,
+			rows:     []db.Message{stepMsg("a", db.StatusProcessing, 0, 0)},
+			preResp:  &PreTurnResponse{Allow: false, Action: "retry"},
+			wantRows: map[string]rowWant{"a": {status: db.StatusProcessing}},
+		},
+		{
+			name: "IgnoredChannelFinished", mode: "ignore", runs: 1,
+			rows:         []db.Message{stepMsg("a", db.StatusProcessing, 0, 0)},
+			wantDecision: TurnDecisionFinished,
+			wantRows:     map[string]rowWant{"a": {status: db.StatusCompleted, errText: "[IGNORE]"}},
+		},
+		{
+			name: "PreTurnRejectedFinished", mode: "thread", hooked: true, runs: 1,
+			rows:         []db.Message{stepMsg("a", db.StatusProcessing, 0, 0)},
+			preResp:      &PreTurnResponse{Allow: false, Reason: "busy"},
+			wantDecision: TurnDecisionFinished,
+			wantRows:     map[string]rowWant{"a": {status: db.StatusCompleted, errText: "[SKIPPED pre_turn_rejected: busy]"}},
+		},
+		{
+			name: "PreTurnTimeoutDrop", mode: "thread", hooked: true, runs: 1,
+			rows:         []db.Message{stepMsg("a", db.StatusProcessing, 0, 0)},
+			preErr:       errors.New("deadline"),
+			wantDecision: TurnDecisionFinished,
+			wantRows:     map[string]rowWant{"a": {status: db.StatusCompleted, errText: "[SKIPPED pre_turn_timeout_drop]"}},
+		},
+		{
+			name: "RetryLaterTwiceBumpsOnce", mode: "thread", hooked: true, runs: 2,
+			rows:         []db.Message{stepMsg("a", db.StatusProcessing, 0, 0), stepMsg("b", db.StatusProcessing, 1, 0)},
+			preResp:      &PreTurnResponse{Allow: false, Action: "retry", RetryAfterSeconds: 7},
+			wantDecision: TurnDecisionReschedule, wantDelayMs: 5000,
+			wantRows: map[string]rowWant{"a": {status: db.StatusPending, errText: "pre_turn_deferred", retry: 1}, "b": {status: db.StatusPending, errText: "pre_turn_deferred", retry: 2}},
+		},
+		{
+			name: "RetryLaterExhaustsLastAttempt", mode: "thread", hooked: true, runs: 1,
+			rows:         []db.Message{stepMsg("a", db.StatusProcessing, 2, 0), stepMsg("b", db.StatusProcessing, 0, 0)},
+			preResp:      &PreTurnResponse{Allow: false, Action: "retry", RetryAfterSeconds: 7},
+			wantDecision: TurnDecisionReschedule, wantDelayMs: 7000,
+			wantRows: map[string]rowWant{"a": {status: db.StatusFailed, errText: "[EXHAUSTED_PRE_TURN_RETRIES]", retry: 2}, "b": {status: db.StatusPending, errText: "pre_turn_deferred", retry: 1}},
+		},
+		{
+			name: "RetryLaterAllExhaustedFinished", mode: "thread", hooked: true, runs: 1,
+			rows:         []db.Message{stepMsg("a", db.StatusProcessing, 2, 0)},
+			preResp:      &PreTurnResponse{Allow: false, Action: "retry"},
+			wantDecision: TurnDecisionFinished,
+			wantRows:     map[string]rowWant{"a": {status: db.StatusFailed, errText: "[EXHAUSTED_PRE_TURN_RETRIES]", retry: 2}},
+		},
+		{
+			name: "AllowedBuildsPrompt", mode: "thread", hooked: true, runs: 1,
+			rows:          []db.Message{stepMsg("a", db.StatusProcessing, 0, 0)},
+			preResp:       &PreTurnResponse{Allow: true, InjectedContext: "be brief", Metadata: map[string]any{"lane": "fast", "n": 2}},
+			wantDecision:  TurnDecisionRun,
+			wantPromptSub: "hello a",
+			wantInjected:  "<COORDINATION_CONTEXT>\nbe brief\n</COORDINATION_CONTEXT>",
+			wantMetadata:  map[string]string{"lane": "fast", "n": "2"},
+			wantRows:      map[string]rowWant{"a": {status: db.StatusProcessing}},
+		},
+		{
+			name: "TerminalRowsFinishedWithoutWrites", mode: "thread", hooked: true, runs: 1,
+			rows:         []db.Message{doneMsg("a", db.StatusCompleted, "", "done")},
+			preResp:      &PreTurnResponse{Allow: false, Reason: "never called"},
+			wantDecision: TurnDecisionFinished,
+			wantRows:     map[string]rowWant{"a": {status: db.StatusCompleted}},
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			store := setupTestStore(t)
+			seedMessages(t, store, tc.rows)
+			policy := config.ChannelPolicy{Mode: tc.mode}
+			if tc.hooked {
+				policy.Hooks.PreTurn = preTurn
+			}
+			preResp, preErr := tc.preResp, tc.preErr
+			pool := New(nil, WorkerPoolConfig{
+				Store: store, MaxAttempts: 3,
+				ResolveChannelPolicy: func(string, string) config.ChannelPolicy { return policy },
+				WebhookDispatcher: &mockWebhookDispatcher{callPreTurnHookFunc: func(context.Context, *config.WebhookEndpoint, *PreTurnRequest) (*PreTurnResponse, error) {
+					return preResp, preErr
+				}},
+				RunnerFunc: func(context.Context, string, string, string, string, string, int) (string, string, int, error) {
+					return "", "", 0, errors.New("prep must not run the agent")
+				},
+			})
+			pool.Start()
+			defer pool.Stop()
+			ids := make([]string, len(tc.rows))
+			for i, m := range tc.rows {
+				ids[i] = m.ID
+			}
+			if tc.failMethod != "" {
+				store.FailNext(tc.failMethod, tc.failErr)
+			}
+			var got TurnPrep
+			var err error
+			for range tc.runs {
+				got, err = pool.PrepareBurstTurn(context.Background(), "thread-steps", "turn-1", ids)
+			}
+			assertStepErr(t, err, tc.wantErr, false)
+			assertPrep(t, got, prepWant{decision: tc.wantDecision, delayMs: tc.wantDelayMs, promptSub: tc.wantPromptSub, injected: tc.wantInjected, metadata: tc.wantMetadata})
+			assertRows(t, store, tc.wantRows)
+		})
+	}
+}
+
+func TestPrepareDispatchTurn(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name          string
+		status        string
+		sessionID     string
+		seed          bool
+		wantDecision  string
+		wantPromptSub string
+		failMethod    string
+		failErr       error
+		noStore       bool
+		wantErr       bool
+		wantTerminal  bool
+		noAgent       bool
+		wantStatus    string
+	}{
+		{name: "SessionLeaseUnavailableFinished", status: db.StatusProcessing, sessionID: "sess-1", seed: true, noAgent: true, wantDecision: TurnDecisionFinished, wantStatus: db.StatusFailed},
+		{name: "ReadErrorTerminal", status: db.StatusProcessing, seed: true, failMethod: "GetDispatch", failErr: errStepIntegrity, wantErr: true, wantTerminal: true},
+		{name: "NoStoreTerminal", noStore: true, wantErr: true, wantTerminal: true},
+		{name: "EphemeralBuildsPrompt", status: db.StatusProcessing, seed: true, wantDecision: TurnDecisionRun, wantPromptSub: "do the thing"},
+		{name: "SessionBuildsPrompt", status: db.StatusProcessing, sessionID: "sess-1", seed: true, wantDecision: TurnDecisionRun, wantPromptSub: "do the thing"},
+		{name: "TerminalFinished", status: db.StatusFailed, seed: true, wantDecision: TurnDecisionFinished},
+		{name: "MissingFinished", wantDecision: TurnDecisionFinished},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			store := setupTestStore(t)
+			if tc.seed {
+				if _, err := store.InsertDispatch(context.Background(), db.Dispatch{ID: "d1", Source: "test", SessionID: tc.sessionID, Prompt: "do the thing", Status: tc.status}); err != nil {
+					t.Fatal(err)
+				}
+			}
+			cfg := WorkerPoolConfig{Store: store, RunnerFunc: func(context.Context, string, string, string, string, string, int) (string, string, int, error) {
+				return "", "", 0, errors.New("prep must not run the agent")
+			}}
+			if tc.noStore {
+				cfg.Store = nil
+			}
+			if tc.noAgent {
+				cfg.RunnerFunc = nil
+			}
+			pool := New(nil, cfg)
+			pool.Start()
+			defer pool.Stop()
+			if tc.failMethod != "" {
+				store.FailNext(tc.failMethod, tc.failErr)
+			}
+			got, err := pool.PrepareDispatchTurn(context.Background(), "sess-1", "turn-1", "d1")
+			assertStepErr(t, err, tc.wantErr, tc.wantTerminal)
+			if d, _ := store.GetDispatch(context.Background(), "d1"); tc.wantStatus != "" && (d == nil || d.Status != tc.wantStatus) {
+				t.Errorf("dispatch = %+v, want status %s", d, tc.wantStatus)
+			}
+			if got.Decision != tc.wantDecision || !strings.Contains(got.Prompt, tc.wantPromptSub) {
+				t.Errorf("prep = %+v, want decision=%s prompt containing %q", got, tc.wantDecision, tc.wantPromptSub)
+			}
+		})
+	}
+}
+
+// noticeRecorder captures failure notices delivered to Discord.
+type noticeRecorder struct {
+	mu      sync.Mutex
+	notices []string
+}
+
+func (r *noticeRecorder) deliver(_ *discordgo.Session, _, text string) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.notices = append(r.notices, text)
+	return nil
+}
+
+func (r *noticeRecorder) all() []string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return append([]string(nil), r.notices...)
+}
+
+func TestRecordBurstOutcome(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name        string
+		rows        []db.Message
+		summary     AttemptSummary
+		runs        int
+		wantErr     bool
+		wantNotices []string
+		wantRows    map[string]rowWant
+		failMethod  string
+		failErr     error
+		noStore     bool
+	}{
+		{name: "NoStoreTerminal", runs: 1, noStore: true, wantErr: true, rows: []db.Message{stepMsg("a", db.StatusProcessing, 0, 0)}, summary: AttemptSummary{Outcome: OutcomeFailed}},
+		{
+			name: "ReadErrorRetryable", runs: 1, wantErr: true, failMethod: "GetMessagesByID", failErr: errStepTransient,
+			rows:     []db.Message{stepMsg("a", db.StatusProcessing, 0, 0)},
+			summary:  AttemptSummary{Outcome: OutcomeFailed, Reason: "x"},
+			wantRows: map[string]rowWant{"a": {status: db.StatusProcessing}},
+		},
+		{
+			name: "FailWriteErrorRetryable", runs: 1, wantErr: true, failMethod: "FailMessagesIfActive", failErr: errStepTransient,
+			rows:     []db.Message{stepMsg("a", db.StatusProcessing, 0, 0)},
+			summary:  AttemptSummary{Outcome: OutcomeCancelled},
+			wantRows: map[string]rowWant{"a": {status: db.StatusProcessing}},
+		},
+		{
+			name: "TelemetryWriteErrorRetryable", runs: 1, wantErr: true, failMethod: "UpdateMessageStatus", failErr: errStepTransient,
+			rows:     []db.Message{stepMsg("a", db.StatusProcessing, 0, 0)},
+			summary:  AttemptSummary{Outcome: OutcomeCancelled, DurationMs: 5},
+			wantRows: map[string]rowWant{"a": {status: db.StatusFailed, errText: "cancelled by operator"}},
+		},
+		{name: "NoIDsNoop", runs: 1, summary: AttemptSummary{Outcome: OutcomeFailed}},
+		{
+			name: "CustomNoticePrefix", runs: 1,
+			rows:        []db.Message{stepMsg("a", db.StatusProcessing, 0, 0)},
+			summary:     AttemptSummary{Outcome: OutcomeTimeout, Reason: "stalled", NoticePrefix: "agent went quiet"},
+			wantNotices: []string{"agent went quiet: stalled"},
+			wantRows:    map[string]rowWant{"a": {status: db.StatusFailed, errText: "stalled"}},
+		},
+		{
+			name: "FailedDefaultReason", runs: 1,
+			rows:        []db.Message{stepMsg("a", db.StatusProcessing, 0, 0)},
+			summary:     AttemptSummary{Outcome: OutcomeFailed, NoticePrefix: "exhausted"},
+			wantNotices: []string{"exhausted: failed"},
+			wantRows:    map[string]rowWant{"a": {status: db.StatusFailed, errText: "failed"}},
+		},
+		{
+			name: "FailedNotifiesAndFailsActiveRows", runs: 1,
+			rows:        []db.Message{stepMsg("a", db.StatusProcessing, 1, 0), doneMsg("b", db.StatusCompleted, "", "ok")},
+			summary:     AttemptSummary{Outcome: OutcomeFailed, Reason: "agent exploded", DurationMs: 1200},
+			wantNotices: []string{"execution failed: agent exploded"},
+			wantRows:    map[string]rowWant{"a": {status: db.StatusFailed, errText: "agent exploded", retry: 1}, "b": {status: db.StatusCompleted}},
+		},
+		{
+			name: "TimeoutReplayNotifiesOnce", runs: 2,
+			rows:        []db.Message{stepMsg("a", db.StatusProcessing, 0, 0)},
+			summary:     AttemptSummary{Outcome: OutcomeTimeout, Reason: "[watchdog] inactivity timeout exceeded"},
+			wantNotices: []string{"execution timed out while processing the request: [watchdog] inactivity timeout exceeded"},
+			wantRows:    map[string]rowWant{"a": {status: db.StatusFailed, errText: "[watchdog] inactivity timeout exceeded"}},
+		},
+		{
+			name: "CancelledNoNotice", runs: 1,
+			rows:     []db.Message{stepMsg("a", db.StatusPending, 0, 0)},
+			summary:  AttemptSummary{Outcome: OutcomeCancelled},
+			wantRows: map[string]rowWant{"a": {status: db.StatusFailed, errText: "cancelled by operator"}},
+		},
+		{
+			name: "CompletedAllTerminal", runs: 1,
+			rows:     []db.Message{doneMsg("a", db.StatusCompleted, "", "ok")},
+			summary:  AttemptSummary{Outcome: OutcomeCompleted},
+			wantRows: map[string]rowWant{"a": {status: db.StatusCompleted}},
+		},
+		{
+			name: "CompletedWithOpenRowIsRetryable", runs: 1, wantErr: true,
+			rows:     []db.Message{stepMsg("a", db.StatusProcessing, 0, 0)},
+			summary:  AttemptSummary{Outcome: OutcomeCompleted},
+			wantRows: map[string]rowWant{"a": {status: db.StatusProcessing}},
+		},
+		{
+			name: "RescheduleLeavesRows", runs: 1,
+			rows:     []db.Message{stepMsg("a", db.StatusPending, 1, 0)},
+			summary:  AttemptSummary{Outcome: OutcomeReschedule},
+			wantRows: map[string]rowWant{"a": {status: db.StatusPending, retry: 1}},
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			store := setupTestStore(t)
+			seedMessages(t, store, tc.rows)
+			rec := &noticeRecorder{}
+			pool := stepPool(store, tc.noStore, tc.failMethod, tc.failErr, WorkerPoolConfig{DeliveryFunc: rec.deliver, NotifierFunc: func(_, _, desc string) string { return desc }})
+			ids := make([]string, len(tc.rows))
+			for i, m := range tc.rows {
+				ids[i] = m.ID
+			}
+			var err error
+			for range tc.runs {
+				err = pool.RecordBurstOutcome(context.Background(), ids, tc.summary)
+			}
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("RecordBurstOutcome err = %v, wantErr %v", err, tc.wantErr)
+			}
+			if got := rec.all(); strings.Join(got, "|") != strings.Join(tc.wantNotices, "|") {
+				t.Errorf("notices = %q, want %q", got, tc.wantNotices)
+			}
+			assertRows(t, store, tc.wantRows)
+		})
+	}
+}
+
+func TestRecordDispatchOutcome(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name       string
+		status     string
+		summary    AttemptSummary
+		wantErr    bool
+		wantStatus string
+		wantErrMsg string
+		failMethod string
+		failErr    error
+	}{
+		{name: "FailWriteErrorRetryable", status: db.StatusProcessing, summary: AttemptSummary{Outcome: OutcomeFailed, Reason: "boom"}, failMethod: "FailDispatchesIfActive", failErr: errStepTransient, wantErr: true, wantStatus: db.StatusProcessing},
+		{name: "TelemetryWriteErrorRetryable", status: db.StatusProcessing, summary: AttemptSummary{Outcome: OutcomeFailed, Reason: "boom", DurationMs: 9}, failMethod: "UpdateDispatchStatus", failErr: errStepTransient, wantErr: true, wantStatus: db.StatusFailed, wantErrMsg: "boom"},
+		{name: "VerifyReadErrorRetryable", status: db.StatusCompleted, summary: AttemptSummary{Outcome: OutcomeCompleted}, failMethod: "GetDispatch", failErr: errStepTransient, wantErr: true, wantStatus: db.StatusCompleted},
+		{name: "RescheduleNoop", status: db.StatusPending, summary: AttemptSummary{Outcome: OutcomeReschedule}, wantStatus: db.StatusPending},
+		{name: "FailedRecorded", status: db.StatusProcessing, summary: AttemptSummary{Outcome: OutcomeFailed, Reason: "boom", DurationMs: 50}, wantStatus: db.StatusFailed, wantErrMsg: "boom"},
+		{name: "TimeoutDefaultReason", status: db.StatusProcessing, summary: AttemptSummary{Outcome: OutcomeTimeout}, wantStatus: db.StatusFailed, wantErrMsg: "timeout"},
+		{name: "CompletedOpenRowRetryable", status: db.StatusProcessing, summary: AttemptSummary{Outcome: OutcomeCompleted}, wantErr: true, wantStatus: db.StatusProcessing},
+		{name: "AlreadyCompletedUntouched", status: db.StatusCompleted, summary: AttemptSummary{Outcome: OutcomeFailed, Reason: "late"}, wantStatus: db.StatusCompleted},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			store := setupTestStore(t)
+			if _, err := store.InsertDispatch(context.Background(), db.Dispatch{ID: "d1", Source: "test", Prompt: "p", Status: tc.status}); err != nil {
+				t.Fatal(err)
+			}
+			pool := stepPool(store, false, tc.failMethod, tc.failErr, WorkerPoolConfig{})
+			err := pool.RecordDispatchOutcome(context.Background(), []string{"d1"}, tc.summary)
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("err = %v, wantErr %v", err, tc.wantErr)
+			}
+			d, _ := store.GetDispatch(context.Background(), "d1")
+			if d == nil || d.Status != tc.wantStatus || d.ErrorMessage != tc.wantErrMsg {
+				t.Errorf("dispatch = %+v, want status=%s err=%q", d, tc.wantStatus, tc.wantErrMsg)
+			}
+		})
+	}
+}
+
+func TestRunBurstPostTurnHook(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name         string
+		rows         []db.Message
+		attempted    bool
+		outcome      TurnOutcome
+		metadata     map[string]string
+		wantCalled   bool
+		wantStatus   string
+		wantResponse string
+		wantError    string
+		wantMetaKey  string
+		failMethod   string
+		wantErr      bool
+	}{
+		{name: "ReadErrorRetryable", attempted: true, outcome: OutcomeCompleted, rows: []db.Message{doneMsg("a", db.StatusCompleted, "", "r")}, failMethod: "GetMessagesByID", wantErr: true},
+		{name: "NoRowsNoop", attempted: true, outcome: OutcomeFailed},
+		{name: "FailedSendsFailed", attempted: true, outcome: OutcomeFailed, rows: []db.Message{doneMsg("a", db.StatusFailed, "boom", "")}, wantCalled: true, wantStatus: "failed", wantError: "boom"},
+		{name: "CompletedSendsSuccess", attempted: true, outcome: OutcomeCompleted, metadata: map[string]string{"lane": "fast"}, rows: []db.Message{doneMsg("a", db.StatusCompleted, "", "the reply")}, wantCalled: true, wantStatus: "success", wantResponse: "the reply", wantMetaKey: "lane"},
+		{name: "TimeoutSendsTimeout", attempted: true, outcome: OutcomeTimeout, rows: []db.Message{doneMsg("a", db.StatusFailed, "[watchdog] stalled", "")}, wantCalled: true, wantStatus: "timeout", wantError: "[watchdog] stalled"},
+		{name: "NotAttemptedSkipsHook", attempted: false, outcome: OutcomeCompleted, rows: []db.Message{doneMsg("a", db.StatusCompleted, "[SKIPPED x]", "")}},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			store := setupTestStore(t)
+			seedMessages(t, store, tc.rows)
+			var mu sync.Mutex
+			var captured *PostTurnRequest
+			policy := config.ChannelPolicy{Mode: "thread", Hooks: config.ChannelHooksConfig{PostTurn: &config.WebhookEndpoint{URL: "http://sidecar.local/post", TimeoutMs: 1000}}}
+			pool := NewWorkerPool(WorkerPoolConfig{
+				Store:                store,
+				ResolveChannelPolicy: func(string, string) config.ChannelPolicy { return policy },
+				WebhookDispatcher: &mockWebhookDispatcher{callPostTurnHookFunc: func(_ context.Context, _ *config.WebhookEndpoint, req *PostTurnRequest) (*PostTurnResponse, error) {
+					mu.Lock()
+					captured = req
+					mu.Unlock()
+					return &PostTurnResponse{Acknowledged: true}, nil
+				}},
+			})
+			if tc.failMethod != "" {
+				store.FailNext(tc.failMethod, errStepTransient)
+			}
+			err := pool.RunBurstPostTurnHook(context.Background(), "thread-steps", []string{"a"}, tc.attempted, tc.outcome, tc.metadata)
+			assertStepErr(t, err, tc.wantErr, false)
+			mu.Lock()
+			defer mu.Unlock()
+			if (captured != nil) != tc.wantCalled {
+				t.Fatalf("hook called = %v, want %v", captured != nil, tc.wantCalled)
+			}
+			if captured == nil {
+				return
+			}
+			if captured.Status != tc.wantStatus || captured.ResponseText != tc.wantResponse || captured.Error != tc.wantError {
+				t.Errorf("post_turn = %+v, want status=%s response=%q error=%q", captured, tc.wantStatus, tc.wantResponse, tc.wantError)
+			}
+			if _, ok := captured.Metadata[tc.wantMetaKey]; tc.wantMetaKey != "" && !ok {
+				t.Errorf("metadata %v missing %s", captured.Metadata, tc.wantMetaKey)
+			}
+		})
+	}
+}
+
+func TestPublishDispatchOutcome(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name         string
+		outcome      TurnOutcome
+		runs         int
+		wantSubjects []string
+		dispatchID   string
+		noBus        bool
+		failMethod   string
+		wantErr      bool
+	}{
+		{name: "FailedPublishesWithError", outcome: OutcomeFailed, runs: 1, wantSubjects: []string{pubsub.SubjectAerialDispatchPrefix + "failed"}},
+		{name: "ReplayPublishesSameMsgID", outcome: OutcomeCompleted, runs: 2, wantSubjects: []string{pubsub.SubjectAerialDispatchPrefix + "completed", pubsub.SubjectAerialDispatchPrefix + "completed"}},
+		{name: "MissingDispatchSkipped", outcome: OutcomeCompleted, runs: 1, dispatchID: "nope"},
+		{name: "NoBusSkipped", outcome: OutcomeCompleted, runs: 1, noBus: true},
+		{name: "ReadErrorRetryable", outcome: OutcomeCompleted, runs: 1, failMethod: "GetDispatch", wantErr: true},
+		{name: "CompletedPublishes", outcome: OutcomeCompleted, runs: 1, wantSubjects: []string{pubsub.SubjectAerialDispatchPrefix + "completed"}},
+		{name: "TimeoutPublishes", outcome: OutcomeTimeout, runs: 1, wantSubjects: []string{pubsub.SubjectAerialDispatchPrefix + "timeout"}},
+		{name: "CancelledSkipped", outcome: OutcomeCancelled, runs: 1},
+		{name: "EmptySkipped", outcome: OutcomeEmpty, runs: 1},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			store := setupTestStore(t)
+			if _, err := store.InsertDispatch(context.Background(), db.Dispatch{ID: "d1", Source: "vanadis", Prompt: "p", Status: db.StatusCompleted, DurationMs: 10}); err != nil {
+				t.Fatal(err)
+			}
+			memBus := pubsub.NewMemoryBus()
+			defer memBus.Close()
+			bus := &trackingBus{Bus: memBus}
+			cfg := WorkerPoolConfig{EventBus: bus}
+			if tc.noBus {
+				cfg.EventBus = nil
+			}
+			pool := stepPool(store, false, tc.failMethod, errStepTransient, cfg)
+			id := "d1"
+			if tc.dispatchID != "" {
+				id = tc.dispatchID
+			}
+			var err error
+			for range tc.runs {
+				err = pool.PublishDispatchOutcome(context.Background(), id, tc.outcome)
+			}
+			assertStepErr(t, err, tc.wantErr, false)
+			bus.mu.Lock()
+			defer bus.mu.Unlock()
+			if strings.Join(bus.publishes, ",") != strings.Join(tc.wantSubjects, ",") {
+				t.Errorf("published %v, want %v", bus.publishes, tc.wantSubjects)
+			}
+		})
+	}
+}
+
+func TestStringifyHookMetadata(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name string
+		in   map[string]any
+		want map[string]string
+	}{
+		{name: "Nil", in: nil, want: nil},
+		{name: "Mixed", in: map[string]any{"s": "x", "n": 3, "b": true, "o": map[string]any{"k": "v"}}, want: map[string]string{"s": "x", "n": "3", "b": "true", "o": `{"k":"v"}`}},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			got := stringifyHookMetadata(tc.in)
+			if len(got) != len(tc.want) {
+				t.Fatalf("got %v, want %v", got, tc.want)
+			}
+			for k, v := range tc.want {
+				if got[k] != v {
+					t.Errorf("[%s] = %q, want %q", k, got[k], v)
+				}
+			}
+		})
+	}
+}
+
+func TestStopBurstTurn(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name       string
+		rows       []db.Message
+		runs       int
+		failMethod string
+		noStore    bool
+		wantErr    bool
+		wantStop   bool
+		wantRows   map[string]rowWant
+	}{
+		{name: "NoStoreTerminal", runs: 1, noStore: true, wantErr: true, rows: []db.Message{stepMsg("a", db.StatusProcessing, 0, 0)}, wantRows: map[string]rowWant{"a": {status: db.StatusProcessing}}},
+		{name: "FailWriteErrorRetryable", runs: 1, failMethod: "FailMessagesIfActive", wantErr: true, wantStop: true, rows: []db.Message{stepMsg("a", db.StatusProcessing, 0, 0)}, wantRows: map[string]rowWant{"a": {status: db.StatusProcessing}}},
+		{
+			name: "ReplayCancelsActiveRowsOnceWithoutNotice", runs: 2, wantStop: true,
+			rows:     []db.Message{stepMsg("a", db.StatusProcessing, 0, 0), stepMsg("b", db.StatusPending, 0, 0), doneMsg("c", db.StatusCompleted, "", "ok")},
+			wantRows: map[string]rowWant{"a": {status: db.StatusFailed, errText: CancelledByOperatorReason}, "b": {status: db.StatusFailed, errText: CancelledByOperatorReason}, "c": {status: db.StatusCompleted}},
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			store := setupTestStore(t)
+			seedMessages(t, store, tc.rows)
+			rec := &noticeRecorder{}
+			pool := stepPool(store, tc.noStore, tc.failMethod, errStepTransient, WorkerPoolConfig{DeliveryFunc: rec.deliver, NotifierFunc: func(_, _, desc string) string { return desc }})
+			var err error
+			for range tc.runs {
+				err = pool.StopBurstTurn(context.Background(), "turn-s", []string{"a", "b", "c"})
+			}
+			assertStepErr(t, err, tc.wantErr, tc.noStore)
+			if got := pool.Turns().Tombstoned("turn-s"); got != tc.wantStop {
+				t.Errorf("tombstoned = %v, want %v", got, tc.wantStop)
+			}
+			if got := rec.all(); len(got) != 0 {
+				t.Errorf("notices = %q, want none", got)
+			}
+			assertRows(t, store, tc.wantRows)
+		})
+	}
+}
+
+func TestFailBurstTurn(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name        string
+		rows        []db.Message
+		runs        int
+		noStore     bool
+		wantErr     bool
+		wantNotices []string
+		wantRows    map[string]rowWant
+	}{
+		{name: "NoStoreTerminal", runs: 1, noStore: true, wantErr: true, rows: []db.Message{stepMsg("a", db.StatusProcessing, 0, 0)}, wantRows: map[string]rowWant{"a": {status: db.StatusProcessing}}},
+		{
+			name: "ReplayNotifiesOnce", runs: 2,
+			rows:        []db.Message{stepMsg("a", db.StatusProcessing, 0, 0), doneMsg("b", db.StatusCompleted, "", "ok")},
+			wantNotices: []string{"execution failed: integrity violation"},
+			wantRows:    map[string]rowWant{"a": {status: db.StatusFailed, errText: "integrity violation"}, "b": {status: db.StatusCompleted}},
+		},
+		{name: "AllTerminalNoNotice", runs: 1, rows: []db.Message{doneMsg("a", db.StatusCompleted, "", "ok")}, wantRows: map[string]rowWant{"a": {status: db.StatusCompleted}}},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			store := setupTestStore(t)
+			seedMessages(t, store, tc.rows)
+			rec := &noticeRecorder{}
+			pool := stepPool(store, tc.noStore, "", nil, WorkerPoolConfig{DeliveryFunc: rec.deliver, NotifierFunc: func(_, _, desc string) string { return desc }})
+			ids := make([]string, len(tc.rows))
+			for i, m := range tc.rows {
+				ids[i] = m.ID
+			}
+			var err error
+			for range tc.runs {
+				err = pool.FailBurstTurn(context.Background(), "turn-f", ids, "integrity violation")
+			}
+			assertStepErr(t, err, tc.wantErr, tc.noStore)
+			if got := rec.all(); strings.Join(got, "|") != strings.Join(tc.wantNotices, "|") {
+				t.Errorf("notices = %q, want %q", got, tc.wantNotices)
+			}
+			if !tc.noStore && !pool.Turns().Tombstoned("turn-f") {
+				t.Error("turn not tombstoned")
+			}
+			assertRows(t, store, tc.wantRows)
+		})
+	}
+}
+
+func TestStopDispatchTurn(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name       string
+		status     string
+		noStore    bool
+		wantErr    bool
+		wantStatus string
+		wantErrMsg string
+	}{
+		{name: "NoStoreTerminal", status: db.StatusProcessing, noStore: true, wantErr: true, wantStatus: db.StatusProcessing},
+		{name: "ActiveRowCancelled", status: db.StatusProcessing, wantStatus: db.StatusFailed, wantErrMsg: CancelledByOperatorReason},
+		{name: "CompletedRowUntouched", status: db.StatusCompleted, wantStatus: db.StatusCompleted},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			store := setupTestStore(t)
+			if _, err := store.InsertDispatch(context.Background(), db.Dispatch{ID: "d1", Source: "test", Prompt: "p", Status: tc.status}); err != nil {
+				t.Fatal(err)
+			}
+			pool := stepPool(store, tc.noStore, "", nil, WorkerPoolConfig{})
+			err := pool.StopDispatchTurn(context.Background(), "turn-d", []string{"d1"})
+			assertStepErr(t, err, tc.wantErr, tc.noStore)
+			d, _ := store.GetDispatch(context.Background(), "d1")
+			if d == nil || d.Status != tc.wantStatus || d.ErrorMessage != tc.wantErrMsg {
+				t.Errorf("dispatch = %+v, want status=%s err=%q", d, tc.wantStatus, tc.wantErrMsg)
+			}
+		})
+	}
+}
+
+func TestFailDispatchTurn(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name         string
+		status       string
+		ids          []string
+		noStore      bool
+		failMethod   string
+		wantErr      bool
+		wantStatus   string
+		wantSubjects []string
+	}{
+		{name: "NoStoreTerminal", status: db.StatusProcessing, ids: []string{"d1"}, noStore: true, wantErr: true, wantStatus: db.StatusProcessing},
+		{name: "FailWriteErrorRetryable", status: db.StatusProcessing, ids: []string{"d1"}, failMethod: "FailDispatchesIfActive", wantErr: true, wantStatus: db.StatusProcessing},
+		{name: "ActiveRowFailedAndPublished", status: db.StatusProcessing, ids: []string{"d1"}, wantStatus: db.StatusFailed, wantSubjects: []string{pubsub.SubjectAerialDispatchPrefix + "failed"}},
+		{name: "CompletedRowPublishesCompleted", status: db.StatusCompleted, ids: []string{"d1"}, wantStatus: db.StatusCompleted, wantSubjects: []string{pubsub.SubjectAerialDispatchPrefix + "completed"}},
+		{name: "MissingRowSkipped", status: db.StatusCompleted, ids: []string{"nope"}, wantStatus: db.StatusCompleted},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			store := setupTestStore(t)
+			if _, err := store.InsertDispatch(context.Background(), db.Dispatch{ID: "d1", Source: "vanadis", Prompt: "p", Status: tc.status}); err != nil {
+				t.Fatal(err)
+			}
+			memBus := pubsub.NewMemoryBus()
+			defer memBus.Close()
+			bus := &trackingBus{Bus: memBus}
+			pool := stepPool(store, tc.noStore, tc.failMethod, errStepTransient, WorkerPoolConfig{EventBus: bus})
+			err := pool.FailDispatchTurn(context.Background(), "turn-d", tc.ids, "integrity violation")
+			assertStepErr(t, err, tc.wantErr, tc.noStore)
+			d, _ := store.GetDispatch(context.Background(), "d1")
+			if d == nil || d.Status != tc.wantStatus {
+				t.Errorf("dispatch = %+v, want status=%s", d, tc.wantStatus)
+			}
+			bus.mu.Lock()
+			defer bus.mu.Unlock()
+			if strings.Join(bus.publishes, ",") != strings.Join(tc.wantSubjects, ",") {
+				t.Errorf("published %v, want %v", bus.publishes, tc.wantSubjects)
+			}
+		})
+	}
+}
+
+func TestRefreshBurstThreadSummary(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name       string
+		rows       []db.Message
+		outcome    TurnOutcome
+		failMethod string
+		noStore    bool
+		wantErr    bool
+	}{
+		{name: "NoStoreTerminal", noStore: true, outcome: OutcomeCompleted, wantErr: true},
+		{name: "ReadErrorRetryable", outcome: OutcomeCompleted, rows: []db.Message{doneMsg("a", db.StatusCompleted, "", "r")}, failMethod: "GetMessagesByID", wantErr: true},
+		{name: "NoRowsNoop", outcome: OutcomeCompleted},
+		{name: "FailedTurnSkipsRefresh", outcome: OutcomeFailed, rows: []db.Message{doneMsg("a", db.StatusFailed, "boom", "")}},
+		{name: "CompletedWithoutSessionSkipsRefresh", outcome: OutcomeCompleted, rows: []db.Message{doneMsg("a", db.StatusCompleted, "", "r")}},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			store := setupTestStore(t)
+			seedMessages(t, store, tc.rows)
+			pool := stepPool(store, tc.noStore, tc.failMethod, errStepTransient, WorkerPoolConfig{})
+			err := pool.RefreshBurstThreadSummary(context.Background(), "thread-steps", []string{"a"}, tc.outcome)
+			assertStepErr(t, err, tc.wantErr, tc.noStore)
+		})
+	}
+}
+
+// liveTurn is what driving one turn through the TurnRunner step functions returned.
+type liveTurn struct {
+	started StartedTurn
+	prep    TurnPrep
+	kinds   []string
+	last    AttemptResult
+	outcome TurnOutcome
+	err     error
+}
+
+// runLiveTurn drives one turn through the TurnRunner step functions in the order executeTurn
+// journals them: record-started, prep, run-1..n chained by nextAttempt, record-outcome and the
+// post-turn steps. It runs without Restate and skips the backoff sleeps; a step error stops it.
+func runLiveTurn(ctx context.Context, subj runnerSubject, maxAttempts int, turnID string) liveTurn {
+	var lt liveTurn
+	if lt.started, lt.err = subj.recordStarted(ctx); lt.err != nil || len(lt.started.IDs) == 0 {
+		lt.outcome = OutcomeEmpty
+		return lt
+	}
+	tp := turnProgress{ids: lt.started.IDs}
+	if lt.prep, lt.err = subj.prep(ctx, turnID, lt.started.IDs); lt.err != nil {
+		return lt
+	}
+	tp.hookMetadata = lt.prep.HookMetadata
+	if decided, err := applyPrepDecision(lt.prep, &tp); err != nil || decided {
+		lt.outcome, lt.err = tp.outcome, err
+		return lt
+	}
+	in := subj.attemptInput(turnID, lt.started.IDs, lt.prep, lt.started.BaseRetry+1)
+	for {
+		res, err := subj.attempt(ctx, in)
+		lt.kinds, lt.last = append(lt.kinds, res.Kind), res
+		if err != nil {
+			if restate.IsTerminalError(err) {
+				lt.outcome = OutcomeFailed
+				if failErr := subj.fail(ctx, turnID, tp.ids, err.Error(), tp.hookMetadata); failErr != nil {
+					lt.err = failErr
+				}
+				return lt
+			}
+			lt.err = err
+			return lt
+		}
+		tp.attempted, tp.last = true, res
+		action, next, outcome, err := nextAttempt(in, res, maxAttempts)
+		if err != nil {
+			lt.err = err
+			return lt
+		}
+		if action == actionDone {
+			tp.outcome = outcome
+			break
+		}
+		in = next
+	}
+	lt.outcome = tp.outcome
+	if lt.err = subj.recordOutcome(ctx, tp.ids, outcomeSummary(tp)); lt.err != nil {
+		return lt
+	}
+	for _, step := range subj.afterSteps(tp) {
+		if lt.err = step.fn(ctx); lt.err != nil {
+			return lt
+		}
+	}
+	return lt
+}
+
+// runLiveBurst drives one burst turn of threadID over ids through the TurnRunner steps.
+func runLiveBurst(ctx context.Context, pool *WorkerPool, threadID, turnID string, ids ...string) liveTurn {
+	return runLiveTurn(ctx, burstRunner{steps: pool, threadID: threadID, ids: normalizeStepIDs(ids)}, pool.maxAttempts(), turnID)
+}
+
+// runLiveDispatch drives one dispatch turn through the TurnRunner steps.
+func runLiveDispatch(ctx context.Context, pool *WorkerPool, sessionKey, turnID, dispatchID string) liveTurn {
+	return runLiveTurn(ctx, dispatchRunner{steps: pool, sessionKey: sessionKey, dispatchID: dispatchID, ids: []string{dispatchID}}, pool.maxAttempts(), turnID)
+}
+
+func TestTurnRunner_QuotaPause_PreservesEffort(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name           string
+		effort         string
+		expectedEffort string
+	}{
+		{name: "LowEffort", effort: "low", expectedEffort: "low"},
+		{name: "MediumEffort", effort: "medium", expectedEffort: "medium"},
+		{name: "HighEffort", effort: "high", expectedEffort: "high"},
+		{name: "DefaultEffort", effort: "", expectedEffort: "high"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			store, tmpHome, tempData := setupTestStore(t), t.TempDir(), t.TempDir()
+			quotaErrSpawner := newScriptedDaemonSpawner("11111111-2222-3333-4444-555555555555",
+				`{"event":"result","result":{"status":"ERROR","exit_code":1,"error":"RESOURCE_EXHAUSTED (code 429): Google Gemini API quota reached. Resets in 30m.","stderr":"RESOURCE_EXHAUSTED (code 429): Google Gemini API quota reached. Resets in 30m."}}`+"\n",
+			)
+			primaryPool := runner.NewUnifiedProcessPool(runner.PoolConfig{Model: "gemini-3.7-pro"}, quotaErrSpawner)
+			defer primaryPool.Close()
+			lowPool := runner.NewUnifiedProcessPool(runner.PoolConfig{Model: "gemini-3.8-flash-low"}, quotaErrSpawner)
+			defer lowPool.Close()
+
+			cfg := newTestConfig(func(d *config.ConfigData) { d.DataDir, d.LowEffortModel = tempData, "gemini-3.8-flash-low" })
+			haroBus, getOneShots := newMockHaroOneShotBus(t)
+			pool := New(cfg, WorkerPoolConfig{
+				ProcessPool:          primaryPool,
+				LowEffortProcessPool: lowPool,
+				SessionManager:       session.New(tmpHome, tempData),
+				Store:                store,
+				MaxAttempts:          1,
+				EventBus:             haroBus,
+			})
+			defer pool.Stop()
+
+			threadID := "thread-runner-quota-" + tc.name
+			msg := db.Message{ID: "msg-runner-quota-" + tc.name, ThreadID: threadID, Content: "run task", Effort: tc.effort, Status: db.StatusPending, CreatedAt: time.Now()}
+			if err := store.InsertMessage(context.Background(), msg); err != nil {
+				t.Fatalf("InsertMessage: %v", err)
+			}
+
+			lt := runLiveBurst(context.Background(), pool, threadID, "turn-1", msg.ID)
+			if lt.outcome != OutcomeFailed {
+				t.Fatalf("turn outcome = %s (err = %v), want failed", lt.outcome, lt.err)
+			}
+			schedules := getOneShots(threadID)
+			if len(schedules) != 1 || schedules[0].Effort != tc.expectedEffort {
+				t.Fatalf("expected 1 schedule with effort %q, got %v", tc.expectedEffort, schedules)
+			}
+		})
+	}
+}
+
+func newTurnTraceMockSpawner(convID string, onTurn func()) *mockDaemonSpawner {
+	return &mockDaemonSpawner{
+		SpawnFn: func(ctx context.Context, cfg runner.DaemonConfig) (io.WriteCloser, io.ReadCloser, io.ReadCloser, runner.ProcessHandle, error) {
+			inR, inW := io.Pipe()
+			outR, outW := io.Pipe()
+			errR, errW := io.Pipe()
+			defer errW.Close()
+			go func() {
+				_, _ = fmt.Fprintf(outW, `{"event":"init","conversation_id":%q}`+"\n", convID)
+				scanner := bufio.NewScanner(inR)
+				for scanner.Scan() {
+					_, _ = outW.Write([]byte(`{"event":"step_update","step_update":{"step_index":1,"type":"tool_call","tool_name":"run_command"}}` + "\n"))
+					if onTurn != nil {
+						onTurn()
+					}
+					_, _ = outW.Write([]byte(`{"event":"step_update","step_update":{"step_index":1,"type":"tool_call","state":"DONE"}}` + "\n"))
+					_, _ = outW.Write([]byte(`{"event":"result","result":{"status":"SUCCESS","response":"all done","usage":{"input_tokens":7,"output_tokens":3,"total_tokens":10}}}` + "\n"))
+				}
+			}()
+			return inW, outR, errR, newMockProcessHandle(12347), nil
+		},
+	}
+}
+
+type turnTraceCase struct {
+	name        string
+	isDispatch  bool
+	traceparent string
+	wantTraceID string
+	wantParent  string
+}
+
+func runTraceTurn(t *testing.T, pool *WorkerPool, store db.Store, tc turnTraceCase, convID string) {
+	t.Helper()
+	if tc.isDispatch {
+		d := db.Dispatch{
+			ID:          "disp-trace-" + strings.ReplaceAll(tc.name, " ", "-"),
+			SessionID:   convID,
+			Prompt:      "run task",
+			Status:      db.StatusPending,
+			CreatedAt:   time.Now().Add(-500 * time.Millisecond),
+			Source:      "cron",
+			TargetID:    "default",
+			Traceparent: tc.traceparent,
+		}
+		if _, err := store.InsertDispatch(context.Background(), d); err != nil {
+			t.Fatalf("InsertDispatch: %v", err)
+		}
+		lt := runLiveDispatch(context.Background(), pool, convID, "turn-disp-1", d.ID)
+		if lt.outcome != OutcomeCompleted {
+			t.Fatalf("dispatch turn outcome = %s (err = %v), want completed", lt.outcome, lt.err)
+		}
+		return
+	}
+	msg := db.Message{
+		ID:          "msg-trace-" + strings.ReplaceAll(tc.name, " ", "-"),
+		ThreadID:    "thread-trace-" + strings.ReplaceAll(tc.name, " ", "-"),
+		Content:     "run task",
+		Status:      db.StatusPending,
+		CreatedAt:   time.Now().Add(-500 * time.Millisecond),
+		Traceparent: tc.traceparent,
+	}
+	if err := store.InsertMessage(context.Background(), msg); err != nil {
+		t.Fatalf("InsertMessage: %v", err)
+	}
+	lt := runLiveBurst(context.Background(), pool, msg.ThreadID, "turn-burst-1", msg.ID)
+	if lt.outcome != OutcomeCompleted {
+		t.Fatalf("burst turn outcome = %s (err = %v), want completed", lt.outcome, lt.err)
+	}
+}
+
+func assertTraceRootParent(t *testing.T, root sdktrace.ReadOnlySpan, tc turnTraceCase) {
+	t.Helper()
+	if tc.wantTraceID == "" {
+		if root.Parent().IsValid() {
+			t.Errorf("expected root span to have invalid parent for untraced turn, got %v", root.Parent())
+		}
+		return
+	}
+	if !root.Parent().IsValid() {
+		t.Fatalf("root span parent is not valid, want remote parent %s", tc.wantTraceID)
+	}
+	if got := root.SpanContext().TraceID().String(); got != tc.wantTraceID {
+		t.Errorf("root trace ID = %s, want %s", got, tc.wantTraceID)
+	}
+	if got := root.Parent().TraceID().String(); got != tc.wantTraceID {
+		t.Errorf("parent trace ID = %s, want %s", got, tc.wantTraceID)
+	}
+	if got := root.Parent().SpanID().String(); got != tc.wantParent {
+		t.Errorf("parent span ID = %s, want %s", got, tc.wantParent)
+	}
+}
+
+func assertTraceChildren(t *testing.T, byName map[string]sdktrace.ReadOnlySpan, root sdktrace.ReadOnlySpan) {
+	t.Helper()
+	for _, childName := range []string{spanQueueWait, spanLease, runner.OperationChat, "execute_tool run_command"} {
+		s, ok := byName[childName]
+		if !ok {
+			t.Errorf("missing expected child span %q", childName)
+			continue
+		}
+		if s.SpanContext().TraceID() != root.SpanContext().TraceID() {
+			t.Errorf("child span %q trace ID = %v, want root trace ID %v", childName, s.SpanContext().TraceID(), root.SpanContext().TraceID())
+		}
+	}
+}
+
+func assertTraceAttributes(t *testing.T, root sdktrace.ReadOnlySpan) {
+	t.Helper()
+	attrs := make(map[attribute.Key]attribute.Value, len(root.Attributes()))
+	for _, kv := range root.Attributes() {
+		attrs[kv.Key] = kv.Value
+	}
+	if attrs[runner.AttrGenAIUsageInputTokens].AsInt64() != 7 {
+		t.Errorf("input tokens = %v, want 7", attrs[runner.AttrGenAIUsageInputTokens])
+	}
+	if attrs[runner.AttrGenAIUsageOutputTokens].AsInt64() != 3 {
+		t.Errorf("output tokens = %v, want 3", attrs[runner.AttrGenAIUsageOutputTokens])
+	}
+	if inMsgs := attrs[tracing.AttrGenAIInputMessages].AsString(); inMsgs == "" {
+		t.Errorf("gen_ai.input.messages attribute is missing or empty")
+	}
+	if outMsgs := attrs[tracing.AttrGenAIOutputMessages].AsString(); outMsgs == "" {
+		t.Errorf("gen_ai.output.messages attribute is missing or empty")
+	}
+}
+
+func assertActiveTurnStatus(t *testing.T, duringSpan trace.SpanContext, root sdktrace.ReadOnlySpan, daemon string, reg *runner.ActiveTurnRegistry) {
+	t.Helper()
+	if !duringSpan.IsValid() || !duringSpan.Equal(root.SpanContext()) {
+		t.Errorf("during turn registered span = %v, want root %v", duringSpan, root.SpanContext())
+	}
+	if daemon == "" {
+		t.Errorf("no daemon was registered in ActiveTurnRegistry during turn")
+	} else if _, ok := reg.Get(daemon); ok {
+		t.Errorf("daemon %q still registered in ActiveTurnRegistry after completion", daemon)
+	}
+}
+
+func TestTurnRunner_EmitsTurnTraceAndRegistersActiveTurn(t *testing.T) {
+	t.Parallel()
+	tests := []turnTraceCase{
+		{
+			name:        "traced burst",
+			isDispatch:  false,
+			traceparent: "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01",
+			wantTraceID: "4bf92f3577b34da6a3ce929d0e0e4736",
+			wantParent:  "00f067aa0ba902b7",
+		},
+		{
+			name:        "untraced burst",
+			isDispatch:  false,
+			traceparent: "",
+		},
+		{
+			name:        "dispatch",
+			isDispatch:  true,
+			traceparent: "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01",
+			wantTraceID: "4bf92f3577b34da6a3ce929d0e0e4736",
+			wantParent:  "00f067aa0ba902b7",
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			store, tmpHome, tempData := setupTestStore(t), t.TempDir(), t.TempDir()
+			registry := runner.NewActiveTurnRegistry()
+			rec := tracetest.NewSpanRecorder()
+			tp := sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(rec))
+
+			var onTurnMu sync.Mutex
+			var duringTurnSpan trace.SpanContext
+			var capturedDaemon string
+			convID := "c1111111-2222-3333-4444-555555555555"
+
+			spawner := newTurnTraceMockSpawner(convID, func() {
+				onTurnMu.Lock()
+				defer onTurnMu.Unlock()
+				if daemon, _, ok := registry.DaemonByConversation(convID); ok {
+					capturedDaemon = daemon
+					duringTurnSpan, _ = registry.Get(daemon)
+				}
+			})
+
+			procPool := runner.NewUnifiedProcessPool(runner.PoolConfig{
+				DefaultModel: "gemini-2.5-flash",
+			}, spawner)
+			defer procPool.Close()
+
+			pool := New(newTestConfig(func(d *config.ConfigData) { d.DataDir = tempData }), WorkerPoolConfig{
+				ProcessPool:    procPool,
+				SessionManager: session.New(tmpHome, tempData),
+				Store:          store,
+				TracerProvider: tp,
+				ActiveTurns:    registry,
+				TraceContent:   true,
+			})
+			defer pool.Stop()
+
+			runTraceTurn(t, pool, store, tc, convID)
+
+			var root sdktrace.ReadOnlySpan
+			byName := make(map[string]sdktrace.ReadOnlySpan)
+			for _, s := range rec.Ended() {
+				if s.Name() == runner.OperationInvokeAgent && (!s.Parent().IsValid() || s.Parent().IsRemote()) {
+					root = s
+				} else {
+					byName[s.Name()] = s
+				}
+			}
+			if root == nil {
+				t.Fatalf("ended invoke_agent root span not found in %d spans: %v", len(rec.Ended()), rec.Ended())
+			}
+
+			assertTraceRootParent(t, root, tc)
+			assertTraceChildren(t, byName, root)
+			assertTraceAttributes(t, root)
+			assertActiveTurnStatus(t, duringTurnSpan, root, capturedDaemon, registry)
+		})
+	}
+}

@@ -24,6 +24,8 @@ import (
 
 	"github.com/jackc/pgx/v5"
 
+	"github.com/azylman/aerial/pkg/buildplan"
+	"github.com/azylman/aerial/pkg/strutil"
 	"github.com/azylman/aerial/services/vanadis-restate/internal/model"
 )
 
@@ -59,11 +61,11 @@ func (s *Store) attachToExistingChunk(ctx context.Context, chunkID string, req A
 		return "", "", "", fmt.Errorf("check chunk mode %s: %w", chunkID, chkErr)
 	}
 	if mode == chunkModeAction {
-		repo := NormalizeRepo(req.Repo)
+		repo := buildplan.TrimRepo(req.Repo)
 		if repo == "" {
 			return "", "", "", fmt.Errorf("%w: repo is required to attach PR to action chunk", ErrInvalidBuildInput)
 		}
-		candidates := RepoMatchCandidates(repo)
+		candidates := RepoMatchCandidates(s.gitHubOwner, repo)
 		const qAction = `UPDATE vanadis_chunks c SET repo = $1, pr_number = $2, status = CASE WHEN c.status = 'failed' OR (c.repo = ANY($4) AND c.pr_number = $2 AND c.status IN ('ci_failed', 'conflict', 'merged', 'synced', 'deploying', 'deployed', 'deploy_failed', 'completed')) THEN c.status ELSE 'pr_opened' END, banner = CASE WHEN c.status IN ('ci_failed', 'conflict') AND (NOT (c.repo = ANY($4)) OR c.pr_number IS DISTINCT FROM $2) THEN '' ELSE c.banner END, started_at = COALESCE(c.started_at, CURRENT_TIMESTAMP), updated_at = CURRENT_TIMESTAMP FROM vanadis_builds b WHERE c.build_id = b.id AND c.id = $3 AND c.status != 'cancelled' AND (c.repo = '' OR c.repo = ANY($4)) AND (c.status NOT IN ('merged', 'synced', 'deploying', 'deployed', 'deploy_failed', 'completed') OR (c.repo = ANY($4) AND c.pr_number = $2)) AND b.status NOT IN ('cancelled', 'completed') RETURNING b.id, c.id, b.thread_id;`
 		var buildID, returnChunkID, threadID string
 		err := s.db.QueryRow(ctx, qAction, repo, req.PRNumber, chunkID, candidates).Scan(&buildID, &returnChunkID, &threadID)
@@ -111,11 +113,11 @@ func (s *Store) attachPRTransaction(ctx context.Context, chunkID string, req Att
 		return "", "", "", ErrChunkNotFound
 	}
 	c := *selected
-	if !AttachmentMatches(c, b, req) {
+	if !AttachmentMatches(s.gitHubOwner, c, b, req) {
 		return "", "", "", ErrBuildConflict
 	}
 
-	recoverWorker := firstWorkerFailure(c)
+	recoverWorker := firstWorkerFailure(c, req.PRNumber)
 	if recoverWorker && !attachmentRecoveryAllowed(b, chunks, c.ID) {
 		return "", "", "", ErrBuildConflict
 	}
@@ -137,7 +139,7 @@ func (s *Store) attachPRTransaction(ctx context.Context, chunkID string, req Att
 }
 
 func (s *Store) attachStandalonePR(ctx context.Context, req AttachChunkPRRequest) (string, string, string, error) {
-	repo := NormalizeRepo(req.Repo)
+	repo := buildplan.TrimRepo(req.Repo)
 	if repo == "" {
 		return "", "", "", fmt.Errorf("%w: repo is required for standalone attach", ErrInvalidBuildInput)
 	}
@@ -150,7 +152,7 @@ func (s *Store) attachStandalonePR(ctx context.Context, req AttachChunkPRRequest
 			slog.ErrorContext(ctx, "[vanadis] standalone attach tx rollback error", "error", rbErr)
 		}
 	}()
-	candidates := RepoMatchCandidates(repo)
+	candidates := RepoMatchCandidates(s.gitHubOwner, repo)
 	const findExisting = `SELECT c.build_id, c.id, b.thread_id FROM vanadis_chunks c JOIN vanadis_builds b ON c.build_id = b.id WHERE c.repo = ANY($1) AND c.pr_number = $2 AND c.status != 'cancelled' LIMIT 1;`
 	var existingBuildID, existingChunkID, existingThreadID string
 	fErr := tx.QueryRow(ctx, findExisting, candidates, req.PRNumber).Scan(&existingBuildID, &existingChunkID, &existingThreadID)
@@ -163,13 +165,14 @@ func (s *Store) attachStandalonePR(ctx context.Context, req AttachChunkPRRequest
 	if !errors.Is(fErr, pgx.ErrNoRows) {
 		return "", "", "", fmt.Errorf("find existing pr attach %s#%d: %w", repo, req.PRNumber, fErr)
 	}
-	buildID := model.GenerateBuildID()
+	buildID := buildplan.GenerateBuildID()
 	chunkID := buildID + "-chunk-1"
-	title := FirstNonEmpty(strings.TrimSpace(req.Title), fmt.Sprintf("PR #%d: %s", req.PRNumber, model.CleanRepoName(repo)))
+	title := strutil.FirstNonEmpty(strings.TrimSpace(req.Title), fmt.Sprintf("PR #%d: %s", req.PRNumber, model.CleanRepoName(repo)))
 	threadID := model.NormalizeDiscordThreadID(req.TargetID)
 	now := time.Now().UTC()
 	build := model.VanadisBuild{
 		ID:        buildID,
+		Agent:     NormalizeRunnerAgent(req.Agent),
 		ThreadID:  threadID,
 		Tier:      0,
 		Title:     title,
@@ -195,8 +198,8 @@ func (s *Store) attachStandalonePR(ctx context.Context, req AttachChunkPRRequest
 		CreatedAt:    now,
 		UpdatedAt:    now,
 	}
-	bQ := `INSERT INTO vanadis_builds (id, thread_id, tier, title, objective, shared_context, status, status_message_id, quiet, created_at, updated_at) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11);`
-	if _, err := tx.Exec(ctx, bQ, build.ID, build.ThreadID, build.Tier, build.Title, build.Objective, "", build.Status, "", build.Quiet, now, now); err != nil {
+	bQ := `INSERT INTO vanadis_builds (id, agent, thread_id, tier, title, objective, shared_context, status, status_message_id, quiet, created_at, updated_at) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12);`
+	if _, err := tx.Exec(ctx, bQ, build.ID, build.Agent, build.ThreadID, build.Tier, build.Title, build.Objective, "", build.Status, "", build.Quiet, now, now); err != nil {
 		return "", "", "", fmt.Errorf("insert standalone build %s: %w", buildID, err)
 	}
 	if err := InsertBuildChunk(ctx, tx, buildID, chunk, InsertChunkSQL); err != nil {
@@ -219,7 +222,7 @@ func (s *Store) resolveAttachChunkPRError(ctx context.Context, chunkID, repo str
 	if cancErr == nil && isCancelled {
 		return fmt.Errorf("%w: chunk %s or parent build is in terminal status", ErrBuildConflict, chunkID)
 	}
-	candidates := RepoMatchCandidates(repo)
+	candidates := RepoMatchCandidates(s.gitHubOwner, repo)
 	var repoMismatch bool
 	mismatchErr := s.db.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM vanadis_chunks WHERE id = $1 AND repo != '' AND NOT (repo = ANY($2)));`, chunkID, candidates).Scan(&repoMismatch)
 	if mismatchErr == nil && repoMismatch {
@@ -233,15 +236,15 @@ func attachmentRecoveryAllowed(b model.VanadisBuild, chunks []model.VanadisChunk
 		return false
 	}
 	for _, sibling := range chunks {
-		if sibling.ID != selected && (sibling.Status == statusFailed || sibling.Status == statusCancelled) {
+		if sibling.ID != selected && sibling.Status == statusCancelled {
 			return false
 		}
 	}
 	return true
 }
 
-func AttachmentMatches(c model.VanadisChunk, b model.VanadisBuild, req AttachChunkPRRequest) bool {
-	candidates := RepoMatchCandidates(req.Repo)
+func AttachmentMatches(owner string, c model.VanadisChunk, b model.VanadisBuild, req AttachChunkPRRequest) bool {
+	candidates := RepoMatchCandidates(owner, req.Repo)
 	matches := len(candidates) == 0
 	for _, repo := range candidates {
 		if repo == c.Repo {
@@ -252,6 +255,6 @@ func AttachmentMatches(c model.VanadisChunk, b model.VanadisBuild, req AttachChu
 	return matches && c.Status != statusCancelled && b.Status != statusCancelled && b.Status != statusCompleted && (!terminalChunk || c.PRNumber == req.PRNumber)
 }
 
-func firstWorkerFailure(c model.VanadisChunk) bool {
-	return c.Mode == "pr" && c.Status == statusFailed && c.PRNumber == 0 && c.CIFailCount == 0
+func firstWorkerFailure(c model.VanadisChunk, reqPRNumber ...int) bool {
+	return c.Mode == "pr" && c.Status == statusFailed && c.CIFailCount == 0 && (c.PRNumber == 0 || (len(reqPRNumber) > 0 && reqPRNumber[0] > 0 && c.PRNumber == reqPRNumber[0]))
 }

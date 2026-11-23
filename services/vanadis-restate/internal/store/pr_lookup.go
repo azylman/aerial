@@ -42,7 +42,7 @@ func (s *Store) GetChunkByPR(ctx context.Context, repo string, prNumber int) (*V
 	if s == nil || s.db == nil {
 		return nil, errors.New("database connection is nil")
 	}
-	candidates := RepoMatchCandidates(repo)
+	candidates := RepoMatchCandidates(s.gitHubOwner, repo)
 	if len(candidates) == 0 || prNumber <= 0 {
 		return &VanadisChunkPRLookup{Matched: false}, nil
 	}
@@ -58,49 +58,60 @@ func (s *Store) GetChunkByPR(ctx context.Context, repo string, prNumber int) (*V
 	}, nil
 }
 
-func (s *Store) LookupPRChunk(ctx context.Context, repo string, prNumber int) (string, string, error) {
-	lookup, err := s.GetChunkByPR(ctx, repo, prNumber)
+// LookupPRChunk resolves the build route and chunk that own a repo PR.
+func (s *Store) LookupPRChunk(ctx context.Context, repo string, prNumber int) (BuildRoute, string, error) {
+	if s == nil || s.db == nil {
+		return BuildRoute{}, "", errors.New("database connection is nil")
+	}
+	candidates := RepoMatchCandidates(s.gitHubOwner, repo)
+	if len(candidates) == 0 || prNumber <= 0 {
+		return BuildRoute{}, "", ErrChunkNotFound
+	}
+	match, found, err := s.findChunkPRMatch(ctx, candidates, prNumber)
 	if err != nil {
-		return "", "", err
+		return BuildRoute{}, "", err
 	}
-	if lookup == nil || !lookup.Matched {
-		return "", "", ErrChunkNotFound
+	if !found {
+		return BuildRoute{}, "", ErrChunkNotFound
 	}
-	return lookup.BuildID, lookup.ChunkID, nil
+	return BuildRoute{BuildID: match.buildID}, match.chunkID, nil
 }
 
-func (s *Store) LookupChunkBuildID(ctx context.Context, chunkID string) (string, error) {
+// LookupChunkBuildID resolves the build route that owns a chunk.
+func (s *Store) LookupChunkBuildID(ctx context.Context, chunkID string) (BuildRoute, error) {
 	if s == nil || s.db == nil {
-		return "", errors.New("database connection is nil")
+		return BuildRoute{}, errors.New("database connection is nil")
 	}
 	chunkID = strings.TrimSpace(chunkID)
 	if chunkID == "" {
-		return "", errors.New("chunk id cannot be empty")
+		return BuildRoute{}, errors.New("chunk id cannot be empty")
 	}
-	var buildID string
-	err := s.db.QueryRow(ctx, `SELECT build_id FROM vanadis_chunks WHERE id = $1;`, chunkID).Scan(&buildID)
+	var route BuildRoute
+	err := s.db.QueryRow(ctx, `SELECT c.build_id FROM vanadis_chunks c WHERE c.id = $1;`, chunkID).Scan(&route.BuildID)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
-			return "", ErrChunkNotFound
+			return BuildRoute{}, ErrChunkNotFound
 		}
-		return "", fmt.Errorf("lookup chunk build id: %w", err)
+		return BuildRoute{}, fmt.Errorf("lookup chunk build id: %w", err)
 	}
-	return buildID, nil
+	return route, nil
 }
 
-func (s *Store) LookupUnattachedChunkByThreadAndRepo(ctx context.Context, threadID, repo string) (string, string, error) {
+// LookupUnattachedChunkByThreadAndRepo resolves the single running unattached
+// PR chunk for a thread and repo, with its build route.
+func (s *Store) LookupUnattachedChunkByThreadAndRepo(ctx context.Context, threadID, repo string) (BuildRoute, string, error) {
 	if s == nil || s.db == nil {
-		return "", "", errors.New("database connection is nil")
+		return BuildRoute{}, "", errors.New("database connection is nil")
 	}
 	threadID = model.NormalizeDiscordThreadID(threadID)
-	candidates := RepoMatchCandidates(repo)
+	candidates := RepoMatchCandidates(s.gitHubOwner, repo)
 	if threadID == "" || len(candidates) == 0 {
-		return "", "", ErrChunkNotFound
+		return BuildRoute{}, "", ErrChunkNotFound
 	}
 	const query = `SELECT c.build_id, c.id FROM vanadis_chunks c JOIN vanadis_builds b ON c.build_id = b.id WHERE b.thread_id = $1 AND b.status != 'cancelled' AND c.mode = 'pr' AND c.repo = ANY($2) AND COALESCE(c.pr_number, 0) = 0 AND c.status IN ('running', 'coding') AND c.started_at IS NOT NULL ORDER BY c.chunk_index ASC LIMIT 2;`
 	rows, err := s.db.Query(ctx, query, threadID, candidates)
 	if err != nil {
-		return "", "", fmt.Errorf("lookup unattached chunk by thread %s and repo %s: %w", threadID, repo, err)
+		return BuildRoute{}, "", fmt.Errorf("lookup unattached chunk by thread %s and repo %s: %w", threadID, repo, err)
 	}
 	defer rows.Close()
 
@@ -112,17 +123,17 @@ func (s *Store) LookupUnattachedChunkByThreadAndRepo(ctx context.Context, thread
 	for rows.Next() {
 		var m chunkMatch
 		if err := rows.Scan(&m.buildID, &m.chunkID); err != nil {
-			return "", "", fmt.Errorf("scan unattached chunk: %w", err)
+			return BuildRoute{}, "", fmt.Errorf("scan unattached chunk: %w", err)
 		}
 		matches = append(matches, m)
 	}
 	if err := rows.Err(); err != nil {
-		return "", "", fmt.Errorf("iterate unattached chunks: %w", err)
+		return BuildRoute{}, "", fmt.Errorf("iterate unattached chunks: %w", err)
 	}
 	if len(matches) == 1 {
-		return matches[0].buildID, matches[0].chunkID, nil
+		return BuildRoute{BuildID: matches[0].buildID}, matches[0].chunkID, nil
 	}
-	return "", "", ErrChunkNotFound
+	return BuildRoute{}, "", ErrChunkNotFound
 }
 
 func (s *Store) findChunkPRMatch(ctx context.Context, candidates []string, prNumber int) (chunkPRMatch, bool, error) {
@@ -137,6 +148,45 @@ func (s *Store) findChunkPRMatch(ctx context.Context, candidates []string, prNum
 	}
 	return m, true, nil
 }
+
+const recordPRRolloutStateQ = `WITH reopened_build AS (
+    UPDATE vanadis_builds AS rb
+    SET status = 'running', updated_at = CURRENT_TIMESTAMP
+    FROM vanadis_chunks AS target
+    WHERE target.id = $3
+      AND rb.id = target.build_id
+      AND rb.status = 'failed'
+      AND target.mode = 'pr'
+      AND COALESCE(target.pr_number, 0) > 0
+      AND target.status = 'failed'
+      AND $2 != ''
+      AND NOT EXISTS (
+          SELECT 1 FROM vanadis_chunks AS s
+          WHERE s.build_id = target.build_id
+            AND s.id != target.id
+            AND s.status IN ('failed', 'cancelled')
+      )
+)
+UPDATE vanadis_chunks
+SET rollout_state = CASE
+        WHEN status IN ('completed', 'cancelled') OR (status = 'failed' AND (mode != 'pr' OR COALESCE(pr_number, 0) <= 0))
+            THEN rollout_state
+        ELSE $1::jsonb
+    END,
+    status = CASE
+        WHEN status IN ('completed', 'cancelled') OR (status = 'failed' AND (mode != 'pr' OR COALESCE(pr_number, 0) <= 0))
+            THEN status
+        WHEN $2 != ''
+            THEN $2
+        ELSE status
+    END,
+    banner = CASE
+        WHEN status = 'failed' AND mode = 'pr' AND COALESCE(pr_number, 0) > 0 AND $2 != ''
+            THEN ''
+        ELSE banner
+    END,
+    updated_at = CURRENT_TIMESTAMP
+WHERE id = $3;`
 
 func (s *Store) RecordPRRolloutState(ctx context.Context, chunkID, status string, rolloutState *pubsub.PRRolloutState) error {
 	if s == nil || s.db == nil {
@@ -157,8 +207,7 @@ func (s *Store) RecordPRRolloutState(ctx context.Context, chunkID, status string
 		rolloutBytes = []byte("{}")
 	}
 
-	tag, err := s.db.Exec(ctx, `UPDATE vanadis_chunks SET rollout_state = CASE WHEN status IN ('completed', 'failed', 'cancelled') THEN rollout_state ELSE $1::jsonb END, status = CASE WHEN status IN ('completed', 'failed', 'cancelled') THEN status WHEN $2 != '' THEN $2 ELSE status END, updated_at = CURRENT_TIMESTAMP WHERE id = $3;`, rolloutBytes, strings.TrimSpace(status), chunkID)
-
+	tag, err := s.db.Exec(ctx, recordPRRolloutStateQ, rolloutBytes, strings.TrimSpace(status), chunkID)
 	switch {
 	case err != nil:
 		return fmt.Errorf("record pr rollout state: %w", err)
@@ -169,6 +218,37 @@ func (s *Store) RecordPRRolloutState(ctx context.Context, chunkID, status string
 	}
 }
 
+const updateChunkBannerAndStatusQ = `WITH reopened_build AS (
+    UPDATE vanadis_builds AS rb
+    SET status = 'running', updated_at = CURRENT_TIMESTAMP
+    FROM vanadis_chunks AS target
+    WHERE target.id = $3
+      AND rb.id = target.build_id
+      AND rb.status = 'failed'
+      AND target.mode = 'pr'
+      AND COALESCE(target.pr_number, 0) > 0
+      AND target.status = 'failed'
+      AND $1 IN ('conflict', 'deploy_failed')
+      AND NOT EXISTS (
+          SELECT 1 FROM vanadis_chunks AS s
+          WHERE s.build_id = target.build_id
+            AND s.id != target.id
+            AND s.status IN ('failed', 'cancelled')
+      )
+)
+UPDATE vanadis_chunks AS c
+SET status = CASE WHEN $1 != '' THEN $1 ELSE c.status END,
+    banner = $2,
+    completed_at = CASE WHEN c.status = 'failed' THEN NULL ELSE c.completed_at END,
+    updated_at = CURRENT_TIMESTAMP
+FROM vanadis_builds AS b
+WHERE c.id = $3
+  AND b.id = c.build_id
+  AND c.status NOT IN ('completed', 'cancelled')
+  AND (c.status != 'failed' OR (c.mode = 'pr' AND COALESCE(c.pr_number, 0) > 0 AND $1 IN ('conflict', 'deploy_failed')))
+  AND b.status != 'cancelled'
+  AND ($1 NOT IN ('conflict', 'ci_failed') OR c.status NOT IN ('merged', 'synced', 'deploying', 'deployed', 'deploy_failed'));`
+
 func (s *Store) UpdateChunkBannerAndStatus(ctx context.Context, chunkID, status, banner string) error {
 	if s == nil || s.db == nil {
 		return errors.New("database connection is nil")
@@ -177,7 +257,7 @@ func (s *Store) UpdateChunkBannerAndStatus(ctx context.Context, chunkID, status,
 	if id == "" {
 		return errors.New("chunk_id cannot be empty")
 	}
-	tag, err := s.db.Exec(ctx, `UPDATE vanadis_chunks AS c SET status = CASE WHEN $1 != '' THEN $1 ELSE c.status END, banner = $2, updated_at = CURRENT_TIMESTAMP FROM vanadis_builds AS b WHERE c.id = $3 AND b.id = c.build_id AND c.status NOT IN ('completed', 'failed', 'cancelled') AND b.status != 'cancelled' AND ($1 NOT IN ('conflict', 'ci_failed') OR c.status NOT IN ('merged', 'synced', 'deploying', 'deployed', 'deploy_failed'));`, strings.TrimSpace(status), strings.TrimSpace(banner), id)
+	tag, err := s.db.Exec(ctx, updateChunkBannerAndStatusQ, strings.TrimSpace(status), strings.TrimSpace(banner), id)
 	switch {
 	case err != nil:
 		return fmt.Errorf("update chunk banner and status: %w", err)

@@ -1,7 +1,6 @@
 package bridge
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -9,11 +8,12 @@ import (
 	"log"
 	"log/slog"
 	"net/http"
-	"net/url"
 	"strings"
 	"time"
 
+	"github.com/azylman/aerial/pkg/buildplan"
 	"github.com/azylman/aerial/pkg/pubsub"
+	"github.com/azylman/aerial/pkg/restateingress"
 	"github.com/azylman/aerial/pkg/tracing"
 	"github.com/azylman/aerial/services/vanadis-nats/internal/config"
 )
@@ -41,20 +41,8 @@ func NewNATSBridge(cfg config.Config, bus pubsub.Bus, httpClient *http.Client) *
 	}
 }
 
-func (b *NATSBridge) buildServiceName() string {
-	return config.BuildServiceName(b.cfg.AgentName)
-}
-
-func (b *NATSBridge) buildRouterServiceName() string {
-	return config.BuildRouterServiceName(b.cfg.AgentName)
-}
-
-func (b *NATSBridge) restateObjectSendPath(buildID, handler string) string {
-	return "/" + b.buildServiceName() + "/" + url.PathEscape(buildID) + "/" + handler + "/send"
-}
-
 func (b *NATSBridge) restateRouterSendPath(handler string) string {
-	return "/" + b.buildRouterServiceName() + "/" + handler + "/send"
+	return "/" + buildplan.BuildRouterServiceName(b.cfg.AgentName) + "/" + handler + "/send"
 }
 
 // StartConsumers verifies JetStream streams and binds durable queue consumers for dispatch and PR events.
@@ -76,28 +64,17 @@ func (b *NATSBridge) StartConsumers(ctx context.Context) error {
 	}
 	log.Println("[vanadis-nats] Subscribed vanadis-pr-events queue consumer to aerial.pr.>")
 
-	if _, err := b.bus.ConsumeQueue(ctx, "aerial.coalesced.widget_sync.>", "vanadis-widget", b.HandleWidgetSyncEvent); err != nil {
-		return fmt.Errorf("subscribe vanadis-widget queue: %w", err)
-	}
-	log.Println("[vanadis-nats] Subscribed vanadis-widget queue consumer to aerial.coalesced.widget_sync.>")
-
 	return nil
 }
+
+const maxIngressResponseBytes = 1 << 20
 
 func isRetryableIngressStatus(code int) bool {
 	return code == http.StatusRequestTimeout || code == http.StatusTooManyRequests || code >= http.StatusInternalServerError
 }
 
-func nakBackoffDelay(delivered uint64) time.Duration {
-	if delivered <= 1 {
-		return 1 * time.Second
-	}
-	shift := min(delivered-1, 4)
-	return time.Duration(1<<shift) * time.Second
-}
-
 func settleFailedDelivery(ctx context.Context, msg pubsub.Message) {
-	delay := nakBackoffDelay(msg.NumDelivered())
+	delay := pubsub.NakBackoff(msg.NumDelivered(), 16*time.Second)
 	if err := msg.NakWithDelay(delay); err != nil {
 		slog.ErrorContext(ctx, "[vanadis-nats] error naking message", "delay", delay, "error", err)
 	}
@@ -130,51 +107,31 @@ func dispatchIdempotencyKey(msg pubsub.Message, ev pubsub.DispatchOutcomeEvent) 
 	return fmt.Sprintf("dispatch:%s:%s:%s", ev.DispatchID, ev.VanadisChunkID, ev.Status)
 }
 
-func widgetSyncIdempotencyKey(msg pubsub.Message, args pubsub.WidgetSyncJobArgs) string {
-	if msg != nil && msg.Header() != nil {
-		if k := strings.TrimSpace(msg.Header().Get(pubsub.HeaderMsgID)); k != "" {
-			return k
-		}
-		if k := strings.TrimSpace(msg.Header().Get("Idempotency-Key")); k != "" {
-			return k
-		}
-	}
-	if strings.TrimSpace(args.BuildID) != "" {
-		return "widget:build:" + strings.TrimSpace(args.BuildID)
-	}
-	return fmt.Sprintf("widget:pr:%s:%d", strings.TrimSpace(args.Repo), args.PRNumber)
-}
-
 func (b *NATSBridge) postRestateIngress(ctx context.Context, endpoint, idempotencyKey string, body []byte, msg pubsub.Message) error {
-	targetURL := fmt.Sprintf("%s%s", b.cfg.RestateIngressURL, endpoint)
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, targetURL, bytes.NewReader(body))
-	if err != nil {
+	targetURL := b.cfg.RestateIngressURL + endpoint
+	if _, err := http.NewRequestWithContext(ctx, http.MethodPost, targetURL, http.NoBody); err != nil {
 		if termErr := msg.Term(); termErr != nil {
 			slog.ErrorContext(ctx, "[vanadis-nats] error terming message on request creation failure", "error", termErr)
 		}
 		return fmt.Errorf("create request to %s: %w", targetURL, err)
 	}
-	req.Header.Set("Content-Type", "application/json")
-	if idempotencyKey != "" {
-		req.Header.Set("Idempotency-Key", idempotencyKey)
+	_, err := restateingress.Post(ctx, b.httpClient, targetURL, idempotencyKey, json.RawMessage(body), maxIngressResponseBytes)
+	if err == nil {
+		return nil
 	}
-
-	resp, err := b.httpClient.Do(req)
-	if err != nil {
+	var httpErr *restateingress.HTTPError
+	if !errors.As(err, &httpErr) {
 		settleFailedDelivery(ctx, msg)
 		return fmt.Errorf("post to restate ingress %s: %w", targetURL, err)
 	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode < 200 || isRetryableIngressStatus(resp.StatusCode) {
+	if httpErr.Status < 200 || isRetryableIngressStatus(httpErr.Status) {
 		settleFailedDelivery(ctx, msg)
-		return fmt.Errorf("restate ingress error (status %d)", resp.StatusCode)
+		return fmt.Errorf("restate ingress error (status %d)", httpErr.Status)
 	}
-	if resp.StatusCode >= 400 && resp.StatusCode < 500 {
+	if httpErr.Status >= 400 && httpErr.Status < 500 {
 		if termErr := msg.Term(); termErr != nil {
-			slog.ErrorContext(ctx, "[vanadis-nats] error terming message on non-retryable restate status", "status", resp.StatusCode, "error", termErr)
+			slog.ErrorContext(ctx, "[vanadis-nats] error terming message on non-retryable restate status", "status", httpErr.Status, "error", termErr)
 		}
-		return nil
 	}
 	return nil
 }
@@ -225,35 +182,4 @@ func (b *NATSBridge) HandleDispatchOutcomeEvent(ctx context.Context, msg pubsub.
 	}
 	key := dispatchIdempotencyKey(msg, ev)
 	return b.postRestateIngress(ctx, b.restateRouterSendPath("RouteDispatchOutcome"), key, body, msg)
-}
-
-// HandleWidgetSyncEvent processes an incoming WidgetSyncJobArgs on aerial.coalesced.widget_sync.>.
-func (b *NATSBridge) HandleWidgetSyncEvent(ctx context.Context, msg pubsub.Message) error {
-	var args pubsub.WidgetSyncJobArgs
-	if err := json.Unmarshal(msg.Data(), &args); err != nil {
-		slog.WarnContext(ctx, "[vanadis-nats] failed to unmarshal widget sync event", "error", err)
-		return nil
-	}
-
-	if buildID := strings.TrimSpace(args.BuildID); buildID != "" {
-		body, err := json.Marshal(map[string]string{"reason": "widget_sync"})
-		if err != nil {
-			return fmt.Errorf("marshal build widget sync body: %w", err)
-		}
-		return b.postRestateIngress(ctx, b.restateObjectSendPath(buildID, "Reconcile"), widgetSyncIdempotencyKey(msg, args), body, msg)
-	}
-
-	if repo := strings.TrimSpace(args.Repo); repo != "" && args.PRNumber > 0 {
-		body, err := json.Marshal(pubsub.PRLifecycleEvent{
-			Event:    "widget_sync",
-			Repo:     repo,
-			PRNumber: args.PRNumber,
-		})
-		if err != nil {
-			return fmt.Errorf("marshal pr widget sync body: %w", err)
-		}
-		return b.postRestateIngress(ctx, b.restateRouterSendPath("RoutePREvent"), widgetSyncIdempotencyKey(msg, args), body, msg)
-	}
-
-	return nil
 }

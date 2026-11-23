@@ -45,19 +45,21 @@ const SourceAmbient = "AMBIENT"
 
 // Transcript vocabulary shared by the session scanners.
 const (
-	stepTypeUserInput      = "USER_INPUT"
-	blockTypeToolResult    = "tool_result"
-	transcriptFileName     = "transcript.jsonl"
-	transcriptFullFileName = "transcript_full.jsonl"
-	runtimeDiscord         = "discord"
-	runtimeVoice           = "voice"
-	runtimeEphemeral       = "ephemeral"
-	roleUser               = "user"
-	roleAssistant          = "assistant"
-	entryTypeError         = "error"
-	entryTypeMessage       = "message"
-	entryTypeResponseItem  = "response_item"
-	entryTypeEventMsg      = "event_msg"
+	stepTypeUserInput       = "USER_INPUT"
+	stepTypePlannerResponse = "PLANNER_RESPONSE"
+	stepTypeSystemMessage   = "SYSTEM_MESSAGE"
+	blockTypeToolResult     = "tool_result"
+	transcriptFileName      = "transcript.jsonl"
+	transcriptFullFileName  = "transcript_full.jsonl"
+	runtimeDiscord          = "discord"
+	runtimeVoice            = "voice"
+	runtimeEphemeral        = "ephemeral"
+	roleUser                = "user"
+	roleAssistant           = "assistant"
+	entryTypeError          = "error"
+	entryTypeMessage        = "message"
+	entryTypeResponseItem   = "response_item"
+	entryTypeEventMsg       = "event_msg"
 )
 
 // Manager manages session directories, transcripts, and activity tracking
@@ -151,163 +153,11 @@ func isStepBefore(createdAt string, since time.Time) bool {
 	return false
 }
 
-// expandSessionRoot interpolates %s or {session} template placeholders with cleanID.
-func expandSessionRoot(root, cleanID string) string {
-	if strings.Contains(root, "%s") {
-		return fmt.Sprintf(root, cleanID)
-	}
-	if strings.Contains(root, "{session}") {
-		return strings.ReplaceAll(root, "{session}", cleanID)
-	}
-	return root
-}
-
 // SanitizeClaudeProjectPath transforms a working directory path into Claude's project folder name
 // by replacing path separators ('/') and dots ('.') with dashes ('-').
 func SanitizeClaudeProjectPath(cwd string) string {
 	r := strings.NewReplacer("/", "-", ".", "-")
 	return r.Replace(strings.TrimSpace(cwd))
-}
-
-// resolveSessionDirInRoot returns the candidate session directory within root if it exists.
-func resolveSessionDirInRoot(root, cleanID string) (string, bool) {
-	if strings.TrimSpace(root) == "" {
-		return "", false
-	}
-	expandedRoot := expandSessionRoot(root, cleanID)
-
-	sessDir := filepath.Join(expandedRoot, cleanID)
-	if fi, err := os.Stat(sessDir); err == nil && fi.IsDir() {
-		return sessDir, true
-	}
-
-	// Also check if expandedRoot is directly the session directory or points to .system_generated/logs
-	fiRoot, errRoot := os.Stat(expandedRoot)
-	if errRoot != nil || !fiRoot.IsDir() {
-		return "", false
-	}
-
-	cleanExpanded := filepath.Clean(expandedRoot)
-	if filepath.Base(cleanExpanded) == cleanID {
-		return cleanExpanded, true
-	}
-	if strings.HasSuffix(cleanExpanded, filepath.Clean(filepath.Join(cleanID, ".system_generated", "logs"))) ||
-		strings.HasSuffix(cleanExpanded, filepath.Clean(filepath.Join(".system_generated", "logs"))) {
-		return filepath.Dir(filepath.Dir(cleanExpanded)), true
-	}
-
-	return "", false
-}
-
-// latestModTimeInSessionDir inspects transcript and task logs in sessDir and returns the latest mod time.
-func latestModTimeInSessionDir(sessDir string) time.Time {
-	var latest time.Time
-
-	// 1. Transcripts in .system_generated/logs/
-	logsDir := filepath.Join(sessDir, ".system_generated", "logs")
-	for _, name := range []string{transcriptFileName, transcriptFullFileName} {
-		if fi, err := os.Stat(filepath.Join(logsDir, name)); err == nil && !fi.IsDir() {
-			if fi.ModTime().After(latest) {
-				latest = fi.ModTime()
-			}
-		}
-	}
-
-	// 2. Background task logs in .system_generated/tasks/*.log
-	tasksDir := filepath.Join(sessDir, ".system_generated", "tasks")
-	entries, err := os.ReadDir(tasksDir)
-	if err == nil {
-		for _, entry := range entries {
-			if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".log") {
-				continue
-			}
-			info, err := entry.Info()
-			if err != nil {
-				continue
-			}
-			if info.ModTime().After(latest) {
-				latest = info.ModTime()
-			}
-		}
-	}
-
-	return latest
-}
-
-func checkFileMtime(p string, current time.Time) time.Time {
-	if fi, err := os.Stat(p); err == nil && !fi.IsDir() && fi.Size() > 0 {
-		if fi.ModTime().After(current) {
-			return fi.ModTime()
-		}
-	}
-	return current
-}
-
-func checkClaudeSubdirsActivity(root, cleanID string, current time.Time) time.Time {
-	entries, err := os.ReadDir(root)
-	if err != nil {
-		return current
-	}
-	for _, entry := range entries {
-		if !entry.IsDir() {
-			continue
-		}
-		cand := filepath.Join(root, entry.Name(), cleanID+".jsonl")
-		current = checkFileMtime(cand, current)
-	}
-	return current
-}
-
-// LastActivityFromRoots returns the latest modification timestamp across all log files
-// (transcripts and background task logs) for a session ID within the provided search roots.
-// Zero ambient environment defaults are used.
-func LastActivityFromRoots(sessionID string, roots []string) (time.Time, error) {
-	cleanID, ok := cleanSessionID(sessionID)
-	if !ok || len(roots) == 0 {
-		return time.Time{}, nil
-	}
-
-	var latestTime time.Time
-	for _, root := range roots {
-		if sessDir, ok := resolveSessionDirInRoot(root, cleanID); ok {
-			if t := latestModTimeInSessionDir(sessDir); t.After(latestTime) {
-				latestTime = t
-			}
-		}
-
-		directPath := filepath.Join(root, cleanID+".jsonl")
-		latestTime = checkFileMtime(directPath, latestTime)
-		latestTime = checkClaudeSubdirsActivity(root, cleanID, latestTime)
-		latestTime = checkCodexSubdirsActivity(root, cleanID, latestTime)
-		latestTime = checkMuseSubdirsActivity(root, cleanID, latestTime)
-	}
-
-	return latestTime, nil
-}
-
-// GetSessionLastActivity returns the latest modification timestamp across all log files
-// for a session ID. If customRoots are provided, they override the manager's configured roots.
-func (m *Manager) GetSessionLastActivity(sessionID string, customRoots ...string) (time.Time, error) {
-	if len(customRoots) > 0 {
-		return LastActivityFromRoots(sessionID, customRoots)
-	}
-	if m == nil {
-		return time.Time{}, nil
-	}
-	latestTime, err := LastActivityFromRoots(sessionID, m.roots)
-	if err != nil {
-		return time.Time{}, err
-	}
-	for _, p := range m.claudeTranscriptPaths(sessionID) {
-		latestTime = checkFileMtime(p, latestTime)
-	}
-	for _, p := range m.codexTranscriptPaths(sessionID) {
-		latestTime = checkFileMtime(p, latestTime)
-	}
-	for _, p := range m.museTranscriptPaths(sessionID) {
-		latestTime = checkFileMtime(p, latestTime)
-	}
-	return latestTime, nil
 }
 
 func (m *Manager) runtimeSubdirBaseDirs(topDir, leafDir, hiddenTopDir string) []string {
@@ -818,14 +668,9 @@ func (m *Manager) ExtractLastTurnError(ctx context.Context, convID string, since
 	return "", nil
 }
 
-// ExtractResponseSince parses transcript files for convID and returns the latest substantive
-// PLANNER_RESPONSE turn strictly at or after 'since', or empty string if not found.
-// It searches transcript files (transcript_full.jsonl, transcript.jsonl) from newest to oldest,
-// applies a strict monotonic cutoff (step.CreatedAt >= since), ignores tool-call-only turns
-// and empty steps, and returns the trimmed substantive response.
-func (m *Manager) ExtractResponseSince(convID string, since time.Time) string {
-	return m.ExtractResponseSinceContext(context.Background(), convID, since)
-}
+// AgyBackgroundAbortNotice is the synthetic notice agy writes when a turn aborts
+// because the model did not make any tool calls or return any response text.
+const AgyBackgroundAbortNotice = "Turn is aborted because model did not make any tool calls or return any response text"
 
 type transcriptStepRecord struct {
 	Type      string            `json:"type"`
@@ -854,11 +699,14 @@ func scanLinesForResponse(ctx context.Context, lines []string, since time.Time) 
 			break
 		}
 
-		if step.Type != "PLANNER_RESPONSE" {
+		if step.Type != stepTypePlannerResponse {
 			continue
 		}
 
 		trimmedContent := strings.TrimSpace(step.Content)
+		if strings.Contains(trimmedContent, AgyBackgroundAbortNotice) {
+			return ""
+		}
 		if trimmedContent == "" || strings.HasPrefix(trimmedContent, "[Tool Call Requested]:") {
 			continue
 		}

@@ -3,10 +3,11 @@ package queue
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"os"
+	"path/filepath"
 	"slices"
 	"strings"
 	"sync"
@@ -14,8 +15,8 @@ import (
 	"time"
 
 	"github.com/azylman/aerial/pkg/pubsub"
+	"github.com/azylman/aerial/services/eri/pkg/config"
 	"github.com/azylman/aerial/services/eri/pkg/db"
-	"github.com/azylman/aerial/services/eri/pkg/runner"
 )
 
 type trackingBus struct {
@@ -128,6 +129,7 @@ func TestWorkerPool_PublishDispatchOutcome_JetStream(t *testing.T) {
 		chunkID       string
 		dispatchID    string
 		source        string
+		wantErr       bool
 		wantPublishes []string
 		wantDelivered []deliveredOutcome
 	}{
@@ -163,6 +165,7 @@ func TestWorkerPool_PublishDispatchOutcome_JetStream(t *testing.T) {
 			chunkID:    "chunk-empty-status",
 			dispatchID: "disp-empty-status",
 			source:     "vanadis",
+			wantErr:    true,
 		},
 	}
 
@@ -175,210 +178,17 @@ func TestWorkerPool_PublishDispatchOutcome_JetStream(t *testing.T) {
 			trackBus := &trackingBus{Bus: memBus}
 			recorder := newOutcomeRecorder(t, memBus)
 
-			poolCtx, cancelPool := context.WithCancel(context.Background())
-			defer cancelPool()
-			restateSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				w.WriteHeader(http.StatusOK)
-			}))
-			defer restateSrv.Close()
-
-			pool := &WorkerPool{
-				ctx:      poolCtx,
-				cancel:   cancelPool,
-				eventBus: trackBus,
-				cfg: WorkerPoolConfig{
-					EventBus:          trackBus,
-					RestateIngressURL: restateSrv.URL,
-				},
-			}
-
+			pool := &WorkerPool{eventBus: trackBus, cfg: WorkerPoolConfig{EventBus: trackBus}}
 			disp := outcomeDispatch(tc.dispatchID, tc.source, tc.chunkID)
-			te := &turnExecution{
-				pool:        pool,
-				dispatch:    &disp,
-				threadID:    "dispatch-" + disp.ID,
-				triggerType: "dispatch:" + tc.source,
-				execStart:   time.Now().UTC().Add(-100 * time.Millisecond),
-				turnStatus:  tc.turnStatus,
-				turnError:   tc.turnError,
-				turnCtx:     poolCtx,
+			completedAt := time.Now().UTC()
+			err := pool.publishDispatchOutcome(context.Background(), disp, tc.turnStatus, tc.turnError, completedAt.Add(-100*time.Millisecond), completedAt)
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("publishDispatchOutcome error = %v, wantErr %v", err, tc.wantErr)
 			}
-
-			cleanup := pool.setupDispatchTurn(disp, te)
-			cleanup()
 
 			delivered := recorder.waitFor(len(tc.wantDelivered))
 			assertAttemptedPublishes(t, trackBus.dispatchPublishes(), tc.wantPublishes)
 			assertDeliveredOutcomes(t, delivered, tc.wantDelivered)
-		})
-	}
-}
-
-type retryFailingBus struct {
-	pubsub.Bus
-
-	mu           sync.Mutex
-	attempts     int
-	failAttempts int
-	afterAttempt func(att int)
-}
-
-func (r *retryFailingBus) Publish(ctx context.Context, subject, msgID string, payload any) error {
-	if !strings.HasPrefix(subject, pubsub.SubjectAerialDispatchPrefix) {
-		return r.Bus.Publish(ctx, subject, msgID, payload)
-	}
-	r.mu.Lock()
-	r.attempts++
-	att := r.attempts
-	cb := r.afterAttempt
-	r.mu.Unlock()
-	if cb != nil {
-		cb(att)
-	}
-	if att <= r.failAttempts {
-		return errors.New("simulated jetstream publish error")
-	}
-	return r.Bus.Publish(ctx, subject, msgID, payload)
-}
-
-func TestWorkerPool_SetupDispatchTurn_OutcomePublishRetries(t *testing.T) {
-	t.Parallel()
-
-	tests := []struct {
-		name          string
-		failAttempts  int
-		cancelPool    bool
-		cancelBefore  bool
-		wantAttempts  int
-		wantPublishes []string
-	}{
-		{
-			name:          "outcome publish succeeds on first attempt",
-			failAttempts:  0,
-			wantAttempts:  1,
-			wantPublishes: []string{"aerial.dispatch.completed"},
-		},
-		{
-			name:          "outcome publish retries and succeeds after transient error",
-			failAttempts:  1,
-			wantAttempts:  2,
-			wantPublishes: []string{"aerial.dispatch.completed"},
-		},
-		{
-			name:          "outcome publish exhausts 3 attempts on continuous error",
-			failAttempts:  5,
-			wantAttempts:  3,
-			wantPublishes: nil,
-		},
-		{
-			name:          "cancelled pool context aborts publish retries",
-			failAttempts:  5,
-			cancelPool:    true,
-			wantAttempts:  1,
-			wantPublishes: nil,
-		},
-		{
-			name:          "cancelled pool context before cleanup still publishes first attempt",
-			failAttempts:  0,
-			cancelBefore:  true,
-			wantAttempts:  1,
-			wantPublishes: []string{"aerial.dispatch.completed"},
-		},
-	}
-
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-
-			memBus := pubsub.NewMemoryBus()
-			defer memBus.Close()
-			failingBus := &retryFailingBus{Bus: memBus, failAttempts: tc.failAttempts}
-			recorder := newOutcomeRecorder(t, memBus)
-
-			poolCtx, cancelPool := context.WithCancel(context.Background())
-			defer cancelPool()
-
-			restateSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				w.WriteHeader(http.StatusOK)
-			}))
-			defer restateSrv.Close()
-
-			pool := &WorkerPool{
-				ctx:      poolCtx,
-				cancel:   cancelPool,
-				eventBus: failingBus,
-				cfg: WorkerPoolConfig{
-					EventBus:           failingBus,
-					RetryDelayOverride: 1 * time.Millisecond,
-					RestateIngressURL:  restateSrv.URL,
-				},
-			}
-
-			if tc.cancelBefore {
-				cancelPool()
-			}
-			if tc.cancelPool {
-				failingBus.afterAttempt = func(att int) {
-					if att == 1 {
-						cancelPool()
-					}
-				}
-			}
-
-			disp := outcomeDispatch("disp-retry-"+strings.ReplaceAll(tc.name, " ", "-"), "vanadis", "chunk-retry")
-			te := &turnExecution{
-				pool:        pool,
-				dispatch:    &disp,
-				threadID:    "dispatch-" + disp.ID,
-				triggerType: "dispatch:vanadis",
-				execStart:   time.Now().UTC().Add(-100 * time.Millisecond),
-				turnStatus:  "success",
-				turnCtx:     poolCtx,
-			}
-
-			cleanup := pool.setupDispatchTurn(disp, te)
-			cleanup()
-
-			failingBus.mu.Lock()
-			gotAttempts := failingBus.attempts
-			failingBus.mu.Unlock()
-
-			if gotAttempts != tc.wantAttempts {
-				t.Fatalf("publish attempts = %d, want %d", gotAttempts, tc.wantAttempts)
-			}
-
-			if len(tc.wantPublishes) > 0 {
-				delivered := recorder.waitFor(len(tc.wantPublishes))
-				if len(delivered) != len(tc.wantPublishes) {
-					t.Fatalf("delivered count = %d, want %d", len(delivered), len(tc.wantPublishes))
-				}
-			}
-		})
-	}
-}
-
-func TestBuildServiceName(t *testing.T) {
-	t.Parallel()
-	tests := []struct {
-		name      string
-		agent     string
-		wantBuild string
-	}{
-		{name: "empty agent defaults to Build", agent: "", wantBuild: "Build"},
-		{name: "aerial agent defaults to Build", agent: "aerial", wantBuild: "Build"},
-		{name: "trimmed and upper aerial defaults to Build", agent: "  AERIAL  ", wantBuild: "Build"},
-		{name: "miorine stack agent", agent: "miorine", wantBuild: "Build-miorine"},
-		{name: "trimmed upper miorine", agent: "  MIORINE  ", wantBuild: "Build-miorine"},
-		{name: "suletta stack agent", agent: "suletta", wantBuild: "Build-suletta"},
-		{name: "custom agent identifier", agent: "custom-worker", wantBuild: "Build-custom-worker"},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			got := BuildServiceName(tc.agent)
-			if got != tc.wantBuild {
-				t.Fatalf("BuildServiceName(%q) = %q, want %q", tc.agent, got, tc.wantBuild)
-			}
 		})
 	}
 }
@@ -393,6 +203,7 @@ type flushActiveStepTestCase struct {
 	serverBody      string
 	restateURL      string
 	vanadisURL      string
+	appVanadisURL   string
 	expectErr       bool
 	expectErrSubstr string
 	wantURI         string
@@ -428,12 +239,16 @@ func runFlushActiveStepCase(t *testing.T, tc flushActiveStepTestCase) {
 	restateIngress := tc.restateURL
 	vanadisIngress := tc.vanadisURL
 	switch {
-	case !tc.skipServer && restateIngress == "" && vanadisIngress == "":
+	case !tc.skipServer && restateIngress == "" && vanadisIngress == "" && tc.appVanadisURL == "":
 		restateIngress = serverURL
 	case restateIngress == "USE_SERVER":
 		restateIngress = serverURL
 	case vanadisIngress == "USE_SERVER":
 		vanadisIngress = serverURL
+	}
+	appVanadis := tc.appVanadisURL
+	if appVanadis == "USE_SERVER" {
+		appVanadis = serverURL + "/"
 	}
 
 	pool := &WorkerPool{
@@ -443,6 +258,9 @@ func runFlushActiveStepCase(t *testing.T, tc flushActiveStepTestCase) {
 			VanadisURL:        vanadisIngress,
 			VanadisHTTPClient: vanClient,
 		},
+	}
+	if appVanadis != "" {
+		pool.appCfg = config.NewFromData(&config.ConfigData{VanadisURL: appVanadis})
 	}
 
 	err := pool.FlushChunkActiveStepToRestate(context.Background(), tc.buildID, tc.chunkID, tc.step)
@@ -486,7 +304,7 @@ var flushActiveStepTestCases = []flushActiveStepTestCase{
 		step:           "Executing `git status`",
 		serverStatus:   http.StatusOK,
 		serverBody:     `{"status":"ok"}`,
-		wantURI:        "/Build/build-101/UpdateActiveStep/send",
+		wantURI:        "/Build/build-101/UpdateActiveStep",
 		wantChunkID:    "chunk-live-1",
 		wantActiveStep: "Executing `git status`",
 	},
@@ -550,7 +368,7 @@ var flushActiveStepTestCases = []flushActiveStepTestCase{
 		step:           "Compiling binaries...",
 		serverStatus:   http.StatusOK,
 		serverBody:     `{"status":"ok"}`,
-		wantURI:        "/Build-agent-alpha/build-202/UpdateActiveStep/send",
+		wantURI:        "/Build/build-202/UpdateActiveStep",
 		wantChunkID:    "chunk-live-2",
 		wantActiveStep: "Compiling binaries...",
 	},
@@ -562,7 +380,7 @@ var flushActiveStepTestCases = []flushActiveStepTestCase{
 		step:           "   Running tests...   \n",
 		serverStatus:   http.StatusOK,
 		serverBody:     `{"status":"ok"}`,
-		wantURI:        "/Build-agent-beta/" + url.PathEscape("build/special:1") + "/UpdateActiveStep/send",
+		wantURI:        "/Build/" + url.PathEscape("build/special:1") + "/UpdateActiveStep",
 		wantChunkID:    "chunk-trim",
 		wantActiveStep: "Running tests...",
 	},
@@ -574,7 +392,7 @@ var flushActiveStepTestCases = []flushActiveStepTestCase{
 		step:           "",
 		serverStatus:   http.StatusOK,
 		serverBody:     `{"status":"ok"}`,
-		wantURI:        "/Build/build-clear/UpdateActiveStep/send",
+		wantURI:        "/Build/build-clear/UpdateActiveStep",
 		wantChunkID:    "chunk-clear-1",
 		wantActiveStep: "",
 	},
@@ -599,6 +417,25 @@ var flushActiveStepTestCases = []flushActiveStepTestCase{
 		wantActiveStep: "Running custom chunk...",
 	},
 	{
+		name:           "app config vanadis_url routes to vanadis API",
+		appVanadisURL:  "USE_SERVER",
+		buildID:        "build-appcfg-1",
+		chunkID:        "chunk-appcfg-1",
+		step:           "Reading app config...",
+		serverStatus:   http.StatusOK,
+		serverBody:     `{"status":"ok"}`,
+		wantURI:        "/builds/build-appcfg-1/active-step",
+		wantChunkID:    "chunk-appcfg-1",
+		wantActiveStep: "Reading app config...",
+	},
+	{
+		name:       "unconfigured vanadis URL skips flush without dialing a default",
+		buildID:    "build-unconfigured",
+		chunkID:    "chunk-unconfigured",
+		step:       "anything",
+		skipServer: true,
+	},
+	{
 		name:            "missing buildID with non-empty chunkID fails loud on direct restate fallback",
 		restateURL:      "http://restate.test:8080",
 		buildID:         "",
@@ -618,7 +455,7 @@ var flushActiveStepTestCases = []flushActiveStepTestCase{
 		serverBody:      `{"error":"restate internal failure"}`,
 		expectErr:       true,
 		expectErrSubstr: "restate returned status 500",
-		wantURI:         "/Build/build-err-500/UpdateActiveStep/send",
+		wantURI:         "/Build/build-err-500/UpdateActiveStep",
 		wantChunkID:     "chunk-err-500",
 		wantActiveStep:  "failing step",
 	},
@@ -632,7 +469,7 @@ var flushActiveStepTestCases = []flushActiveStepTestCase{
 		serverBody:      `{"error":"build not found"}`,
 		expectErr:       true,
 		expectErrSubstr: "restate returned status 404",
-		wantURI:         "/Build/build-err-404/UpdateActiveStep/send",
+		wantURI:         "/Build/build-err-404/UpdateActiveStep",
 		wantChunkID:     "chunk-err-404",
 		wantActiveStep:  "not found step",
 	},
@@ -649,178 +486,70 @@ func TestWorkerPool_FlushChunkActiveStepToRestate(t *testing.T) {
 	}
 }
 
-type setupDispatchActiveStepCase struct {
-	name             string
-	source           string
-	chunkID          string
-	targetID         string
-	prompt           string
-	dispatchStatus   string
-	serverStatus     int
-	emitToolCommand  string
-	expectUpdater    bool
-	expectDirtyAfter bool
-	wantFlushes      []string
+type vanadisHTTPClientCase struct {
+	name       string
+	injected   bool
+	token      string
+	wantAuth   string
+	wantErrSub string
 }
 
-func verifyUpdaterStep(t *testing.T, u *StatusUpdater, cmd string, expectDirty bool) {
+func runVanadisHTTPClientCase(t *testing.T, tc vanadisHTTPClientCase) {
 	t.Helper()
-	if cmd == "" {
-		return
-	}
-	u.HandleStep(&runner.StepUpdateEvent{
-		StepType: "tool",
-		ToolName: "run_command",
-		State:    "ACTIVE",
-		ToolInfo: &runner.StepToolInfo{
-			Parameters: runner.StepToolParameters{CommandLine: cmd},
-		},
-	})
-	u.flush()
-	if !expectDirty {
-		return
-	}
-	u.mu.Lock()
-	dirty := u.dirty
-	u.mu.Unlock()
-	if !dirty {
-		t.Error("expected statusUpdater to remain dirty after server error")
-	}
-}
-
-func runSetupDispatchActiveStepCase(t *testing.T, tc setupDispatchActiveStepCase) {
-	t.Helper()
-
-	var flushedSteps []string
-	var flushedMu sync.Mutex
-
+	var gotAuth string
+	var mu sync.Mutex
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		var p updateActiveStepPayload
-		_ = json.NewDecoder(r.Body).Decode(&p)
-		flushedMu.Lock()
-		flushedSteps = append(flushedSteps, p.ActiveStep)
-		flushedMu.Unlock()
-
-		status := tc.serverStatus
-		if status == 0 {
-			status = http.StatusOK
-		}
-		w.WriteHeader(status)
-		_, _ = w.Write([]byte(`{"status":"ok"}`))
+		mu.Lock()
+		gotAuth = r.Header.Get("Authorization")
+		mu.Unlock()
+		w.WriteHeader(http.StatusOK)
 	}))
 	defer srv.Close()
 
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-
-	pool := &WorkerPool{
-		ctx:    ctx,
-		cancel: cancel,
-		cfg: WorkerPoolConfig{
-			RestateIngressURL: srv.URL,
-		},
-	}
-
-	disp := db.Dispatch{
-		ID:             "disp-" + strings.ReplaceAll(tc.name, " ", "-"),
-		Source:         tc.source,
-		SessionID:      tc.source + "-sess",
-		TargetID:       tc.targetID,
-		VanadisChunkID: tc.chunkID,
-		Prompt:         tc.prompt,
-		Status:         tc.dispatchStatus,
-		CreatedAt:      time.Now().UTC(),
-		UpdatedAt:      time.Now().UTC(),
-	}
-
-	te := &turnExecution{
-		pool:        pool,
-		dispatch:    &disp,
-		threadID:    "dispatch-" + disp.ID,
-		triggerType: "dispatch:" + tc.source,
-		turnCtx:     ctx,
-	}
-
-	cleanup := pool.setupDispatchTurn(disp, te)
-	if !tc.expectUpdater {
-		if te.statusUpdater != nil {
-			t.Fatal("expected statusUpdater to be nil for non-vanadis dispatch")
+	tokenPath := filepath.Join(t.TempDir(), "token")
+	if tc.token != "" {
+		if err := os.WriteFile(tokenPath, []byte(tc.token), 0o600); err != nil {
+			t.Fatalf("write token: %v", err)
 		}
-	} else {
-		if te.statusUpdater == nil {
-			t.Fatal("expected statusUpdater to be non-nil")
-		}
-		verifyUpdaterStep(t, te.statusUpdater, tc.emitToolCommand, tc.expectDirtyAfter)
 	}
-
-	cleanup()
-
-	flushedMu.Lock()
-	got := append([]string(nil), flushedSteps...)
-	flushedMu.Unlock()
-
-	if len(got) != len(tc.wantFlushes) {
-		t.Fatalf("flushed steps = %v (len %d), want %v (len %d)", got, len(got), tc.wantFlushes, len(tc.wantFlushes))
+	pool := &WorkerPool{cfg: WorkerPoolConfig{SATokenPath: tokenPath}}
+	if tc.injected {
+		pool.cfg.VanadisHTTPClient = srv.Client()
 	}
-	for i, want := range tc.wantFlushes {
-		if !strings.Contains(got[i], want) {
-			t.Errorf("flush[%d] = %q, want substring %q", i, got[i], want)
-		}
+	req, err := http.NewRequestWithContext(context.Background(), http.MethodGet, srv.URL, http.NoBody)
+	if err != nil {
+		t.Fatalf("new request: %v", err)
+	}
+	resp, err := pool.vanadisHTTPClient().Do(req)
+	if resp != nil {
+		_ = resp.Body.Close()
+	}
+	gotErr := ""
+	if err != nil {
+		gotErr = err.Error()
+	}
+	if (tc.wantErrSub == "") != (err == nil) || !strings.Contains(gotErr, tc.wantErrSub) {
+		t.Fatalf("error = %v, want substring %q", err, tc.wantErrSub)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if gotAuth != tc.wantAuth {
+		t.Fatalf("Authorization = %q, want %q", gotAuth, tc.wantAuth)
 	}
 }
 
-func TestWorkerPool_SetupDispatchTurn_ActiveStepLifecycle(t *testing.T) {
+func TestWorkerPool_VanadisHTTPClient(t *testing.T) {
 	t.Parallel()
 
-	tests := []setupDispatchActiveStepCase{
-		{
-			name:            "live step forwarding and turn cleanup clearing",
-			source:          "vanadis",
-			chunkID:         "build-lifecycle-chunk-1",
-			prompt:          "Build ID: build-lifecycle\nChunk ID: build-lifecycle-chunk-1",
-			dispatchStatus:  db.StatusPending,
-			emitToolCommand: "git commit -m tweak",
-			expectUpdater:   true,
-			wantFlushes:     []string{"Executing `git`", ""},
-		},
-		{
-			name:            "resumed dispatch turn extracts chunk info and forwards steps",
-			source:          "vanadis",
-			chunkID:         "",
-			targetID:        "build-resumed-99-chunk-1",
-			prompt:          "[VANADIS BUILD CHUNK EXECUTION]\nBuild ID: build-resumed-99\nChunk ID: build-resumed-99-chunk-1\nResume turn",
-			dispatchStatus:  db.StatusProcessing,
-			emitToolCommand: "go test -v ./...",
-			expectUpdater:   true,
-			wantFlushes:     []string{"Executing `go`", ""},
-		},
-		{
-			name:             "http error on live step logs and marks dirty for retry",
-			source:           "vanadis",
-			chunkID:          "build-retry-chunk-err",
-			prompt:           "Build ID: build-retry\nChunk ID: build-retry-chunk-err",
-			dispatchStatus:   db.StatusPending,
-			serverStatus:     http.StatusInternalServerError,
-			emitToolCommand:  "verify.sh",
-			expectUpdater:    true,
-			expectDirtyAfter: true,
-			wantFlushes:      []string{"Executing `verify.sh`", ""},
-		},
-		{
-			name:           "heartbeat dispatch without chunk info skips status updater",
-			source:         "heartbeat",
-			chunkID:        "",
-			prompt:         "regular heartbeat check",
-			dispatchStatus: db.StatusPending,
-			expectUpdater:  false,
-			wantFlushes:    nil,
-		},
+	tests := []vanadisHTTPClientCase{
+		{name: "injected client is used as-is", injected: true, wantAuth: ""},
+		{name: "configured token path sends bearer token", token: "pool-test-token", wantAuth: "Bearer pool-test-token"},
+		{name: "missing token file fails before dialing", wantErrSub: "obtain serviceaccount token"},
 	}
-
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			runSetupDispatchActiveStepCase(t, tc)
+			runVanadisHTTPClientCase(t, tc)
 		})
 	}
 }

@@ -2,39 +2,78 @@ package store
 
 import (
 	"context"
-	"errors"
-	"slices"
 	"strings"
 	"testing"
 
-	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/azylman/aerial/services/vanadis-restate/internal/model"
 )
 
-var aerialRepoSet = []string{"aerial", "azylman/aerial"}
+// paSkipChunkUpdatesSQL makes every UPDATE of vanadis_chunks silently affect
+// no row (a BEFORE trigger returning NULL), so an UPDATE ... RETURNING comes
+// back empty although the chunk still exists unchanged.
+const paSkipChunkUpdatesSQL = `CREATE FUNCTION pa_skip() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RETURN NULL; END $$;
+CREATE TRIGGER pa_skip BEFORE UPDATE ON vanadis_chunks FOR EACH ROW EXECUTE FUNCTION pa_skip();`
 
-func attachRoutes(mode string, exists, cancelled bool) []sqlRoute {
-	return []sqlRoute{
-		{match: "SELECT mode", row: valuesRow(mode)},
-		{match: "c.status = 'cancelled'", row: valuesRow(cancelled)},
-		{match: "SELECT EXISTS", row: valuesRow(exists)},
-	}
+// paFixture is the store a table row runs against: a nil receiver, a Store
+// without a database, a closed pool, or a private database seeded with builds
+// and chunks and then sabotaged.
+type paFixture struct {
+	nilReceiver, nilDB, closed bool
+	builds                     []model.VanadisBuild
+	chunks                     []model.VanadisChunk
+	sabotage                   string
 }
 
-func assertCandidates(t *testing.T, got *[]string, want []string) {
+func (f paFixture) open(t *testing.T) (*Store, *pgxpool.Pool) {
 	t.Helper()
-	if want != nil && !slices.Equal(*got, want) {
-		t.Errorf("repo candidates = %v, want %v", *got, want)
+	switch {
+	case f.nilReceiver:
+		return nil, nil
+	case f.nilDB:
+		return &Store{}, nil
+	case f.closed:
+		return closedStore(t), nil
 	}
+	st, pool := openStore(t)
+	seed(t, pool, f.builds, f.chunks)
+	mustExec(t, pool, f.sabotage)
+	return st, pool
 }
+
+func (f paFixture) store(t *testing.T) *Store {
+	t.Helper()
+	switch {
+	case f.nilReceiver:
+		return nil
+	case f.nilDB:
+		return &Store{}
+	case f.closed:
+		return closedStore(t)
+	}
+	st, pool := openStore(t)
+	seed(t, pool, f.builds, f.chunks)
+	mustExec(t, pool, f.sabotage)
+	return st
+}
+
+// paDeleteOnUpdateSQL deletes a chunk the moment an UPDATE reaches it and
+// skips the UPDATE: the chunk existed when the attachment started but is gone
+// when the attachment write runs.
+const paDeleteOnUpdateSQL = `CREATE FUNCTION pa_delete_on_update() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN DELETE FROM vanadis_chunks WHERE id = OLD.id; RETURN NULL; END $$;
+CREATE TRIGGER pa_delete_on_update BEFORE UPDATE ON vanadis_chunks FOR EACH ROW EXECUTE FUNCTION pa_delete_on_update();`
 
 func attachRequest(chunkID, repo string) AttachChunkPRRequest {
 	return AttachChunkPRRequest{ChunkID: chunkID, PRNumber: 101, Repo: repo}
 }
 
-func attachmentScript(chunk, build, thread, status, repo string) dbScript {
-	return dbScript{routes: []sqlRoute{{match: "SELECT mode", row: valuesRow("pr")}, {match: "SELECT build_id", row: valuesRow(build)}}, buildRow: &mockRow{b: &model.VanadisBuild{ID: build, ThreadID: thread, Status: status}}, chunks: []model.VanadisChunk{{ID: chunk, BuildID: build, Mode: "pr", Repo: repo, Status: "running"}}}
+func paBuild(id, thread, status string) model.VanadisBuild {
+	return model.VanadisBuild{ID: id, ThreadID: thread, Status: status}
+}
+
+func paChunk(id, build, mode, repo, status string, idx, pr int) model.VanadisChunk {
+	return model.VanadisChunk{ID: id, BuildID: build, ChunkIndex: idx, Mode: mode, Repo: repo, Status: status, PRNumber: pr, Title: "T", Instructions: "I"}
 }
 
 func TestFirstAttachmentRecovery(t *testing.T) {
@@ -45,85 +84,105 @@ func TestFirstAttachmentRecovery(t *testing.T) {
 	}{
 		{"failed parent", "failed", "completed", false},
 		{"running parent", "running", "pending", false},
-		{"failed sibling", "failed", "failed", true},
+		{"failed sibling", "failed", "failed", false},
 		{"cancelled sibling", "failed", "cancelled", true},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			b := model.VanadisBuild{ID: "b1", Status: tc.parent}
-			st, _ := dbScript{buildRow: &mockRow{b: &b}, chunks: []model.VanadisChunk{{ID: "c1", BuildID: "b1", Mode: "pr", Repo: "aerial", Status: "failed"}, {ID: "other", Status: tc.sibling}}, routes: []sqlRoute{{match: "UPDATE vanadis_chunks", row: valuesRow("b1", "c1", "")}, {match: "SELECT mode", row: valuesRow("pr")}, {match: "SELECT build_id", row: valuesRow("b1")}}, row: valuesRow("b1", "c1", "")}.open()
+			st, pool := openStore(t)
+			seed(t, pool, []model.VanadisBuild{paBuild("b1", "thread-1", tc.parent)},
+				[]model.VanadisChunk{paChunk("c1", "b1", "pr", "aerial", "failed", 0, 0), paChunk("other", "b1", "pr", "aerial", tc.sibling, 1, 0)})
 			_, _, _, err := st.AttachChunkPR(context.Background(), attachRequest("c1", "aerial"))
 			if tc.wantConflict {
 				assertStoreErr(t, err, ErrBuildConflict, false)
-			} else if err != nil {
+				if got := loadChunk(t, pool, "c1"); got.Status != "failed" || got.PRNumber != 0 {
+					t.Fatalf("rejected attachment stored status=%s pr=%d, want failed/0", got.Status, got.PRNumber)
+				}
+				return
+			}
+			if err != nil {
 				t.Fatal(err)
+			}
+			if got := loadChunk(t, pool, "c1"); got.Status != "pr_opened" || got.PRNumber != 101 {
+				t.Fatalf("stored status=%s pr=%d, want pr_opened/101", got.Status, got.PRNumber)
+			}
+			if got := loadBuild(t, pool, "b1"); got.Status != "running" {
+				t.Fatalf("parent status = %s, want running", got.Status)
 			}
 		})
 	}
 }
 
-// This fixture exercises Go selection and error propagation, not SQL effects or row locking.
+// Real rows drive selection, the recovery rule and the SQL status CASE;
+// sabotage rows inject write and commit failures.
 func TestAttachmentSelectionAndErrors(t *testing.T) {
 	t.Parallel()
-	writeErr := errors.New("write failed")
 	tests := []struct {
-		name, parent, status, sibling, failure string
-		previous, cap, index                   int
-		commitErr, wantErr                     error
+		name, parent, status, sibling, sabotage string
+		previous, cap, index                    int
+		wantErrIs                               error
+		wantErr                                 bool
+		wantStatus, wantParent                  string
 	}{
-		{name: "first", parent: "failed", status: "failed"},
-		{name: "middle", parent: "failed", status: "failed", index: 1},
-		{name: "final", parent: "failed", status: "failed", index: 2},
-		{name: "duplicate after failure", parent: "failed", status: "failed", previous: 101},
-		{name: "cancelled chunk", parent: "running", status: "cancelled", wantErr: ErrBuildConflict},
-		{name: "completed different PR", parent: "running", status: "completed", previous: 100, wantErr: ErrBuildConflict},
-		{name: "completed matching PR", parent: "running", status: "completed", previous: 101},
-		{name: "merged matching PR", parent: "running", status: "merged", previous: 101},
-		{name: "merged different PR", parent: "running", status: "merged", previous: 100, wantErr: ErrBuildConflict},
-		{name: "synced matching PR", parent: "running", status: "synced", previous: 101},
-		{name: "synced different PR", parent: "running", status: "synced", previous: 100, wantErr: ErrBuildConflict},
-		{name: "deploying matching PR", parent: "running", status: "deploying", previous: 101},
-		{name: "deploying different PR", parent: "running", status: "deploying", previous: 100, wantErr: ErrBuildConflict},
-		{name: "deployed matching PR", parent: "running", status: "deployed", previous: 101},
-		{name: "deployed different PR", parent: "running", status: "deployed", previous: 100, wantErr: ErrBuildConflict},
-		{name: "deploy_failed matching PR", parent: "running", status: "deploy_failed", previous: 101},
-		{name: "deploy_failed different PR", parent: "running", status: "deploy_failed", previous: 100, wantErr: ErrBuildConflict},
-		{name: "duplicate at cap", parent: "failed", status: "failed", previous: 101, cap: 3},
-		{name: "cancelled parent", parent: "cancelled", status: "failed", wantErr: ErrBuildConflict},
-		{name: "completed parent", parent: "completed", status: "failed", wantErr: ErrBuildConflict},
-		{name: "failed sibling", parent: "failed", status: "failed", sibling: "failed", wantErr: ErrBuildConflict},
-		{name: "cancelled sibling", parent: "failed", status: "failed", sibling: "cancelled", wantErr: ErrBuildConflict},
-		{name: "chunk write failure", parent: "failed", status: "failed", failure: "UPDATE vanadis_chunks", wantErr: writeErr},
-		{name: "parent write failure", parent: "failed", status: "failed", failure: "UPDATE vanadis_builds", wantErr: writeErr},
-		{name: "commit failure", parent: "failed", status: "failed", commitErr: writeErr, wantErr: writeErr},
+		{name: "first", parent: "failed", status: "failed", wantStatus: "pr_opened", wantParent: "running"},
+		{name: "middle", parent: "failed", status: "failed", index: 1, wantStatus: "pr_opened", wantParent: "running"},
+		{name: "final", parent: "failed", status: "failed", index: 2, wantStatus: "pr_opened", wantParent: "running"},
+		{name: "duplicate after failure", parent: "failed", status: "failed", previous: 101, wantStatus: "pr_opened", wantParent: "running"},
+		{name: "cancelled chunk", parent: "running", status: "cancelled", wantErrIs: ErrBuildConflict},
+		{name: "completed different PR", parent: "running", status: "completed", previous: 100, wantErrIs: ErrBuildConflict},
+		{name: "completed matching PR", parent: "running", status: "completed", previous: 101, wantStatus: "completed", wantParent: "running"},
+		{name: "merged matching PR", parent: "running", status: "merged", previous: 101, wantStatus: "merged", wantParent: "running"},
+		{name: "merged different PR", parent: "running", status: "merged", previous: 100, wantErrIs: ErrBuildConflict},
+		{name: "synced matching PR", parent: "running", status: "synced", previous: 101, wantStatus: "synced", wantParent: "running"},
+		{name: "synced different PR", parent: "running", status: "synced", previous: 100, wantErrIs: ErrBuildConflict},
+		{name: "deploying matching PR", parent: "running", status: "deploying", previous: 101, wantStatus: "deploying", wantParent: "running"},
+		{name: "deploying different PR", parent: "running", status: "deploying", previous: 100, wantErrIs: ErrBuildConflict},
+		{name: "deployed matching PR", parent: "running", status: "deployed", previous: 101, wantStatus: "deployed", wantParent: "running"},
+		{name: "deployed different PR", parent: "running", status: "deployed", previous: 100, wantErrIs: ErrBuildConflict},
+		{name: "deploy_failed matching PR", parent: "running", status: "deploy_failed", previous: 101, wantStatus: "deploy_failed", wantParent: "running"},
+		{name: "deploy_failed different PR", parent: "running", status: "deploy_failed", previous: 100, wantErrIs: ErrBuildConflict},
+		{name: "duplicate at cap", parent: "failed", status: "failed", previous: 101, cap: 3, wantStatus: "failed", wantParent: "failed"},
+		{name: "cancelled parent", parent: "cancelled", status: "failed", wantErrIs: ErrBuildConflict},
+		{name: "completed parent", parent: "completed", status: "failed", wantErrIs: ErrBuildConflict},
+		{name: "failed sibling", parent: "failed", status: "failed", sibling: "failed", wantStatus: "pr_opened", wantParent: "running"},
+		{name: "cancelled sibling", parent: "failed", status: "failed", sibling: "cancelled", wantErrIs: ErrBuildConflict},
+		{name: "chunk write failure", parent: "failed", status: "failed", sabotage: failStatement("vanadis_chunks", "UPDATE"), wantErr: true},
+		{name: "parent write failure", parent: "failed", status: "failed", sabotage: failStatement("vanadis_builds", "UPDATE"), wantErr: true},
+		{name: "commit failure", parent: "failed", status: "failed", sabotage: failCommit("vanadis_chunks", "UPDATE"), wantErr: true},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			chunks := []model.VanadisChunk{
-				{ID: "before", Status: "completed", Repo: "other", ChunkIndex: 0},
-				{ID: "between", Status: "completed", Repo: "other", ChunkIndex: 1},
-				{ID: "after", Status: "completed", Repo: "other", ChunkIndex: 2},
+				paChunk("before", "b1", "pr", "other", "completed", 0, 0),
+				paChunk("between", "b1", "pr", "other", "completed", 1, 0),
+				paChunk("after", "b1", "pr", "other", "completed", 2, 0),
 			}
-			chunks[tc.index] = model.VanadisChunk{ID: "selected", BuildID: "b1", Mode: "pr", Repo: "aerial", Status: tc.status, ChunkIndex: tc.index, PRNumber: tc.previous, CIFailCount: tc.cap}
+			chunks[tc.index] = paChunk("selected", "b1", "pr", "aerial", tc.status, tc.index, tc.previous)
+			chunks[tc.index].CIFailCount = tc.cap
 			if tc.sibling != "" {
 				chunks[(tc.index+1)%3].Status = tc.sibling
 			}
-			script := attachmentScript("selected", "b1", "thread-1", tc.parent, "aerial")
-			script.chunks = chunks
-			script.failExec, script.execErr, script.commitErr = tc.failure, writeErr, tc.commitErr
-			// No failure route means writes succeed; this fake does not apply SQL state changes.
-			if tc.failure == "" {
-				script.execErr = nil
-			}
-			st, _ := script.open()
+			st, pool := paFixture{builds: []model.VanadisBuild{paBuild("b1", "thread-1", tc.parent)}, chunks: chunks, sabotage: tc.sabotage}.open(t)
 			b, c, th, err := st.AttachChunkPR(context.Background(), attachRequest("selected", "aerial"))
-			if assertStoreErr(t, err, tc.wantErr, false) {
+			if assertStoreErr(t, err, tc.wantErrIs, tc.wantErr) {
+				if got := loadChunk(t, pool, "selected"); got.Status != tc.status || got.PRNumber != tc.previous {
+					t.Fatalf("failed attachment stored status=%s pr=%d, want %s/%d", got.Status, got.PRNumber, tc.status, tc.previous)
+				}
+				if got := loadBuild(t, pool, "b1"); got.Status != tc.parent {
+					t.Fatalf("failed attachment parent = %s, want %s", got.Status, tc.parent)
+				}
 				return
 			}
 			if b != "b1" || c != "selected" || th != "thread-1" {
 				t.Fatalf("attachment = %q %q %q", b, c, th)
+			}
+			if got := loadChunk(t, pool, "selected"); got.Status != tc.wantStatus || got.PRNumber != 101 {
+				t.Fatalf("stored status=%s pr=%d, want %s/101", got.Status, got.PRNumber, tc.wantStatus)
+			}
+			if got := loadBuild(t, pool, "b1"); got.Status != tc.wantParent {
+				t.Fatalf("parent status = %s, want %s", got.Status, tc.wantParent)
 			}
 		})
 	}
@@ -134,18 +193,27 @@ func TestFirstWorkerFailure(t *testing.T) {
 	tests := []struct {
 		name, mode, status string
 		previous, failures int
+		reqPR              int
 		want               bool
 	}{
-		{"eligible", "pr", "failed", 0, 0, true},
-		{"already attached", "pr", "failed", 101, 0, false},
-		{"CI attempts", "pr", "failed", 0, 3, false},
-		{"action", "action", "failed", 0, 0, false},
-		{"running", "pr", "running", 0, 0, false},
+		{"eligible unattached", "pr", "failed", 0, 0, 0, true},
+		{"already attached no req", "pr", "failed", 101, 0, 0, false},
+		{"already attached matching req", "pr", "failed", 101, 0, 101, true},
+		{"already attached mismatched req", "pr", "failed", 101, 0, 102, false},
+		{"CI attempts", "pr", "failed", 0, 3, 0, false},
+		{"action", "action", "failed", 0, 0, 0, false},
+		{"running", "pr", "running", 0, 0, 0, false},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			got := firstWorkerFailure(model.VanadisChunk{Mode: tc.mode, Status: tc.status, PRNumber: tc.previous, CIFailCount: tc.failures})
+			chunk := model.VanadisChunk{Mode: tc.mode, Status: tc.status, PRNumber: tc.previous, CIFailCount: tc.failures}
+			var got bool
+			if tc.reqPR > 0 {
+				got = firstWorkerFailure(chunk, tc.reqPR)
+			} else {
+				got = firstWorkerFailure(chunk)
+			}
 			if got != tc.want {
 				t.Fatalf("eligible = %v, want %v", got, tc.want)
 			}
@@ -157,72 +225,83 @@ type attachResult struct{ BuildID, ChunkID, ThreadID string }
 
 func TestPostgresVanadisStore_AttachChunkPR(t *testing.T) {
 	t.Parallel()
-	var (
-		errModeQuery = errors.New("attach db err")
-		errLookup    = errors.New("lookup err")
-		errBegin     = errors.New("begin standalone tx err")
-		errBuildIns  = errors.New("insert build err")
-		errChunkIns  = errors.New("insert chunk err")
-		errCommit    = errors.New("commit standalone err")
-	)
-	noRows := errRow(pgx.ErrNoRows)
-	attached := func(mode string) *genericMockRow { return valuesRow("b-"+mode, "c-"+mode, "thread-"+mode) }
+	running := func(id, thread string) []model.VanadisBuild {
+		return []model.VanadisBuild{paBuild(id, thread, "running")}
+	}
+	prChunk := func(id, build, repo, status string, pr int) []model.VanadisChunk {
+		return []model.VanadisChunk{paChunk(id, build, "pr", repo, status, 0, pr)}
+	}
+	actionChunk := func(id, build, repo, status string, pr int) []model.VanadisChunk {
+		return []model.VanadisChunk{paChunk(id, build, "action", repo, status, 0, pr)}
+	}
 	existing := attachRequest("c1", "aerial")
 	standalone := attachRequest("", "aerial")
 	tests := []struct {
-		name            string
-		req             AttachChunkPRRequest
-		db              dbScript
-		wantErrIs       error
-		wantErr         bool
-		wantErrContains string
-		want            attachResult
-		wantNewBuild    bool
-		wantCandidates  []string
+		name         string
+		req          AttachChunkPRRequest
+		db           paFixture
+		wantErrIs    error
+		wantErr      bool
+		want         attachResult
+		wantNewBuild bool
+		// wantRepo, wantStatus describe the attached chunk stored afterwards.
+		wantRepo, wantStatus string
 	}{
-		{name: "nil receiver", req: existing, db: dbScript{bare: nilReceiver}, wantErr: true},
-		{name: "nil db", req: existing, db: dbScript{bare: nilDB}, wantErr: true},
+		{name: "nil receiver", req: existing, db: paFixture{nilReceiver: true}, wantErr: true},
+		{name: "nil db", req: existing, db: paFixture{nilDB: true}, wantErr: true},
 		{name: "empty chunk id and zero pr number", req: AttachChunkPRRequest{Repo: "aerial"}, wantErrIs: ErrInvalidBuildInput},
-		{name: "chunk not found", req: existing, db: dbScript{row: noRows}, wantErrIs: ErrChunkNotFound},
-		{name: "mode query error", req: existing, db: dbScript{row: errRow(errModeQuery)}, wantErrIs: errModeQuery},
-		{name: "action chunk requires repo", req: attachRequest("c1", ""), db: dbScript{routes: attachRoutes("action", true, false), row: noRows}, wantErrIs: ErrInvalidBuildInput},
-		{name: "action blank repo", req: attachRequest("c1", " \t"), db: dbScript{routes: attachRoutes("action", true, false)}, wantErrIs: ErrInvalidBuildInput},
+		{name: "chunk not found", req: existing, wantErrIs: ErrChunkNotFound},
+		{name: "mode query error", req: existing, db: paFixture{builds: running("b1", ""), chunks: prChunk("c1", "b1", "aerial", "running", 0), sabotage: `ALTER TABLE vanadis_chunks RENAME COLUMN mode TO mode_x;`}, wantErr: true},
+		{name: "action chunk requires repo", req: attachRequest("c1", ""), db: paFixture{builds: running("b1", ""), chunks: actionChunk("c1", "b1", "", "running", 0)}, wantErrIs: ErrInvalidBuildInput},
+		{name: "action blank repo", req: attachRequest("c1", " \t"), db: paFixture{builds: running("b1", ""), chunks: actionChunk("c1", "b1", "", "running", 0)}, wantErrIs: ErrInvalidBuildInput},
 		{name: "negative pr number", req: AttachChunkPRRequest{ChunkID: "c1", PRNumber: -1}, wantErrIs: ErrInvalidBuildInput},
-		{name: "mismatched repo", req: existing, db: attachmentScript("c1", "b1", "", "running", "other"), wantErrIs: ErrBuildConflict},
-		{name: "cancelled chunk or build with repo conflicts", req: existing, db: attachmentScript("c1", "b1", "", "cancelled", "aerial"), wantErrIs: ErrBuildConflict},
-		{name: "cancelled chunk or build without repo conflicts", req: attachRequest("c1", ""), db: attachmentScript("c1", "b1", "", "cancelled", "aerial"), wantErrIs: ErrBuildConflict},
-		{name: "attaches pr chunk without repo", req: attachRequest("c-pr", ""), db: attachmentScript("c-pr", "b-pr", "thread-pr", "running", "aerial"), want: attachResult{"b-pr", "c-pr", "thread-pr"}},
-		{name: "attaches pr chunk matching repo candidates", req: attachRequest("c-pr", "aerial"), db: attachmentScript("c-pr", "b-pr", "thread-pr", "running", "aerial"), want: attachResult{"b-pr", "c-pr", "thread-pr"}},
-		{name: "attaches action chunk", req: attachRequest("c-act", "aerial"), db: dbScript{routes: attachRoutes("action", true, false), row: attached("action")}, want: attachResult{"b-action", "c-action", "thread-action"}, wantCandidates: aerialRepoSet},
-		{name: "action attachment removed chunk", req: existing, db: dbScript{routes: attachRoutes("action", false, false), row: noRows}, wantErrIs: ErrChunkNotFound},
-		{name: "action attachment terminal parent", req: existing, db: dbScript{routes: attachRoutes("action", true, true), row: noRows}, wantErrIs: ErrBuildConflict},
-		{name: "action attachment mismatching repository", req: existing, db: dbScript{routes: []sqlRoute{{match: "SELECT mode", row: valuesRow("action")}, {match: "c.status = 'cancelled'", row: valuesRow(false)}, {match: "repo != ''", row: valuesRow(true)}, {match: "SELECT EXISTS", row: valuesRow(true)}}, row: noRows}, wantErrIs: ErrBuildConflict},
-		{name: "action attachment unknown rejection", req: existing, db: dbScript{routes: attachRoutes("action", true, false), row: noRows}, wantErr: true},
-		{name: "pr transaction begin error", req: existing, db: dbScript{routes: attachRoutes("pr", true, false), beginErr: errBegin}, wantErrIs: errBegin},
-		{name: "pr transaction chunk removed", req: existing, db: dbScript{routes: attachRoutes("pr", true, false), row: noRows}, wantErrIs: ErrChunkNotFound},
-		{name: "pr transaction lookup failure", req: existing, db: dbScript{routes: attachRoutes("pr", true, false), row: errRow(errLookup)}, wantErrIs: errLookup},
-		{name: "pr parent lock failure", req: existing, db: dbScript{routes: []sqlRoute{{match: "SELECT mode", row: valuesRow("pr")}, {match: "SELECT build_id", row: valuesRow("b1")}}, buildRow: errRow(errLookup)}, wantErrIs: errLookup},
-		{name: "pr locked chunk absent", req: existing, db: dbScript{routes: []sqlRoute{{match: "SELECT mode", row: valuesRow("pr")}, {match: "SELECT build_id", row: valuesRow("b1")}}, buildRow: &mockRow{b: &model.VanadisBuild{ID: "b1", Status: "running"}}}, wantErrIs: ErrChunkNotFound},
+		{name: "mismatched repo", req: existing, db: paFixture{builds: running("b1", ""), chunks: prChunk("c1", "b1", "other", "running", 0)}, wantErrIs: ErrBuildConflict},
+		{name: "cancelled chunk or build with repo conflicts", req: existing, db: paFixture{builds: []model.VanadisBuild{paBuild("b1", "", "cancelled")}, chunks: prChunk("c1", "b1", "aerial", "running", 0)}, wantErrIs: ErrBuildConflict},
+		{name: "cancelled chunk or build without repo conflicts", req: attachRequest("c1", ""), db: paFixture{builds: []model.VanadisBuild{paBuild("b1", "", "cancelled")}, chunks: prChunk("c1", "b1", "aerial", "running", 0)}, wantErrIs: ErrBuildConflict},
+		{
+			name: "attaches pr chunk without repo", req: attachRequest("c-pr", ""), db: paFixture{builds: running("b-pr", "thread-pr"), chunks: prChunk("c-pr", "b-pr", "aerial", "running", 0)},
+			want: attachResult{"b-pr", "c-pr", "thread-pr"}, wantRepo: "aerial", wantStatus: "pr_opened",
+		},
+		{
+			name: "attaches pr chunk matching repo candidates", req: attachRequest("c-pr", "aerial"), db: paFixture{builds: running("b-pr", "thread-pr"), chunks: prChunk("c-pr", "b-pr", "example-org/aerial", "running", 0)},
+			want: attachResult{"b-pr", "c-pr", "thread-pr"}, wantRepo: "example-org/aerial", wantStatus: "pr_opened",
+		},
+		{
+			name: "attaches action chunk", req: attachRequest("c-act", "aerial"), db: paFixture{builds: running("b-action", "thread-action"), chunks: actionChunk("c-act", "b-action", "", "running", 0)},
+			want: attachResult{"b-action", "c-act", "thread-action"}, wantRepo: "aerial", wantStatus: "pr_opened",
+		},
+		{
+			name: "action chunk matches owner-qualified attached repo", req: attachRequest("c-act", "aerial"), db: paFixture{builds: running("b-action", "thread-action"), chunks: actionChunk("c-act", "b-action", "example-org/aerial", "ci_failed", 101)},
+			want: attachResult{"b-action", "c-act", "thread-action"}, wantRepo: "aerial", wantStatus: "ci_failed",
+		},
+		{name: "action attachment terminal parent", req: existing, db: paFixture{builds: []model.VanadisBuild{paBuild("b1", "", "completed")}, chunks: actionChunk("c1", "b1", "", "running", 0)}, wantErrIs: ErrBuildConflict},
+		{name: "action attachment mismatching repository", req: existing, db: paFixture{builds: running("b1", ""), chunks: actionChunk("c1", "b1", "other/repo", "pr_opened", 5)}, wantErrIs: ErrBuildConflict},
+		{name: "action attachment unknown rejection", req: existing, db: paFixture{builds: running("b1", ""), chunks: actionChunk("c1", "b1", "", "running", 0), sabotage: paSkipChunkUpdatesSQL}, wantErr: true},
+		{name: "pr transaction lookup failure", req: existing, db: paFixture{builds: running("b1", ""), chunks: prChunk("c1", "b1", "aerial", "running", 0), sabotage: `ALTER TABLE vanadis_chunks RENAME COLUMN build_id TO build_id_x;`}, wantErr: true},
+		{name: "pr parent lock failure", req: existing, db: paFixture{builds: running("b1", ""), chunks: prChunk("c1", "b1", "aerial", "running", 0), sabotage: `ALTER TABLE vanadis_builds RENAME COLUMN quiet TO quiet_x;`}, wantErr: true},
+		{name: "pr chunk removed after parent lock", req: existing, db: paFixture{builds: running("b1", ""), chunks: prChunk("c1", "b1", "aerial", "running", 0), sabotage: vanishChunkOnBuildReadSQL}, wantErrIs: ErrChunkNotFound},
+		{name: "action chunk removed during attachment", req: existing, db: paFixture{builds: running("b1", ""), chunks: actionChunk("c1", "b1", "", "running", 0), sabotage: paDeleteOnUpdateSQL}, wantErrIs: ErrChunkNotFound},
+		{name: "pr chunk lock failure", req: existing, db: paFixture{builds: running("b1", ""), chunks: prChunk("c1", "b1", "aerial", "running", 0), sabotage: `ALTER TABLE vanadis_chunks RENAME COLUMN banner TO banner_x;`}, wantErr: true},
 		{name: "standalone requires repo", req: attachRequest("", ""), wantErrIs: ErrInvalidBuildInput},
-		{name: "standalone begin error", req: standalone, db: dbScript{beginErr: errBegin}, wantErrIs: errBegin},
-		{name: "standalone existing pr lookup error", req: standalone, db: dbScript{row: errRow(errLookup)}, wantErrIs: errLookup},
-		{name: "standalone reuses existing pr chunk", req: standalone, db: dbScript{row: valuesRow("b-existing", "c-existing", "thread-existing")}, want: attachResult{"b-existing", "c-existing", "thread-existing"}, wantCandidates: aerialRepoSet},
-		{name: "standalone insert build error", req: standalone, db: dbScript{row: noRows, failExec: "INSERT INTO vanadis_builds", execErr: errBuildIns}, wantErrIs: errBuildIns},
-		{name: "standalone insert chunk error", req: standalone, db: dbScript{row: noRows, failExec: "INSERT INTO vanadis_chunks", execErr: errChunkIns}, wantErrIs: errChunkIns},
-		{name: "standalone commit error", req: standalone, db: dbScript{row: noRows, commitErr: errCommit}, wantErrIs: errCommit},
-		{name: "standalone creates build in target thread", req: AttachChunkPRRequest{Repo: "aerial", PRNumber: 101, TargetID: "123456789012345678", Branch: "dependabot/npm_and_yarn/foo", Title: "Bump foo"}, db: dbScript{row: noRows}, want: attachResult{ThreadID: "123456789012345678"}, wantNewBuild: true},
+		{name: "standalone begin error", req: standalone, db: paFixture{closed: true}, wantErr: true},
+		{name: "standalone existing pr lookup error", req: standalone, db: paFixture{sabotage: `ALTER TABLE vanadis_builds RENAME COLUMN thread_id TO thread_x;`}, wantErr: true},
+		{
+			name: "standalone reuses existing pr chunk", req: standalone, db: paFixture{builds: running("b-existing", "thread-existing"), chunks: prChunk("c-existing", "b-existing", "example-org/aerial", "pr_opened", 101)},
+			want: attachResult{"b-existing", "c-existing", "thread-existing"}, wantRepo: "example-org/aerial", wantStatus: "pr_opened",
+		},
+		{name: "standalone insert build error", req: standalone, db: paFixture{sabotage: failStatement("vanadis_builds", "INSERT")}, wantErr: true},
+		{name: "standalone insert chunk error", req: standalone, db: paFixture{sabotage: failStatement("vanadis_chunks", "INSERT")}, wantErr: true},
+		{name: "standalone commit error", req: standalone, db: paFixture{sabotage: failCommit("vanadis_builds", "INSERT")}, wantErr: true},
+		{
+			name: "standalone creates build in target thread", req: AttachChunkPRRequest{Repo: "aerial", PRNumber: 101, TargetID: "123456789012345678", Branch: "dependabot/npm_and_yarn/foo", Title: "Bump foo"},
+			want: attachResult{ThreadID: "123456789012345678"}, wantNewBuild: true, wantRepo: "aerial", wantStatus: "pr_opened",
+		},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			st, candidates := tc.db.open()
+			st, pool := tc.db.open(t)
 			bID, cID, threadID, err := st.AttachChunkPR(context.Background(), tc.req)
-			if tc.wantErrContains != "" {
-				if err == nil || !strings.Contains(err.Error(), tc.wantErrContains) {
-					t.Fatalf("err = %v, want error containing %q", err, tc.wantErrContains)
-				}
-				return
-			}
 			if assertStoreErr(t, err, tc.wantErrIs, tc.wantErr) {
 				return
 			}
@@ -231,12 +310,68 @@ func TestPostgresVanadisStore_AttachChunkPR(t *testing.T) {
 				if !strings.HasPrefix(bID, "build-") || cID != bID+"-chunk-1" {
 					t.Errorf("AttachChunkPR minted build %q chunk %q, want build-* with chunk <build>-chunk-1", bID, cID)
 				}
+				if b := loadBuild(t, pool, bID); b.ThreadID != tc.want.ThreadID || b.Title != "Bump foo" || b.Status != "running" {
+					t.Errorf("stored standalone build = %+v", b)
+				}
 				got.BuildID, got.ChunkID = "", ""
 			}
 			if got != tc.want {
 				t.Errorf("AttachChunkPR = %+v, want %+v", got, tc.want)
 			}
-			assertCandidates(t, candidates, tc.wantCandidates)
+			if c := loadChunk(t, pool, cID); c.Repo != tc.wantRepo || c.Status != tc.wantStatus || c.PRNumber != 101 {
+				t.Errorf("stored chunk repo=%q status=%q pr=%d, want %q/%q/101", c.Repo, c.Status, c.PRNumber, tc.wantRepo, tc.wantStatus)
+			}
+		})
+	}
+}
+
+// TestAttachPRTransaction drives the PR-mode transaction directly for the
+// failures AttachChunkPR's mode probe would otherwise intercept.
+func TestAttachPRTransaction(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name      string
+		db        paFixture
+		wantErrIs error
+		wantErr   bool
+	}{
+		{name: "begin error", db: paFixture{closed: true}, wantErr: true},
+		{name: "chunk removed", wantErrIs: ErrChunkNotFound},
+		{name: "parent missing", db: paFixture{sabotage: `ALTER TABLE vanadis_chunks DROP CONSTRAINT vanadis_chunks_build_id_fkey; INSERT INTO vanadis_chunks (id, build_id, chunk_index, title, instructions, repo) VALUES ('c1', 'gone', 0, 'T', 'I', 'aerial');`}, wantErrIs: ErrBuildNotFound},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			st := tc.db.store(t)
+			_, _, _, err := st.attachPRTransaction(context.Background(), "c1", attachRequest("c1", "aerial"))
+			assertStoreErr(t, err, tc.wantErrIs, tc.wantErr)
+		})
+	}
+}
+
+func TestAttachStandalonePR_RecordsOwner(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name      string
+		agent     string
+		wantAgent string
+	}{
+		{name: "defaults to the default agent", wantAgent: "aerial"},
+		{name: "caller owns the build", agent: "agent-alpha", wantAgent: "agent-alpha"},
+		{name: "names are normalized", agent: " Agent-Beta ", wantAgent: "agent-beta"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			st, pool := openStore(t)
+			req := AttachChunkPRRequest{Repo: "aerial", PRNumber: 9, Agent: tc.agent}
+			buildID, _, _, err := st.AttachChunkPR(context.Background(), req)
+			if err != nil {
+				t.Fatalf("AttachChunkPR: %v", err)
+			}
+			if got := loadBuild(t, pool, buildID).Agent; got != tc.wantAgent {
+				t.Errorf("stored agent = %q; want %q", got, tc.wantAgent)
+			}
 		})
 	}
 }

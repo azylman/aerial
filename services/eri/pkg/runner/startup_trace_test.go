@@ -64,7 +64,9 @@ func runStartupSpansCase(t *testing.T, tc startupSpanTestCase, idx int) {
 		t.Fatalf("AcquireLease err = %v, want error %v", err, tc.wantErr)
 	}
 	if lease != nil {
-		_ = lease.Release()
+		if err := lease.Release(); err != nil {
+			t.Fatalf("lease.Release: %v", err)
+		}
 	}
 	if turn != nil {
 		turn.End()

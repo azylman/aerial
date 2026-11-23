@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/azylman/aerial/pkg/buildplan"
 	"github.com/azylman/aerial/services/vanadis/internal/config"
 	"github.com/azylman/aerial/services/vanadis/internal/model"
 )
@@ -78,7 +79,6 @@ func mockRestateProxyServerHandler(w http.ResponseWriter, r *http.Request) {
 type callIngressCase struct {
 	name        string
 	serverURL   string
-	envURL      string
 	path        string
 	usePayload  bool
 	useOut      bool
@@ -89,9 +89,9 @@ type callIngressCase struct {
 }
 
 func TestCallIngress(t *testing.T) {
+	t.Parallel()
 	ts := httptest.NewServer(http.HandlerFunc(mockRestateProxyServerHandler))
-	defer ts.Close()
-	t.Setenv("RESTATE_INGRESS_URL", "")
+	t.Cleanup(ts.Close)
 
 	tests := []callIngressCase{
 		{name: "missing ingress url", path: "/ok", wantErr: true, wantSubstr: "restate ingress URL not configured"},
@@ -106,7 +106,7 @@ func TestCallIngress(t *testing.T) {
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			t.Setenv("RESTATE_INGRESS_URL", tc.envURL)
+			t.Parallel()
 			runCallIngressCase(t, ts, tc)
 		})
 	}
@@ -169,8 +169,8 @@ type scriptTransport struct {
 func (d scriptTransport) RoundTrip(r *http.Request) (*http.Response, error) {
 	if d.checkDeadline {
 		deadline, ok := r.Context().Deadline()
-		if !ok || time.Until(deadline) > 10*time.Second {
-			d.t.Error("upstream request must have at most ten seconds to respond")
+		if !ok || time.Until(deadline) > 30*time.Second {
+			d.t.Error("upstream request must have at most thirty seconds to respond")
 		}
 	}
 	if d.err != nil {
@@ -294,6 +294,10 @@ func runCallRetryActionCase(t *testing.T, tc retryActionCase) {
 				w.WriteHeader(http.StatusBadRequest)
 				return
 			}
+			if r.URL.Path != "/Build-agent-alpha/b1/RetryActionChunk" {
+				w.WriteHeader(http.StatusTeapot)
+				return
+			}
 			w.WriteHeader(tc.status)
 			_, _ = w.Write([]byte(tc.body))
 		}))
@@ -301,7 +305,7 @@ func runCallRetryActionCase(t *testing.T, tc retryActionCase) {
 		serverURL = ts.URL
 	}
 	var out retryAck
-	err := retryActionClient(t, tc, serverURL).CallRetryAction(context.Background(), "b1", []byte(`{"build_id":"b1"}`), "retry-action-key", &out)
+	err := retryActionClient(t, tc, serverURL).CallRetryAction(context.Background(), "Build-agent-alpha", "b1", []byte(`{"build_id":"b1"}`), "retry-action-key", &out)
 	if tc.wantErr {
 		checkRetryActionErr(t, err, tc)
 		return
@@ -316,9 +320,9 @@ func runCallRetryActionCase(t *testing.T, tc retryActionCase) {
 
 type scopedNameCase struct {
 	name           string
-	agent          string
+	clientAgent    string
+	runnerAgent    string
 	buildID        string
-	wantBuild      string
 	wantRouter     string
 	wantObjectPath string
 	wantRouterPath string
@@ -327,32 +331,76 @@ type scopedNameCase struct {
 func TestClientScopedNames(t *testing.T) {
 	t.Parallel()
 	tests := []scopedNameCase{
-		{name: "empty defaults to legacy", agent: "", buildID: "b1", wantBuild: "Build", wantRouter: "BuildRouter", wantObjectPath: "/Build/b1/Create", wantRouterPath: "/BuildRouter/RouteFailChunk"},
-		{name: "aerial defaults to legacy", agent: "aerial", buildID: "b1", wantBuild: "Build", wantRouter: "BuildRouter", wantObjectPath: "/Build/b1/Create", wantRouterPath: "/BuildRouter/RouteFailChunk"},
-		{name: "suletta scoped", agent: "suletta", buildID: "b1", wantBuild: "Build-suletta", wantRouter: "BuildRouter-suletta", wantObjectPath: "/Build-suletta/b1/Create", wantRouterPath: "/BuildRouter-suletta/RouteFailChunk"},
-		{name: "miorine scoped", agent: "miorine", buildID: "b1", wantBuild: "Build-miorine", wantRouter: "BuildRouter-miorine", wantObjectPath: "/Build-miorine/b1/Create", wantRouterPath: "/BuildRouter-miorine/RouteFailChunk"},
-		{name: "mixed case scoped normalized", agent: "Suletta", buildID: "b1", wantBuild: "Build-suletta", wantRouter: "BuildRouter-suletta", wantObjectPath: "/Build-suletta/b1/Create", wantRouterPath: "/BuildRouter-suletta/RouteFailChunk"},
-		{name: "special characters in buildID are escaped", agent: "suletta", buildID: "build/1#test:special", wantBuild: "Build-suletta", wantRouter: "BuildRouter-suletta", wantObjectPath: "/Build-suletta/build%2F1%23test:special/Create", wantRouterPath: "/BuildRouter-suletta/RouteFailChunk"},
+		{name: "default build and router paths", clientAgent: "", runnerAgent: "", buildID: "b1", wantRouter: "BuildRouter", wantObjectPath: "/Build/b1/Create", wantRouterPath: "/BuildRouter/RouteFailChunk"},
+		{name: "special characters in buildID are escaped", clientAgent: "aerial", runnerAgent: "aerial", buildID: "build/1#test:special", wantRouter: "BuildRouter", wantObjectPath: "/Build/build%2F1%23test:special/Create", wantRouterPath: "/BuildRouter/RouteFailChunk"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			c := NewClient(config.RestateConfig{AgentName: tc.agent}, nil)
-			if got := c.BuildServiceName(); got != tc.wantBuild {
-				t.Errorf("BuildServiceName() = %q, want %q", got, tc.wantBuild)
-			}
+			c := NewClient(config.RestateConfig{AgentName: tc.clientAgent}, nil)
 			if got := c.BuildRouterServiceName(); got != tc.wantRouter {
 				t.Errorf("BuildRouterServiceName() = %q, want %q", got, tc.wantRouter)
 			}
-			bid := tc.buildID
-			if bid == "" {
-				bid = "b1"
-			}
-			if got := c.ObjectPath(bid, "Create"); got != tc.wantObjectPath {
+			if got := c.ObjectPath(buildplan.BuildServiceName(tc.runnerAgent), tc.buildID, "Create"); got != tc.wantObjectPath {
 				t.Errorf("ObjectPath() = %q, want %q", got, tc.wantObjectPath)
 			}
 			if got := c.RouterPath("RouteFailChunk"); got != tc.wantRouterPath {
 				t.Errorf("RouterPath() = %q, want %q", got, tc.wantRouterPath)
+			}
+		})
+	}
+}
+
+type ingressURLCase struct {
+	name       string
+	envURL     string
+	configured string
+	want       string
+}
+
+// TestIngressURL pins that the client reports only its configured ingress and
+// never falls back to RESTATE_INGRESS_URL, so tests cannot be routed to a live
+// Restate ingress. Each row sets a hostile env value, so it is not parallel.
+func TestIngressURL(t *testing.T) {
+	tests := []ingressURLCase{
+		{name: "empty config ignores env ingress", envURL: "http://env.example", configured: "", want: ""},
+		{name: "configured url wins over env ingress", envURL: "http://env.example", configured: "http://restate.test:8080/", want: "http://restate.test:8080"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("RESTATE_INGRESS_URL", tc.envURL)
+			got := NewClient(config.RestateConfig{RestateIngressURL: tc.configured}, nil).IngressURL()
+			if got != tc.want {
+				t.Fatalf("IngressURL() = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestCallIngressKeyed(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name    string
+		key     string
+		wantKey string
+	}{
+		{"sends key", "complete:d1", "complete:d1"},
+		{"omits empty key", "", ""},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			var got string
+			ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				got = r.Header.Get("Idempotency-Key")
+			}))
+			defer ts.Close()
+			c := NewClient(config.RestateConfig{RestateIngressURL: ts.URL}, ts.Client())
+			if err := c.CallIngressKeyed(context.Background(), "/Build/b/CompleteChunk", tc.key, nil, nil); err != nil {
+				t.Fatal(err)
+			}
+			if got != tc.wantKey {
+				t.Fatalf("Idempotency-Key = %q, want %q", got, tc.wantKey)
 			}
 		})
 	}

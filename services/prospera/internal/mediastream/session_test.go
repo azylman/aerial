@@ -16,6 +16,7 @@ import (
 
 	"github.com/azylman/aerial/services/prospera/internal/audio"
 	"github.com/azylman/aerial/services/prospera/internal/config"
+	"github.com/azylman/aerial/services/prospera/internal/fakes"
 	"github.com/azylman/aerial/services/prospera/internal/gemini"
 	"github.com/azylman/aerial/services/prospera/internal/model"
 	"github.com/azylman/aerial/services/prospera/internal/store"
@@ -43,49 +44,13 @@ func (m *mockConsultClient) ConsultMemory(ctx context.Context, query string) (st
 	return m.memoryResp, m.memoryErr
 }
 
-type mockTwilioClient struct {
-	mu             sync.Mutex
-	hungUpCallSIDs []string
-	createdCalls   []twilio.CreateCallRequest
-	smsList        []string
-	hangupErr      error
-}
-
-func (m *mockTwilioClient) CreateCall(ctx context.Context, req twilio.CreateCallRequest) (string, error) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	m.createdCalls = append(m.createdCalls, req)
-	return "CA_mock_123", nil
-}
-
-func (m *mockTwilioClient) HangupCall(ctx context.Context, providerCallSID string) error {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	m.hungUpCallSIDs = append(m.hungUpCallSIDs, providerCallSID)
-	return m.hangupErr
-}
-
-func (*mockTwilioClient) IsCallActive(ctx context.Context, providerCallSID string) (bool, error) {
-	return true, nil
-}
-
-func (m *mockTwilioClient) SendSMS(ctx context.Context, to, from, body string) (string, error) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	m.smsList = append(m.smsList, to+":"+body)
-	return "SM_mock_123", nil
-}
-
-func (*mockTwilioClient) EnsurePhoneNumber(ctx context.Context, areaCode, webhookBaseURL string) (string, error) {
-	return "+15105550100", nil
-}
-
-func (*mockTwilioClient) DownloadRecording(ctx context.Context, recordingURL string) ([]byte, string, error) {
-	return []byte("test"), "audio/wav", nil
-}
-
 // newBridgeTestSession adapts a manager session request to the concrete bridge implementation.
 func newBridgeTestSession(cfg SessionConfig) Session {
+	return newBridgeMediaSession(cfg)
+}
+
+// newBridgeMediaSession builds the concrete bridge for a manager session request.
+func newBridgeMediaSession(cfg SessionConfig) *MediaStreamSession {
 	return NewMediaStreamSession(MediaStreamSessionConfig{
 		CallID:           cfg.CallID,
 		TwilioConn:       cfg.Conn,
@@ -102,18 +67,40 @@ func newBridgeTestSession(cfg SessionConfig) Session {
 	})
 }
 
-// requireBridgeSession resolves a managed session to the concrete bridge type.
-func requireBridgeSession(t *testing.T, mgr *CallSessionManager, callID string) *MediaStreamSession {
+// signalingBridgeSession announces its bridge on ran before delegating Run.
+// The manager calls Run only after RegisterSession, so a receive on ran
+// means the session is registered and live.
+type signalingBridgeSession struct {
+	*MediaStreamSession
+
+	ran chan<- *MediaStreamSession
+}
+
+func (s signalingBridgeSession) Run(ctx context.Context) {
+	s.ran <- s.MediaStreamSession
+	s.MediaStreamSession.Run(ctx)
+}
+
+// newSignalingBridgeFactory returns a bridge factory plus the channel its
+// sessions report on when Run starts.
+func newSignalingBridgeFactory() (SessionFactory, <-chan *MediaStreamSession) {
+	ran := make(chan *MediaStreamSession, 1)
+	factory := func(cfg SessionConfig) Session {
+		return signalingBridgeSession{MediaStreamSession: newBridgeMediaSession(cfg), ran: ran}
+	}
+	return factory, ran
+}
+
+// requireBridgeSession waits for the bridge session built by a signaling factory to start running.
+func requireBridgeSession(t *testing.T, ran <-chan *MediaStreamSession) *MediaStreamSession {
 	t.Helper()
-	waited, err := mgr.WaitForSession(context.Background(), callID)
-	if err != nil || waited == nil {
-		t.Fatalf("WaitForSession failed: %v", err)
+	select {
+	case sess := <-ran:
+		return sess
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for the bridge session to run")
+		return nil
 	}
-	sess, ok := waited.(*MediaStreamSession)
-	if !ok {
-		t.Fatalf("WaitForSession returned %T, want *MediaStreamSession", waited)
-	}
-	return sess
 }
 
 func TestMediaStreamBridge_Lifecycle(t *testing.T) {
@@ -135,14 +122,15 @@ func TestMediaStreamBridge_Lifecycle(t *testing.T) {
 		GeminiVoiceName:     "Kore",
 	}
 
-	twilioClient := &mockTwilioClient{}
+	twilioClient := &fakes.FakeTwilio{}
 	consultClient := &mockConsultClient{
 		calendarResp: "Dentist appointment at 2pm",
 		memoryResp:   "Home address: 123 Example St",
 	}
-	tokenMgr := twilio.NewStreamTokenManager(time.Now)
+	tokenMgr := twilio.NewStreamTokenManager(time.Now, nil)
 
-	sessionMgr := NewCallSessionManager(staticManagerConfig{cfg: cfg}, nil, twilioClient, consultClient, tokenMgr,
+	bridgeFactory, bridgeRan := newSignalingBridgeFactory()
+	sessionMgr := NewCallSessionManager(fakes.StaticConfig{Cfg: cfg}, nil, twilioClient, consultClient, tokenMgr,
 		WithPacerInterval(1*time.Millisecond),
 		WithGeminiDialer(func(ctx context.Context, modelName string) (*websocket.Conn, error) {
 			dialer := websocket.DefaultDialer
@@ -152,7 +140,7 @@ func TestMediaStreamBridge_Lifecycle(t *testing.T) {
 			}
 			return conn, err
 		}),
-		WithSessionFactory(newBridgeTestSession),
+		WithSessionFactory(bridgeFactory),
 	)
 
 	token, err := tokenMgr.Issue("call-test-bridge", 30*time.Second)
@@ -189,7 +177,7 @@ func TestMediaStreamBridge_Lifecycle(t *testing.T) {
 		t.Fatalf("write start event: %v", err)
 	}
 
-	sess := requireBridgeSession(t, sessionMgr, "call-test-bridge")
+	sess := requireBridgeSession(t, bridgeRan)
 
 	select {
 	case <-sess.Started():
@@ -454,8 +442,8 @@ func TestMediaStream_TransparentReconnect(t *testing.T) {
 		GeminiVoiceName:     "Kore",
 	}
 
-	tokenMgr := twilio.NewStreamTokenManager(time.Now)
-	sessionMgr := NewCallSessionManager(staticManagerConfig{cfg: cfg}, nil, nil, nil, tokenMgr,
+	tokenMgr := twilio.NewStreamTokenManager(time.Now, nil)
+	sessionMgr := NewCallSessionManager(fakes.StaticConfig{Cfg: cfg}, nil, nil, nil, tokenMgr,
 		WithPacerInterval(1*time.Millisecond),
 		WithGeminiDialer(func(ctx context.Context, modelName string) (*websocket.Conn, error) {
 			dialer := websocket.DefaultDialer
@@ -546,7 +534,7 @@ func TestMediaStream_BargeInAndVoicemail(t *testing.T) {
 	t.Cleanup(geminiServer.Close)
 
 	geminiWSURL := "ws" + strings.TrimPrefix(geminiServer.URL, "http")
-	tokenMgr := twilio.NewStreamTokenManager(time.Now)
+	tokenMgr := twilio.NewStreamTokenManager(time.Now, nil)
 
 	consultClient := &mockConsultClient{
 		calendarErr: errors.New("calendar failed"),
@@ -554,7 +542,8 @@ func TestMediaStream_BargeInAndVoicemail(t *testing.T) {
 	}
 
 	bargeStore := testutil.SetUpTestStore(t)
-	sessionMgr := NewCallSessionManager(staticManagerConfig{cfg: &config.Config{}}, bargeStore, nil, consultClient, tokenMgr,
+	bridgeFactory, bridgeRan := newSignalingBridgeFactory()
+	sessionMgr := NewCallSessionManager(fakes.StaticConfig{Cfg: &config.Config{}}, bargeStore, nil, consultClient, tokenMgr,
 		WithPacerInterval(1*time.Millisecond),
 		WithGeminiDialer(func(ctx context.Context, modelName string) (*websocket.Conn, error) {
 			dialer := websocket.DefaultDialer
@@ -564,7 +553,7 @@ func TestMediaStream_BargeInAndVoicemail(t *testing.T) {
 			}
 			return conn, err
 		}),
-		WithSessionFactory(newBridgeTestSession),
+		WithSessionFactory(bridgeFactory),
 	)
 
 	token, _ := tokenMgr.Issue("call-bargein", 30*time.Second)
@@ -590,7 +579,7 @@ func TestMediaStream_BargeInAndVoicemail(t *testing.T) {
 		"start":     map[string]any{"streamSid": "MZ_barge", "callSid": "CA_barge"},
 	})
 
-	sess := requireBridgeSession(t, sessionMgr, "call-bargein")
+	sess := requireBridgeSession(t, bridgeRan)
 
 	select {
 	case <-sess.Started():
@@ -603,8 +592,12 @@ func TestMediaStream_BargeInAndVoicemail(t *testing.T) {
 	sess.handleAMDAction(audio.AMDActionSpeakVoicemailAndHangup)
 	sess.HandleAMD("human")
 
-	_ = sess.Steer("guidance instruction", "guidance")
-	_ = sess.Steer("say instruction", "say")
+	if err := sess.Steer("guidance instruction", "guidance"); err != nil {
+		t.Fatalf("Steer failed: %v", err)
+	}
+	if err := sess.Steer("say instruction", "say"); err != nil {
+		t.Fatalf("Steer failed: %v", err)
+	}
 
 	sess.handleInboundTwilioMedia("")
 	sess.handleInboundTwilioMedia("invalid-base64!!!")
@@ -662,19 +655,6 @@ func waitForClearEvent(ws *websocket.Conn) bool {
 		}
 	}
 	return false
-}
-
-func TestStreamTokenManager_NilTimeSource(t *testing.T) {
-	t.Parallel()
-
-	mgrNil := twilio.NewStreamTokenManager(nil)
-	tok, err := mgrNil.Issue("c1", 10*time.Second)
-	if err != nil {
-		t.Fatalf("Issue err: %v", err)
-	}
-	if id, ok := mgrNil.Consume(tok); !ok || id != "c1" {
-		t.Fatalf("Consume err: %q, %v", id, ok)
-	}
 }
 
 type mediaWebSocketModeTestCase struct {
@@ -762,8 +742,9 @@ func runMediaWebSocketModeCase(t *testing.T, tc mediaWebSocketModeTestCase) {
 	setupMediaWebSocketStoreCall(context.Background(), st, tc)
 
 	geminiWSURL := "ws" + strings.TrimPrefix(geminiServer.URL, "http")
-	tokenMgr := twilio.NewStreamTokenManager(time.Now)
-	sessionMgr := NewCallSessionManager(staticManagerConfig{cfg: &config.Config{}}, st, nil, nil, tokenMgr,
+	tokenMgr := twilio.NewStreamTokenManager(time.Now, nil)
+	bridgeFactory, bridgeRan := newSignalingBridgeFactory()
+	sessionMgr := NewCallSessionManager(fakes.StaticConfig{Cfg: &config.Config{}}, st, nil, nil, tokenMgr,
 		WithPacerInterval(1*time.Millisecond),
 		WithGeminiDialer(func(ctx context.Context, modelName string) (*websocket.Conn, error) {
 			dialer := websocket.DefaultDialer
@@ -773,7 +754,7 @@ func runMediaWebSocketModeCase(t *testing.T, tc mediaWebSocketModeTestCase) {
 			}
 			return conn, err
 		}),
-		WithSessionFactory(newBridgeTestSession),
+		WithSessionFactory(bridgeFactory),
 	)
 
 	token, _ := tokenMgr.Issue(tc.callID, 30*time.Second)
@@ -799,7 +780,7 @@ func runMediaWebSocketModeCase(t *testing.T, tc mediaWebSocketModeTestCase) {
 		"start":     map[string]any{"streamSid": tc.streamSID, "callSid": tc.providerSID},
 	})
 
-	sess := requireBridgeSession(t, sessionMgr, tc.callID)
+	sess := requireBridgeSession(t, bridgeRan)
 
 	if tc.wantPromptSub != "" && !strings.Contains(sess.systemPrompt, tc.wantPromptSub) {
 		t.Fatalf("system prompt missing %q:\n%s", tc.wantPromptSub, sess.systemPrompt)

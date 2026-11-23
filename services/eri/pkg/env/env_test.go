@@ -513,32 +513,7 @@ type syncSettingsCase struct {
 	blockJetskiState      bool
 	corruptedInput        bool
 	blockFile             bool
-	createTempFail        bool
-	atomicEmptyDir        bool
-	atomicNonEmptyDir     bool
 	wantErr               bool
-}
-
-func testAtomicDirReplacement(t *testing.T, tc syncSettingsCase) {
-	t.Helper()
-	tmpDir := t.TempDir()
-	p := newDisabledProvisioner(t, tmpDir, tmpDir)
-	targetPath := filepath.Join(tmpDir, "replace_dir")
-	if tc.atomicNonEmptyDir {
-		writeTestFile(t, filepath.Join(targetPath, "child.txt"), "child")
-	} else if err := os.Mkdir(targetPath, 0o755); err != nil {
-		t.Fatalf("mkdir: %v", err)
-	}
-	err := p.writeAtomic(targetPath, "new content")
-	if (err != nil) != tc.wantErr {
-		t.Fatalf("writeAtomic dir replacement error=%v, wantErr=%v", err, tc.wantErr)
-	}
-	if !tc.wantErr {
-		data, _ := os.ReadFile(targetPath)
-		if string(data) != "new content" {
-			t.Errorf("writeAtomic content mismatch: %q", string(data))
-		}
-	}
 }
 
 func assertSyncSettingsOAuth(t *testing.T, tc syncSettingsCase, configDir string, parsed map[string]any) {
@@ -603,21 +578,6 @@ func assertSyncSettingsOutput(t *testing.T, tc syncSettingsCase, configDir, sett
 
 func runSyncSettingsCase(t *testing.T, tc syncSettingsCase) {
 	t.Helper()
-	if tc.createTempFail {
-		tmpDir := t.TempDir()
-		p := newDisabledProvisioner(t, tmpDir, tmpDir)
-		writeTestFile(t, filepath.Join(tmpDir, "blocker"), "file")
-		if err := p.writeAtomic(filepath.Join(tmpDir, "blocker", "sub", "test.txt"), "data"); err == nil {
-			t.Errorf("expected error when directory creation fails")
-		}
-		return
-	}
-
-	if tc.atomicEmptyDir || tc.atomicNonEmptyDir {
-		testAtomicDirReplacement(t, tc)
-		return
-	}
-
 	tmpHome := t.TempDir()
 	p := newDisabledProvisioner(t, tmpHome, "")
 	p.SetOAuthTokenSourcePath("")
@@ -677,14 +637,52 @@ func TestSyncSettings(t *testing.T) {
 		{name: "oauth mode fails when jetski_state destination is blocked by directory", apiKey: "", blockJetskiState: true, wantErr: true},
 		{name: "recovers gracefully from corrupted json file", apiKey: "rec-key", model: "rec-model", corruptedInput: true},
 		{name: "write failure returns error when parent dir blocked", blockFile: true, wantErr: true},
-		{name: "writeAtomic fails on parent directory blocker", createTempFail: true, wantErr: true},
-		{name: "writeAtomic replaces empty directory fallback", atomicEmptyDir: true},
-		{name: "writeAtomic fails replacing non-empty directory", atomicNonEmptyDir: true, wantErr: true},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			runSyncSettingsCase(t, tc)
+		})
+	}
+}
+
+func TestWriteAtomic(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name    string
+		files   map[string]string // pre-existing files under the temp root
+		dirs    []string          // pre-existing empty dirs under the temp root
+		path    string
+		wantErr bool
+	}{
+		{name: "fails on parent directory blocker", files: map[string]string{"blocker": "file"}, path: "blocker/sub/test.txt", wantErr: true},
+		{name: "replaces empty directory fallback", dirs: []string{"replace_dir"}, path: "replace_dir"},
+		{name: "fails replacing non-empty directory", files: map[string]string{"replace_dir/child.txt": "child"}, path: "replace_dir", wantErr: true},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			tmpDir := t.TempDir()
+			for rel, content := range tc.files {
+				writeTestFile(t, filepath.Join(tmpDir, rel), content)
+			}
+			for _, rel := range tc.dirs {
+				if err := os.Mkdir(filepath.Join(tmpDir, rel), 0o755); err != nil {
+					t.Fatalf("mkdir: %v", err)
+				}
+			}
+			p := newDisabledProvisioner(t, tmpDir, tmpDir)
+			target := filepath.Join(tmpDir, tc.path)
+			err := p.writeAtomic(target, "new content")
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("writeAtomic() error = %v, wantErr %v", err, tc.wantErr)
+			}
+			if tc.wantErr {
+				return
+			}
+			if data, _ := os.ReadFile(target); string(data) != "new content" {
+				t.Errorf("writeAtomic content = %q, want %q", string(data), "new content")
+			}
 		})
 	}
 }
@@ -799,24 +797,9 @@ func TestCodexTargetMcpAndHooksProvisioning(t *testing.T) {
 			wantErr:    true,
 			wantTOML:   false,
 		},
-		{
-			name:      "empty raw config does not write toml",
-			rawConfig: json.RawMessage(""),
-			wantErr:   false,
-			wantTOML:  false,
-		},
-		{
-			name:      "null raw config does not write toml",
-			rawConfig: json.RawMessage("null"),
-			wantErr:   false,
-			wantTOML:  false,
-		},
-		{
-			name:      "quoted empty raw config does not write toml",
-			rawConfig: json.RawMessage(`""`),
-			wantErr:   false,
-			wantTOML:  false,
-		},
+		{name: "empty raw config does not write toml", rawConfig: json.RawMessage(""), wantErr: false, wantTOML: false},
+		{name: "null raw config does not write toml", rawConfig: json.RawMessage("null"), wantErr: false, wantTOML: false},
+		{name: "quoted empty raw config does not write toml", rawConfig: json.RawMessage(`""`), wantErr: false, wantTOML: false},
 		{
 			name:      "empty dir returns nil without writing",
 			emptyDir:  true,
@@ -888,18 +871,9 @@ func TestMuseTargetMcpAndHooksProvisioning(t *testing.T) {
 			isBlocked:   true,
 			expectError: true,
 		},
-		{
-			label:     "do not write on empty raw json config payload",
-			jsonInput: json.RawMessage(""),
-		},
-		{
-			label:     "do not write on null json string literal",
-			jsonInput: json.RawMessage(nullLiteral),
-		},
-		{
-			label:     "do not write on empty json string literal",
-			jsonInput: json.RawMessage(`""`),
-		},
+		{label: "do not write on empty raw json config payload", jsonInput: json.RawMessage("")},
+		{label: "do not write on null json string literal", jsonInput: json.RawMessage(nullLiteral)},
+		{label: "do not write on empty json string literal", jsonInput: json.RawMessage(`""`)},
 		{
 			label:      "skip write when target directory argument is blank",
 			skippedDir: "blank",
@@ -932,236 +906,6 @@ func TestMuseTargetMcpAndHooksProvisioning(t *testing.T) {
 				t.Fatalf("EnsureTargetMuseSettingsJSON() error = %v, expectError %v", err, tc.expectError)
 			}
 			assertMuseSettingsFile(t, targetDir, tc)
-		})
-	}
-}
-
-func TestOverlayConfigMCPServers(t *testing.T) {
-	t.Parallel()
-	tests := []struct {
-		name    string
-		nilCfg  bool
-		raw     string
-		target  RuleTarget
-		wantKey string
-	}{
-		{name: "nil config returns immediately", nilCfg: true},
-		{name: "invalid json preserved verbatim", raw: "invalid-json", target: TargetDiscord, wantKey: "raw_server"},
-		{name: "ephemeral target without servers leaves merged empty", target: TargetEphemeral},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			var cfg *config.Config
-			if !tc.nilCfg {
-				cfg = newTestConfig(func(c *config.ConfigData) {
-					if tc.wantKey != "" {
-						c.McpServers.Discord = map[string]json.RawMessage{
-							tc.wantKey: json.RawMessage(tc.raw),
-						}
-					}
-				})
-			}
-			target := tc.target
-			if target == "" {
-				target = TargetDiscord
-			}
-			merged := make(map[string]any)
-			overlayConfigMCPServers(cfg, target, merged)
-			if tc.wantKey != "" {
-				if _, ok := merged[tc.wantKey]; !ok {
-					t.Fatalf("expected key %q in merged", tc.wantKey)
-				}
-			}
-		})
-	}
-}
-
-type sourceFingerprintCase struct {
-	name            string
-	nilProv         bool
-	emptyHome       bool
-	mutateRule      bool
-	mutateSkill     bool
-	mutateHook      bool
-	mutateCred      bool
-	expectEmpty     bool
-	expectBaseMatch bool
-}
-
-func runSourceFingerprintCase(t *testing.T, tc sourceFingerprintCase) {
-	t.Helper()
-	if tc.nilProv {
-		var p *Provisioner
-		if fp := p.SourceFingerprint(); fp != "" {
-			t.Fatalf("expected empty string for nil provisioner, got %q", fp)
-		}
-		return
-	}
-	if tc.emptyHome {
-		p := newDisabledProvisioner(t, "", t.TempDir())
-		if fp := p.SourceFingerprint(); fp != "" {
-			t.Fatalf("expected empty string for empty home provisioner, got %q", fp)
-		}
-		return
-	}
-
-	homeDir := t.TempDir()
-	dataDir := t.TempDir()
-	aerialDir := t.TempDir()
-	configDir := t.TempDir()
-	skillsDir := t.TempDir()
-	hooksDir := t.TempDir()
-	credDir := t.TempDir()
-
-	ruleFile := filepath.Join(aerialDir, "00_test.md")
-	writeTestFile(t, ruleFile, "# Base Rule")
-
-	skillMD := filepath.Join(skillsDir, "test-skill", "SKILL.md")
-	writeTestFile(t, skillMD, "# Test Skill")
-
-	hookScript := filepath.Join(hooksDir, "pre-commit")
-	writeTestFile(t, hookScript, "#!/bin/sh\nexit 0\n")
-
-	credFile := filepath.Join(credDir, "token.json")
-	writeTestFile(t, credFile, `{"token":"initial"}`)
-
-	p := newDisabledProvisioner(t, homeDir, dataDir)
-	p.SetAerialRulesDir(aerialDir)
-	p.SetConfigRulesDir(configDir)
-	p.SetCustomSkillsDir(skillsDir)
-	p.SetHooksDir(hooksDir)
-	p.SetOAuthTokenSourcePath(credFile)
-
-	baseFP := p.SourceFingerprint()
-	if baseFP == "" {
-		t.Fatalf("expected non-empty baseline fingerprint")
-	}
-
-	if tc.expectBaseMatch {
-		repeatedFP := p.SourceFingerprint()
-		if repeatedFP != baseFP {
-			t.Fatalf("expected repeated fingerprint to match baseline %q, got %q", baseFP, repeatedFP)
-		}
-		return
-	}
-
-	if tc.mutateRule {
-		writeTestFile(t, ruleFile, "# Modified Rule Content")
-	}
-	if tc.mutateSkill {
-		writeTestFile(t, skillMD, "# Modified Skill Content")
-	}
-	if tc.mutateHook {
-		writeTestFile(t, hookScript, "#!/bin/sh\nexit 1\n")
-	}
-	if tc.mutateCred {
-		writeTestFile(t, credFile, `{"token":"rotated-token"}`)
-	}
-
-	mutatedFP := p.SourceFingerprint()
-	if mutatedFP == "" {
-		t.Fatalf("expected non-empty mutated fingerprint")
-	}
-	if mutatedFP == baseFP {
-		t.Fatalf("expected fingerprint to change after mutation, but got same %q", mutatedFP)
-	}
-}
-
-func TestProvisioner_SourceFingerprint(t *testing.T) {
-	t.Parallel()
-	tests := []sourceFingerprintCase{
-		{name: "nil provisioner returns empty string", nilProv: true, expectEmpty: true},
-		{name: "empty home returns empty string", emptyHome: true, expectEmpty: true},
-		{name: "identical assets produce matching fingerprint across repeated calls", expectBaseMatch: true},
-		{name: "modifying rule file produces distinct fingerprint", mutateRule: true},
-		{name: "modifying skill SKILL.md produces distinct fingerprint", mutateSkill: true},
-		{name: "modifying hook script produces distinct fingerprint", mutateHook: true},
-		{name: "modifying credential file produces distinct fingerprint", mutateCred: true},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			runSourceFingerprintCase(t, tc)
-		})
-	}
-}
-
-type hashDirCase struct {
-	name          string
-	relativePaths []string
-	symlinks      map[string]string
-	asFile        bool
-	emptyRoot     bool
-	nonExistent   bool
-	wantContains  string
-	wantCount     int
-}
-
-func setupHashDirRoot(t *testing.T, tc hashDirCase) string {
-	t.Helper()
-	if tc.emptyRoot {
-		return ""
-	}
-	tmp := t.TempDir()
-	root := filepath.Join(tmp, "root")
-	if tc.asFile {
-		return writeTestFile(t, root, "just a file")
-	}
-	if tc.nonExistent {
-		return root
-	}
-	if err := os.MkdirAll(root, 0o755); err != nil {
-		t.Fatalf("mkdir %s: %v", root, err)
-	}
-	for _, rel := range tc.relativePaths {
-		writeTestFile(t, filepath.Join(root, rel), "content of "+rel)
-	}
-	for link, target := range tc.symlinks {
-		linkTarget := target
-		if !filepath.IsAbs(target) && target != "." && target != ".." {
-			linkTarget = filepath.Join(root, target)
-		}
-		if err := os.Symlink(linkTarget, filepath.Join(root, link)); err != nil {
-			t.Fatalf("symlink %s -> %s: %v", link, linkTarget, err)
-		}
-	}
-	return root
-}
-
-func runHashDirCase(t *testing.T, tc hashDirCase) {
-	t.Helper()
-	root := setupHashDirRoot(t, tc)
-
-	var buf strings.Builder
-	hashProvisionerDir(&buf, "test-label", root)
-	out := buf.String()
-	if tc.wantContains != "" && !strings.Contains(out, tc.wantContains) {
-		t.Fatalf("expected output containing %q, got %q", tc.wantContains, out)
-	}
-	if tc.wantCount > 0 {
-		count := strings.Count(out, tc.wantContains)
-		if count != tc.wantCount {
-			t.Fatalf("expected %q to appear %d times, got %d in %q", tc.wantContains, tc.wantCount, count, out)
-		}
-	}
-}
-
-func TestHashProvisionerDir(t *testing.T) {
-	t.Parallel()
-	tests := []hashDirCase{
-		{name: "empty root string", emptyRoot: true, wantContains: "test-label:empty"},
-		{name: "nonexistent root directory", nonExistent: true, wantContains: "test-label:empty"},
-		{name: "regular file as root", asFile: true, wantContains: "test-label:empty"},
-		{name: "empty directory", wantContains: "test-label:empty"},
-		{name: "nested directory with files", relativePaths: []string{"a/b/c/file.txt"}, wantContains: "file.txt", wantCount: 1},
-		{name: "directory with symlink loop preserves single file occurrence", relativePaths: []string{"real.txt"}, symlinks: map[string]string{"loop": "."}, wantContains: "real.txt", wantCount: 1},
-		{name: "directory with broken symlink skips broken link and hashes valid file", relativePaths: []string{"valid.txt"}, symlinks: map[string]string{"broken": "missing"}, wantContains: "valid.txt", wantCount: 1},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			runHashDirCase(t, tc)
 		})
 	}
 }

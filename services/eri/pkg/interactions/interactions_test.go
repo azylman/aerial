@@ -20,7 +20,6 @@ import (
 	"github.com/azylman/aerial/services/eri/pkg/db/dbtest"
 	"github.com/azylman/aerial/services/eri/pkg/metrics"
 	"github.com/azylman/aerial/services/eri/pkg/queue"
-	"github.com/azylman/aerial/services/eri/pkg/runner"
 )
 
 type capturedRequest struct {
@@ -130,40 +129,6 @@ func ResetRegisteredGuilds() {
 	})
 }
 
-type mockInteractionsProcessHandle struct{}
-
-func (mockInteractionsProcessHandle) Pid() int    { return 12345 }
-func (mockInteractionsProcessHandle) Kill() error { return nil }
-func (mockInteractionsProcessHandle) Wait() error { return nil }
-
-type mockInteractionsDaemonSpawner struct{}
-
-func (mockInteractionsDaemonSpawner) Spawn(ctx context.Context, cfg runner.DaemonConfig) (io.WriteCloser, io.ReadCloser, io.ReadCloser, runner.ProcessHandle, error) {
-	inR, inW := io.Pipe()
-	outR, outW := io.Pipe()
-	errR, errW := io.Pipe()
-	go func() {
-		_, _ = outW.Write([]byte("{\"event\":\"init\",\"conversation_id\":\"550e8400-e29b-41d4-a716-446655440000\"}\n"))
-		_ = errW.Close()
-		_, _ = io.Copy(io.Discard, inR)
-	}()
-	return inW, outR, errR, mockInteractionsProcessHandle{}, nil
-}
-
-func newMockProcessPools(threadID string) *queue.WorkerPool {
-	spawner := mockInteractionsDaemonSpawner{}
-	mk := func(m string) *runner.UnifiedProcessPool {
-		p := runner.NewUnifiedProcessPool(runner.PoolConfig{DefaultModel: m}, spawner)
-		_, _ = p.GetOrCreate(context.Background(), threadID, "")
-		return p
-	}
-	return queue.New(nil, queue.WorkerPoolConfig{
-		ProcessPool:             mk("gemini-2.5-flash"),
-		LowEffortProcessPool:    mk("gemini-2.5-flash"),
-		MediumEffortProcessPool: mk("gemini-3.8-flash-medium"),
-	})
-}
-
 func mockGitOpsUpdater(cfg *config.Config, shouldErr bool) GitOpsChannelUpdater {
 	return func(ctx context.Context, channelKey string, mutateFn func(p *config.ChannelPolicy)) (string, error) {
 		if shouldErr {
@@ -183,132 +148,67 @@ func seedStatusFixtures(store *dbtest.FakeStore, active bool) {
 	}
 }
 
-type appCommandHelperTestCase struct {
-	name       string
-	helperType string
-	strInput   string
-	intInput   int
-	durInput   time.Duration
-	wantStr    string
-	wantBool   bool
-	wantInt    int
-}
-
-func checkAppCommandOptions(t *testing.T, tc appCommandHelperTestCase, sampleOpts []*discordgo.ApplicationCommandInteractionDataOption) bool {
-	t.Helper()
-	switch tc.helperType {
-	case "bool":
-		if got := getBoolOption(sampleOpts, tc.strInput, tc.strInput == "missing"); got != tc.wantBool {
-			t.Errorf("getBoolOption(%s)=%v, want %v", tc.strInput, got, tc.wantBool)
+// TestCommandDefinitions checks the catalog Discord would reject or render blank: every
+// command needs a unique, non-empty name and a description.
+func TestCommandDefinitions(t *testing.T) {
+	t.Parallel()
+	seen := make(map[string]bool)
+	for _, c := range CommandDefinitions() {
+		if c.Name == "" || c.Description == "" || seen[c.Name] {
+			t.Errorf("command %q: want a unique non-empty name and a description (got %q)", c.Name, c.Description)
 		}
-		return true
-	case "string":
-		def := ""
-		if tc.strInput == "missing" {
-			def = "default"
-		}
-		if got := getStringOption(sampleOpts, tc.strInput, def); got != tc.wantStr {
-			t.Errorf("getStringOption(%s)=%q, want %q", tc.strInput, got, tc.wantStr)
-		}
-		return true
-	case "channel":
-		if got := getChannelOption(sampleOpts, tc.strInput, "fallback"); got != tc.wantStr {
-			t.Errorf("getChannelOption(%s)=%q, want %q", tc.strInput, got, tc.wantStr)
-		}
-		return true
-	case "has_opt":
-		if got := hasOption(sampleOpts, tc.strInput); got != tc.wantBool {
-			t.Errorf("hasOption(%s)=%v, want %v", tc.strInput, got, tc.wantBool)
-		}
-		return true
-	default:
-		return false
+		seen[c.Name] = true
 	}
 }
 
-func checkAppCommandFormatting(t *testing.T, tc appCommandHelperTestCase, cmds []*discordgo.ApplicationCommand, cmdMap map[string]int) {
-	t.Helper()
-	switch tc.helperType {
-	case "cmd_len":
-		if len(cmds) != tc.wantInt {
-			t.Fatalf("expected %d commands, got %d", tc.wantInt, len(cmds))
-		}
-	case "cmd_opts":
-		if opts, ok := cmdMap[tc.strInput]; !ok || opts != tc.wantInt {
-			t.Fatalf("cmd %s: expected %d options, got %d (found=%v)", tc.strInput, tc.wantInt, opts, ok)
-		}
-	case "truncate":
-		if got := truncateRunes(tc.strInput, tc.intInput); got != tc.wantStr {
-			t.Errorf("truncateRunes(%s, %d)=%q, want %q", tc.strInput, tc.intInput, got, tc.wantStr)
-		}
-	case "duration":
-		if got := formatRelativeDuration(tc.durInput); got != tc.wantStr {
-			t.Errorf("formatRelativeDuration(%v)=%q, want %q", tc.durInput, got, tc.wantStr)
-		}
-	case "relative_time":
-		if got := formatRelativeTime(tc.durInput); got != tc.wantStr {
-			t.Errorf("formatRelativeTime(%v)=%q, want %q", tc.durInput, got, tc.wantStr)
-		}
-	}
+// helperSampleOpts is the option list shared by the option-lookup helper tables.
+var helperSampleOpts = []*discordgo.ApplicationCommandInteractionDataOption{
+	mkOpt("opt_true", discordgo.ApplicationCommandOptionBoolean, true),
+	mkOpt("opt_false", discordgo.ApplicationCommandOptionBoolean, false),
+	mkOpt("opt_str", discordgo.ApplicationCommandOptionString, "hello"),
+	mkOpt("opt_ch", discordgo.ApplicationCommandOptionChannel, "channel-999"),
+	mkOpt("opt_val_str", discordgo.ApplicationCommandOptionChannel, "channel-raw-val"),
 }
 
-func runApplicationCommandHelperCase(t *testing.T, tc appCommandHelperTestCase, cmds []*discordgo.ApplicationCommand, cmdMap map[string]int, sampleOpts []*discordgo.ApplicationCommandInteractionDataOption) {
-	t.Helper()
-	if checkAppCommandOptions(t, tc, sampleOpts) {
-		return
+func TestGetBoolOption(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name string
+		key  string
+		def  bool
+		want bool
+	}{
+		{"true", "opt_true", false, true},
+		{"false", "opt_false", false, false},
+		{"missing falls back", "missing", true, true},
 	}
-	checkAppCommandFormatting(t, tc, cmds, cmdMap)
-}
-
-func TestApplicationCommandsAndHelpers(t *testing.T) {
-	sampleOpts := []*discordgo.ApplicationCommandInteractionDataOption{
-		mkOpt("opt_true", discordgo.ApplicationCommandOptionBoolean, true),
-		mkOpt("opt_false", discordgo.ApplicationCommandOptionBoolean, false),
-		mkOpt("opt_str", discordgo.ApplicationCommandOptionString, "hello"),
-		mkOpt("opt_ch", discordgo.ApplicationCommandOptionChannel, "channel-999"),
-		mkOpt("opt_val_str", discordgo.ApplicationCommandOptionChannel, "channel-raw-val"),
-	}
-
-	tests := []appCommandHelperTestCase{
-		{"CmdDefCount", "cmd_len", "", 0, 0, "", false, 6},
-		{"CmdDef_status", "cmd_opts", "status", 0, 0, "", false, 0},
-		{"CmdDef_quota", "cmd_opts", "quota", 0, 0, "", false, 0},
-		{"CmdDef_rotate", "cmd_opts", "rotate", 0, 0, "", false, 2},
-		{"CmdDef_interrupt", "cmd_opts", "interrupt", 0, 0, "", false, 2},
-		{"CmdDef_mode", "cmd_opts", "mode", 0, 0, "", false, 2},
-		{"CmdDef_ignore_bots", "cmd_opts", "ignore_bots", 0, 0, "", false, 2},
-		{"GetBool_True", "bool", "opt_true", 0, 0, "", true, 0},
-		{"GetBool_False", "bool", "opt_false", 0, 0, "", false, 0},
-		{"GetBool_MissingFallback", "bool", "missing", 0, 0, "", true, 0},
-		{"GetString_Found", "string", "opt_str", 0, 0, "hello", false, 0},
-		{"GetString_MissingFallback", "string", "missing", 0, 0, "default", false, 0},
-		{"GetChannel_Found", "channel", "opt_ch", 0, 0, "channel-999", false, 0},
-		{"GetChannel_RawVal", "channel", "opt_val_str", 0, 0, "channel-raw-val", false, 0},
-		{"GetChannel_MissingFallback", "channel", "missing", 0, 0, "fallback", false, 0},
-		{"HasOption_True", "has_opt", "opt_true", 0, 0, "", true, 0},
-		{"HasOption_False", "has_opt", "nonexistent", 0, 0, "", false, 0},
-		{"Truncate_Long", "truncate", "hello world", 5, 0, "hello...", false, 0},
-		{"Truncate_Short", "truncate", "hi", 5, 0, "hi", false, 0},
-		{"FormatDur_Negative", "duration", "", 0, -10 * time.Second, "10s", false, 0},
-		{"FormatDur_Seconds", "duration", "", 0, 45 * time.Second, "45s", false, 0},
-		{"FormatDur_Minutes", "duration", "", 0, 5*time.Minute + 30*time.Second, "5m", false, 0},
-		{"FormatDur_HoursMinutes", "duration", "", 0, 2*time.Hour + 10*time.Minute, "2h 10m", false, 0},
-		{"FormatDur_DaysHours", "duration", "", 0, 25 * time.Hour, "1d 1h", false, 0},
-		{"FormatRel_JustNow", "relative_time", "", 0, 10 * time.Second, "just now", false, 0},
-		{"FormatRel_Minutes", "relative_time", "", 0, 5 * time.Minute, "5m", false, 0},
-		{"FormatRel_Hours", "relative_time", "", 0, 3 * time.Hour, "3h", false, 0},
-		{"FormatRel_Days", "relative_time", "", 0, 48 * time.Hour, "2d", false, 0},
-	}
-
-	cmds := CommandDefinitions()
-	cmdMap := make(map[string]int)
-	for _, c := range cmds {
-		cmdMap[c.Name] = len(c.Options)
-	}
-
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			runApplicationCommandHelperCase(t, tc, cmds, cmdMap, sampleOpts)
+			t.Parallel()
+			if got := getBoolOption(helperSampleOpts, tc.key, tc.def); got != tc.want {
+				t.Errorf("getBoolOption(%s) = %v, want %v", tc.key, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestGetStringOption(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name string
+		key  string
+		def  string
+		want string
+	}{
+		{"found", "opt_str", "", "hello"},
+		{"missing falls back", "missing", "default", "default"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got := getStringOption(helperSampleOpts, tc.key, tc.def); got != tc.want {
+				t.Errorf("getStringOption(%s) = %q, want %q", tc.key, got, tc.want)
+			}
 		})
 	}
 }
@@ -318,19 +218,109 @@ func TestGetChannelOption(t *testing.T) {
 	tests := []struct {
 		name    string
 		options []*discordgo.ApplicationCommandInteractionDataOption
+		key     string
 		want    string
 	}{
-		{"missing", nil, "fallback"},
-		{"nil option", []*discordgo.ApplicationCommandInteractionDataOption{nil}, "fallback"},
-		{"different option", []*discordgo.ApplicationCommandInteractionDataOption{mkOpt("other", discordgo.ApplicationCommandOptionChannel, "channel-123")}, "fallback"},
-		{"selected channel", []*discordgo.ApplicationCommandInteractionDataOption{mkOpt("channel", discordgo.ApplicationCommandOptionChannel, "channel-123")}, "channel-123"},
-		{"empty selection", []*discordgo.ApplicationCommandInteractionDataOption{mkOpt("channel", discordgo.ApplicationCommandOptionChannel, "")}, ""},
+		{"found", helperSampleOpts, "opt_ch", "channel-999"},
+		{"raw value", helperSampleOpts, "opt_val_str", "channel-raw-val"},
+		{"missing in sample falls back", helperSampleOpts, "missing", "fallback"},
+		{"missing", nil, "channel", "fallback"},
+		{"nil option", []*discordgo.ApplicationCommandInteractionDataOption{nil}, "channel", "fallback"},
+		{"different option", []*discordgo.ApplicationCommandInteractionDataOption{mkOpt("other", discordgo.ApplicationCommandOptionChannel, "channel-123")}, "channel", "fallback"},
+		{"selected channel", []*discordgo.ApplicationCommandInteractionDataOption{mkOpt("channel", discordgo.ApplicationCommandOptionChannel, "channel-123")}, "channel", "channel-123"},
+		{"empty selection", []*discordgo.ApplicationCommandInteractionDataOption{mkOpt("channel", discordgo.ApplicationCommandOptionChannel, "")}, "channel", ""},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			if got := getChannelOption(tc.options, "channel", "fallback"); got != tc.want {
-				t.Errorf("getChannelOption() = %q, want %q", got, tc.want)
+			if got := getChannelOption(tc.options, tc.key, "fallback"); got != tc.want {
+				t.Errorf("getChannelOption(%s) = %q, want %q", tc.key, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestHasOption(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name string
+		key  string
+		want bool
+	}{
+		{"present", "opt_true", true},
+		{"absent", "nonexistent", false},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got := hasOption(helperSampleOpts, tc.key); got != tc.want {
+				t.Errorf("hasOption(%s) = %v, want %v", tc.key, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestTruncateRunes(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name string
+		in   string
+		max  int
+		want string
+	}{
+		{"long", "hello world", 5, "hello..."},
+		{"short", "hi", 5, "hi"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got := truncateRunes(tc.in, tc.max); got != tc.want {
+				t.Errorf("truncateRunes(%q, %d) = %q, want %q", tc.in, tc.max, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestFormatRelativeDuration(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name string
+		in   time.Duration
+		want string
+	}{
+		{"negative", -10 * time.Second, "10s"},
+		{"seconds", 45 * time.Second, "45s"},
+		{"minutes", 5*time.Minute + 30*time.Second, "5m"},
+		{"hours and minutes", 2*time.Hour + 10*time.Minute, "2h 10m"},
+		{"days and hours", 25 * time.Hour, "1d 1h"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got := formatRelativeDuration(tc.in); got != tc.want {
+				t.Errorf("formatRelativeDuration(%v) = %q, want %q", tc.in, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestFormatRelativeTime(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name string
+		in   time.Duration
+		want string
+	}{
+		{"just now", 10 * time.Second, "just now"},
+		{"minutes", 5 * time.Minute, "5m"},
+		{"hours", 3 * time.Hour, "3h"},
+		{"days", 48 * time.Hour, "2d"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got := formatRelativeTime(tc.in); got != tc.want {
+				t.Errorf("formatRelativeTime(%v) = %q, want %q", tc.in, got, tc.want)
 			}
 		})
 	}
@@ -406,18 +396,19 @@ func TestRouter_AuthAndDispatch(t *testing.T) {
 }
 
 type statusTestCase struct {
-	name         string
-	gitCommitEnv string
-	deployStatus string
-	hasDeployFn  bool
-	seedFacts    bool
-	seedCrons    bool
-	seedOneShots bool
-	seedActive   bool
-	failStore    bool
-	httpStatus   int
-	wantSubstrs  []string
-	envMode      string
+	name          string
+	gitCommitEnv  string
+	deployStatus  string
+	hasDeployFn   bool
+	seedFacts     bool
+	seedCrons     bool
+	seedOneShots  bool
+	seedActive    bool
+	failStore     bool
+	httpStatus    int
+	wantSubstrs   []string
+	haroInConfig  bool // haro URL comes from config instead of deps
+	covenInConfig bool // memory URL comes from config CovenURL instead of deps
 }
 
 func buildStatusHaroFixtures(tc statusTestCase, now time.Time) ([]map[string]any, []map[string]any) {
@@ -459,16 +450,14 @@ func setupStatusRouter(tc statusTestCase, memSrvURL string, haroSrvURL string) (
 		store.FailNext("GetActiveTasks", errors.New("db error"))
 		router.deps.Pool = queue.New(nil, queue.WorkerPoolConfig{})
 	} else {
-		switch tc.envMode {
-		case "haro_config":
+		router.deps.HaroURL = haroSrvURL
+		if tc.haroInConfig {
 			router.deps.HaroURL = ""
 			cfg.Current().HaroURL = haroSrvURL
-		case "coven_config":
+		}
+		if tc.covenInConfig {
 			router.deps.MemoryURL = ""
 			cfg.Current().CovenURL = memSrvURL
-			router.deps.HaroURL = haroSrvURL
-		default:
-			router.deps.HaroURL = haroSrvURL
 		}
 	}
 
@@ -523,13 +512,13 @@ func TestRouter_HandleStatus(t *testing.T) {
 	defer memSrv.Close()
 
 	tests := []statusTestCase{
-		{"StandardWithFactsAndCron", "", "`aerial@bfed897` (Live, healthy)", true, true, true, false, false, false, 0, []string{"**Runtime**:", "`aerial@bfed897`", "1 facts recorded", "Morning briefing"}, ""},
-		{"FallbackEnvAndIdle", "abcdef123456", "", false, false, false, false, false, false, 0, []string{"`aerial@abcdef1`", "`Idle`"}, ""},
-		{"AdvancedBranchesAndSchedules", "", "", true, false, true, true, true, false, 0, []string{"Follow up on PR deployment"}, ""},
-		{"HaroConfigFallback", "", "", false, true, true, false, false, false, 0, []string{"Morning briefing"}, "haro_config"},
-		{"CovenConfigFallback", "", "", false, false, true, false, false, false, 0, []string{"Hourly health check", "1 facts recorded"}, "coven_config"},
-		{"StoreFailuresHandledGracefully", "", "", false, false, false, false, false, true, 0, []string{"0 facts recorded"}, ""},
-		{"ErrorLoggingHttp500", "", "", false, false, false, false, false, false, http.StatusInternalServerError, nil, ""},
+		{name: "StandardWithFactsAndCron", deployStatus: "`aerial@bfed897` (Live, healthy)", hasDeployFn: true, seedFacts: true, seedCrons: true, wantSubstrs: []string{"**Runtime**:", "`aerial@bfed897`", "1 facts recorded", "Morning briefing"}},
+		{name: "FallbackEnvAndIdle", gitCommitEnv: "abcdef123456", wantSubstrs: []string{"`aerial@abcdef1`", "`Idle`"}},
+		{name: "AdvancedBranchesAndSchedules", hasDeployFn: true, seedCrons: true, seedOneShots: true, seedActive: true, wantSubstrs: []string{"Follow up on PR deployment"}},
+		{name: "HaroConfigFallback", seedFacts: true, seedCrons: true, haroInConfig: true, wantSubstrs: []string{"Morning briefing"}},
+		{name: "CovenConfigFallback", seedCrons: true, covenInConfig: true, wantSubstrs: []string{"Hourly health check", "1 facts recorded"}},
+		{name: "StoreFailuresHandledGracefully", failStore: true, wantSubstrs: []string{"0 facts recorded"}},
+		{name: "ErrorLoggingHttp500", httpStatus: http.StatusInternalServerError},
 	}
 
 	for _, tc := range tests {
@@ -564,6 +553,7 @@ func TestRouter_HandleQuota(t *testing.T) {
 	}{
 		{"WithActiveQuotaBuckets", sampleGroups, refreshedAt, true, 0, []string{"**Gemini Models**", "**weekly**: `87%` remaining", "resets in 2h", "Last refreshed: 4m ago", `\u003ct:`}, nil},
 		{"CodexWeeklyOnly", []metrics.QuotaGroup{{Name: "Codex", Buckets: []metrics.QuotaBucket{{ID: "codex-seven-day", Window: "weekly", RemainingFraction: 0.98}}}}, refreshedAt, true, 0, []string{"**Codex**", "**weekly**: `98%` remaining"}, []string{"**5h**"}},
+		{"ZeroUpdatedAtOmitsLine", sampleGroups, time.Time{}, true, 0, []string{"**Gemini Models**"}, []string{"Last refreshed"}},
 		{"EmptyQuotaFallback", nil, time.Time{}, false, 0, []string{"No quota telemetry recorded yet"}, nil},
 		{"ErrorLoggingHttp500", nil, time.Time{}, true, http.StatusInternalServerError, nil, nil},
 	}
@@ -571,9 +561,8 @@ func TestRouter_HandleQuota(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			router, _, transport, session := setupTestRouter("admin-123", tc.httpStatus)
 			if tc.useProvider {
-				g, u := tc.groups, tc.updatedAt
-				router.deps.QuotaProvider = func() []metrics.QuotaGroup { return g }
-				router.deps.QuotaTimeProvider = func() time.Time { return u }
+				snap := metrics.QuotaSnapshot{Groups: tc.groups, UpdatedAt: tc.updatedAt}
+				router.deps.QuotaProvider = func() metrics.QuotaSnapshot { return snap }
 			}
 			router.Handle(t.Context(), session, mkCmd("int-quota", "chan-1", "admin-123", "quota"))
 			reqs := transport.Requests()
@@ -595,97 +584,111 @@ func TestRouter_HandleQuota(t *testing.T) {
 	}
 }
 
-type sessionQueueTestCase struct {
-	name         string
-	cmdName      string
-	opts         []*discordgo.ApplicationCommandInteractionDataOption
-	seedPending  bool
-	failStore    bool
-	withPools    bool
-	httpStatus   int
-	wantRequests int
-	wantSubstrs  []string
-	avoidSubstrs []string
+type fakeTurnCanceller struct {
+	resp      queue.CancelTurnResponse
+	err       error
+	mu        sync.Mutex
+	threadIDs []string
+	reasons   []string
 }
 
-func assertSessionQueueResponseBody(t *testing.T, reqs []capturedRequest, wantSubstrs, avoidSubstrs []string) {
-	t.Helper()
-	body := ""
-	if len(reqs) == 2 {
-		var deferredResp discordgo.InteractionResponse
-		_ = json.Unmarshal(reqs[0].Body, &deferredResp)
-		if deferredResp.Type != discordgo.InteractionResponseDeferredChannelMessageWithSource {
-			t.Errorf("expected deferred response type, got %d", deferredResp.Type)
-		}
-		body = string(reqs[1].Body)
-	} else if len(reqs) == 1 {
-		body = string(reqs[0].Body)
-	}
-
-	for _, want := range wantSubstrs {
-		if !strings.Contains(body, want) {
-			t.Errorf("expected body to contain %q, got: %s", want, body)
-		}
-	}
-	for _, avoid := range avoidSubstrs {
-		if strings.Contains(body, avoid) {
-			t.Errorf("expected body NOT to contain %q, got: %s", avoid, body)
-		}
-	}
+func (f *fakeTurnCanceller) CancelThreadTurn(_ context.Context, threadID string, req queue.CancelTurnRequest) (queue.CancelTurnResponse, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.threadIDs = append(f.threadIDs, threadID)
+	f.reasons = append(f.reasons, req.Reason)
+	return f.resp, f.err
 }
 
-func runSessionAndQueueCommandCase(t *testing.T, tc sessionQueueTestCase) {
-	t.Helper()
-	router, _, transport, session := setupTestRouter("admin-123", tc.httpStatus)
-	store := dbtest.NewFakeStore()
-	targetChan := "chan-" + tc.name
-
-	if tc.seedPending {
-		_ = store.InsertMessage(context.Background(), db.Message{ID: "msg-pending-1", ThreadID: targetChan, Status: db.StatusPending, CreatedAt: time.Now().UTC()})
-	}
-	if tc.failStore {
-		store.FailNext("RotateSessionID", errors.New("db error"))
-		store.FailNext("GetPendingOrProcessingMessages", errors.New("db error"))
-		store.FailNext("RotateSessionID", errors.New("db error"))
-	}
-	router.deps.Store = store
-
-	if tc.withPools {
-		router.deps.Pool = newMockProcessPools(targetChan)
-	}
-
-	router.Handle(t.Context(), session, mkCmd("int-"+tc.name, targetChan, "admin-123", tc.cmdName, tc.opts...))
-
-	reqs := transport.Requests()
-	if len(reqs) != tc.wantRequests {
-		t.Fatalf("expected %d requests, got %d", tc.wantRequests, len(reqs))
-	}
-
-	assertSessionQueueResponseBody(t, reqs, tc.wantSubstrs, tc.avoidSubstrs)
-
-	if tc.seedPending {
-		msg, err := store.GetMessage(context.Background(), "msg-pending-1")
-		if err != nil || msg.Status != db.StatusFailed {
-			t.Errorf("expected message status failed, got %v (err=%v)", msg.Status, err)
-		}
-	}
-}
-
-func TestRouter_SessionAndQueueCommands(t *testing.T) {
-	tests := []sessionQueueTestCase{
-		{"Rotate_BareAndTopic", "rotate", []*discordgo.ApplicationCommandInteractionDataOption{mkOpt("bare", discordgo.ApplicationCommandOptionBoolean, true), mkOpt("topic", discordgo.ApplicationCommandOptionString, "refactor queue")}, false, false, false, 0, 2, []string{"Bare session wipe complete", "refactor queue"}, nil},
-		{"Rotate_NormalFresh", "rotate", nil, false, false, false, 0, 2, []string{"Fresh context initialized"}, nil},
-		{"Rotate_StoreFailureAndPools", "rotate", nil, false, true, true, 0, 2, nil, nil},
-		{"Interrupt_DrainAndReset", "interrupt", []*discordgo.ApplicationCommandInteractionDataOption{mkOpt("drain_queue", discordgo.ApplicationCommandOptionBoolean, true), mkOpt("reset", discordgo.ApplicationCommandOptionBoolean, true)}, true, false, false, 0, 1, []string{"Interrupted active turn execution", "Pending message backlog purged", "Session rotated"}, nil},
-		{"Interrupt_NoFlagsAndFailures", "interrupt", []*discordgo.ApplicationCommandInteractionDataOption{mkOpt("drain_queue", discordgo.ApplicationCommandOptionBoolean, false), mkOpt("reset", discordgo.ApplicationCommandOptionBoolean, false)}, false, true, true, 0, 1, []string{"Interrupted active turn execution"}, []string{"Pending message backlog purged", "Session rotated"}},
-		{"ErrorLogging_RotateHttp500", "rotate", nil, false, false, false, http.StatusInternalServerError, 1, nil, nil},
-		{"ErrorLogging_InterruptHttp500", "interrupt", nil, false, false, false, http.StatusInternalServerError, 1, nil, nil},
+func TestRouter_HandleInterrupt(t *testing.T) {
+	t.Parallel()
+	const reason = "cancelled by operator via /interrupt"
+	tests := []struct {
+		name            string
+		userID          string
+		noProvider      bool
+		providerNil     bool
+		httpStatus      int
+		resp            queue.CancelTurnResponse
+		err             error
+		wantDeferred    bool
+		wantContent     string
+		wantCancelCalls int
+	}{
+		{name: "admin active-turn cancel", userID: "admin-123", resp: queue.CancelTurnResponse{CancelledActiveTurn: true, CancelledCount: 2}, wantDeferred: true, wantContent: "🛑 Interrupted the active turn in <#chan-int> and dropped 2 queued messages", wantCancelCalls: 1},
+		{name: "admin active-turn cancel without queue", userID: "admin-123", resp: queue.CancelTurnResponse{CancelledActiveTurn: true}, wantDeferred: true, wantContent: "🛑 Interrupted the active turn in <#chan-int>", wantCancelCalls: 1},
+		{name: "admin queued-only cancel", userID: "admin-123", resp: queue.CancelTurnResponse{CancelledCount: 3}, wantDeferred: true, wantContent: "No active turn in <#chan-int>; dropped 3 queued messages.", wantCancelCalls: 1},
+		{name: "admin nothing running", userID: "admin-123", wantDeferred: true, wantContent: "Nothing was running in <#chan-int>.", wantCancelCalls: 1},
+		{name: "admin canceller error", userID: "admin-123", err: errors.New("restate down"), wantDeferred: true, wantContent: "Interrupt failed: restate down", wantCancelCalls: 1},
+		{name: "non-admin rejection", userID: "attacker-999", wantContent: "Unauthorized"},
+		{name: "nil provider", userID: "admin-123", noProvider: true, wantDeferred: true, wantContent: "interrupt unavailable"},
+		{name: "provider returning nil", userID: "admin-123", providerNil: true, wantDeferred: true, wantContent: "interrupt unavailable"},
+		{name: "discord defer failure skips cancel", userID: "admin-123", httpStatus: http.StatusInternalServerError, wantContent: `"type":5`},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			runSessionAndQueueCommandCase(t, tc)
+			t.Parallel()
+			router, _, transport, session := setupTestRouter("admin-123", tc.httpStatus)
+			fake := &fakeTurnCanceller{resp: tc.resp, err: tc.err}
+			router.deps.TurnCancellerProvider = interruptProvider(fake, tc.noProvider, tc.providerNil)
+
+			router.Handle(t.Context(), session, mkCmd("int-"+tc.name, "chan-int", tc.userID, "interrupt"))
+
+			assertInterruptResponses(t, transport.Requests(), tc.wantDeferred, tc.wantContent)
+			assertCancelCalls(t, fake, tc.wantCancelCalls, "chan-int", reason)
 		})
+	}
+}
+
+func interruptProvider(fake *fakeTurnCanceller, noProvider, providerNil bool) TurnCancellerProvider {
+	if noProvider {
+		return nil
+	}
+	if providerNil {
+		return func() TurnCanceller { return nil }
+	}
+	return func() TurnCanceller { return fake }
+}
+
+func assertInterruptResponses(t *testing.T, reqs []capturedRequest, wantDeferred bool, wantContent string) {
+	t.Helper()
+	if !wantDeferred {
+		if len(reqs) != 1 || !strings.Contains(string(reqs[0].Body), wantContent) {
+			t.Fatalf("expected one response containing %q, got %+v", wantContent, reqs)
+		}
+		return
+	}
+	if len(reqs) != 2 {
+		t.Fatalf("expected deferred response plus edit, got %d requests", len(reqs))
+	}
+	var deferred discordgo.InteractionResponse
+	if err := json.Unmarshal(reqs[0].Body, &deferred); err != nil {
+		t.Fatalf("decode deferred response: %v", err)
+	}
+	if deferred.Type != discordgo.InteractionResponseDeferredChannelMessageWithSource || deferred.Data == nil || deferred.Data.Flags != discordgo.MessageFlagsEphemeral {
+		t.Errorf("expected deferred ephemeral response, got %s", reqs[0].Body)
+	}
+	var edit discordgo.WebhookEdit
+	if err := json.Unmarshal(reqs[1].Body, &edit); err != nil {
+		t.Fatalf("decode edit: %v", err)
+	}
+	if reqs[1].Method != http.MethodPatch || edit.Content == nil || *edit.Content != wantContent {
+		t.Errorf("expected PATCH edit %q, got %s %s", wantContent, reqs[1].Method, reqs[1].Body)
+	}
+}
+
+func assertCancelCalls(t *testing.T, fake *fakeTurnCanceller, wantCalls int, wantThreadID, wantReason string) {
+	t.Helper()
+	fake.mu.Lock()
+	defer fake.mu.Unlock()
+	if len(fake.threadIDs) != wantCalls {
+		t.Fatalf("expected %d cancel calls, got %d", wantCalls, len(fake.threadIDs))
+	}
+	for idx := range fake.threadIDs {
+		if fake.threadIDs[idx] != wantThreadID || fake.reasons[idx] != wantReason {
+			t.Errorf("cancel call %d: got thread %q reason %q", idx, fake.threadIDs[idx], fake.reasons[idx])
+		}
 	}
 }
 
@@ -806,95 +809,99 @@ func TestRouter_ConfigMutationCommands(t *testing.T) {
 	}
 }
 
-type handleSyncTestCase struct {
-	name         string
-	appID        string
-	guildID      string
-	nilSession   bool
-	bareSession  bool
-	noStateUser  bool
-	httpStatus   int
-	testOnce     bool
-	wantErr      bool
-	wantRequests int
-	wantMethod   string
+// newSyncSession builds the session shape a register-commands row asks for.
+func newSyncSession(transport *mockTransport, nilSession, bareSession, noStateUser bool) *discordgo.Session {
+	switch {
+	case nilSession:
+		return nil
+	case bareSession:
+		return &discordgo.Session{}
+	}
+	session := newMockDiscordSession(transport)
+	if noStateUser {
+		session.State = nil
+	}
+	return session
 }
 
-func runRegisterGuildCommandsOnceCase(t *testing.T, session *discordgo.Session, transport *mockTransport, tc handleSyncTestCase) {
-	t.Helper()
-	_, err := RegisterGuildCommandsOnce(session, tc.appID, tc.guildID)
-	if (err != nil) != tc.wantErr {
-		t.Fatalf("RegisterGuildCommandsOnce() error = %v, wantErr %v", err, tc.wantErr)
+func TestRegisterGuildCommands(t *testing.T) {
+	tests := []struct {
+		name         string
+		appID        string
+		guildID      string
+		nilSession   bool
+		bareSession  bool
+		noStateUser  bool
+		httpStatus   int
+		wantErr      bool
+		wantRequests int
+		wantMethod   string
+	}{
+		{name: "Success", appID: "app-123", guildID: "guild-456", wantRequests: 1, wantMethod: http.MethodPut},
+		{name: "EmptyAppIDUsesState", guildID: "guild-valid", wantRequests: 1, wantMethod: http.MethodPut},
+		{name: "NilSession", nilSession: true, wantErr: true},
+		{name: "BareSessionNoRatelimiter", bareSession: true, wantErr: true},
+		{name: "EmptyAppIDNoStateUser", guildID: "guild-nostate", noStateUser: true, wantErr: true},
+		{name: "EmptyGuildID", appID: "app-123", wantErr: true},
+		{name: "Http500", appID: "app-123", guildID: "guild-err", httpStatus: http.StatusInternalServerError, wantErr: true, wantRequests: 1},
 	}
-	if tc.wantErr {
-		return
-	}
-	if _, err = RegisterGuildCommandsOnce(session, tc.appID, tc.guildID); err != nil {
-		t.Fatalf("second RegisterGuildCommandsOnce() failed: %v", err)
-	}
-	if len(transport.Requests()) != 1 {
-		t.Errorf("expected 1 request due to cache, got %d", len(transport.Requests()))
-	}
-	ResetRegisteredGuilds()
-	if _, err = RegisterGuildCommandsOnce(session, tc.appID, tc.guildID); err != nil {
-		t.Fatalf("third RegisterGuildCommandsOnce() failed: %v", err)
-	}
-	if len(transport.Requests()) != 2 {
-		t.Errorf("expected 2 requests after reset, got %d", len(transport.Requests()))
-	}
-}
-
-func runRegisterGuildCommandsCase(t *testing.T, session *discordgo.Session, transport *mockTransport, tc handleSyncTestCase) {
-	t.Helper()
-	_, err := RegisterGuildCommands(session, tc.appID, tc.guildID)
-	if (err != nil) != tc.wantErr {
-		t.Fatalf("RegisterGuildCommands() error = %v, wantErr %v", err, tc.wantErr)
-	}
-	reqs := transport.Requests()
-	if len(reqs) != tc.wantRequests {
-		t.Fatalf("expected %d requests, got %d", tc.wantRequests, len(reqs))
-	}
-	if tc.wantMethod != "" && len(reqs) > 0 && reqs[0].Method != tc.wantMethod {
-		t.Errorf("expected method %s, got %s", tc.wantMethod, reqs[0].Method)
-	}
-}
-
-func TestRouter_HandleSync(t *testing.T) {
-	tests := []handleSyncTestCase{
-		{"RegisterGuildCommands_Success", "app-123", "guild-456", false, false, false, 0, false, false, 1, http.MethodPut},
-		{"RegisterGuildCommands_EmptyAppIDUsesState", "", "guild-valid", false, false, false, 0, false, false, 1, http.MethodPut},
-		{"RegisterGuildCommands_NilSession", "", "", true, false, false, 0, false, true, 0, ""},
-		{"RegisterGuildCommands_BareSessionNoRatelimiter", "", "", false, true, false, 0, false, true, 0, ""},
-		{"RegisterGuildCommands_EmptyAppIDNoStateUser", "", "guild-nostate", false, false, true, 0, false, true, 0, ""},
-		{"RegisterGuildCommands_EmptyGuildID", "app-123", "", false, false, false, 0, false, true, 0, ""},
-		{"RegisterGuildCommands_Http500", "app-123", "guild-err", false, false, false, http.StatusInternalServerError, false, true, 1, ""},
-		{"RegisterGuildCommandsOnce_CachingAndReset", "app-123", "guild-once", false, false, false, 0, true, false, 1, ""},
-		{"RegisterGuildCommandsOnce_ErrorCleansCache", "app-123", "guild-once-err", false, false, false, http.StatusInternalServerError, true, true, 0, ""},
-	}
-
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			ResetRegisteredGuilds()
 			defer ResetRegisteredGuilds()
-
 			transport := &mockTransport{respCode: tc.httpStatus}
-			var session *discordgo.Session
-			if !tc.nilSession {
-				if tc.bareSession {
-					session = &discordgo.Session{}
-				} else {
-					session = newMockDiscordSession(transport)
-					if tc.noStateUser {
-						session.State = nil
+			session := newSyncSession(transport, tc.nilSession, tc.bareSession, tc.noStateUser)
+			_, err := RegisterGuildCommands(session, tc.appID, tc.guildID)
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("RegisterGuildCommands() error = %v, wantErr %v", err, tc.wantErr)
+			}
+			reqs := transport.Requests()
+			if len(reqs) != tc.wantRequests {
+				t.Fatalf("expected %d requests, got %d", tc.wantRequests, len(reqs))
+			}
+			if tc.wantMethod != "" && reqs[0].Method != tc.wantMethod {
+				t.Errorf("expected method %s, got %s", tc.wantMethod, reqs[0].Method)
+			}
+		})
+	}
+}
+
+// TestRegisterGuildCommandsOnce registers three times per row: the second call must hit the
+// cache, and the third (after ResetRegisteredGuilds) must reach Discord again.
+func TestRegisterGuildCommandsOnce(t *testing.T) {
+	tests := []struct {
+		name         string
+		guildID      string
+		httpStatus   int
+		wantErr      bool
+		wantRequests []int // transport request count after each of the three calls
+	}{
+		{name: "CachingAndReset", guildID: "guild-once", wantRequests: []int{1, 1, 2}},
+		{name: "ErrorCleansCache", guildID: "guild-once-err", httpStatus: http.StatusInternalServerError, wantErr: true},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			ResetRegisteredGuilds()
+			defer ResetRegisteredGuilds()
+			transport := &mockTransport{respCode: tc.httpStatus}
+			session := newMockDiscordSession(transport)
+			_, err := RegisterGuildCommandsOnce(session, "app-123", tc.guildID)
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("RegisterGuildCommandsOnce() error = %v, wantErr %v", err, tc.wantErr)
+			}
+			for i, want := range tc.wantRequests {
+				if i == 2 {
+					ResetRegisteredGuilds()
+				}
+				if i > 0 {
+					if _, err := RegisterGuildCommandsOnce(session, "app-123", tc.guildID); err != nil {
+						t.Fatalf("call %d: RegisterGuildCommandsOnce() failed: %v", i+1, err)
 					}
 				}
+				if got := len(transport.Requests()); got != want {
+					t.Errorf("after call %d: %d requests, want %d", i+1, got, want)
+				}
 			}
-
-			if tc.testOnce {
-				runRegisterGuildCommandsOnceCase(t, session, transport, tc)
-				return
-			}
-			runRegisterGuildCommandsCase(t, session, transport, tc)
 		})
 	}
 }

@@ -16,7 +16,6 @@ import (
 	"slices"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"testing"
 	"time"
 
@@ -182,20 +181,6 @@ func waitForCompletion(t testing.TB, doneCh <-chan struct{}, timeout time.Durati
 	}
 }
 
-func waitPoolWorkersDone(t *testing.T, pool *WorkerPool, timeout time.Duration) {
-	t.Helper()
-	done := make(chan struct{})
-	go func() {
-		pool.wg.Wait()
-		close(done)
-	}()
-	select {
-	case <-done:
-	case <-time.After(timeout):
-		t.Fatal("timed out waiting for worker pool goroutines to exit")
-	}
-}
-
 func mockJSONResponseWithUsage(convID, responseText string, usage runner.TokenUsage) string {
 	if convID == "" {
 		convID = uuid.New().String()
@@ -283,20 +268,20 @@ func assertExcludesAll(t *testing.T, target string, subs []string, label string)
 }
 
 type workerTestCase struct {
-	name, initialSessionID, policyMode, notifierReply, wantStatus, wantSavedSession, wantErrorContains, wantDBContent, wantResponseText       string
-	useSessionMgr, enqueueAsBurst, sequentialTurns, checkRunnerCalls, checkTurnCount, checkDeliveryCalls                                      bool
-	seedTurnCount, maxAttempts, concurrentEnqueueCount, wantDefaultTimeout, wantRunnerCalls, wantRetryCount, wantTurnCount, wantDeliveryCalls int
-	seedIdleAge, idleTimeout                                                                                                                  time.Duration
-	seedTranscriptFiles                                                                                                                       map[string]string
-	seedPNGImage                                                                                                                              image.Image
-	seedPNGLevel                                                                                                                              png.CompressionLevel
-	seedPNGFilename                                                                                                                           string
-	messages                                                                                                                                  []db.Message
-	runnerSteps                                                                                                                               []mockRunnerStep
-	wantPassedSessions, wantDeliveredTexts, wantDeliveredSubstrings, wantDeliveredExcludes, wantDeliveredChannels                             []string
-	wantAttachments                                                                                                                           []*delivery.Attachment
-	wantPromptContains, wantPromptExcludes                                                                                                    []string
-	wantAttemptPromptContains, wantAttemptPromptExcludes                                                                                      map[int][]string
+	name, initialSessionID, policyMode, notifierReply, wantStatus, wantSavedSession, wantErrorContains, wantDBContent, wantResponseText string
+	useSessionMgr, enqueueAsBurst, checkRunnerCalls, checkTurnCount, checkDeliveryCalls                                                 bool
+	seedTurnCount, maxAttempts, wantRunnerCalls, wantRetryCount, wantTurnCount, wantDeliveryCalls                                       int
+	seedIdleAge                                                                                                                         time.Duration
+	seedTranscriptFiles                                                                                                                 map[string]string
+	seedPNGImage                                                                                                                        image.Image
+	seedPNGLevel                                                                                                                        png.CompressionLevel
+	seedPNGFilename                                                                                                                     string
+	messages                                                                                                                            []db.Message
+	runnerSteps                                                                                                                         []mockRunnerStep
+	wantPassedSessions, wantDeliveredTexts, wantDeliveredSubstrings, wantDeliveredExcludes, wantDeliveredChannels                       []string
+	wantAttachments                                                                                                                     []*delivery.Attachment
+	wantPromptContains, wantPromptExcludes                                                                                              []string
+	wantAttemptPromptContains, wantAttemptPromptExcludes                                                                                map[int][]string
 }
 
 func initWorkerTestSession(t *testing.T, tc workerTestCase, store *dbtest.FakeStore) (string, *session.Manager, string) {
@@ -354,46 +339,20 @@ func setupWorkerTestPNG(t *testing.T, tc workerTestCase, steps []mockRunnerStep,
 	return steps, wantExcludes
 }
 
-func runWorkerConcurrentEnqueue(t *testing.T, tc workerTestCase, pool *WorkerPool, store db.Store, doneCh <-chan struct{}) {
-	t.Helper()
-	pool.Start()
-	var wg sync.WaitGroup
-	for i := range tc.concurrentEnqueueCount {
-		wg.Add(1)
-		go func(idx int) {
-			defer wg.Done()
-			m := db.Message{ID: fmt.Sprintf("msg-race-%d", idx), ThreadID: "thread-evict-race", GuildID: "guild-race", AuthorID: "user-race", AuthorName: "User", Content: fmt.Sprintf("msg content %d", idx), Status: db.StatusPending, CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC()}
-			_ = insertMessage(store, m)
-			pool.Enqueue(m)
-		}(i)
+// runWorkerExecDispatches runs the rows' messages as TurnRunner turns: one burst turn over every
+// message when enqueueAsBurst is set, else one turn per message in order.
+func runWorkerExecDispatches(tc workerTestCase, pool *WorkerPool, msgs []db.Message) {
+	ctx := context.Background()
+	if tc.enqueueAsBurst {
+		ids := make([]string, len(msgs))
+		for i, m := range msgs {
+			ids[i] = m.ID
+		}
+		runLiveBurst(ctx, pool, msgs[0].ThreadID, "turn-"+msgs[0].ID, ids...)
+		return
 	}
-	wg.Wait()
-	waitForCompletion(t, doneCh, 5*time.Second, tc.name)
-	pool.Stop()
-}
-
-func runWorkerExecDispatches(t *testing.T, tc workerTestCase, pool *WorkerPool, msgs []db.Message, doneCh, turnDoneCh <-chan struct{}) {
-	t.Helper()
-	switch {
-	case tc.enqueueAsBurst:
-		pool.EnqueueBurst(msgs...)
-		pool.Start()
-		defer pool.Stop()
-		waitForCompletion(t, doneCh, 3*time.Second, tc.name)
-	case tc.sequentialTurns:
-		pool.Start()
-		defer pool.Stop()
-		for _, m := range msgs {
-			pool.Enqueue(m)
-			waitForCompletion(t, turnDoneCh, 3*time.Second, tc.name)
-		}
-	default:
-		pool.Start()
-		defer pool.Stop()
-		for _, m := range msgs {
-			pool.Enqueue(m)
-		}
-		waitForCompletion(t, doneCh, 5*time.Second, tc.name)
+	for _, m := range msgs {
+		runLiveBurst(ctx, pool, m.ThreadID, "turn-"+m.ID, m.ID)
 	}
 }
 
@@ -487,9 +446,9 @@ func assertWorkerPromptsAndState(t *testing.T, tc workerTestCase, store db.Store
 	assertWorkerSavedMessages(t, tc, store, msgs)
 }
 
-func makeWorkerTestConfig(tc workerTestCase, store db.Store, sessMgr *session.Manager, tmpHome string, steps []mockRunnerStep, maxAttempts, expectedCompletions int, mu *sync.Mutex, runnerCalls *int, passedSessions, promptsSeen *[]string, capturedPrompt *string, deliveredChannels, deliveredTexts *[]string, deliveredAttachments *[]*delivery.Attachment, completedCount *atomic.Int32, doneCh chan struct{}, turnDoneCh chan struct{}) WorkerPoolConfig {
+func makeWorkerTestConfig(tc workerTestCase, store db.Store, sessMgr *session.Manager, tmpHome string, steps []mockRunnerStep, maxAttempts int, mu *sync.Mutex, runnerCalls *int, passedSessions, promptsSeen *[]string, capturedPrompt *string, deliveredChannels, deliveredTexts *[]string, deliveredAttachments *[]*delivery.Attachment) WorkerPoolConfig {
 	cfg := WorkerPoolConfig{
-		Store: store, SessionManager: sessMgr, TimeoutMinutes: 1, IdleTimeout: tc.idleTimeout,
+		Store: store, SessionManager: sessMgr,
 		BackoffBase: 5 * time.Millisecond, MaxAttempts: maxAttempts,
 		RunnerFunc: func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (string, string, int, error) {
 			mu.Lock()
@@ -516,16 +475,6 @@ func makeWorkerTestConfig(tc workerTestCase, store db.Store, sessMgr *session.Ma
 			return nil
 		},
 		TypingFunc: noopTyping,
-		OnMessageCompleted: func(msg db.Message, finalStatus string) {
-			if int(completedCount.Add(1)) == expectedCompletions {
-				select {
-				case <-doneCh:
-				default:
-					close(doneCh)
-				}
-			}
-			turnDoneCh <- struct{}{}
-		},
 	}
 	if len(tc.wantAttachments) > 0 {
 		cfg.DeliveryWithAttachmentsFunc = func(s *discordgo.Session, channelID, text string, attachments []*delivery.Attachment) error {
@@ -548,13 +497,6 @@ func makeWorkerTestConfig(tc workerTestCase, store db.Store, sessMgr *session.Ma
 
 func runWorkerTestCase(t *testing.T, tc workerTestCase) {
 	t.Helper()
-	if tc.wantDefaultTimeout > 0 && len(tc.messages) == 0 && tc.concurrentEnqueueCount == 0 {
-		if DefaultTimeoutMinutes != tc.wantDefaultTimeout {
-			t.Errorf("DefaultTimeoutMinutes = %d, want %d", DefaultTimeoutMinutes, tc.wantDefaultTimeout)
-		}
-		return
-	}
-
 	store := setupTestStore(t)
 	tmpHome, sessMgr, threadID := initWorkerTestSession(t, tc, store)
 	steps, wantDeliveredExcludes := setupWorkerTestPNG(t, tc, append([]mockRunnerStep(nil), tc.runnerSteps...), append([]string(nil), tc.wantDeliveredExcludes...))
@@ -565,12 +507,9 @@ func runWorkerTestCase(t *testing.T, tc workerTestCase) {
 		}
 	}
 
-	maxAttempts, expectedCompletions := tc.maxAttempts, len(tc.messages)
+	maxAttempts := tc.maxAttempts
 	if maxAttempts == 0 {
 		maxAttempts = 1
-	}
-	if tc.concurrentEnqueueCount > 0 {
-		expectedCompletions = tc.concurrentEnqueueCount
 	}
 
 	var mu sync.Mutex
@@ -578,17 +517,10 @@ func runWorkerTestCase(t *testing.T, tc workerTestCase) {
 	var passedSessions, promptsSeen, deliveredTexts, deliveredChannels []string
 	var capturedPrompt string
 	var deliveredAttachments []*delivery.Attachment
-	var completedCount atomic.Int32
-	doneCh := make(chan struct{})
-	turnDoneCh := make(chan struct{}, expectedCompletions+1)
 
-	cfg := makeWorkerTestConfig(tc, store, sessMgr, tmpHome, steps, maxAttempts, expectedCompletions, &mu, &runnerCalls, &passedSessions, &promptsSeen, &capturedPrompt, &deliveredChannels, &deliveredTexts, &deliveredAttachments, &completedCount, doneCh, turnDoneCh)
+	cfg := makeWorkerTestConfig(tc, store, sessMgr, tmpHome, steps, maxAttempts, &mu, &runnerCalls, &passedSessions, &promptsSeen, &capturedPrompt, &deliveredChannels, &deliveredTexts, &deliveredAttachments)
 
 	pool := NewWorkerPool(cfg)
-	if tc.concurrentEnqueueCount > 0 {
-		runWorkerConcurrentEnqueue(t, tc, pool, store, doneCh)
-		return
-	}
 
 	msgs := make([]db.Message, len(tc.messages))
 	for i, m := range tc.messages {
@@ -604,7 +536,7 @@ func runWorkerTestCase(t *testing.T, tc workerTestCase) {
 		}
 	}
 
-	runWorkerExecDispatches(t, tc, pool, msgs, doneCh, turnDoneCh)
+	runWorkerExecDispatches(tc, pool, msgs)
 
 	mu.Lock()
 	defer mu.Unlock()
@@ -785,7 +717,7 @@ func assertBurstState(t *testing.T, tc burstTestCase, store db.Store, tmpDir str
 
 func makeBurstTestConfig(tc burstTestCase, store db.Store, sessMgr *session.Manager, dg *discordgo.Session, cls *classifier.Classifier, tmpDir, initialSessionID string, mu *sync.Mutex, runnerCalls, deliveryCalls, typingCalls *int, receivedPrompt, deliveredText, passedSessID *string, capturedPrompts, passedSessions *[]string, alertChannel, alertTitle, alertBody *string, alertReceived chan struct{}) WorkerPoolConfig {
 	cfg := WorkerPoolConfig{
-		Store: store, SessionManager: sessMgr, DiscordSession: dg, TimeoutMinutes: 1, BackoffBase: 5 * time.Millisecond,
+		Store: store, SessionManager: sessMgr, DiscordSession: dg, BackoffBase: 5 * time.Millisecond,
 		MaxAttempts: tc.maxAttempts, Classifier: cls,
 		SystemAlertFunc: func(s *discordgo.Session, channelNameOrID, title, body string) error {
 			mu.Lock()
@@ -902,11 +834,15 @@ func runBurstTestCase(t *testing.T, tc burstTestCase) {
 		}
 		_ = insertMessage(store, m)
 		if tc.sequentialBursts {
-			pool.processBurst([]db.Message{m})
+			runLiveBurst(context.Background(), pool, m.ThreadID, "turn-"+m.ID, m.ID)
 		}
 	}
 	if !tc.sequentialBursts {
-		pool.processBurst(burst)
+		ids := make([]string, len(burst))
+		for i, m := range burst {
+			ids[i] = m.ID
+		}
+		runLiveBurst(context.Background(), pool, burst[0].ThreadID, "turn-"+burst[0].ID, ids...)
 	}
 
 	if tc.wantAlertTitle != "" {
@@ -924,13 +860,8 @@ func runBurstTestCase(t *testing.T, tc burstTestCase) {
 	assertBurstState(t, tc, store, tmpDir, burst)
 }
 
-func TestWorkerPool_ScopeKeyAndPreviousSessionFallback(t *testing.T) {
+func TestWorkerPool_PreviousSessionFallback(t *testing.T) {
 	t.Parallel()
-	pool := NewWorkerPool(WorkerPoolConfig{})
-	msg := db.Message{ID: "m1", ThreadID: "t1"}
-	if k := pool.resolveScopeKey(msg); k != "t1" {
-		t.Errorf("expected ScopeKey t1, got %s", k)
-	}
 	if prev, err := getPreviousSessionID(nil, ""); err != nil || prev != "" {
 		t.Errorf("expected empty previous session for nil store, got %q (err=%v)", prev, err)
 	}
@@ -978,33 +909,12 @@ func (*errQueueStore) UpdateMessageCompleted(context.Context, string, string, st
 	return errors.New("errQueueStore: update message completed error")
 }
 
-func (*errQueueStore) IncrementMessageRetry(context.Context, string, string) error {
-	return errors.New("errQueueStore: increment message retry error")
-}
-
 func (*errQueueStore) SaveSessionID(context.Context, string, string) error {
 	return errors.New("errQueueStore: save session id error")
 }
 
 func (*errQueueStore) RotateSessionID(context.Context, string, string) error {
 	return errors.New("errQueueStore: rotate session id error")
-}
-
-type mockDrainErrStore struct {
-	db.Store
-
-	messages []db.Message
-}
-
-func (m *mockDrainErrStore) GetPendingOrProcessingMessages(context.Context, int) ([]db.Message, error) {
-	if len(m.messages) > 0 {
-		return m.messages, nil
-	}
-	return []db.Message{{ID: "msg-proc-1", Status: db.StatusProcessing}}, nil
-}
-
-func (*mockDrainErrStore) UpdateMessageStatus(context.Context, string, string, string, ...db.TurnTelemetry) error {
-	return errors.New("mock drain update error")
 }
 
 type mockClaimStore struct {

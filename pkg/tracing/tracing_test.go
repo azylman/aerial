@@ -25,14 +25,12 @@ import (
 	"go.opentelemetry.io/otel/sdk/trace/tracetest"
 	"go.opentelemetry.io/otel/trace"
 	"go.opentelemetry.io/otel/trace/noop"
-	"go.uber.org/goleak"
 
-	"github.com/azylman/aerial/pkg/sanitizer"
+	"github.com/azylman/aerial/pkg/hermetictest"
 )
 
 func TestMain(m *testing.M) {
-	sanitizer.RegisterSensitiveTokens(fakePAT, "sk-ant-api03-abcdefghijklmnopqrstuvwxyz0123456789", "Bearer abcdefghijklmnopqrstuvwxyz")
-	goleak.VerifyTestMain(m)
+	hermetictest.Main(m)
 }
 
 const (
@@ -41,13 +39,9 @@ const (
 	parentTraceparent = "00-" + parentTraceID + "-" + parentSpanID + "-01"
 )
 
-// fakePAT is assembled at runtime so no PAT-shaped literal lives in the source.
-var fakePAT = "gh" + "p_" + strings.Repeat("a1", 18)
-
 func newRecorder(t *testing.T) (*tracetest.SpanRecorder, trace.TracerProvider) {
 	t.Helper()
-	sr := tracetest.NewSpanRecorder()
-	tp := sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(sr))
+	tp, sr := hermetictest.NewRecorder()
 	t.Cleanup(func() { _ = tp.Shutdown(context.Background()) })
 	return sr, tp
 }
@@ -64,11 +58,13 @@ func TestLoadConfig(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
 		name    string
+		file    string // path under the temp dir; "" means tracing.yaml, "." the directory itself
 		content string // "" means the file is absent
 		want    Config
 		wantErr bool
 	}{
 		{name: "missing file is disabled", want: Config{}},
+		{name: "unreadable path (a directory)", file: ".", wantErr: true},
 		{
 			name: "agent config key", content: "enabled: true\nendpoint: http://vt.aerial/insert/opentelemetry/v1/traces\nsample_ratio: 0.5\nagent: aerial\n",
 			want: Config{Enabled: true, Endpoint: "http://vt.aerial/insert/opentelemetry/v1/traces", SampleRatio: 0.5, Agent: "aerial"},
@@ -90,7 +86,11 @@ func TestLoadConfig(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			path := filepath.Join(t.TempDir(), "tracing.yaml")
+			file := tc.file
+			if file == "" {
+				file = "tracing.yaml"
+			}
+			path := filepath.Join(t.TempDir(), file)
 			if tc.content != "" {
 				if err := os.WriteFile(path, []byte(tc.content), 0o600); err != nil {
 					t.Fatal(err)
@@ -136,11 +136,6 @@ func TestContentAttr(t *testing.T) {
 			want:    `[{"role":"assistant","parts":[{"type":"text","content":""}]}]`,
 		},
 		{
-			name: "redacts an API key", key: AttrGenAIInputMessages, role: RoleUser, text: "key sk-ant-api03-abcdefghijklmnopqrstuvwxyz0123456789 done",
-			wantKey: "gen_ai.input.messages",
-			want:    `[{"role":"user","parts":[{"type":"text","content":"key [REDACTED] done"}]}]`,
-		},
-		{
 			name: "input at the cap is kept whole", key: AttrGenAIInputMessages, role: RoleUser, text: fits,
 			wantKey: "gen_ai.input.messages",
 			want:    `[{"role":"user","parts":[{"type":"text","content":"` + fits + `"}]}]`,
@@ -170,13 +165,6 @@ func TestContentAttr(t *testing.T) {
 	}
 }
 
-func TestLoadConfig_Unreadable(t *testing.T) {
-	t.Parallel()
-	if _, err := LoadConfig(t.TempDir()); err == nil {
-		t.Fatal("expected error reading a directory")
-	}
-}
-
 func TestConfigSampleRatio(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
@@ -194,6 +182,22 @@ func TestConfigSampleRatio(t *testing.T) {
 				t.Errorf("sampleRatio = %v, want %v", got, tc.want)
 			}
 		})
+	}
+}
+
+// setupEnvKeys are the OTEL variables the SDK reads; TestSetup blanks them so the ambient env cannot change a row.
+var setupEnvKeys = []string{
+	"OTEL_EXPORTER_OTLP_ENDPOINT", "OTEL_EXPORTER_OTLP_TRACES_ENDPOINT", "OTEL_EXPORTER_OTLP_PROTOCOL",
+	"OTEL_EXPORTER_OTLP_TRACES_PROTOCOL", "OTEL_EXPORTER_OTLP_HEADERS", "OTEL_EXPORTER_OTLP_TRACES_HEADERS",
+	"OTEL_EXPORTER_OTLP_TIMEOUT", "OTEL_EXPORTER_OTLP_TRACES_TIMEOUT", "OTEL_EXPORTER_OTLP_COMPRESSION",
+	"OTEL_EXPORTER_OTLP_TRACES_COMPRESSION", "OTEL_EXPORTER_OTLP_CERTIFICATE", "OTEL_EXPORTER_OTLP_TRACES_CERTIFICATE",
+	"OTEL_TRACES_SAMPLER", "OTEL_TRACES_SAMPLER_ARG", "OTEL_SERVICE_NAME",
+}
+
+func blankSetupEnv(t *testing.T) {
+	t.Helper()
+	for _, k := range setupEnvKeys {
+		t.Setenv(k, "")
 	}
 }
 
@@ -231,6 +235,7 @@ func TestSetup(t *testing.T) {
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
+			blankSetupEnv(t)
 			for k, v := range tc.env {
 				t.Setenv(k, v)
 			}
@@ -328,43 +333,38 @@ func TestEnvOverrides(t *testing.T) {
 // TestNewResource sets process environment (t.Setenv), so it is not parallel.
 func TestNewResource(t *testing.T) {
 	tests := []struct {
-		name          string
-		agent         string
-		stack         string
-		env           map[string]string
-		want          map[string]string
-		wantAbsent    []string
-		wantSchemaURL string
-		wantErr       bool
+		name       string
+		agent      string
+		stack      string
+		env        map[string]string
+		want       map[string]string
+		wantAbsent []string
+		wantErr    bool
 	}{
 		{
-			name: "agent becomes service.namespace and aerial.agent", agent: "miorine",
+			name: "agent becomes service.namespace and aerial.agent", agent: "agent-alpha",
 			want: map[string]string{
-				"service.name": "haro", "service.namespace": "miorine", "aerial.agent": "miorine", "aerial.stack": "miorine",
+				"service.name": "haro", "service.namespace": "agent-alpha", "aerial.agent": "agent-alpha", "aerial.stack": "agent-alpha",
 				"telemetry.sdk.language": "go", "telemetry.sdk.name": "opentelemetry",
 			},
-			wantSchemaURL: "https://opentelemetry.io/schemas/1.43.0",
 		},
 		{
-			name: "stack fallback becomes service.namespace and aerial.agent", stack: "miorine",
+			name: "stack fallback becomes service.namespace and aerial.agent", stack: "agent-alpha",
 			want: map[string]string{
-				"service.name": "haro", "service.namespace": "miorine", "aerial.agent": "miorine", "aerial.stack": "miorine",
+				"service.name": "haro", "service.namespace": "agent-alpha", "aerial.agent": "agent-alpha", "aerial.stack": "agent-alpha",
 				"telemetry.sdk.language": "go", "telemetry.sdk.name": "opentelemetry",
 			},
-			wantSchemaURL: "https://opentelemetry.io/schemas/1.43.0",
 		},
 		{
-			name: "agent takes precedence over stack", agent: "suletta", stack: "miorine",
+			name: "agent takes precedence over stack", agent: "agent-beta", stack: "agent-alpha",
 			want: map[string]string{
-				"service.name": "haro", "service.namespace": "suletta", "aerial.agent": "suletta", "aerial.stack": "suletta",
+				"service.name": "haro", "service.namespace": "agent-beta", "aerial.agent": "agent-beta", "aerial.stack": "agent-beta",
 				"telemetry.sdk.language": "go", "telemetry.sdk.name": "opentelemetry",
 			},
-			wantSchemaURL: "https://opentelemetry.io/schemas/1.43.0",
 		},
 		{
 			name: "empty agent and stack omits namespace and aerial.agent",
 			want: map[string]string{"service.name": "haro", "aerial.stack": ""}, wantAbsent: []string{"service.namespace", "aerial.agent"},
-			wantSchemaURL: "https://opentelemetry.io/schemas/1.43.0",
 		},
 		{
 			name: "OTEL_RESOURCE_ATTRIBUTES added", agent: "aerial",
@@ -373,19 +373,17 @@ func TestNewResource(t *testing.T) {
 				"service.name": "haro", "service.namespace": "aerial", "aerial.agent": "aerial", "aerial.stack": "aerial", "k8s.pod.name": "haro-7d9",
 				"k8s.namespace.name": "default", "k8s.node.name": "calibarn", "service.version": "v1.2.3",
 			},
-			wantSchemaURL: "https://opentelemetry.io/schemas/1.43.0",
 		},
 		{
-			name: "OTEL_SERVICE_NAME overrides service.name", agent: "suletta",
-			env:           map[string]string{"OTEL_SERVICE_NAME": "haro-canary"},
-			want:          map[string]string{"service.name": "haro-canary", "service.namespace": "suletta", "aerial.agent": "suletta", "aerial.stack": "suletta"},
-			wantSchemaURL: "https://opentelemetry.io/schemas/1.43.0",
+			name: "OTEL_SERVICE_NAME overrides service.name", agent: "agent-beta",
+			env:  map[string]string{"OTEL_SERVICE_NAME": "haro-canary"},
+			want: map[string]string{"service.name": "haro-canary", "service.namespace": "agent-beta", "aerial.agent": "agent-beta", "aerial.stack": "agent-beta"},
 		},
 		{
 			name: "malformed attributes keep the rest", agent: "aerial",
 			env:     map[string]string{"OTEL_RESOURCE_ATTRIBUTES": "k8s.pod.name=haro-7d9,broken"},
 			want:    map[string]string{"service.name": "haro", "service.namespace": "aerial", "aerial.agent": "aerial", "aerial.stack": "aerial", "k8s.pod.name": "haro-7d9"},
-			wantErr: true, wantSchemaURL: "https://opentelemetry.io/schemas/1.43.0",
+			wantErr: true,
 		},
 	}
 	for _, tc := range tests {
@@ -407,8 +405,8 @@ func TestNewResource(t *testing.T) {
 					t.Errorf("resource has %s, want absent", k)
 				}
 			}
-			if res.SchemaURL() != tc.wantSchemaURL {
-				t.Errorf("schema URL = %q, want %q", res.SchemaURL(), tc.wantSchemaURL)
+			if res.SchemaURL() != "https://opentelemetry.io/schemas/1.43.0" {
+				t.Errorf("schema URL = %q, want %q", res.SchemaURL(), "https://opentelemetry.io/schemas/1.43.0")
 			}
 		})
 	}
@@ -431,7 +429,7 @@ func TestInit(t *testing.T) {
 	}{
 		{name: "missing file runs disabled", path: filepath.Join(dir, "absent.yaml")},
 		{name: "malformed yaml runs disabled", path: write("bad.yaml", "enabled: [")},
-		{name: "enabled config exports", path: write("ok.yaml", "enabled: true\nendpoint: http://127.0.0.1:1/v1/traces\nstack: marida\n"), wantEnabled: true, wantStack: "marida"},
+		{name: "enabled config exports", path: write("ok.yaml", "enabled: true\nendpoint: http://127.0.0.1:1/v1/traces\nstack: agent-gamma\n"), wantEnabled: true, wantStack: "agent-gamma"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -477,67 +475,45 @@ func TestContextWithTraceparent(t *testing.T) {
 	}
 }
 
-func TestClient(t *testing.T) {
+// TestClientWrappers covers the shared contract of Client, ExternalClient, Transport and
+// ExternalTransport: each wraps its base (http.DefaultTransport when nil) in *transport with the
+// wrapper's propagate mode, and the client forms return a copy that keeps timeout and settings.
+// Transport rows wrap the result in a bare client so every row asserts the same shape.
+func TestClientWrappers(t *testing.T) {
 	t.Parallel()
 	base := &http.Transport{}
+	internal := &http.Client{Timeout: 7 * time.Second, Transport: base}
+	external := &http.Client{Timeout: 20 * time.Second, Transport: base}
 	tests := []struct {
-		name        string
-		in          *http.Client
-		wantTimeout time.Duration
-		wantBase    http.RoundTripper
+		name          string
+		in            *http.Client
+		got           *http.Client
+		wantTimeout   time.Duration
+		wantBase      http.RoundTripper
+		wantPropagate bool
 	}{
-		{name: "nil client gets default transport", in: nil, wantBase: http.DefaultTransport},
-		{name: "settings and base transport are kept", in: &http.Client{Timeout: 7 * time.Second, Transport: base}, wantTimeout: 7 * time.Second, wantBase: base},
+		{name: "Client nil gets default transport", got: Client(nil), wantBase: http.DefaultTransport, wantPropagate: true},
+		{name: "Client keeps settings and base", in: internal, got: Client(internal), wantTimeout: 7 * time.Second, wantBase: base, wantPropagate: true},
+		{name: "ExternalClient nil gets default transport", got: ExternalClient(nil), wantBase: http.DefaultTransport},
+		{name: "ExternalClient keeps settings and base", in: external, got: ExternalClient(external), wantTimeout: 20 * time.Second, wantBase: base},
+		{name: "Transport nil gets default transport", got: &http.Client{Transport: Transport(nil)}, wantBase: http.DefaultTransport, wantPropagate: true},
+		{name: "ExternalTransport nil gets default transport", got: &http.Client{Transport: ExternalTransport(nil)}, wantBase: http.DefaultTransport},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			got := Client(tc.in)
-			if got == tc.in {
-				t.Fatal("Client must return a copy")
+			if tc.in != nil && tc.got == tc.in {
+				t.Fatal("wrapper must return a copy")
 			}
-			if tc.in != nil && tc.in.Transport != tc.wantBase {
+			if tc.in != nil && tc.in.Transport != base {
 				t.Error("input client transport was mutated")
 			}
-			rt, ok := got.Transport.(*transport)
+			rt, ok := tc.got.Transport.(*transport)
 			if !ok {
-				t.Fatalf("transport = %T, want *transport", got.Transport)
+				t.Fatalf("transport = %T, want *transport", tc.got.Transport)
 			}
-			if got.Timeout != tc.wantTimeout || rt.base != tc.wantBase || !rt.propagate {
-				t.Errorf("timeout %v base %T propagate %v, want %v %T true", got.Timeout, rt.base, rt.propagate, tc.wantTimeout, tc.wantBase)
-			}
-		})
-	}
-}
-
-func TestExternalClient(t *testing.T) {
-	t.Parallel()
-	base := &http.Transport{}
-	tests := []struct {
-		name        string
-		in          *http.Client
-		wantTimeout time.Duration
-		wantBase    http.RoundTripper
-	}{
-		{name: "nil client gets default transport", in: nil, wantBase: http.DefaultTransport},
-		{name: "settings and base transport are kept", in: &http.Client{Timeout: 20 * time.Second, Transport: base}, wantTimeout: 20 * time.Second, wantBase: base},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			got := ExternalClient(tc.in)
-			if got == tc.in {
-				t.Fatal("ExternalClient must return a copy")
-			}
-			if tc.in != nil && tc.in.Transport != tc.wantBase {
-				t.Error("input client transport was mutated")
-			}
-			rt, ok := got.Transport.(*transport)
-			if !ok {
-				t.Fatalf("transport = %T, want *transport", got.Transport)
-			}
-			if got.Timeout != tc.wantTimeout || rt.base != tc.wantBase || rt.propagate {
-				t.Errorf("timeout %v base %T propagate %v, want %v %T false", got.Timeout, rt.base, rt.propagate, tc.wantTimeout, tc.wantBase)
+			if tc.got.Timeout != tc.wantTimeout || rt.base != tc.wantBase || rt.propagate != tc.wantPropagate {
+				t.Errorf("timeout %v base %T propagate %v, want %v %T %v", tc.got.Timeout, rt.base, rt.propagate, tc.wantTimeout, tc.wantBase, tc.wantPropagate)
 			}
 		})
 	}
@@ -819,13 +795,12 @@ func assertTransportSpan(t *testing.T, tc transportTestCase, sr *tracetest.SpanR
 func TestTransport(t *testing.T) {
 	t.Parallel()
 	tests := []transportTestCase{
-		{name: "ok strips path and query", url: "https://api.github.com/repos/x/y?access_token=ghp_abcdefghijklmnopqrstuvwxyz0123456789", respStatus: http.StatusOK},
+		{name: "ok strips path and query", url: "https://api.github.com/repos/x/y?access_token=dummy-secret-value", respStatus: http.StatusOK},
 		{name: "server error", url: "http://haro.aerial/dispatch", respStatus: http.StatusServiceUnavailable, wantError: true},
 		{
-			name: "transport error is redacted", url: "http://user:hunter2@coven.aerial/v1?q=secret",
-			// PAT-leak guard: Redact is applied to every span error status.
-			respErr: errors.New("dial failed for " + fakePAT + " Authorization: Bearer abcdefghijklmnopqrstuvwxyz"), wantError: true,
-			wantDesc: "dial failed for [REDACTED] Authorization: [REDACTED]",
+			name: "transport error drops url", url: "http://user:hunter2@coven.aerial/v1?q=secret",
+			respErr: errors.New("dial failed"), wantError: true,
+			wantDesc: "dial failed",
 		},
 	}
 	for _, tc := range tests {
@@ -871,27 +846,6 @@ func TestTransportCloseIdleConnections(t *testing.T) {
 				t.Fatal("idle keep-alive connection was not closed")
 			}
 		})
-	}
-}
-
-func TestTransport_DefaultBase(t *testing.T) {
-	t.Parallel()
-	rt, ok := Transport(nil).(*transport)
-	if !ok {
-		t.Fatalf("Transport(nil) is %T, want *transport", Transport(nil))
-	}
-	if rt.base != http.DefaultTransport || !rt.propagate {
-		t.Errorf("base = %T propagate %v, want http.DefaultTransport true", rt.base, rt.propagate)
-	}
-	ext, ok := ExternalTransport(nil).(*transport)
-	if !ok {
-		t.Fatalf("ExternalTransport(nil) is %T, want *transport", ExternalTransport(nil))
-	}
-	if ext.base != http.DefaultTransport || ext.propagate {
-		t.Errorf("external base = %T propagate %v, want http.DefaultTransport false", ext.base, ext.propagate)
-	}
-	if originOnly(nil) != "" {
-		t.Error("originOnly(nil) should be empty")
 	}
 }
 
@@ -1032,6 +986,26 @@ func TestRouteFromPattern(t *testing.T) {
 	}
 }
 
+func TestOriginOnly(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name string
+		in   *url.URL
+		want string
+	}{
+		{name: "nil url is empty", in: nil, want: ""},
+		{name: "path query and userinfo dropped", in: &url.URL{Scheme: "https", User: url.User("u"), Host: "h:8443", Path: "/p", RawQuery: "token=x"}, want: "https://h:8443"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got := originOnly(tc.in); got != tc.want {
+				t.Errorf("originOnly = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
 func TestTransportErrorMessage(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
@@ -1054,8 +1028,14 @@ func TestTransportErrorMessage(t *testing.T) {
 
 func TestSlogHandler(t *testing.T) {
 	t.Parallel()
-	tid, _ := trace.TraceIDFromHex(parentTraceID)
-	sid, _ := trace.SpanIDFromHex(parentSpanID)
+	tid, err := trace.TraceIDFromHex(parentTraceID)
+	if err != nil {
+		t.Fatalf("TraceIDFromHex: %v", err)
+	}
+	sid, err := trace.SpanIDFromHex(parentSpanID)
+	if err != nil {
+		t.Fatalf("SpanIDFromHex: %v", err)
+	}
 	spanCtx := trace.ContextWithSpanContext(context.Background(), trace.NewSpanContext(trace.SpanContextConfig{TraceID: tid, SpanID: sid, TraceFlags: trace.FlagsSampled}))
 	tests := []struct {
 		name    string

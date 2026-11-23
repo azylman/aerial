@@ -805,7 +805,6 @@ func TestTurnExecution_StoreDelegates(t *testing.T) {
 			threadID := "t-" + tc.name
 			tc.te.updateMessageStatus("m1", "failed", "err")
 			tc.te.updateMessageCompleted("m1", "resp")
-			tc.te.incrementMessageRetry("m1", "retry-err")
 			tc.te.saveSessionID(t.Context(), threadID, "s1")
 			tc.te.rotateSessionID(threadID, "s2")
 			cnt, err := tc.te.incrementSessionTurnCount(threadID)
@@ -875,7 +874,7 @@ func TestSummarizeAndHistoryHelpers(t *testing.T) {
 	teNil := &turnExecution{pool: &WorkerPool{}}
 	_, _ = teNil.resolveWebhookDispatcher()
 	_ = teNil.resolveTurnPolicy()
-	if _, _, _, err := teNil.executeLeaseAttempt("test-model", "prompt", 1); err == nil {
+	if _, _, _, err := teNil.executeLeaseAttemptCtx(t.Context(), "test-model", "prompt"); err == nil {
 		t.Fatal("expected error")
 	}
 	teSumClassifier := &turnExecution{
@@ -911,9 +910,6 @@ func TestSummarizeAndHistoryHelpers(t *testing.T) {
 	_, _ = teFail.deliverSuccessAndFinalize(&runner.AgyResponse{Response: "   "}, runner.TokenUsage{}, "m", 1, 1)
 	teFail.deliverDiscordSuccess("hello", nil)
 	_ = teFail.createOneShotSchedule(oneShotScheduleRequest{ID: "os-bad", ThreadID: "t-fail", Prompt: "p", RunAt: now})
-	drainState := &threadWorkerState{ch: make(chan queueItem, 2)}
-	drainState.ch <- queueItem{dispatch: &db.Dispatch{ID: "d-held"}}
-	_, _ = drainBurstMessages(drainState, db.Message{ID: "m-init"})
 }
 
 func TestWorkerPool_RunnerFallbackAdaptersAndLifecycle(t *testing.T) {
@@ -970,8 +966,6 @@ func TestWorkerPool_RunnerFallbackAdaptersAndLifecycle(t *testing.T) {
 	}
 
 	var nilPool *WorkerPool
-	nilPool.HoldUntilLeader()
-	_ = nilPool.ReleaseLeaderHold()
 	_ = nilPool.DeliverDirect("c", "t")
 	pEmpty := &WorkerPool{}
 	_ = pEmpty.DeliverDirect("c", "t")
@@ -992,34 +986,6 @@ func TestWorkerPool_RunnerFallbackAdaptersAndLifecycle(t *testing.T) {
 	if unwrapUnifiedPool(nil) != nil || unwrapUnifiedPool(&testRunnerAgentPool{}) != nil {
 		t.Errorf("expected nil from unwrapUnifiedPool")
 	}
-
-	mockDrain := &mockDrainErrStore{Store: fake, messages: []db.Message{{ID: "m1", ThreadID: "t1", Status: db.StatusProcessing, RestartCount: 5, RetryCount: 5}}}
-	pDrain := New(nil, WorkerPoolConfig{Store: mockDrain})
-	RecoverInterrupted(t.Context(), mockDrain, pDrain)
-	RecoverInterrupted(t.Context(), nil, nil)
-	RecoverInterrupted(t.Context(), fake, nil)
-	RecoverInterrupted(t.Context(), nil, &WorkerPool{})
-	pDrain.Stop()
-
-	recStore := setupTestStore(t)
-	_ = recStore.InsertMessage(ctx, db.Message{ID: "m-rec-stale", ThreadID: "t-rec-stale", AuthorID: "u1", Status: db.StatusPending, CreatedAt: time.Now().UTC().Add(-2 * time.Hour)})
-	_ = recStore.InsertMessage(ctx, db.Message{ID: "m-rec-poison", ThreadID: "t-rec-poison", AuthorID: "u1", Content: "poison content with a rather long snippet that exceeds sixty characters easily", Status: db.StatusProcessing, RetryCount: 5})
-	pRec := New(nil, WorkerPoolConfig{Store: recStore, NotifierFunc: func(b, k, d string) string { return "poison alert" }, DeliveryFunc: func(s *discordgo.Session, c, txt string) error { return nil }})
-	t.Cleanup(pRec.Stop)
-	RecoverInterrupted(t.Context(), recStore, pRec)
-
-	p := New(nil, WorkerPoolConfig{Store: fake})
-	p.EnqueueBurst()
-	p.processBurst(nil)
-	p.processBurst([]db.Message{})
-	p.cancel()
-	stF := &threadWorkerState{ch: make(chan queueItem, 1)}
-	msg0 := db.Message{ID: "m0"}
-	stF.ch <- queueItem{msg: &msg0}
-	p.threadChs["t-full"] = stF
-	p.EnqueueBurst(db.Message{ID: "m-blocked", ThreadID: "t-full"})
-	p.Stop()
-	p.EnqueueBurst(db.Message{ID: "m-after-stop"})
 }
 
 func TestStatusUpdater_GuardrailsAndRESTTransport(t *testing.T) {
@@ -1063,7 +1029,6 @@ func TestStatusUpdater_GuardrailsAndRESTTransport(t *testing.T) {
 	nilSu.MarkTurnStarted()
 	nilSu.SetCapacityBackoff(5 * time.Second)
 	nilSu.Stop()
-	nilSu.Reset()
 	nilSu.DeleteStatusMessage()
 	nilSu.HandleStep(&runner.StepUpdateEvent{StepType: "thinking"})
 
@@ -1179,20 +1144,20 @@ func TestChannelCacheAndMessageEffort(t *testing.T) {
 	}
 }
 
-func TestWorkerPool_ProcessBurstEdgeCases(t *testing.T) {
-	t.Parallel()
+type burstEdgeCase struct {
+	name, runnerOut, runnerErrOut, wantMsgStatus string
+	msg                                          db.Message
+	trailing                                     *db.Message
+	runnerCode                                   int
+	runnerErr, claimErr                          error
+	policy                                       *config.ChannelPolicy
+	nilClassifier, unclaimed                     bool
+}
+
+func burstEdgeCases() []burstEdgeCase {
 	now := time.Now().UTC()
 	f05 := 0.5
-
-	tests := []struct {
-		name, runnerOut, runnerErrOut, wantMsgStatus string
-		msg                                          db.Message
-		trailing                                     *db.Message
-		runnerCode                                   int
-		runnerErr, claimErr                          error
-		policy                                       *config.ChannelPolicy
-		nilClassifier, unclaimed                     bool
-	}{
+	return []burstEdgeCase{
 		{name: "claim_error_aborts_burst", msg: db.Message{ID: "m-err-claim", ThreadID: "t-claim", Status: db.StatusPending, CreatedAt: now}, claimErr: errors.New("db lock error")},
 		{name: "unclaimed_message_skipped", msg: db.Message{ID: "m-unclaimed", ThreadID: "t-unclaimed", Status: db.StatusPending, CreatedAt: now}, unclaimed: true},
 		{name: "ignored_channel_completes_schedule_run", msg: db.Message{ID: "m-ign-extra", ThreadID: "t-ign-extra", AuthorID: "u1", Content: "ignored prompt", Status: db.StatusPending, CreatedAt: now}, policy: &config.ChannelPolicy{Mode: "ignore"}, wantMsgStatus: db.StatusCompleted},
@@ -1200,40 +1165,62 @@ func TestWorkerPool_ProcessBurstEdgeCases(t *testing.T) {
 		{name: "rate_limit_fails_schedule_run", msg: db.Message{ID: "m-rate-1", ThreadID: "t-rate", AuthorID: "u1", Content: "query", Status: db.StatusPending, CreatedAt: now}, runnerErrOut: "Resource has been exhausted: rate limit exceeded 429", runnerCode: 1, runnerErr: errors.New("exit 1"), wantMsgStatus: db.StatusFailed},
 		{name: "trailing_query_with_nil_classifier_and_default_policy", msg: db.Message{ID: "m-w-lead", ThreadID: "t-trail-noclass", AuthorID: "u1", Content: "<@aerial> start", Status: db.StatusPending, CreatedAt: now}, trailing: &db.Message{ID: "m-trail-query", ThreadID: "t-trail-noclass", AuthorID: "u1", Content: "why is the ocean blue", Status: db.StatusPending, CreatedAt: now}, runnerOut: mockJSONResponse("", "OK"), policy: &config.ChannelPolicy{Mode: "channel", WakeMode: "classifier", AmbientWakeThreshold: &f05}, nilClassifier: true, wantMsgStatus: db.StatusCompleted},
 	}
-	for _, tc := range tests {
+}
+
+// setupBurstEdgeCase seeds tc's rows and builds its pool; it returns the store to read back and
+// the burst in order.
+func setupBurstEdgeCase(t *testing.T, tc burstEdgeCase) (*WorkerPool, db.Store, []db.Message) {
+	t.Helper()
+	fake := setupTestStore(t)
+	_ = insertMessage(fake, tc.msg)
+	burst := []db.Message{tc.msg}
+	if tc.trailing != nil {
+		_ = insertMessage(fake, *tc.trailing)
+		burst = append(burst, *tc.trailing)
+	}
+	var store db.Store = fake
+	if tc.claimErr != nil || tc.unclaimed {
+		store = &mockClaimStore{Store: fake, claimed: !tc.unclaimed, claimErr: tc.claimErr}
+	}
+	pool := New(nil, WorkerPoolConfig{
+		Store: store, MaxAttempts: 1, BackoffBase: time.Millisecond,
+		RunnerFunc: func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (string, string, int, error) {
+			return tc.runnerOut, tc.runnerErrOut, tc.runnerCode, tc.runnerErr
+		},
+	})
+	if tc.nilClassifier {
+		pool.cfg.Classifier = nil
+	}
+	if tc.policy != nil {
+		pol := *tc.policy
+		pool.cfg.ResolveChannelPolicy = func(c, n string) config.ChannelPolicy { return pol }
+	}
+	t.Cleanup(pool.Stop)
+	return pool, fake, burst
+}
+
+func assertBurstEdgeCase(t *testing.T, tc burstEdgeCase, store db.Store) {
+	t.Helper()
+	if tc.wantMsgStatus == "" {
+		return
+	}
+	if gotMsg, err := getMessage(store, tc.msg.ID); err != nil || gotMsg == nil || gotMsg.Status != tc.wantMsgStatus {
+		t.Errorf("msg %s status = %v (err=%v), want %s", tc.msg.ID, gotMsg, err, tc.wantMsgStatus)
+	}
+}
+
+func TestWorkerPool_ProcessBurstEdgeCases(t *testing.T) {
+	t.Parallel()
+	for _, tc := range burstEdgeCases() {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			fake := setupTestStore(t)
-			_ = insertMessage(fake, tc.msg)
-			burst := []db.Message{tc.msg}
-			if tc.trailing != nil {
-				_ = insertMessage(fake, *tc.trailing)
-				burst = append(burst, *tc.trailing)
+			pool, store, burst := setupBurstEdgeCase(t, tc)
+			ids := make([]string, len(burst))
+			for i, m := range burst {
+				ids[i] = m.ID
 			}
-			var store db.Store = fake
-			if tc.claimErr != nil || tc.unclaimed {
-				store = &mockClaimStore{Store: fake, claimed: !tc.unclaimed, claimErr: tc.claimErr}
-			}
-			pool := New(nil, WorkerPoolConfig{
-				Store: store, MaxAttempts: 1, BackoffBase: time.Millisecond,
-				RunnerFunc: func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (string, string, int, error) {
-					return tc.runnerOut, tc.runnerErrOut, tc.runnerCode, tc.runnerErr
-				},
-			})
-			if tc.nilClassifier {
-				pool.cfg.Classifier = nil
-			}
-			if tc.policy != nil {
-				pol := *tc.policy
-				pool.cfg.ResolveChannelPolicy = func(c, n string) config.ChannelPolicy { return pol }
-			}
-			pool.processBurst(burst)
-
-			if tc.wantMsgStatus != "" {
-				if gotMsg, err := getMessage(fake, tc.msg.ID); err != nil || gotMsg == nil || gotMsg.Status != tc.wantMsgStatus {
-					t.Errorf("msg %s status = %v (err=%v), want %s", tc.msg.ID, gotMsg, err, tc.wantMsgStatus)
-				}
-			}
+			_ = runLiveBurst(context.Background(), pool, tc.msg.ThreadID, "turn-1", ids...)
+			assertBurstEdgeCase(t, tc, store)
 		})
 	}
 }

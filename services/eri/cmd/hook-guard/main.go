@@ -116,8 +116,10 @@ func ParseCLIConfig(args []string) Config {
 	return cfg
 }
 
-// RunCLI executes the hook-guard CLI workflow and returns an exit code.
-func RunCLI(args []string, r io.Reader, w io.Writer) int {
+// RunCLI executes the hook-guard CLI workflow and returns an exit code. getenv resolves
+// environment variables (os.Getenv in production) so tests never read the real environment:
+// the batch-guard state directory, SQL describer and every other guard setting come from it.
+func RunCLI(args []string, r io.Reader, w io.Writer, getenv func(string) string) int {
 	cfg := ParseCLIConfig(args)
 	if cfg.ShowHelp {
 		if _, err := fmt.Fprintln(w, HelpMessage()); err != nil {
@@ -127,10 +129,10 @@ func RunCLI(args []string, r io.Reader, w io.Writer) int {
 	}
 
 	if cfg.Mode == ModeTrace {
-		return runTrace(r, w, os.Getenv, &http.Client{Timeout: traceAnnounceTimeout})
+		return runTrace(r, w, getenv, &http.Client{Timeout: traceAnnounceTimeout})
 	}
 
-	if err := guard.Process(r, w, string(cfg.Mode)); err != nil {
+	if err := guard.ProcessWithOptions(r, w, string(cfg.Mode), guard.OptionsFromEnv(getenv)); err != nil {
 		// Preserves fail-open invariant
 		out := `{"decision":"allow"}`
 		if guard.IsInvocationMode(string(cfg.Mode)) {
@@ -209,5 +211,5 @@ func announceMCPCall(payload guard.Payload, endpoint, daemonID string, client *h
 }
 
 func main() {
-	os.Exit(RunCLI(os.Args, os.Stdin, os.Stdout))
+	os.Exit(RunCLI(os.Args, os.Stdin, os.Stdout, os.Getenv))
 }

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
+	"io"
 	"strings"
 	"testing"
 
@@ -23,6 +24,8 @@ type runCLICase struct {
 	wantDeny   bool
 	wantOutput string
 	wantCode   int
+	// brokenWriter routes stdout to a writer that always fails; only the exit code is asserted.
+	brokenWriter bool
 }
 
 func assertRunCLICase(t *testing.T, tt runCLICase) {
@@ -30,9 +33,16 @@ func assertRunCLICase(t *testing.T, tt runCLICase) {
 	var stdout bytes.Buffer
 	stdinBuf := strings.NewReader(tt.input)
 
-	code := RunCLI(tt.args, stdinBuf, &stdout)
+	var w io.Writer = &stdout
+	if tt.brokenWriter {
+		w = &errWriter{}
+	}
+	code := RunCLI(tt.args, stdinBuf, w, hermeticEnv(t))
 	if code != tt.wantCode {
 		t.Errorf("expected exit code %d, got: %d", tt.wantCode, code)
+	}
+	if tt.brokenWriter {
+		return
 	}
 
 	if tt.wantOutput != "" {
@@ -235,39 +245,29 @@ func runCLIExtraTestCases() []runCLICase {
 		{name: "pre-invocation normal", args: []string{"hook-guard", "pre-invocation"}, input: `{"conversationId":"c1","invocationNum":1}`, wantOutput: "{}", wantCode: 0},
 		{name: "invocation-guard symlink", args: []string{"/usr/local/bin/invocation-guard"}, input: `{"conversationId":"c1","invocationNum":25}`, wantOutput: "{}", wantCode: 0},
 		{name: "post-batch subcommand", args: []string{"hook-guard", "post-batch"}, input: `{"conversationId":"c2","stepIdx":1,"error":"e","toolCall":{"name":"edit_file","args":{"Path":"/tmp/a.go"}}}`, wantOutput: "{}", wantCode: 0},
+		{name: "malformed payload with broken writer", args: []string{"hook-guard"}, input: `{malformed`, wantCode: 1, brokenWriter: true},
+		{name: "malformed pre-invocation with broken writer", args: []string{"hook-guard", "pre-invocation"}, input: `{malformed`, wantCode: 1, brokenWriter: true},
+		{name: "help with broken writer", args: []string{"hook-guard", "--help"}, wantCode: 1, brokenWriter: true},
 		{name: "post-batch-guard symlink", args: []string{"/usr/local/bin/post-batch-guard"}, input: `{"conversationId":"c2","stepIdx":1,"toolCall":{"name":"edit_file","args":{"Path":"/tmp/a.go"}}}`, wantOutput: "{}", wantCode: 0},
 	}
 }
 
+// hermeticEnv stands in for os.Getenv so RunCLI never reads the real environment: batch-guard
+// state lands in a per-test temp dir instead of the live /tmp/aerial-batch-guard, and
+// DATABASE_URL and ERI_HOOK_ENDPOINT stay unset so no Postgres or eri endpoint is reached.
+func hermeticEnv(t *testing.T) func(string) string {
+	t.Helper()
+	env := map[string]string{"AERIAL_BATCH_GUARD_DIR": t.TempDir()}
+	return func(k string) string { return env[k] }
+}
+
 func TestRunCLI(t *testing.T) {
+	t.Parallel()
 	tests := runCLITestCases()
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
 			assertRunCLICase(t, tt)
 		})
 	}
-
-	t.Run("failing writer covered", func(t *testing.T) {
-		code := RunCLI([]string{"hook-guard"}, strings.NewReader(`{malformed`), &errWriter{})
-		if code != 0 && code != 1 {
-			t.Errorf("unexpected code %d", code)
-		}
-		if c := RunCLI([]string{"hook-guard", "pre-invocation"}, strings.NewReader(`{malformed`), &errWriter{}); c != 0 && c != 1 {
-			t.Errorf("unexpected code %d", c)
-		}
-	})
-
-	t.Run("help flag with errWriter", func(t *testing.T) {
-		code := RunCLI([]string{"hook-guard", "--help"}, nil, &errWriter{})
-		if code != 1 {
-			t.Errorf("expected 1 on help write failure, got: %d", code)
-		}
-	})
-
-	t.Run("HelpMessage direct", func(t *testing.T) {
-		msg := HelpMessage()
-		if !strings.Contains(msg, "Usage: hook-guard") {
-			t.Errorf("unexpected HelpMessage: %s", msg)
-		}
-	})
 }

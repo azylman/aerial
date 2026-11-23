@@ -62,20 +62,21 @@ type usageCLIResponse struct {
 }
 type UsageRunnerFunc func(ctx context.Context) ([]byte, error)
 
-func LatestQuotaGroups() []QuotaGroup {
+// QuotaSnapshot carries quota groups together with their last refresh time.
+type QuotaSnapshot struct {
+	Groups    []QuotaGroup `json:"groups"`
+	UpdatedAt time.Time    `json:"updated_at"`
+}
+
+// LatestQuotaSnapshot returns a deep copy of groups and refresh time read under one lock.
+func LatestQuotaSnapshot() QuotaSnapshot {
 	latestQuotaMu.RLock()
 	defer latestQuotaMu.RUnlock()
 	out := make([]QuotaGroup, len(latestQuotaGroups))
 	for i, g := range latestQuotaGroups {
 		out[i] = QuotaGroup{Name: g.Name, Buckets: append([]QuotaBucket(nil), g.Buckets...)}
 	}
-	return out
-}
-
-func LatestQuotaUpdatedAt() time.Time {
-	latestQuotaMu.RLock()
-	defer latestQuotaMu.RUnlock()
-	return latestQuotaUpdatedAt
+	return QuotaSnapshot{Groups: out, UpdatedAt: latestQuotaUpdatedAt}
 }
 
 func RecordUsageJSON(raw []byte) error {

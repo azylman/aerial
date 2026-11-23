@@ -3,44 +3,36 @@ package executor
 import (
 	"context"
 	"errors"
-	"net/http"
-	"net/http/httptest"
+	"fmt"
 	"os"
 	"path/filepath"
-	"strings"
+	"sync"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 
+	"github.com/azylman/aerial/pkg/eriwire"
+	"github.com/azylman/aerial/pkg/githubapitest"
 	"github.com/azylman/aerial/pkg/pubsub"
+	"github.com/azylman/aerial/pkg/pubsubtest"
+	"github.com/azylman/aerial/services/vanadis-restate/internal/eritest"
 	"github.com/azylman/aerial/services/vanadis-restate/internal/model"
 	"github.com/azylman/aerial/services/vanadis-restate/internal/store"
 )
 
-type mockEriClient struct {
-	dispatchFn func(ctx context.Context, req BrainDispatchRequest) error
-	cancelFn   func(ctx context.Context, chunkID string) error
-	promptFn   func(ctx context.Context, threadID, prompt string) error
-	widgetFn   func(ctx context.Context, req StatusWidgetRequest) (string, error)
-	messageFn  func(ctx context.Context, channelID, content string) error
-
-	lastDispatch *BrainDispatchRequest
-	lastCancel   string
-	lastThreadID string
-	lastPrompt   string
-	lastWidget   *StatusWidgetRequest
-	lastMsgChan  string
-	lastMsgCont  string
-}
-
-func (m *mockEriClient) DispatchAccepted(ctx context.Context, req BrainDispatchRequest) error {
-	return m.Dispatch(ctx, req)
-}
+var errDelegation = errors.New("eri unavailable")
 
 type mockStoreForLaunch struct {
 	store.VanadisStore
 
 	reserveErr error
+	reserved   []string
+}
+
+func (m *mockStoreForLaunch) ReserveChunkForLaunch(_ context.Context, chunkID string) error {
+	m.reserved = append(m.reserved, chunkID)
+	return m.reserveErr
 }
 
 type mockBusExecutor struct {
@@ -49,216 +41,355 @@ type mockBusExecutor struct {
 	lastSubj string
 }
 
-func (m *mockEriClient) Dispatch(ctx context.Context, req BrainDispatchRequest) error {
-	m.lastDispatch = &req
-	if m.dispatchFn != nil {
-		return m.dispatchFn(ctx, req)
-	}
+func (m *mockBusExecutor) Publish(_ context.Context, subject, _ string, _ any) error {
+	m.lastSubj = subject
 	return nil
 }
 
-func (m *mockEriClient) CancelDispatch(ctx context.Context, chunkID string) error {
-	m.lastCancel = chunkID
-	if m.cancelFn != nil {
-		return m.cancelFn(ctx, chunkID)
-	}
-	return nil
-}
-
-func (m *mockEriClient) Prompt(ctx context.Context, threadID, prompt string) error {
-	m.lastThreadID = threadID
-	m.lastPrompt = prompt
-	if m.promptFn != nil {
-		return m.promptFn(ctx, threadID, prompt)
-	}
-	return nil
-}
-
-func (m *mockEriClient) Widget(ctx context.Context, req StatusWidgetRequest) (string, error) {
-	m.lastWidget = &req
-	if m.widgetFn != nil {
-		return m.widgetFn(ctx, req)
-	}
-	return "msg-123", nil
-}
-
-func (m *mockEriClient) Message(ctx context.Context, channelID, content string) error {
-	m.lastMsgChan = channelID
-	m.lastMsgCont = content
-	if m.messageFn != nil {
-		return m.messageFn(ctx, channelID, content)
-	}
-	return nil
-}
-
-type mockWidgetStore struct {
+// casWidgetStore is a CAS-correct in-memory status message id store for one
+// build: stored is the current status_message_id, writes counts swaps.
+type casWidgetStore struct {
 	store.VanadisStore
 
-	updateErr error
+	mu     sync.Mutex
+	stored string
+	casErr error
+	writes int
 }
 
-func (m *mockWidgetStore) UpdateBuildStatusMessageID(_ context.Context, _, _ string) error {
-	return m.updateErr
+func (m *casWidgetStore) CompareAndSwapBuildStatusMessageID(_ context.Context, _, oldID, newID string) (bool, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.casErr != nil {
+		return false, m.casErr
+	}
+	if m.stored != oldID {
+		return false, nil
+	}
+	m.stored = newID
+	m.writes++
+	return true, nil
 }
 
-func TestExecutor_PromptAndDispatch(t *testing.T) {
+// mintingEriClient is a concurrency-safe fake whose Widget sinks when the
+// request carries staleID (posting a new card) and edits fresh cards in place.
+type mintingEriClient struct {
+	eritest.Client
+
+	mu      sync.Mutex
+	staleID string
+	minted  int
+	deleted []string
+}
+
+func (m *mintingEriClient) Widget(_ context.Context, req StatusWidgetRequest) (string, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if req.MessageID != "" && req.MessageID != m.staleID {
+		return req.MessageID, nil
+	}
+	m.minted++
+	return fmt.Sprintf("new-%d", m.minted), nil
+}
+
+func (m *mintingEriClient) DeleteWidget(_ context.Context, _, _, messageID string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.deleted = append(m.deleted, messageID)
+	return nil
+}
+
+func TestNewExecutor(t *testing.T) {
 	t.Parallel()
-	eri := &mockEriClient{}
-	bus := pubsub.NewMemoryBus()
-	exec := NewExecutor(t.TempDir(), eri, bus, "test-token", nil)
+	tests := []struct {
+		name, shareRoot string
+		deployUIURL     []string
+		wantShare       string
+		wantDeploy      string
+	}{
+		{"defaults", "", nil, "/share", ""},
+		{"explicit share root and deploy ui", "/custom-share", []string{"https://flux.example.com"}, "/custom-share", "https://flux.example.com"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			exec := NewExecutor(tc.shareRoot, nil, nil, "tok", "example-owner", nil, tc.deployUIURL...)
+			assert.Equal(t, tc.wantShare, exec.shareRoot)
+			assert.Equal(t, tc.wantDeploy, exec.deployUIURL)
+		})
+	}
+}
 
-	b := model.VanadisBuild{ID: "b1", Title: "Build 1", Objective: "Make everything awesome", ThreadID: "th-1"}
+// TestExecutorEriDelegation drives every thin eri delegation method with the
+// same arguments (remediation first, so the silent wake is the recorded last
+// dispatch); a nil eri row exercises the no-client guards.
+func TestExecutorEriDelegation(t *testing.T) {
+	t.Parallel()
+	silent := &eriwire.BrainDispatchRequest{
+		ID: "vanadis-deploy-fail-c1-94f73a41fd9c6e67", Source: "vanadis-restate", SessionID: "vanadis-c1", TargetID: "th1",
+		VanadisChunkID: "c1", Prompt: "silent wake", Effort: "medium", SkipIfActive: true,
+	}
+	recorded := eritest.Client{LastCancel: "c1", LastThreadID: "th1", LastPrompt: "wake", LastDispatch: silent, LastMsgChan: "ch1", LastMsgCont: "msg"}
+	failing := eritest.Client{CancelErr: errDelegation, PromptErr: errDelegation, DispatchErr: errDelegation, MessageErr: errDelegation}
+	failingRecorded := failing
+	failingRecorded.LastCancel, failingRecorded.LastThreadID, failingRecorded.LastPrompt = "c1", "th1", "wake"
+	failingRecorded.LastDispatch, failingRecorded.LastMsgChan, failingRecorded.LastMsgCont = silent, "ch1", "msg"
+	tests := []struct {
+		name     string
+		eri      *eritest.Client
+		wantErrs []string
+		want     eritest.Client
+	}{
+		{"nil eri skips notifications and rejects remediation", nil, []string{"executor or eri client is nil", "", "", "", ""}, eritest.Client{}},
+		{"fake records every call", &eritest.Client{}, []string{"", "", "", "", ""}, recorded},
+		{"eri errors propagate", &failing, []string{"eri unavailable", "eri unavailable", "eri unavailable", "eri unavailable", "eri unavailable"}, failingRecorded},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			var client EriClient
+			var eri eritest.Client
+			if tc.eri != nil {
+				eri = *tc.eri
+				client = &eri
+			}
+			exec := NewExecutor("", client, nil, "", "example-owner", nil)
+			ctx := context.Background()
+			remediation := eriwire.BrainDispatchRequest{ID: "d1", Source: "test"}
+			remediationErr := exec.DispatchChunkRemediation(ctx, remediation)
+			if tc.eri != nil {
+				assert.Equal(t, &remediation, eri.LastDispatch)
+			}
+			errs := []error{
+				remediationErr,
+				exec.CancelChunkDispatch(ctx, "c1"),
+				exec.DispatchWakePrompt(ctx, "th1", "wake"),
+				exec.DispatchSilentWakePrompt(ctx, "th1", "c1", "silent wake", ""),
+				exec.DispatchDirectMessage(ctx, "ch1", "msg"),
+			}
+			got := make([]string, len(errs))
+			for i, err := range errs {
+				if err != nil {
+					got[i] = err.Error()
+				}
+			}
+			assert.Equal(t, tc.wantErrs, got)
+			assert.Equal(t, tc.want, eri)
+		})
+	}
+}
+
+func TestExecutorFormatChunkPrompt(t *testing.T) {
+	t.Parallel()
+	build := model.VanadisBuild{ID: "b1", Title: "Build 1", Objective: "Make everything awesome", ThreadID: "th-1"}
 	chunks := []model.VanadisChunk{
 		{ID: "c1", Title: "Chunk 1", Repo: "aerial", Instructions: "Do step 1", Effort: "high"},
 		{ID: "c2", Title: "Chunk 2", Repo: "aerial", Instructions: "Do step 2", Mode: chunkModeAction},
+		{ID: "c3", Title: "Chunk 3", Mode: "pr", Repo: "aerial", TargetFiles: []string{"main.go"}, TargetSymbols: []string{"MySpecialSym"}},
 	}
+	tests := []struct {
+		name     string
+		idx      int
+		want     string
+		wantErr  string
+		wantNots []string
+	}{
+		{name: "pr chunk", idx: 0, want: "Chunk 1", wantNots: []string{"Target Symbol Spans:"}},
+		{name: "action chunk", idx: 1, want: "Chunk 2"},
+		{name: "target symbols render spans from share root", idx: 2, want: "Target Symbol Spans:"},
+		{name: "out of bounds index", idx: 9, wantErr: "active chunk index 9 out of range [0, 3)"},
+	}
+	shareRoot := t.TempDir()
+	require.NoError(t, os.MkdirAll(filepath.Join(shareRoot, "aerial"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(shareRoot, "aerial", "main.go"), []byte("package main\n\nfunc MySpecialSym() {\n}\n"), 0o644))
+	exec := NewExecutor(shareRoot, &eritest.Client{}, nil, "", "example-owner", nil)
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			got, err := exec.FormatChunkPrompt(build, chunks, tc.idx)
+			if tc.wantErr != "" {
+				require.EqualError(t, err, tc.wantErr)
+				return
+			}
+			require.NoError(t, err)
+			assert.Contains(t, got, tc.want)
+			for _, not := range tc.wantNots {
+				assert.NotContains(t, got, not)
+			}
+		})
+	}
+}
 
-	prompt1, err := exec.FormatChunkPrompt(b, chunks, 0)
-	if err != nil || !strings.Contains(prompt1, "Chunk 1") {
-		t.Fatalf("FormatChunkPrompt 0 failed: %v, prompt: %s", err, prompt1)
+func TestExecutorPublishExternalEvent(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name     string
+		bus      pubsub.Bus
+		wantErr  string
+		wantSubj string
+	}{
+		{"nil bus publishes nothing", nil, "", ""},
+		{"publishes to source event subject", &mockBusExecutor{}, "", "aerial.events.source.type"},
+		{"publish error propagates", &pubsubtest.FaultBus{PublishErr: errDelegation}, "eri unavailable", ""},
 	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			err := NewExecutor("", nil, tc.bus, "", "example-owner", nil).PublishExternalEvent(context.Background(), "source", "type", []string{"t1"}, "ctx")
+			if tc.wantErr != "" {
+				require.EqualError(t, err, tc.wantErr)
+			} else {
+				require.NoError(t, err)
+			}
+			if rec, ok := tc.bus.(*mockBusExecutor); ok {
+				assert.Equal(t, tc.wantSubj, rec.lastSubj)
+			}
+		})
+	}
+}
 
-	prompt2, err := exec.FormatChunkPrompt(b, chunks, 1)
-	if err != nil || !strings.Contains(prompt2, "Chunk 2") {
-		t.Fatalf("FormatChunkPrompt 1 failed: %v, prompt: %s", err, prompt2)
+// TestExecutorResolveCIFailureDetailsChecked covers the coordinator's
+// delegation to cilog; cilog's own tables own the log and RoboRev parsing.
+func TestExecutorResolveCIFailureDetailsChecked(t *testing.T) {
+	t.Parallel()
+	const jobURL = "https://github.com/o/r/actions/runs/1/job/42"
+	routes := map[string][]githubapitest.Response{"GET /repos/example-owner/aerial/actions/jobs/42/logs": {{Body: "--- FAIL: TestDelegated (0.01s)\n"}}}
+	tests := []struct {
+		name         string
+		nilExec      bool
+		noHTTPClient bool
+		want         string
+		wantPaths    []string
+	}{
+		{name: "nil executor returns details", nilExec: true, want: "failure", wantPaths: []string{}},
+		{name: "missing http client returns details", noHTTPClient: true, want: "failure", wantPaths: []string{}},
+		{name: "job log fetched through coordinator", want: "FAIL: TestDelegated", wantPaths: []string{"/repos/example-owner/aerial/actions/jobs/42/logs"}},
 	}
-
-	// Test chunk out of bounds
-	if _, err := exec.FormatChunkPrompt(b, chunks, 9); err == nil {
-		t.Error("expected error on out of bounds chunk index, got nil")
-	}
-
-	st := &mockStoreForLaunch{}
-	if err := exec.ExecuteLaunchChunk(context.Background(), st, b, chunks, 0, "[NOTICE]\n"); err != nil {
-		t.Fatalf("ExecuteLaunchChunk failed: %v", err)
-	}
-	if eri.lastDispatch == nil || eri.lastDispatch.VanadisChunkID != "c1" || eri.lastDispatch.VanadisBuildID != "b1" {
-		t.Errorf("lastDispatch chunkID / buildID = %+v, want chunkID c1, buildID b1", eri.lastDispatch)
-	}
-
-	if err := exec.CancelChunkDispatch(context.Background(), "c1"); err != nil || eri.lastCancel != "c1" {
-		t.Errorf("CancelChunkDispatch failed: %v", err)
-	}
-	if err := exec.DispatchWakePrompt(context.Background(), "th-1", "wake"); err != nil || eri.lastPrompt != "wake" {
-		t.Errorf("DispatchWakePrompt failed: %v", err)
-	}
-	if err := exec.DispatchDirectMessage(context.Background(), "ch-1", "msg"); err != nil || eri.lastMsgCont != "msg" {
-		t.Errorf("DispatchDirectMessage failed: %v", err)
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			api := githubapitest.New(t, routes)
+			exec := NewExecutor("", nil, nil, "token", "example-owner", api.Client())
+			exec.GitHubAPIURL = api.URL()
+			if tc.noHTTPClient {
+				exec.HTTPClient = nil
+			}
+			if tc.nilExec {
+				exec = nil
+			}
+			got, err := exec.ResolveCIFailureDetailsChecked(context.Background(), "aerial", 0, "unit", "abc", jobURL, "failure")
+			require.NoError(t, err)
+			assert.Contains(t, got, tc.want)
+			requests := api.Requests()
+			paths := make([]string, 0, len(requests))
+			for _, req := range requests {
+				paths = append(paths, req.Path)
+			}
+			assert.Equal(t, tc.wantPaths, paths)
+		})
 	}
 }
 
 func TestExecutor_SyncBuildWidget(t *testing.T) {
 	t.Parallel()
-	eri := &mockEriClient{
-		widgetFn: func(ctx context.Context, req StatusWidgetRequest) (string, error) {
-			return "widget-msg-456", nil
-		},
+	errCAS := errors.New("cas unavailable")
+	tests := []struct {
+		name        string
+		nilExec     bool
+		noStore     bool
+		eri         eritest.Client
+		known       string
+		stored      string
+		casErr      error
+		wantID      string
+		wantErr     string
+		wantStored  string
+		wantWrites  int
+		wantDeleted []string
+	}{
+		{name: "nil executor is a no-op", nilExec: true, known: "old", stored: "old", wantStored: "old"},
+		{name: "edit in place stores nothing", eri: eritest.Client{WidgetID: "old"}, known: "old", stored: "old", wantID: "old", wantStored: "old"},
+		{name: "first post stores the new card", eri: eritest.Client{WidgetID: "new"}, wantID: "new", wantStored: "new", wantWrites: 1},
+		{name: "sink win stores the new card", eri: eritest.Client{WidgetID: "new"}, known: "old", stored: "old", wantID: "new", wantStored: "new", wantWrites: 1},
+		{name: "sink loss deletes the new card", eri: eritest.Client{WidgetID: "new"}, known: "old", stored: "other", wantStored: "other", wantDeleted: []string{"new"}},
+		{name: "sink loss tolerates delete failure", eri: eritest.Client{WidgetID: "new", DeleteWidgetErr: errors.New("discord down")}, known: "old", stored: "other", wantStored: "other", wantDeleted: []string{"new"}},
+		{name: "cas error keeps the new card", eri: eritest.Client{WidgetID: "new"}, known: "old", stored: "old", casErr: errCAS, wantID: "new", wantStored: "old"},
+		{name: "no store returns the new card", noStore: true, eri: eritest.Client{WidgetID: "new"}, known: "old", wantID: "new"},
+		{name: "widget error writes and deletes nothing", eri: eritest.Client{WidgetErr: errors.New("eri widget failure")}, known: "old", stored: "old", wantErr: "sync widget to eri: eri widget failure", wantStored: "old"},
 	}
-	exec := NewExecutor("", eri, nil, "", nil)
-	st := &mockWidgetStore{}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			eri := tc.eri
+			exec := NewExecutor("", &eri, nil, "", "example-owner", nil)
+			if tc.nilExec {
+				exec = nil
+			}
+			st := &casWidgetStore{stored: tc.stored, casErr: tc.casErr}
+			var vs store.VanadisStore = st
+			if tc.noStore {
+				vs = nil
+			}
+			b := model.VanadisBuild{ID: "b1", Title: "Build 1", Status: "running", ThreadID: "th-1", StatusMessageID: tc.known}
+			chunks := []model.VanadisChunk{{ID: "c1", Title: "Chunk 1", Status: "running"}}
+			got, err := exec.SyncBuildWidget(context.Background(), vs, b, chunks, "Notice!")
+			if tc.wantErr == "" {
+				require.NoError(t, err)
+			} else {
+				require.EqualError(t, err, tc.wantErr)
+			}
+			assert.Equal(t, tc.wantID, got)
+			assert.Equal(t, tc.wantStored, st.stored)
+			assert.Equal(t, tc.wantWrites, st.writes)
+			assert.Equal(t, tc.wantDeleted, eri.DeletedWidgets)
+			if !tc.nilExec {
+				require.NotNil(t, eri.LastWidget)
+				assert.Equal(t, "Notice!", eri.LastWidget.Banner)
+			}
+		})
+	}
+}
 
-	b := model.VanadisBuild{ID: "b1", Title: "Build 1", Status: "running", ThreadID: "th-1"}
+// TestExecutor_SyncBuildWidgetConcurrentSinks races N syncs from the same stale
+// ID: the first racer sinks and stores the new card, while concurrent racers
+// have their ID forwarded to the new card and edit in place without deleting or
+// re-posting duplicate cards.
+func TestExecutor_SyncBuildWidgetConcurrentSinks(t *testing.T) {
+	t.Parallel()
+	const racers = 8
+	eri := &mintingEriClient{staleID: "stale"}
+	exec := NewExecutor("", eri, nil, "", "example-owner", nil)
+	st := &casWidgetStore{stored: "stale"}
+	b := model.VanadisBuild{ID: "b1", Title: "Build 1", Status: "running", ThreadID: "th-1", StatusMessageID: "stale"}
 	chunks := []model.VanadisChunk{{ID: "c1", Title: "Chunk 1", Status: "running"}}
 
-	msgID, err := exec.SyncBuildWidget(context.Background(), st, b, chunks, "Notice!")
-	if err != nil || msgID != "widget-msg-456" {
-		t.Fatalf("SyncBuildWidget msgID = %q err = %v", msgID, err)
+	var wg sync.WaitGroup
+	for range racers {
+		wg.Go(func() {
+			id, err := exec.SyncBuildWidget(context.Background(), st, b, chunks, "")
+			assert.NoError(t, err)
+			assert.Equal(t, "new-1", id)
+		})
 	}
-	if eri.lastWidget == nil || eri.lastWidget.Banner != "Notice!" {
-		t.Errorf("expected banner 'Notice!', got %v", eri.lastWidget)
-	}
+	wg.Wait()
 
-	// nil executor or eri client
-	if id, err := (*Executor)(nil).SyncBuildWidget(context.Background(), nil, b, chunks, ""); id != "" || err != nil {
-		t.Error("expected empty string and nil error")
-	}
-
-	// eri client error
-	eriErr := &mockEriClient{
-		widgetFn: func(ctx context.Context, req StatusWidgetRequest) (string, error) {
-			return "", errors.New("eri widget failure")
-		},
-	}
-	execErr := NewExecutor("", eriErr, nil, "", nil)
-	if _, err := execErr.SyncBuildWidget(context.Background(), st, b, chunks, ""); err == nil {
-		t.Error("expected error on eri failure")
-	}
-
-	// update message id error branch
-	storeUpdateErr := &mockWidgetStore{updateErr: errors.New("update err")}
-	_, _ = exec.SyncBuildWidget(context.Background(), storeUpdateErr, b, chunks, "")
-}
-
-func TestExecutor_PublishExternalEvent(t *testing.T) {
-	t.Parallel()
-	bus := pubsub.NewMemoryBus()
-	exec := NewExecutor("", nil, bus, "", nil)
-
-	ctx := context.Background()
-	if err := exec.PublishExternalEvent(ctx, "vanadis_build", "completed", []string{"b1"}, "all green"); err != nil {
-		t.Fatalf("PublishExternalEvent failed: %v", err)
-	}
-}
-
-func TestExecutor_NilEriAndDirectHelpers(t *testing.T) {
-	t.Parallel()
-	execNil := NewExecutor("", nil, nil, "", nil)
-	ctx := context.Background()
-	if err := execNil.CancelChunkDispatch(ctx, "c1"); err != nil {
-		t.Fatal(err)
-	}
-	if err := execNil.DispatchWakePrompt(ctx, "th1", "prompt"); err != nil {
-		t.Fatal(err)
-	}
-	if err := execNil.DispatchSilentWakePrompt(ctx, "th1", "c1", "prompt", ""); err != nil {
-		t.Fatal(err)
-	}
-	if err := execNil.DispatchDirectMessage(ctx, "ch1", "msg"); err != nil {
-		t.Fatal(err)
-	}
-	if err := execNil.DispatchChunkRemediation(ctx, BrainDispatchRequest{}); err == nil {
-		t.Error("expected error from nil eri client on DispatchChunkRemediation")
-	}
-
-	eri := &mockEriClient{}
-	exec := NewExecutor("", eri, nil, "", nil)
-	if err := exec.CancelChunkDispatch(ctx, "c1"); err != nil {
-		t.Fatal(err)
-	}
-	if eri.lastCancel != "c1" {
-		t.Errorf("lastCancel = %q, want c1", eri.lastCancel)
-	}
-	if err := exec.DispatchWakePrompt(ctx, "th1", "prompt"); err != nil {
-		t.Fatal(err)
-	}
-	if eri.lastPrompt != "prompt" {
-		t.Errorf("lastPrompt = %q, want prompt", eri.lastPrompt)
-	}
-	if err := exec.DispatchSilentWakePrompt(ctx, "th1", "c1", "silent wake", ""); err != nil {
-		t.Fatal(err)
-	}
-	if eri.lastDispatch == nil || eri.lastDispatch.Prompt != "silent wake" || eri.lastDispatch.TargetID != "th1" || eri.lastDispatch.SessionID != "vanadis-c1" || eri.lastDispatch.VanadisChunkID != "c1" || !eri.lastDispatch.SkipIfActive || eri.lastDispatch.ID == "" {
-		t.Errorf("silent dispatch = %+v, want silent dispatch to th1 for c1", eri.lastDispatch)
-	}
-	if err := exec.DispatchDirectMessage(ctx, "ch1", "msg"); err != nil {
-		t.Fatal(err)
-	}
-	if eri.lastMsgCont != "msg" {
-		t.Errorf("lastMsgCont = %q, want msg", eri.lastMsgCont)
-	}
+	assert.Equal(t, 1, st.writes)
+	assert.Equal(t, "new-1", st.stored)
+	assert.Empty(t, eri.deleted)
+	assert.Equal(t, 1, eri.minted)
 }
 
 func TestDispatchSilentWakePrompt_OccurrenceDistinguishesFailures(t *testing.T) {
 	t.Parallel()
-	eri := &mockEriClient{}
-	exec := NewExecutor(t.TempDir(), eri, nil, "test-token", nil)
+	eri := &eritest.Client{}
+	exec := NewExecutor(t.TempDir(), eri, nil, "test-token", "example-owner", nil)
 	ctx := context.Background()
 	dispatch := func(occurrence string) string {
 		t.Helper()
 		if err := exec.DispatchSilentWakePrompt(ctx, "th1", "c1", "Deployment failed", occurrence); err != nil {
 			t.Fatal(err)
 		}
-		return eri.lastDispatch.ID
+		return eri.LastDispatch.ID
 	}
 	first := dispatch("2026-11-19T00:00:00Z")
 	if redelivered := dispatch("2026-11-19T00:00:00Z"); redelivered != first {
@@ -271,181 +402,239 @@ func TestDispatchSilentWakePrompt_OccurrenceDistinguishesFailures(t *testing.T) 
 
 func TestExecuteLaunchChunk_Errors(t *testing.T) {
 	t.Parallel()
-	ctx := context.Background()
-
-	// nil executor or eri client
-	if err := (*Executor)(nil).ExecuteLaunchChunk(ctx, nil, model.VanadisBuild{}, nil, 0, ""); err == nil {
-		t.Error("expected error for nil executor")
+	chunk := []model.VanadisChunk{{ID: "c1", Title: "Chunk 1", Mode: "pr", Repo: "aerial"}}
+	tests := []struct {
+		name         string
+		nilExec      bool
+		store        *mockStoreForLaunch
+		chunks       []model.VanadisChunk
+		idx          int
+		wantErr      string
+		wantDispatch bool
+	}{
+		{name: "nil executor", nilExec: true, wantErr: "executor or eri client is nil"},
+		{name: "no chunks", wantErr: "chunk index 0 out of bounds"},
+		{name: "negative index", chunks: chunk, idx: -1, wantErr: "chunk index -1 out of bounds"},
+		{name: "index past end", chunks: chunk, idx: 2, wantErr: "chunk index 2 out of bounds"},
+		{name: "reserve error only warns", store: &mockStoreForLaunch{reserveErr: errors.New("database locked")}, chunks: chunk, wantDispatch: true},
+		{name: "nil store dispatches without reservation", chunks: chunk, wantDispatch: true},
 	}
-
-	exec := NewExecutor("", &mockEriClient{}, nil, "", nil)
-
-	// out of bounds
-	if err := exec.ExecuteLaunchChunk(ctx, nil, model.VanadisBuild{}, nil, 0, ""); err == nil {
-		t.Error("expected error for out of bounds chunk")
-	}
-
-	// activeIdx out of bounds
-	chunks := []model.VanadisChunk{{ID: "c1"}}
-	if err := exec.ExecuteLaunchChunk(ctx, nil, model.VanadisBuild{ID: "b1"}, chunks, -1, ""); err == nil {
-		t.Error("expected error for negative activeIdx")
-	}
-	if err := exec.ExecuteLaunchChunk(ctx, nil, model.VanadisBuild{ID: "b1"}, chunks, 2, ""); err == nil {
-		t.Error("expected error for out of range activeIdx")
-	}
-
-	// store reserve error branch
-	mockStore := &mockStoreForLaunch{reserveErr: errors.New("database locked")}
-	execWithStore := NewExecutor("", &mockEriClient{}, nil, "", nil)
-	chunksForLaunch := []model.VanadisChunk{{ID: "c1", Title: "Chunk 1", Mode: "pr", Repo: "aerial"}}
-	if err := execWithStore.ExecuteLaunchChunk(ctx, mockStore, model.VanadisBuild{ID: "b1"}, chunksForLaunch, 0, ""); err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-
-	// TargetSymbols span rendering in FormatChunkPrompt
-	tmpShare := t.TempDir()
-	aerialDir := filepath.Join(tmpShare, "aerial")
-	_ = os.MkdirAll(aerialDir, 0o755)
-	_ = os.WriteFile(filepath.Join(aerialDir, "main.go"), []byte("package main\n\nfunc MySpecialSym() {\n}\n"), 0o644)
-	execShare := NewExecutor(tmpShare, &mockEriClient{}, nil, "", nil)
-	promptWithSpans, err := execShare.FormatChunkPrompt(model.VanadisBuild{ID: "b1"}, []model.VanadisChunk{{
-		ID:            "c1",
-		Title:         "Chunk 1",
-		Mode:          "pr",
-		Repo:          "aerial",
-		TargetFiles:   []string{"main.go"},
-		TargetSymbols: []string{"MySpecialSym"},
-	}}, 0)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if !strings.Contains(promptWithSpans, "Target Symbol Spans:") {
-		t.Errorf("expected Target Symbol Spans in prompt, got:\n%s", promptWithSpans)
-	}
-
-	// PublishExternalEvent
-	mockB := &mockBusExecutor{}
-	execBus := NewExecutor("", nil, mockB, "", nil)
-	if err := execBus.PublishExternalEvent(ctx, "source", "type", []string{"t1"}, "ctx"); err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if mockB.lastSubj != "aerial.events.source.type" {
-		t.Errorf("lastSubj = %q, want aerial.events.source.type", mockB.lastSubj)
-	}
-}
-
-func (m *mockStoreForLaunch) ReserveChunkForLaunch(ctx context.Context, chunkID string) error {
-	return m.reserveErr
-}
-
-func (m *mockBusExecutor) Publish(ctx context.Context, subject, msgID string, data any) error {
-	m.lastSubj = subject
-	return nil
-}
-
-func TestExecutorCoordinatorBranches(t *testing.T) {
-	t.Parallel()
-	ctx := context.Background()
-
-	// Nil-executor CI delegation falls back to details.
-	if got, err := (*Executor)(nil).ResolveCIFailureDetailsChecked(ctx, "aerial", 1, "unit", "sha", "", "details"); got != "details" || err != nil {
-		t.Errorf("nil ResolveCIFailureDetailsChecked = (%q, %v), want (details, nil)", got, err)
-	}
-	if got := (*Executor)(nil).ResolveCIFailureDetails(ctx, "aerial", 1, "unit", "sha", "", "details"); got != "details" {
-		t.Errorf("nil ResolveCIFailureDetails = %q, want details", got)
-	}
-
-	// Coordinator with deploy UI URL and explicit share root.
-	eri := &mockEriClient{}
-	exec := NewExecutor("/custom-share", eri, nil, "tok", nil, "https://flux.example.com")
-	if exec.shareRoot != "/custom-share" || exec.deployUIURL != "https://flux.example.com" {
-		t.Errorf("unexpected executor config: %+v", exec)
-	}
-
-	// Successful remediation dispatch records the request.
-	req := BrainDispatchRequest{ID: "d1", Source: "test"}
-	if err := exec.DispatchChunkRemediation(ctx, req); err != nil {
-		t.Fatalf("DispatchChunkRemediation failed: %v", err)
-	}
-	if eri.lastDispatch == nil || eri.lastDispatch.ID != "d1" {
-		t.Errorf("lastDispatch = %+v, want d1", eri.lastDispatch)
-	}
-
-	// Nil store skips reservation and dispatches directly.
-	chunks := []model.VanadisChunk{{ID: "c1", Title: "Chunk 1", Mode: "pr", Repo: "aerial"}}
-	if err := exec.ExecuteLaunchChunk(ctx, nil, model.VanadisBuild{ID: "b1"}, chunks, 0, ""); err != nil {
-		t.Fatalf("ExecuteLaunchChunk with nil store failed: %v", err)
-	}
-
-	// Nil bus publishes nothing and reports no error.
-	execNoBus := NewExecutor("", nil, nil, "", nil)
-	if err := execNoBus.PublishExternalEvent(ctx, "source", "type", []string{"t1"}, "ctx"); err != nil {
-		t.Fatalf("PublishExternalEvent with nil bus failed: %v", err)
-	}
-
-	// Hand-constructed executor without an HTTP client resolves to details, not a fetch.
-	bare := &Executor{gitHubToken: "t"}
-	if got := bare.ResolveCIFailureDetails(ctx, "aerial", 0, "unit", "sha", "", "details"); got != "details" {
-		t.Errorf("bare executor details = %q, want details", got)
-	}
-}
-
-func TestExecutorCILogDelegation(t *testing.T) {
-	t.Parallel()
-	ctx := context.Background()
-
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		switch {
-		case strings.Contains(r.URL.Path, "/comments"):
-			w.WriteHeader(http.StatusInternalServerError)
-		case strings.Contains(r.URL.Path, "/logs"):
-			w.WriteHeader(http.StatusOK)
-			_, _ = w.Write([]byte("--- FAIL: TestDelegated (0.01s)\n"))
-		default:
-			w.WriteHeader(http.StatusNotFound)
-		}
-	}))
-	defer srv.Close()
-
-	exec := NewExecutor("", nil, nil, "token", srv.Client())
-	exec.GitHubAPIURL = srv.URL
-
-	// Log fetch success delegates through the coordinator.
-	got, err := exec.ResolveCIFailureDetailsChecked(ctx, "aerial", 0, "unit", "abc", "https://github.com/o/r/actions/runs/1/job/42", "failure")
-	if err != nil || !strings.Contains(got, "FAIL: TestDelegated") {
-		t.Errorf("delegated checked = (%q, %v), want FAIL log", got, err)
-	}
-	if got := exec.ResolveCIFailureDetails(ctx, "aerial", 0, "unit", "abc", "https://github.com/o/r/actions/runs/1/job/42", "failure"); !strings.Contains(got, "FAIL: TestDelegated") {
-		t.Errorf("delegated details = %q, want FAIL log", got)
-	}
-	// RoboRev errors fall back to details in the non-checked wrapper.
-	if _, err := exec.ResolveCIFailureDetailsChecked(ctx, "aerial", 10, "roborev-check", "abc123", "", "failure"); err == nil {
-		t.Error("expected delegated error for 500 comments, got nil")
-	}
-	if got := exec.ResolveCIFailureDetails(ctx, "aerial", 10, "roborev-check", "abc123", "", "fallback-details"); got != "fallback-details" {
-		t.Errorf("delegated fallback = %q, want fallback-details", got)
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			eri := &eritest.Client{}
+			exec := NewExecutor("", eri, nil, "", "example-owner", nil)
+			if tc.nilExec {
+				exec = nil
+			}
+			var st store.VanadisStore
+			if tc.store != nil {
+				st = tc.store
+			}
+			err := exec.ExecuteLaunchChunk(context.Background(), st, model.VanadisBuild{ID: "b1"}, tc.chunks, tc.idx, "")
+			if tc.wantErr != "" {
+				require.EqualError(t, err, tc.wantErr)
+			} else {
+				require.NoError(t, err)
+			}
+			assert.Equal(t, tc.wantDispatch, eri.LastDispatch != nil)
+		})
 	}
 }
 
 func TestExecuteLaunchChunk_RetryReservation(t *testing.T) {
 	t.Parallel()
+	unavailable := errors.New("unavailable")
 	tests := []struct {
-		name       string
-		reserveErr error
-		wantError  bool
+		name         string
+		nudges       int
+		dispatchErr  error
+		reserveErr   error
+		wantErr      error
+		wantReserved []string
 	}{
-		{"reserved", nil, false},
-		{"database unavailable", errors.New("unavailable"), true},
-		{"missing chunk", store.ErrChunkNotFound, true},
+		{name: "accepted then reserved", nudges: 1, wantReserved: []string{"c"}},
+		{name: "retry reservation unavailable after acceptance", nudges: 1, reserveErr: unavailable, wantErr: unavailable, wantReserved: []string{"c"}},
+		{name: "retry reservation missing chunk after acceptance", nudges: 1, reserveErr: store.ErrChunkNotFound, wantErr: store.ErrChunkNotFound, wantReserved: []string{"c"}},
+		{name: "initial reservation failure only warns", nudges: 0, reserveErr: unavailable, wantReserved: []string{"c"}},
+		{name: "deferred launch keeps pre-launch status", nudges: 0, dispatchErr: eriwire.ErrDispatchActive, wantErr: eriwire.ErrDispatchActive},
+		{name: "rejected launch keeps pre-launch status", nudges: 1, dispatchErr: unavailable, wantErr: unavailable},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			eri := &mockEriClient{}
-			executor := NewExecutor(t.TempDir(), eri, nil, "", nil)
-			err := executor.ExecuteLaunchChunk(context.Background(), &mockStoreForLaunch{reserveErr: tc.reserveErr}, model.VanadisBuild{ID: "b"}, []model.VanadisChunk{{ID: "c", Mode: "action", StallNudges: 1}}, 0, "")
-			assert.Equal(t, tc.wantError, err != nil)
-			assert.Equal(t, !tc.wantError, eri.lastDispatch != nil)
+			eri := &eritest.Client{DispatchErr: tc.dispatchErr}
+			st := &mockStoreForLaunch{reserveErr: tc.reserveErr}
+			executor := NewExecutor(t.TempDir(), eri, nil, "", "example-owner", nil)
+			err := executor.ExecuteLaunchChunk(context.Background(), st, model.VanadisBuild{ID: "b"}, []model.VanadisChunk{{ID: "c", Mode: "action", Status: "pending", StallNudges: tc.nudges}}, 0, "")
+			if tc.wantErr != nil {
+				assert.ErrorIs(t, err, tc.wantErr)
+			} else {
+				assert.NoError(t, err)
+			}
+			require.NotNil(t, eri.LastDispatch)
+			assert.Equal(t, "c", eri.LastDispatch.VanadisChunkID)
+			assert.Equal(t, "b", eri.LastDispatch.VanadisBuildID)
+			assert.Equal(t, tc.wantReserved, st.reserved)
+		})
+	}
+}
+
+func TestExecutor_ActiveSteps(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name          string
+		nilExec       bool
+		buildID       string
+		initialSteps  map[string]string
+		setSteps      map[string]string
+		callClear     bool
+		clearBuildID  string
+		inputChunks   []model.VanadisChunk
+		expectOverlay map[string]string
+	}{
+		{
+			name:          "nil executor noop",
+			nilExec:       true,
+			buildID:       "b1",
+			setSteps:      map[string]string{"c1": "step 1"},
+			callClear:     true,
+			clearBuildID:  "b1",
+			inputChunks:   []model.VanadisChunk{{ID: "c1", ActiveStep: "original"}},
+			expectOverlay: map[string]string{"c1": "original"},
+		},
+		{
+			name:          "empty build id noop",
+			buildID:       "",
+			setSteps:      map[string]string{"c1": "step 1"},
+			inputChunks:   []model.VanadisChunk{{ID: "c1", ActiveStep: "original"}},
+			expectOverlay: map[string]string{"c1": "original"},
+		},
+		{
+			name:          "empty input chunks noop",
+			buildID:       "b1",
+			setSteps:      map[string]string{"c1": "step 1"},
+			inputChunks:   nil,
+			expectOverlay: map[string]string{},
+		},
+		{
+			name:     "all empty steps clears map",
+			buildID:  "b1",
+			setSteps: map[string]string{"c1": "   ", "c2": ""},
+			inputChunks: []model.VanadisChunk{
+				{ID: "c1", ActiveStep: ""},
+			},
+			expectOverlay: map[string]string{"c1": ""},
+		},
+		{
+			name:    "set and overlay active steps",
+			buildID: "b1",
+			setSteps: map[string]string{
+				"c1": "⚡ Compiling",
+				"c2": "⚡ Testing",
+			},
+			inputChunks: []model.VanadisChunk{
+				{ID: "c1", ActiveStep: ""},
+				{ID: "c2", ActiveStep: "existing step"},
+				{ID: "c3", ActiveStep: ""},
+			},
+			expectOverlay: map[string]string{
+				"c1": "⚡ Compiling",
+				"c2": "existing step",
+				"c3": "",
+			},
+		},
+		{
+			name:         "clear active steps removes overlay",
+			buildID:      "b1",
+			initialSteps: map[string]string{"c1": "step 1"},
+			callClear:    true,
+			clearBuildID: "b1",
+			inputChunks:  []model.VanadisChunk{{ID: "c1"}},
+			expectOverlay: map[string]string{
+				"c1": "",
+			},
+		},
+		{
+			name:         "clear active steps with empty buildID noop",
+			buildID:      "b1",
+			initialSteps: map[string]string{"c1": "step 1"},
+			callClear:    true,
+			clearBuildID: "",
+			inputChunks:  []model.VanadisChunk{{ID: "c1"}},
+			expectOverlay: map[string]string{
+				"c1": "step 1",
+			},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			var exec *Executor
+			if !tc.nilExec {
+				exec = NewExecutor("", &eritest.Client{}, nil, "", "example-owner", nil)
+				if tc.initialSteps != nil {
+					exec.SetActiveSteps(tc.buildID, tc.initialSteps)
+				}
+				if tc.setSteps != nil {
+					exec.SetActiveSteps(tc.buildID, tc.setSteps)
+				}
+				if tc.callClear {
+					exec.ClearActiveSteps(tc.clearBuildID)
+				}
+			}
+
+			chunks := make([]model.VanadisChunk, len(tc.inputChunks))
+			copy(chunks, tc.inputChunks)
+
+			exec.OverlayActiveSteps(tc.buildID, chunks)
+
+			if len(tc.inputChunks) == 0 {
+				assert.Empty(t, chunks)
+			}
+			for _, ch := range chunks {
+				assert.Equal(t, tc.expectOverlay[ch.ID], ch.ActiveStep)
+			}
+		})
+	}
+}
+
+func TestExecutor_SyncBuildWidget_ClearsTerminalBuildActiveSteps(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name        string
+		status      string
+		expectClear bool
+	}{
+		{name: "running build preserves active steps", status: "running", expectClear: false},
+		{name: "completed build clears active steps", status: "completed", expectClear: true},
+		{name: "failed build clears active steps", status: "failed", expectClear: true},
+		{name: "cancelled build clears active steps", status: "cancelled", expectClear: true},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			eri := &mintingEriClient{}
+			exec := NewExecutor("", eri, nil, "tok", "owner", nil)
+			exec.SetActiveSteps("b1", map[string]string{"c1": "step 1"})
+
+			bld := model.VanadisBuild{ID: "b1", Status: tc.status}
+			chunks := []model.VanadisChunk{{ID: "c1"}}
+
+			_, err := exec.SyncBuildWidget(context.Background(), nil, bld, chunks, "")
+			assert.NoError(t, err)
+
+			val, ok := exec.activeSteps.Load("b1")
+			if tc.expectClear {
+				assert.False(t, ok)
+				assert.Nil(t, val)
+			} else {
+				assert.True(t, ok)
+				assert.NotNil(t, val)
+			}
 		})
 	}
 }

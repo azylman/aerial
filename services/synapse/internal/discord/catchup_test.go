@@ -6,6 +6,8 @@ import (
 	"encoding/json"
 	"io"
 	"net/http"
+	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -20,62 +22,7 @@ func TestChannelWatermarks(t *testing.T) {
 	ResetWatermarksForTest()
 	t.Cleanup(ResetWatermarksForTest)
 
-	tests := []struct {
-		name       string
-		channelID  string
-		advanceID  string
-		wantBefore string
-		wantAfter  string
-	}{
-		{
-			name:       "empty channel returns empty",
-			channelID:  "chan-new",
-			advanceID:  "",
-			wantBefore: "",
-			wantAfter:  "",
-		},
-		{
-			name:       "first advance sets watermark",
-			channelID:  "chan-new",
-			advanceID:  "100",
-			wantBefore: "",
-			wantAfter:  "100",
-		},
-		{
-			name:       "smaller advance does not regress watermark",
-			channelID:  "chan-new",
-			advanceID:  "50",
-			wantBefore: "100",
-			wantAfter:  "100",
-		},
-		{
-			name:       "larger advance advances watermark",
-			channelID:  "chan-new",
-			advanceID:  "200",
-			wantBefore: "100",
-			wantAfter:  "200",
-		},
-	}
-
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			before := GetChannelWatermarkForAgent("", tc.channelID)
-			if before != tc.wantBefore {
-				t.Errorf("before = %q, want %q", before, tc.wantBefore)
-			}
-			AdvanceChannelWatermarkForAgent("", tc.channelID, tc.advanceID)
-			after := GetChannelWatermarkForAgent("", tc.channelID)
-			if after != tc.wantAfter {
-				t.Errorf("after = %q, want %q", after, tc.wantAfter)
-			}
-		})
-	}
-}
-
-func TestChannelWatermarksForAgent(t *testing.T) {
-	ResetWatermarksForTest()
-	t.Cleanup(ResetWatermarksForTest)
-
+	// Rows run in order against one shared watermark map.
 	tests := []struct {
 		name       string
 		agent      string
@@ -84,41 +31,24 @@ func TestChannelWatermarksForAgent(t *testing.T) {
 		wantBefore string
 		wantAfter  string
 	}{
-		{
-			name:       "scoped agent advance sets agent watermark without affecting other agents or legacy",
-			agent:      "agent-alpha",
-			channelID:  "chan-agent-2",
-			advanceID:  "250",
-			wantBefore: "",
-			wantAfter:  "250",
-		},
-		{
-			name:       "other agent has empty watermark for same channel",
-			agent:      "agent-beta",
-			channelID:  "chan-agent-2",
-			advanceID:  "",
-			wantBefore: "",
-			wantAfter:  "",
-		},
-		{
-			name:       "legacy unscoped has empty watermark for agent-advanced channel",
-			agent:      "",
-			channelID:  "chan-agent-2",
-			advanceID:  "",
-			wantBefore: "",
-			wantAfter:  "",
-		},
+		{name: "empty channel returns empty", channelID: "chan-new"},
+		{name: "first advance sets watermark", channelID: "chan-new", advanceID: "100", wantAfter: "100"},
+		{name: "smaller advance does not regress watermark", channelID: "chan-new", advanceID: "50", wantBefore: "100", wantAfter: "100"},
+		{name: "larger advance advances watermark", channelID: "chan-new", advanceID: "200", wantBefore: "100", wantAfter: "200"},
+		{name: "empty channel ID never advances", advanceID: "300"},
+		{name: "agent advance sets agent watermark", agent: "agent-alpha", channelID: "chan-agent-2", advanceID: "250", wantAfter: "250"},
+		{name: "other agent has empty watermark for same channel", agent: "agent-beta", channelID: "chan-agent-2"},
+		{name: "unscoped has empty watermark for agent-advanced channel", channelID: "chan-agent-2"},
+		{name: "agent watermark is separate from unscoped", agent: "agent-alpha", channelID: "chan-new", wantBefore: ""},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			before := GetChannelWatermarkForAgent(tc.agent, tc.channelID)
-			if before != tc.wantBefore {
+			if before := GetChannelWatermarkForAgent(tc.agent, tc.channelID); before != tc.wantBefore {
 				t.Errorf("GetChannelWatermarkForAgent(%q, %q) before = %q, want %q", tc.agent, tc.channelID, before, tc.wantBefore)
 			}
 			AdvanceChannelWatermarkForAgent(tc.agent, tc.channelID, tc.advanceID)
-			after := GetChannelWatermarkForAgent(tc.agent, tc.channelID)
-			if after != tc.wantAfter {
+			if after := GetChannelWatermarkForAgent(tc.agent, tc.channelID); after != tc.wantAfter {
 				t.Errorf("GetChannelWatermarkForAgent(%q, %q) after = %q, want %q", tc.agent, tc.channelID, after, tc.wantAfter)
 			}
 		})
@@ -151,6 +81,7 @@ type sweepTestCase struct {
 	messagesErrCode     int
 	hasBus              bool
 	runSecondSweep      bool
+	agent               string
 
 	wantFetchCalls  int
 	wantAfterQuery  string
@@ -286,7 +217,7 @@ func runDiscordCatchUpSweepCase(ctx context.Context, t *testing.T, tc sweepTestC
 	defer ResetWatermarksForTest()
 
 	if tc.initialWatermark != "" && tc.channelID != "" {
-		AdvanceChannelWatermarkForAgent("", tc.channelID, tc.initialWatermark)
+		AdvanceChannelWatermarkForAgent(tc.agent, tc.channelID, tc.initialWatermark)
 	}
 
 	srv := &testIngressServer{}
@@ -314,215 +245,116 @@ func runDiscordCatchUpSweepCase(ctx context.Context, t *testing.T, tc sweepTestC
 		targetServer = srv
 	}
 
-	RunCatchUpSweepForAgent(targetCtx, session, targetServer, tc.now, "")
+	RunCatchUpSweepForAgent(targetCtx, session, targetServer, tc.now, tc.agent)
 
 	if tc.runSecondSweep {
-		RunCatchUpSweepForAgent(targetCtx, session, targetServer, tc.now, "")
+		RunCatchUpSweepForAgent(targetCtx, session, targetServer, tc.now, tc.agent)
 	}
 
 	assertCatchUpSweepResults(t, tc, srv, bus, transport)
+	for idx, call := range srv.processedIngress {
+		if call.Agent != tc.agent {
+			t.Errorf("call[%d] Agent = %q, want %q", idx, call.Agent, tc.agent)
+		}
+	}
 
 	if tc.channelID != "" && tc.wantWatermark != "" {
-		wm := GetChannelWatermarkForAgent("", tc.channelID)
-		if wm != tc.wantWatermark {
+		if wm := GetChannelWatermarkForAgent(tc.agent, tc.channelID); wm != tc.wantWatermark {
 			t.Errorf("channel watermark = %q, want %q", wm, tc.wantWatermark)
+		}
+		if wm := GetChannelWatermarkForAgent("unrelated-agent", tc.channelID); wm != "" {
+			t.Errorf("unrelated agent watermark = %q, want empty", wm)
 		}
 	}
 }
 
-func discordCatchUpSweepCases(baseNow time.Time, minSnow, staleSnow, freshSnow1, freshSnow2, botSnow string, freshMsg1, freshMsg2, botMsg, staleMsg *discordgo.Message) []sweepTestCase {
-	return []sweepTestCase{
-		{
-			name:       "nil session returns immediately",
-			nilSession: true,
-		},
-		{
-			name:      "nil server returns immediately",
-			nilServer: true,
-		},
-		{
-			name:                "concurrent sweep already running returns immediately",
-			sweepAlreadyRunning: true,
-		},
-		{
-			name:        "canceled context halts sweep early",
-			now:         baseNow,
-			canceledCtx: true,
-			channelID:   "chan-canceled",
-		},
-		{
-			name:          "zero now defaults to UTC now",
-			now:           time.Time{},
-			channelID:     "chan-zero-now",
-			lastMessageID: "",
-		},
-		{
-			name:          "fast-path skip on empty LastMessageID",
-			now:           baseNow,
-			channelID:     "chan-sweep-1",
-			lastMessageID: "",
-		},
-		{
-			name:          "fast-path skip when LastMessageID <= minSnowflake",
-			now:           baseNow,
-			channelID:     "chan-sweep-2",
-			lastMessageID: staleSnow,
-		},
-		{
-			name:             "fast-path skip when LastMessageID <= watermark",
-			now:              baseNow,
-			channelID:        "chan-sweep-3",
-			lastMessageID:    freshSnow1,
-			initialWatermark: freshSnow1,
-		},
-		{
-			name:            "ChannelMessages fetch error logged and channel skipped",
-			now:             baseNow,
-			channelID:       "chan-sweep-4",
-			lastMessageID:   freshSnow2,
-			messagesErrCode: http.StatusInternalServerError,
-			wantFetchCalls:  1,
-			wantAfterQuery:  minSnow,
-		},
-		{
-			name:          "chronological enqueue skipping stale and bot messages, advancing watermark",
-			now:           baseNow,
-			botUserID:     "bot-123",
-			channelID:     "chan-sweep-5",
-			guildID:       "guild-123",
-			lastMessageID: freshSnow2,
-			// Discord REST returns descending (newest first)
-			messagesResp:    []*discordgo.Message{freshMsg2, freshMsg1, botMsg, staleMsg},
-			wantFetchCalls:  1,
-			wantAfterQuery:  minSnow,
-			wantEnqueuedIDs: []string{freshSnow1, freshSnow2},
-			wantWatermark:   freshSnow2,
-		},
-		{
-			name:            "subsequent sweep makes zero calls once watermark advanced",
-			now:             baseNow,
-			botUserID:       "bot-123",
-			channelID:       "chan-sweep-6",
-			guildID:         "guild-123",
-			lastMessageID:   freshSnow2,
-			messagesResp:    []*discordgo.Message{freshMsg2, freshMsg1},
-			runSecondSweep:  true,
-			wantFetchCalls:  1,
-			wantAfterQuery:  minSnow,
-			wantEnqueuedIDs: []string{freshSnow1, freshSnow2},
-			wantWatermark:   freshSnow2,
-		},
-		{
-			name:            "bus client enqueue in chronological order",
-			now:             baseNow,
-			botUserID:       "bot-123",
-			channelID:       "chan-sweep-7",
-			guildID:         "guild-123",
-			lastMessageID:   freshSnow2,
-			hasBus:          true,
-			messagesResp:    []*discordgo.Message{freshMsg2, freshMsg1},
-			wantFetchCalls:  1,
-			wantAfterQuery:  minSnow,
-			wantEnqueuedIDs: []string{freshSnow1, freshSnow2},
-			wantWatermark:   freshSnow2,
-		},
-		{
-			name:           "empty state guilds fetches user guilds from REST",
-			now:            baseNow,
-			userGuildsResp: []*discordgo.UserGuild{{ID: "user-guild-1"}},
-			restChannels:   []*discordgo.Channel{{ID: "ch-rest-1", LastMessageID: ""}},
-			wantFetchCalls: 0,
-		},
-		{
-			name:          "user guilds fetch error handled gracefully",
-			now:           baseNow,
-			userGuildsErr: true,
-		},
-		{
-			name:            "guild channels and active threads error handled gracefully",
-			now:             baseNow,
-			guildID:         "guild-err",
-			channelID:       "chan-err-fallback",
-			lastMessageID:   "",
-			restChannelsErr: true,
-			restThreadsErr:  true,
-		},
-		{
-			name:           "REST active threads and state threads merged and processed",
-			now:            baseNow,
-			guildID:        "guild-threads",
-			channelID:      "chan-main",
-			lastMessageID:  "",
-			restThreads:    []*discordgo.Channel{{ID: "thread-rest", LastMessageID: ""}},
-			threadsInState: []*discordgo.Channel{{ID: "thread-state", LastMessageID: ""}},
-		},
-		{
-			name:              "nil guild in state and nil channel ignored safely",
-			now:               baseNow,
-			guildID:           "guild-valid",
-			channelID:         "chan-valid",
-			lastMessageID:     "",
-			nilGuildInState:   true,
-			nilChannelInGuild: true,
-		},
-		{
-			name:            "nil and empty ID messages in fetched batch skipped",
-			now:             baseNow,
-			guildID:         "guild-nil-msg",
-			channelID:       "chan-nil-msg",
-			lastMessageID:   freshSnow2,
-			messagesResp:    []*discordgo.Message{nil, {ID: ""}, freshMsg2},
-			wantFetchCalls:  1,
-			wantAfterQuery:  minSnow,
-			wantEnqueuedIDs: []string{freshSnow2},
-			wantWatermark:   freshSnow2,
-		},
+// Catch-up sweep fixtures: snowflakes and messages relative to sweepNow (stale TTL is 30m).
+var (
+	sweepNow        = time.Date(2026, 10, 29, 12, 0, 0, 0, time.UTC)
+	sweepMinSnow    = DiscordSnowflakeFromTime(sweepNow.Add(-30 * time.Minute))
+	sweepStaleSnow  = DiscordSnowflakeFromTime(sweepNow.Add(-45 * time.Minute))
+	sweepFreshSnow1 = DiscordSnowflakeFromTime(sweepNow.Add(-15 * time.Minute))
+	sweepFreshSnow2 = DiscordSnowflakeFromTime(sweepNow.Add(-5 * time.Minute))
+	sweepBotSnow    = DiscordSnowflakeFromTime(sweepNow.Add(-10 * time.Minute))
+
+	sweepFreshMsg1 = sweepMessage(sweepFreshSnow1, "user-alpha", 15*time.Minute)
+	sweepFreshMsg2 = &discordgo.Message{
+		ID: sweepFreshSnow2, Author: &discordgo.User{ID: "user-beta"}, Timestamp: sweepNow.Add(-5 * time.Minute),
+		ReferencedMessage: &discordgo.Message{ID: "ref-parent"},
 	}
+	sweepBotMsg   = sweepMessage(sweepBotSnow, "bot-123", 10*time.Minute)
+	sweepStaleMsg = sweepMessage(sweepStaleSnow, "user-gamma", 45*time.Minute)
+)
+
+func sweepMessage(id, authorID string, age time.Duration) *discordgo.Message {
+	return &discordgo.Message{ID: id, Author: &discordgo.User{ID: authorID}, Content: "catch-up message", Timestamp: sweepNow.Add(-age)}
 }
 
 func TestRunDiscordCatchUpSweep(t *testing.T) {
 	ctx := context.Background()
+	fresh := []string{sweepFreshSnow1, sweepFreshSnow2}
 
-	baseNow := time.Date(2026, 10, 29, 12, 0, 0, 0, time.UTC)
-	minSnow := DiscordSnowflakeFromTime(baseNow.Add(-30 * time.Minute))
-	staleSnow := DiscordSnowflakeFromTime(baseNow.Add(-45 * time.Minute))
-	freshSnow1 := DiscordSnowflakeFromTime(baseNow.Add(-15 * time.Minute))
-	freshSnow2 := DiscordSnowflakeFromTime(baseNow.Add(-5 * time.Minute))
-	botSnow := DiscordSnowflakeFromTime(baseNow.Add(-10 * time.Minute))
-
-	freshMsg1 := &discordgo.Message{
-		ID:        freshSnow1,
-		ChannelID: "chan-sweep-5",
-		Author:    &discordgo.User{ID: "user-alpha"},
-		Content:   "older fresh message",
-		Timestamp: baseNow.Add(-15 * time.Minute),
-	}
-	freshMsg2 := &discordgo.Message{
-		ID:        freshSnow2,
-		ChannelID: "chan-sweep-5",
-		Author:    &discordgo.User{ID: "user-beta"},
-		Content:   "newer fresh message",
-		Timestamp: baseNow.Add(-5 * time.Minute),
-		ReferencedMessage: &discordgo.Message{
-			ID: "ref-parent",
+	tests := []sweepTestCase{
+		{name: "nil session returns immediately", nilSession: true},
+		{name: "nil server returns immediately", nilServer: true},
+		{name: "concurrent sweep already running returns immediately", sweepAlreadyRunning: true},
+		{name: "canceled context halts sweep early", now: sweepNow, canceledCtx: true, channelID: "chan-canceled"},
+		{name: "zero now defaults to UTC now", channelID: "chan-zero-now"},
+		{name: "fast-path skip on empty LastMessageID", now: sweepNow, channelID: "chan-sweep-1"},
+		{name: "fast-path skip when LastMessageID <= minSnowflake", now: sweepNow, channelID: "chan-sweep-2", lastMessageID: sweepStaleSnow},
+		{
+			name: "fast-path skip when LastMessageID <= watermark", now: sweepNow, channelID: "chan-sweep-3", lastMessageID: sweepFreshSnow1,
+			initialWatermark: sweepFreshSnow1,
+		},
+		{
+			name: "ChannelMessages fetch error logged and channel skipped", now: sweepNow, channelID: "chan-sweep-4", lastMessageID: sweepFreshSnow2,
+			messagesErrCode: http.StatusInternalServerError, wantFetchCalls: 1, wantAfterQuery: sweepMinSnow,
+		},
+		// Discord REST returns messages newest first; the sweep enqueues oldest first.
+		{
+			name: "chronological enqueue skipping stale and bot messages, advancing watermark", now: sweepNow, botUserID: "bot-123", channelID: "chan-sweep-5",
+			guildID: "guild-123", lastMessageID: sweepFreshSnow2,
+			messagesResp: []*discordgo.Message{sweepFreshMsg2, sweepFreshMsg1, sweepBotMsg, sweepStaleMsg}, wantFetchCalls: 1, wantAfterQuery: sweepMinSnow,
+			wantEnqueuedIDs: fresh, wantWatermark: sweepFreshSnow2,
+		},
+		{
+			name: "subsequent sweep makes zero calls once watermark advanced", now: sweepNow, botUserID: "bot-123", channelID: "chan-sweep-6",
+			guildID: "guild-123", lastMessageID: sweepFreshSnow2, messagesResp: []*discordgo.Message{sweepFreshMsg2, sweepFreshMsg1}, runSecondSweep: true,
+			wantFetchCalls: 1, wantAfterQuery: sweepMinSnow, wantEnqueuedIDs: fresh, wantWatermark: sweepFreshSnow2,
+		},
+		{
+			name: "bus client enqueue in chronological order", now: sweepNow, botUserID: "bot-123", channelID: "chan-sweep-7", guildID: "guild-123",
+			lastMessageID: sweepFreshSnow2, hasBus: true, messagesResp: []*discordgo.Message{sweepFreshMsg2, sweepFreshMsg1}, wantFetchCalls: 1,
+			wantAfterQuery: sweepMinSnow, wantEnqueuedIDs: fresh, wantWatermark: sweepFreshSnow2,
+		},
+		{
+			name: "agent-scoped sweep enqueues for the agent and advances only its watermark", agent: "agent-alpha", now: sweepNow, channelID: "chan-agent-1",
+			guildID: "guild-agent-1", lastMessageID: sweepFreshSnow2, messagesResp: []*discordgo.Message{sweepFreshMsg2}, wantFetchCalls: 1,
+			wantAfterQuery: sweepMinSnow, wantEnqueuedIDs: []string{sweepFreshSnow2}, wantWatermark: sweepFreshSnow2,
+		},
+		{
+			name: "empty state guilds fetches user guilds from REST", now: sweepNow, userGuildsResp: []*discordgo.UserGuild{{ID: "user-guild-1"}},
+			restChannels: []*discordgo.Channel{{ID: "ch-rest-1"}},
+		},
+		{name: "user guilds fetch error handled gracefully", now: sweepNow, userGuildsErr: true},
+		{
+			name: "guild channels and active threads error handled gracefully", now: sweepNow, guildID: "guild-err", channelID: "chan-err-fallback",
+			restChannelsErr: true, restThreadsErr: true,
+		},
+		{
+			name: "REST active threads and state threads merged and processed", now: sweepNow, guildID: "guild-threads", channelID: "chan-main",
+			restThreads: []*discordgo.Channel{{ID: "thread-rest"}}, threadsInState: []*discordgo.Channel{{ID: "thread-state"}},
+		},
+		{
+			name: "nil guild in state and nil channel ignored safely", now: sweepNow, guildID: "guild-valid", channelID: "chan-valid", nilGuildInState: true,
+			nilChannelInGuild: true,
+		},
+		{
+			name: "nil and empty ID messages in fetched batch skipped", now: sweepNow, guildID: "guild-nil-msg", channelID: "chan-nil-msg",
+			lastMessageID: sweepFreshSnow2, messagesResp: []*discordgo.Message{nil, {ID: ""}, sweepFreshMsg2}, wantFetchCalls: 1, wantAfterQuery: sweepMinSnow,
+			wantEnqueuedIDs: []string{sweepFreshSnow2}, wantWatermark: sweepFreshSnow2,
 		},
 	}
-	botMsg := &discordgo.Message{
-		ID:        botSnow,
-		ChannelID: "chan-sweep-5",
-		Author:    &discordgo.User{ID: "bot-123"},
-		Content:   "bot response",
-		Timestamp: baseNow.Add(-10 * time.Minute),
-	}
-	staleMsg := &discordgo.Message{
-		ID:        staleSnow,
-		ChannelID: "chan-sweep-5",
-		Author:    &discordgo.User{ID: "user-gamma"},
-		Content:   "stale message older than 30m",
-		Timestamp: baseNow.Add(-45 * time.Minute),
-	}
-
-	tests := discordCatchUpSweepCases(baseNow, minSnow, staleSnow, freshSnow1, freshSnow2, botSnow, freshMsg1, freshMsg2, botMsg, staleMsg)
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			runDiscordCatchUpSweepCase(ctx, t, tc)
@@ -558,7 +390,10 @@ func (m *mockDiscordTransport) roundTripGuilds() (int, []byte) {
 	if m.userGuildsErr {
 		return http.StatusInternalServerError, []byte(`{"message": "error"}`)
 	}
-	bodyBytes, _ := json.Marshal(m.userGuildsResp)
+	bodyBytes, err := json.Marshal(m.userGuildsResp)
+	if err != nil {
+		return http.StatusInternalServerError, []byte(`{"message": "marshal error"}`)
+	}
 	return http.StatusOK, bodyBytes
 }
 
@@ -567,11 +402,17 @@ func (m *mockDiscordTransport) roundTripThreads(path string) (int, []byte) {
 	if m.threadsErr != nil && m.threadsErr[guildID] {
 		return http.StatusInternalServerError, []byte(`{"message": "error"}`)
 	}
-	thList := &discordgo.ThreadsList{}
-	if m.threadsResp != nil && m.threadsResp[guildID] != nil {
-		thList = m.threadsResp[guildID]
+	thList, ok := m.threadsResp[guildID]
+	if ok && thList == nil {
+		return http.StatusOK, []byte(`null`) // explicit nil entry: Discord returned no thread list
 	}
-	bodyBytes, _ := json.Marshal(thList)
+	if thList == nil {
+		thList = &discordgo.ThreadsList{}
+	}
+	bodyBytes, err := json.Marshal(thList)
+	if err != nil {
+		return http.StatusInternalServerError, []byte(`{"message": "marshal error"}`)
+	}
 	return http.StatusOK, bodyBytes
 }
 
@@ -584,7 +425,10 @@ func (m *mockDiscordTransport) roundTripChannels(path string) (int, []byte) {
 	if m.channelsResp != nil && m.channelsResp[guildID] != nil {
 		chList = m.channelsResp[guildID]
 	}
-	bodyBytes, _ := json.Marshal(chList)
+	bodyBytes, err := json.Marshal(chList)
+	if err != nil {
+		return http.StatusInternalServerError, []byte(`{"message": "marshal error"}`)
+	}
 	return http.StatusOK, bodyBytes
 }
 
@@ -600,7 +444,10 @@ func (m *mockDiscordTransport) roundTripMessages(req *http.Request, path string)
 	if m.messagesResp != nil && m.messagesResp[channelID] != nil {
 		msgList = m.messagesResp[channelID]
 	}
-	bodyBytes, _ := json.Marshal(msgList)
+	bodyBytes, err := json.Marshal(msgList)
+	if err != nil {
+		return http.StatusInternalServerError, []byte(`{"message": "marshal error"}`)
+	}
 	return http.StatusOK, bodyBytes
 }
 
@@ -627,6 +474,7 @@ func (m *mockDiscordTransport) RoundTrip(req *http.Request) (*http.Response, err
 
 	resp := &http.Response{
 		StatusCode: statusCode,
+		Status:     strconv.Itoa(statusCode) + " " + http.StatusText(statusCode),
 		Body:       io.NopCloser(bytes.NewReader(bodyBytes)),
 		Header:     http.Header{"Content-Type": {"application/json"}},
 		Request:    req,
@@ -634,243 +482,289 @@ func (m *mockDiscordTransport) RoundTrip(req *http.Request) (*http.Response, err
 	return resp, nil
 }
 
-func TestEnqueueDiscordMessageDirect(t *testing.T) {
+func TestEnqueueDiscordMessageGuards(t *testing.T) {
 	t.Parallel()
-	ctx := context.Background()
+	author := func(id string) *discordgo.Message {
+		return &discordgo.Message{ID: "msg-direct-1", ChannelID: "chan-direct-1", Author: &discordgo.User{ID: id}}
+	}
 
 	tests := []struct {
-		name          string
-		nilServer     bool
-		nilMsg        bool
-		nilAuthor     bool
-		botUserID     string
-		authorID      string
-		refGuildID    string
-		msgGuildID    string
-		hasBus        bool
-		wantProcessed int
+		name      string
+		srv       *testIngressServer
+		msg       *discordgo.Message
+		botUserID string
 	}{
+		{"nil server returns", nil, author("user-1"), "bot-1"},
+		{"nil message returns", &testIngressServer{}, nil, "bot-1"},
+		{"nil author returns", &testIngressServer{}, &discordgo.Message{ID: "msg-direct-1"}, "bot-1"},
+		{"author is bot returns", &testIngressServer{}, author("bot-1"), "bot-1"},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			EnqueueDiscordMessageForAgent(context.Background(), tc.srv, nil, tc.msg, tc.botUserID, "")
+			if tc.srv != nil && (len(tc.srv.processedIngress) != 0 || len(tc.srv.publishedJobs) != 0) {
+				t.Errorf("processed = %d, published = %d, want none", len(tc.srv.processedIngress), len(tc.srv.publishedJobs))
+			}
+		})
+	}
+}
+
+// newCatchupSession builds a REST-capable session whose HTTP calls go to tr and whose state holds guilds.
+func newCatchupSession(tr *mockDiscordTransport, guilds ...*discordgo.Guild) *discordgo.Session {
+	sess, err := discordgo.New("Bot dummy")
+	if err != nil {
+		panic(err)
+	}
+	sess.Client = &http.Client{Transport: tr}
+	sess.State.Guilds = guilds
+	return sess
+}
+
+func channelIDs(chs []*discordgo.Channel) []string {
+	ids := make([]string, 0, len(chs))
+	for _, ch := range chs {
+		ids = append(ids, ch.ID)
+	}
+	return ids
+}
+
+func guildIDs(gs []*discordgo.Guild) []string {
+	ids := make([]string, 0, len(gs))
+	for _, g := range gs {
+		ids = append(ids, g.ID)
+	}
+	return ids
+}
+
+func TestFetchActiveGuildThreads(t *testing.T) {
+	t.Parallel()
+	threads := &discordgo.ThreadsList{Threads: []*discordgo.Channel{{ID: "th-1"}, {ID: "th-2"}}}
+
+	tests := []struct {
+		name    string
+		dg      *discordgo.Session
+		guildID string
+		want    []string
+		wantErr string
+	}{
+		{name: "nil session returns nothing", guildID: "g-1"},
+		{name: "empty guild ID returns nothing", dg: newCatchupSession(&mockDiscordTransport{})},
 		{
-			name:      "nil server returns",
-			nilServer: true,
+			name: "REST error returned", dg: newCatchupSession(&mockDiscordTransport{threadsErr: map[string]bool{"g-err": true}}), guildID: "g-err",
+			wantErr: `HTTP 500 Internal Server Error, {"message": "error"}`,
 		},
 		{
-			name:   "nil message returns",
-			nilMsg: true,
+			name: "null thread list returns nothing",
+			dg:   newCatchupSession(&mockDiscordTransport{threadsResp: map[string]*discordgo.ThreadsList{"g-null": nil}}), guildID: "g-null",
 		},
 		{
-			name:      "nil author returns",
-			nilAuthor: true,
-		},
-		{
-			name:      "author is bot returns",
-			botUserID: "bot-1",
-			authorID:  "bot-1",
-		},
-		{
-			name:          "valid direct message dispatch with ref message guild ID",
-			botUserID:     "bot-1",
-			authorID:      "user-1",
-			msgGuildID:    "guild-1",
-			refGuildID:    "guild-1",
-			wantProcessed: 1,
+			name: "active threads returned", dg: newCatchupSession(&mockDiscordTransport{threadsResp: map[string]*discordgo.ThreadsList{"g-1": threads}}),
+			guildID: "g-1", want: []string{"th-1", "th-2"},
 		},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			var srv *testIngressServer
-			if !tc.nilServer {
-				srv = &testIngressServer{}
+			got, err := FetchActiveGuildThreads(tc.dg, tc.guildID)
+			if gotErr := errString(err); gotErr != tc.wantErr {
+				t.Fatalf("FetchActiveGuildThreads() err = %q, want %q", gotErr, tc.wantErr)
 			}
-			var m *discordgo.Message
-			if !tc.nilMsg {
-				m = &discordgo.Message{
-					ID:        "msg-direct-1",
-					ChannelID: "chan-direct-1",
-					GuildID:   tc.msgGuildID,
-				}
-				if !tc.nilAuthor {
-					m.Author = &discordgo.User{ID: tc.authorID}
-				}
-				if tc.refGuildID != "" {
-					m.ReferencedMessage = &discordgo.Message{
-						ID:      "ref-direct-1",
-						GuildID: tc.refGuildID,
-					}
-				}
-			}
-
-			var targetServer IngressServer
-			if srv != nil {
-				targetServer = srv
-			}
-			EnqueueDiscordMessageForAgent(ctx, targetServer, nil, m, tc.botUserID, "")
-
-			if srv != nil && len(srv.processedIngress) != tc.wantProcessed {
-				t.Errorf("processedIngress = %d, want %d", len(srv.processedIngress), tc.wantProcessed)
+			if ids := channelIDs(got); !slices.Equal(ids, tc.want) {
+				t.Errorf("FetchActiveGuildThreads() = %v, want %v", ids, tc.want)
 			}
 		})
 	}
 }
 
-func TestFetchActiveGuildThreads(t *testing.T) {
-	t.Parallel()
-
-	// nil session
-	threads, err := FetchActiveGuildThreads(nil, "guild-1")
-	if err != nil || threads != nil {
-		t.Errorf("expected nil, nil; got %v, %v", threads, err)
-	}
-
-	// empty guild ID
-	sess, err := discordgo.New("Bot dummy")
-	if err != nil {
-		t.Fatalf("discordgo.New() err = %v", err)
-	}
-	threads, err = FetchActiveGuildThreads(sess, "")
-	if err != nil || threads != nil {
-		t.Errorf("expected nil, nil; got %v, %v", threads, err)
-	}
-
-	// threads error
-	transportErr := &mockDiscordTransport{threadsErr: map[string]bool{"g-err": true}}
-	sessErr, _ := discordgo.New("Bot dummy")
-	sessErr.Client = &http.Client{Transport: transportErr}
-	if _, err := FetchActiveGuildThreads(sessErr, "g-err"); err == nil {
-		t.Error("expected error for threadsErr")
-	}
-}
-
 func TestResolveCatchUpGuilds(t *testing.T) {
 	t.Parallel()
+	stateGuild := &discordgo.Guild{
+		ID:       "g-state",
+		Channels: []*discordgo.Channel{nil, {ID: "c-1", GuildID: "g-state", LastMessageID: "9"}},
+		Threads:  []*discordgo.Channel{nil, {ID: "t-1"}},
+	}
 
-	if guilds := resolveCatchUpGuilds(nil); guilds != nil {
-		t.Errorf("resolveCatchUpGuilds(nil) = %v", guilds)
+	tests := []struct {
+		name string
+		dg   *discordgo.Session
+		want []string
+	}{
+		{name: "nil session returns nothing"},
+		{name: "nil state and empty token returns nothing", dg: &discordgo.Session{}},
+		{
+			name: "state guilds snapshotted, nil and empty IDs skipped", dg: newCatchupSession(&mockDiscordTransport{}, nil, &discordgo.Guild{}, stateGuild),
+			want: []string{"g-state"},
+		},
+		{
+			name: "empty state falls back to user guilds",
+			dg:   newCatchupSession(&mockDiscordTransport{userGuildsResp: []*discordgo.UserGuild{nil, {ID: ""}, {ID: "g-rest"}}}), want: []string{"g-rest"},
+		},
+		{name: "user guilds error returns nothing", dg: newCatchupSession(&mockDiscordTransport{userGuildsErr: true})},
 	}
-	if guilds := fetchFallbackUserGuilds(nil); guilds != nil {
-		t.Errorf("fetchFallbackUserGuilds(nil) = %v", guilds)
-	}
-	if guilds := fetchFallbackUserGuilds(&discordgo.Session{}); guilds != nil {
-		t.Errorf("fetchFallbackUserGuilds(empty token) = %v", guilds)
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got := guildIDs(resolveCatchUpGuilds(tc.dg)); !slices.Equal(got, tc.want) {
+				t.Errorf("resolveCatchUpGuilds() = %v, want %v", got, tc.want)
+			}
+		})
 	}
 }
 
 func TestCollectCandidateChannels(t *testing.T) {
 	t.Parallel()
-
-	if chs := collectCandidateChannels(nil, nil); chs != nil {
-		t.Errorf("collectCandidateChannels(nil) = %v", chs)
+	restTransport := &mockDiscordTransport{
+		channelsResp: map[string][]*discordgo.Channel{"g-1": {{ID: "c-rest"}, {ID: "c-state"}}},
+		threadsResp:  map[string]*discordgo.ThreadsList{"g-1": {Threads: []*discordgo.Channel{{ID: "t-rest"}}}},
 	}
-	if chs := collectCandidateChannels(nil, &discordgo.Guild{}); chs != nil {
-		t.Errorf("collectCandidateChannels(empty guild) = %v", chs)
+	failing := &mockDiscordTransport{channelsErr: map[string]bool{"g-1": true}, threadsErr: map[string]bool{"g-1": true}}
+	stateGuild := &discordgo.Guild{
+		ID:       "g-1",
+		Channels: []*discordgo.Channel{nil, {ID: ""}, {ID: "c-state"}, {ID: "c-state"}},
+		Threads:  []*discordgo.Channel{{ID: "t-rest"}, {ID: "t-state"}},
 	}
 
-	// Duplicate channels deduplication
-	gDup := &discordgo.Guild{
-		ID: "g-dup",
-		Channels: []*discordgo.Channel{
-			{ID: "c1"},
-			{ID: "c1"},
+	tests := []struct {
+		name  string
+		dg    *discordgo.Session
+		guild *discordgo.Guild
+		want  []string
+	}{
+		{name: "nil guild returns nothing"},
+		{name: "empty guild ID returns nothing", guild: &discordgo.Guild{}},
+		{name: "state only dedupes and skips nil or empty", guild: stateGuild, want: []string{"c-state", "t-rest", "t-state"}},
+		{
+			name: "REST channels then threads then state, deduped", dg: newCatchupSession(restTransport), guild: stateGuild,
+			want: []string{"c-rest", "c-state", "t-rest", "t-state"},
 		},
+		{name: "REST errors fall back to state", dg: newCatchupSession(failing), guild: stateGuild, want: []string{"c-state", "t-rest", "t-state"}},
 	}
-	if chs := collectCandidateChannels(nil, gDup); len(chs) != 1 {
-		t.Errorf("expected 1 unique channel, got %d", len(chs))
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got := channelIDs(collectCandidateChannels(tc.dg, tc.guild)); !slices.Equal(got, tc.want) {
+				t.Errorf("collectCandidateChannels() = %v, want %v", got, tc.want)
+			}
+		})
 	}
 }
 
 func TestIsCatchUpMessageEligible(t *testing.T) {
 	t.Parallel()
+	user := &discordgo.User{ID: "user-1"}
 
-	now := time.Now().UTC()
-	minSnow := DiscordSnowflakeFromTime(now.Add(-30 * time.Minute))
-	if isCatchUpMessageEligible(nil, "bot", minSnow, now) {
-		t.Error("nil message should not be eligible")
+	tests := []struct {
+		name string
+		msg  *discordgo.Message
+		want bool
+	}{
+		{"nil message", nil, false},
+		{"empty ID", &discordgo.Message{Author: user}, false},
+		{"nil author", &discordgo.Message{ID: sweepFreshSnow1}, false},
+		{"bot author", &discordgo.Message{ID: sweepFreshSnow1, Author: &discordgo.User{ID: "bot"}}, false},
+		{"timestamp older than stale TTL", &discordgo.Message{ID: sweepFreshSnow1, Author: user, Timestamp: sweepNow.Add(-31 * time.Minute)}, false},
+		{"ID at minSnowflake", &discordgo.Message{ID: sweepMinSnow, Author: user}, false},
+		{"fresh message without timestamp", &discordgo.Message{ID: sweepFreshSnow1, Author: user}, true},
+		{"fresh message with timestamp", &discordgo.Message{ID: sweepFreshSnow1, Author: user, Timestamp: sweepNow.Add(-15 * time.Minute)}, true},
 	}
-	if isCatchUpMessageEligible(&discordgo.Message{}, "bot", minSnow, now) {
-		t.Error("empty ID message should not be eligible")
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got := isCatchUpMessageEligible(tc.msg, "bot", sweepMinSnow, sweepNow); got != tc.want {
+				t.Errorf("isCatchUpMessageEligible() = %v, want %v", got, tc.want)
+			}
+		})
 	}
-	if isCatchUpMessageEligible(&discordgo.Message{ID: "1"}, "bot", minSnow, now) {
-		t.Error("nil author message should not be eligible")
-	}
-	if isCatchUpMessageEligible(&discordgo.Message{ID: minSnow, Author: &discordgo.User{ID: "u1"}}, "bot", minSnow, now) {
-		t.Error("message <= minSnowflake should not be eligible")
-	}
+}
+
+func canceledCatchupContext() context.Context {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	return ctx
 }
 
 func TestCatchUpChannelMessages(t *testing.T) {
 	t.Parallel()
-	ctx := context.Background()
-	now := time.Now().UTC()
-
-	sess, err := discordgo.New("Bot dummy")
-	if err != nil {
-		t.Fatalf("discordgo.New: %v", err)
+	ref := &discordgo.Message{ID: sweepFreshSnow2, Author: &discordgo.User{ID: "user-2"}, ReferencedMessage: &discordgo.Message{ID: "ref-1"}}
+	msgs := func(channelID string) *mockDiscordTransport {
+		older := &discordgo.Message{ID: sweepFreshSnow1, Author: &discordgo.User{ID: "user-1"}}
+		return &mockDiscordTransport{messagesResp: map[string][]*discordgo.Message{channelID: {ref, older}}}
 	}
-	sess.Client = &http.Client{Transport: &mockDiscordTransport{}}
-
-	CatchUpChannelMessagesForAgent(ctx, nil, nil, nil, "", "", "", now, "")
-	CatchUpChannelMessagesForAgent(ctx, sess, &testIngressServer{}, &discordgo.Channel{}, "", "", "", now, "")
-
-	cCtx, cancel := context.WithCancel(ctx)
-	cancel()
-	CatchUpChannelMessagesForAgent(cCtx, sess, &testIngressServer{}, &discordgo.Channel{ID: "c1", LastMessageID: "999"}, "", "", "1", now, "")
-}
-
-func TestRunStartupCatchup(t *testing.T) {
-	ResetWatermarksForTest()
-	t.Cleanup(ResetWatermarksForTest)
-
-	ctx := context.Background()
-	sess, err := discordgo.New("Bot dummy")
-	if err != nil {
-		t.Fatalf("discordgo.New: %v", err)
+	chanWith := func(id, guildID string) *discordgo.Channel {
+		return &discordgo.Channel{ID: id, GuildID: guildID, LastMessageID: sweepFreshSnow2}
 	}
 
-	channelID := "chan-catchup-1"
-	guildID := "guild-catchup-1"
-	msgID := DiscordSnowflakeFromTime(time.Now().UTC().Add(-5 * time.Minute))
-
-	msg := &discordgo.Message{
-		ID:        msgID,
-		ChannelID: channelID,
-		GuildID:   guildID,
-		Author:    &discordgo.User{ID: "u1"},
-		Content:   "hello",
-		Timestamp: time.Now().UTC().Add(-5 * time.Minute),
-	}
-
-	transport := &mockDiscordTransport{
-		messagesResp: map[string][]*discordgo.Message{channelID: {msg}},
-	}
-	sess.Client = &http.Client{Transport: transport}
-	sess.State.Guilds = []*discordgo.Guild{
+	// Each row uses its own channel ID so the shared watermark map stays row-local.
+	tests := []struct {
+		name          string
+		ctx           context.Context
+		tr            *mockDiscordTransport
+		srv           *testIngressServer
+		ch            *discordgo.Channel
+		guildID       string
+		wantFetches   int
+		wantEnqueued  []string
+		wantGuild     string
+		wantWatermark string
+	}{
+		{name: "nil channel ignored", ctx: context.Background(), tr: &mockDiscordTransport{}, srv: &testIngressServer{}},
+		{name: "empty channel ID ignored", ctx: context.Background(), tr: &mockDiscordTransport{}, srv: &testIngressServer{}, ch: &discordgo.Channel{}},
+		{name: "nil server ignored", ctx: context.Background(), tr: msgs("c-nosrv"), ch: chanWith("c-nosrv", "")},
 		{
-			ID: guildID,
-			Channels: []*discordgo.Channel{
-				{ID: channelID, GuildID: guildID, LastMessageID: msgID},
-			},
+			name: "empty LastMessageID skips fetch", ctx: context.Background(), tr: msgs("c-idle"), srv: &testIngressServer{},
+			ch: &discordgo.Channel{ID: "c-idle"},
+		},
+		{
+			name: "canceled context stops before enqueue or watermark", ctx: canceledCatchupContext(), tr: msgs("c-cancel"), srv: &testIngressServer{},
+			ch: chanWith("c-cancel", ""), wantFetches: 1,
+		},
+		{
+			name: "channel guild ID backfilled oldest first", ctx: context.Background(), tr: msgs("c-ok"), srv: &testIngressServer{},
+			ch: chanWith("c-ok", "g-chan"), guildID: "g-arg", wantFetches: 1, wantEnqueued: []string{sweepFreshSnow1, sweepFreshSnow2}, wantGuild: "g-chan",
+			wantWatermark: sweepFreshSnow2,
+		},
+		{
+			name: "guild argument used when channel has none", ctx: context.Background(), tr: msgs("c-arg"), srv: &testIngressServer{},
+			ch: chanWith("c-arg", ""), guildID: "g-arg", wantFetches: 1, wantEnqueued: []string{sweepFreshSnow1, sweepFreshSnow2}, wantGuild: "g-arg",
+			wantWatermark: sweepFreshSnow2,
 		},
 	}
 
-	srv := &testIngressServer{}
-	RunCatchUpSweepForAgent(ctx, sess, srv, time.Now().UTC(), "agent-alpha")
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			CatchUpChannelMessagesForAgent(tc.ctx, newCatchupSession(tc.tr), tc.srv, tc.ch, tc.guildID, "bot", sweepMinSnow, sweepNow, "catchup-agent")
 
-	if len(srv.processedIngress) != 1 {
-		t.Fatalf("processedIngress = %d, want 1", len(srv.processedIngress))
-	}
-	if got := srv.processedIngress[0].Agent; got != "agent-alpha" {
-		t.Errorf("processed message agent = %q, want %q", got, "agent-alpha")
-	}
-	if got := srv.processedIngress[0].MessageID; got != msgID {
-		t.Errorf("processed message ID = %q, want %q", got, msgID)
-	}
-
-	if got := GetChannelWatermarkForAgent("agent-alpha", channelID); got != msgID {
-		t.Errorf("GetChannelWatermarkForAgent(agent-alpha) = %q, want %q", got, msgID)
-	}
-	if got := GetChannelWatermarkForAgent("aerial", channelID); got != "" {
-		t.Errorf("GetChannelWatermarkForAgent(aerial) = %q, want empty", got)
+			if got := len(tc.tr.messageCalls); got != tc.wantFetches {
+				t.Errorf("fetches = %d, want %d", got, tc.wantFetches)
+			}
+			if tc.srv == nil {
+				return
+			}
+			var gotIDs []string
+			for _, call := range tc.srv.processedIngress {
+				gotIDs = append(gotIDs, call.MessageID)
+				if call.Message.GuildID != tc.wantGuild {
+					t.Errorf("message %s GuildID = %q, want %q", call.MessageID, call.Message.GuildID, tc.wantGuild)
+				}
+				if ref := call.Message.ReferencedMessage; ref != nil && ref.GuildID != tc.wantGuild {
+					t.Errorf("message %s referenced GuildID = %q, want %q", call.MessageID, ref.GuildID, tc.wantGuild)
+				}
+			}
+			if !slices.Equal(gotIDs, tc.wantEnqueued) {
+				t.Errorf("enqueued = %v, want %v", gotIDs, tc.wantEnqueued)
+			}
+			if tc.ch != nil && tc.ch.ID != "" {
+				if got := GetChannelWatermarkForAgent("catchup-agent", tc.ch.ID); got != tc.wantWatermark {
+					t.Errorf("watermark = %q, want %q", got, tc.wantWatermark)
+				}
+			}
+		})
 	}
 }

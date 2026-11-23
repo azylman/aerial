@@ -6,11 +6,11 @@ import (
 	"encoding/json"
 	"errors"
 	"flag"
-	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strconv"
 	"strings"
 	"testing"
@@ -284,80 +284,58 @@ func TestParseCLIArgs(t *testing.T) {
 }
 
 func TestFormatSearchResults(t *testing.T) {
-	t.Run("EmptyMatches", func(t *testing.T) {
-		res := transcript.SearchResult{
-			Query: "nothing",
-			Mode:  "auto",
-		}
-		formatted := formatSearchResults(res)
-		if !strings.Contains(formatted, "*(No matching records found)*") {
-			t.Errorf("expected empty notice, got: %s", formatted)
-		}
-	})
-
-	t.Run("SessionsAndSteps", func(t *testing.T) {
-		now := time.Now()
-		res := transcript.SearchResult{
-			Query: "quota limit",
-			Mode:  "auto",
-			Sessions: []db.SessionSummary{
-				{
-					Stack:     "stack-a",
-					Engine:    "claude",
-					SessionID: "11112222-3333-4444-5555-666677778888",
-					ThreadID:  "th-100",
-					Summary:   "Triaged Gemini 429 quota exhaustion and tuned backoff.",
+	longID := "11112222-3333-4444-5555-666677778888"
+	tests := []struct {
+		name        string
+		res         transcript.SearchResult
+		wantSubstrs []string
+	}{
+		{name: "empty matches", res: transcript.SearchResult{Query: "nothing", Mode: "auto"}, wantSubstrs: []string{"*(No matching records found)*"}},
+		{
+			name: "sessions and steps",
+			res: transcript.SearchResult{
+				Query: "quota limit",
+				Mode:  "auto",
+				Sessions: []db.SessionSummary{
+					{Stack: "stack-a", Engine: "claude", SessionID: longID, ThreadID: "th-100", Summary: "Triaged quota exhaustion and tuned backoff."},
+					{SessionID: "short", Summary: "Short ID test session"},
 				},
-				{
-					SessionID: "short",
-					Summary:   "Short ID test session",
-				},
-			},
-			Steps: []db.TranscriptStep{
-				{
-					Stack:     "stack-b",
-					Engine:    "agy",
-					SessionID: "11112222-3333-4444-5555-666677778888",
-					StepIndex: 5,
-					ToolName:  "run_command",
-					ToolKind:  "shell",
-					Content:   "docker logs aerial-brain --tail 50\nline 2 of logs",
-					CreatedAt: now,
-				},
-				{
-					SessionID: "short",
-					StepIndex: 12,
-					StepType:  "PLANNER_RESPONSE",
-					Content:   strings.Repeat("a", 400),
-					CreatedAt: now,
+				Steps: []db.TranscriptStep{
+					{
+						Stack:     "stack-b",
+						Engine:    "agy",
+						SessionID: longID,
+						StepIndex: 5,
+						ToolName:  "run_command",
+						ToolKind:  "shell",
+						Content:   "docker logs svc --tail 50\nline 2 of logs",
+						CreatedAt: transcriptsFixedTime,
+					},
+					{SessionID: "short", StepIndex: 12, StepType: "PLANNER_RESPONSE", Content: strings.Repeat("a", 400), CreatedAt: transcriptsFixedTime},
 				},
 			},
-		}
-
-		out := formatSearchResults(res)
-		if !strings.Contains(out, "### 📄 Session Summaries (2 matches)") {
-			t.Errorf("missing session summaries header: %s", out)
-		}
-		if !strings.Contains(out, "[11112222...](conversation://11112222-3333-4444-5555-666677778888)") {
-			t.Errorf("missing conversation link: %s", out)
-		}
-		if !strings.Contains(out, "### 💬 Transcript Execution Steps (2 matches)") {
-			t.Errorf("missing steps header: %s", out)
-		}
-		for _, want := range []string{
-			"- [stack-a/claude] Session [11112222...]",
-			"- [?/?] Session [short]",
-			"- [stack-b/agy] **[run_command · shell]** Step #5",
-			"- [?/?] **[PLANNER_RESPONSE]** Step #12",
-		} {
-			if !strings.Contains(out, want) {
-				t.Errorf("missing %q in: %s", want, out)
+			wantSubstrs: []string{
+				"### 📄 Session Summaries (2 matches)",
+				"[11112222...](conversation://11112222-3333-4444-5555-666677778888)",
+				"### 💬 Transcript Execution Steps (2 matches)",
+				"- [stack-a/claude] Session [11112222...]",
+				"- [?/?] Session [short]",
+				"- [stack-b/agy] **[run_command · shell]** Step #5",
+				"- [?/?] **[PLANNER_RESPONSE]** Step #12",
+				"... [truncated]",
+			},
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			out := formatSearchResults(tc.res)
+			for _, want := range tc.wantSubstrs {
+				if !strings.Contains(out, want) {
+					t.Errorf("output missing %q:\n%s", want, out)
+				}
 			}
-		}
-		if !strings.Contains(out, "... [truncated]") {
-			t.Errorf("expected truncation for long content: %s", out)
-		}
-	})
+		})
+	}
 }
 
 func TestFormatStepWindow(t *testing.T) {
@@ -456,557 +434,380 @@ func TestFormatStepWindow(t *testing.T) {
 	}
 }
 
-func TestRunCLI_HTTPGet(t *testing.T) {
-	now := time.Now().UTC()
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/api/transcripts/steps" {
-			http.NotFound(w, r)
-			return
-		}
-		sess := r.URL.Query().Get("session")
-		if sess == "error" {
-			http.Error(w, "internal database failure", http.StatusInternalServerError)
-			return
-		}
+var transcriptsFixedTime = time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)
 
-		step, _ := strconv.Atoi(r.URL.Query().Get("step"))
-		ctxWindow, _ := strconv.Atoi(r.URL.Query().Get("context"))
+// transcriptsServers are the shared fakes for the HTTP tables: echo serves the three endpoints and echoes the
+// forwarded query string back, the rest are fixed failure modes.
+type transcriptsServers struct {
+	echo, badJSON, status500, truncated, closed string
+}
 
-		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(transcript.StepWindowResult{
-			SessionID:  sess,
-			CenterStep: step,
-			Context:    ctxWindow,
-			Steps: []db.TranscriptStep{
+func newTranscriptsServers(t *testing.T) transcriptsServers {
+	t.Helper()
+	// Clients resolve their SA token from the env and /var/run/secrets; point them at an absent file instead.
+	t.Setenv("AERIAL_SA_TOKEN_PATH", filepath.Join(t.TempDir(), "absent-token"))
+	t.Setenv("TRANSCRIPTS_URL", "")
+	t.Setenv("ERI_URL", "")
+	serve := func(h http.HandlerFunc) string {
+		srv := httptest.NewServer(h)
+		t.Cleanup(srv.Close)
+		return srv.URL
+	}
+	closedSrv := httptest.NewServer(http.NotFoundHandler())
+	closedSrv.Close()
+	return transcriptsServers{
+		echo: serve(transcriptsEchoHandler),
+		badJSON: serve(func(w http.ResponseWriter, _ *http.Request) {
+			_, _ = w.Write([]byte("{invalid-json"))
+		}),
+		status500: serve(func(w http.ResponseWriter, _ *http.Request) {
+			http.Error(w, "server error", http.StatusInternalServerError)
+		}),
+		truncated: serve(func(w http.ResponseWriter, _ *http.Request) {
+			w.Header().Set("Content-Length", "500")
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte("truncated"))
+			if hijacker, ok := w.(http.Hijacker); ok {
+				conn, _, _ := hijacker.Hijack()
+				_ = conn.Close()
+			}
+		}),
+		closed: closedSrv.URL,
+	}
+}
+
+func transcriptsEchoHandler(w http.ResponseWriter, r *http.Request) {
+	q := r.URL.Query()
+	var payload any
+	switch r.URL.Path {
+	case "/api/transcripts/search":
+		payload = transcript.SearchResult{
+			Query:    q.Get("q"),
+			Mode:     q.Get("mode"),
+			Sessions: []db.SessionSummary{{Stack: q.Get("stack"), Engine: "claude", SessionID: "sess-abc", Summary: r.URL.RawQuery}},
+			Total:    1,
+		}
+	case "/api/transcripts/stats":
+		stacks := []db.TranscriptStackStats{{Stack: "stack-a", Sessions: 5000, Steps: 90000}, {Stack: "stack-b", Sessions: 32, Steps: 400}}
+		stats := statsResponse{Stacks: stacks, Status: "ok"}
+		if q.Get("stack") == "stack-b" {
+			stats.Stacks = stats.Stacks[1:]
+		}
+		for _, st := range stats.Stacks {
+			stats.TotalSessions += st.Sessions
+			stats.TotalSteps += st.Steps
+		}
+		payload = stats
+	case "/api/transcripts/steps":
+		step, _ := strconv.Atoi(q.Get("step"))
+		window, _ := strconv.Atoi(q.Get("context"))
+		payload = transcript.StepWindowResult{SessionID: q.Get("session"), CenterStep: step, Context: window, Steps: []db.TranscriptStep{
+			{
+				Stack:     q.Get("stack"),
+				Engine:    "agy",
+				SessionID: q.Get("session"),
+				StepIndex: step,
+				ToolName:  "run_command",
+				ToolKind:  "shell",
+				Content:   r.URL.RawQuery,
+				CreatedAt: transcriptsFixedTime,
+			},
+		}}
+	default:
+		http.NotFound(w, r)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(payload)
+}
+
+func assertTranscriptsHTTPResult[T any](t *testing.T, got T, err error, want T, wantErr string) {
+	t.Helper()
+	if wantErr != "" {
+		if err == nil || !strings.Contains(err.Error(), wantErr) {
+			t.Fatalf("error = %v, want containing %q", err, wantErr)
+		}
+		return
+	}
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("result = %+v\nwant %+v", got, want)
+	}
+}
+
+func TestExecuteSearchHTTP(t *testing.T) {
+	srv := newTranscriptsServers(t)
+	tests := []struct {
+		name    string
+		cfg     CLIConfig
+		want    transcript.SearchResult
+		wantErr string
+	}{
+		{
+			name: "forwards every filter",
+			cfg:  CLIConfig{BaseURL: srv.echo + "/", Query: "docker", Mode: "steps", Tool: "shell", Session: "s1", Stack: "stack-b", Limit: 5},
+			want: transcript.SearchResult{Query: "docker", Mode: "steps", Total: 1, Sessions: []db.SessionSummary{
+				{Stack: "stack-b", Engine: "claude", SessionID: "sess-abc", Summary: "limit=5&mode=steps&q=docker&session=s1&stack=stack-b&tool=shell"},
+			}},
+		},
+		{
+			name: "omits empty filters",
+			cfg:  CLIConfig{BaseURL: srv.echo, Query: "docker", Mode: "auto", Limit: 10},
+			want: transcript.SearchResult{Query: "docker", Mode: "auto", Total: 1, Sessions: []db.SessionSummary{
+				{Engine: "claude", SessionID: "sess-abc", Summary: "limit=10&mode=auto&q=docker"},
+			}},
+		},
+		{name: "invalid url", cfg: CLIConfig{BaseURL: "://bad-url", Query: "q"}, wantErr: "missing protocol scheme"},
+		{name: "bad json", cfg: CLIConfig{BaseURL: srv.badJSON, Query: "q"}, wantErr: "failed unmarshaling response"},
+		{name: "status 500", cfg: CLIConfig{BaseURL: srv.status500, Query: "q"}, wantErr: "HTTP 500: server error"},
+		{name: "truncated body", cfg: CLIConfig{BaseURL: srv.truncated, Query: "q"}, wantErr: "unexpected EOF"},
+		{name: "connection refused", cfg: CLIConfig{BaseURL: srv.closed, Query: "q"}, wantErr: "connection refused"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := executeSearchHTTP(context.Background(), tc.cfg)
+			assertTranscriptsHTTPResult(t, got, err, tc.want, tc.wantErr)
+		})
+	}
+}
+
+func TestExecuteStatsHTTP(t *testing.T) {
+	srv := newTranscriptsServers(t)
+	stackA := db.TranscriptStackStats{Stack: "stack-a", Sessions: 5000, Steps: 90000}
+	stackB := db.TranscriptStackStats{Stack: "stack-b", Sessions: 32, Steps: 400}
+	tests := []struct {
+		name    string
+		cfg     CLIConfig
+		want    statsResponse
+		wantErr string
+	}{
+		{name: "all stacks", cfg: CLIConfig{BaseURL: srv.echo}, want: statsResponse{5032, 90400, []db.TranscriptStackStats{stackA, stackB}, "ok"}},
+		{name: "stack filter", cfg: CLIConfig{BaseURL: srv.echo, Stack: "stack-b"}, want: statsResponse{32, 400, []db.TranscriptStackStats{stackB}, "ok"}},
+		{name: "invalid url", cfg: CLIConfig{BaseURL: "://bad-url"}, wantErr: "missing protocol scheme"},
+		{name: "bad json", cfg: CLIConfig{BaseURL: srv.badJSON}, wantErr: "failed unmarshaling response"},
+		{name: "status 500", cfg: CLIConfig{BaseURL: srv.status500}, wantErr: "HTTP 500: server error"},
+		{name: "truncated body", cfg: CLIConfig{BaseURL: srv.truncated}, wantErr: "unexpected EOF"},
+		{name: "connection refused", cfg: CLIConfig{BaseURL: srv.closed}, wantErr: "connection refused"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := executeStatsHTTP(context.Background(), tc.cfg)
+			assertTranscriptsHTTPResult(t, got, err, tc.want, tc.wantErr)
+		})
+	}
+}
+
+func TestExecuteGetHTTP(t *testing.T) {
+	srv := newTranscriptsServers(t)
+	tests := []struct {
+		name    string
+		cfg     CLIConfig
+		want    transcript.StepWindowResult
+		wantErr string
+	}{
+		{
+			name: "forwards session step context and stack",
+			cfg:  CLIConfig{BaseURL: srv.echo, Session: "sess-123", Step: 2, Context: 3, Stack: "stack-b"},
+			want: transcript.StepWindowResult{SessionID: "sess-123", CenterStep: 2, Context: 3, Steps: []db.TranscriptStep{
 				{
-					Stack:     r.URL.Query().Get("stack"),
+					Stack:     "stack-b",
 					Engine:    "agy",
-					SessionID: sess,
-					StepIndex: step,
+					SessionID: "sess-123",
+					StepIndex: 2,
 					ToolName:  "run_command",
 					ToolKind:  "shell",
-					Content:   "go test ./...",
-					CreatedAt: now,
+					Content:   "context=3&session=sess-123&stack=stack-b&step=2",
+					CreatedAt: transcriptsFixedTime,
 				},
-			},
+			}},
+		},
+		{name: "invalid url", cfg: CLIConfig{BaseURL: "://bad-url", Session: "s"}, wantErr: "missing protocol scheme"},
+		{name: "bad json", cfg: CLIConfig{BaseURL: srv.badJSON, Session: "s"}, wantErr: "failed unmarshaling response"},
+		{name: "status 500", cfg: CLIConfig{BaseURL: srv.status500, Session: "s"}, wantErr: "HTTP 500: server error"},
+		{name: "connection refused", cfg: CLIConfig{BaseURL: srv.closed, Session: "s"}, wantErr: "connection refused"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := executeGetHTTP(context.Background(), tc.cfg)
+			assertTranscriptsHTTPResult(t, got, err, tc.want, tc.wantErr)
 		})
-	}))
-	defer server.Close()
-
-	t.Run("GetSuccessText", func(t *testing.T) {
-		var buf bytes.Buffer
-		err := runCLI(context.Background(), []string{"get", "--session", "sess-123", "--step", "2", "--url", server.URL}, &buf)
-		if err != nil {
-			t.Fatalf("unexpected error: %v", err)
-		}
-		out := buf.String()
-		if !strings.Contains(out, "go test ./...") || !strings.Contains(out, "Step #2") {
-			t.Errorf("unexpected output: %s", out)
-		}
-	})
-
-	t.Run("GetForwardsStackFilter", func(t *testing.T) {
-		var buf bytes.Buffer
-		err := runCLI(context.Background(), []string{"get", "--session", "sess-123", "--step", "2", "--stack", "stack-b", "--url", server.URL}, &buf)
-		if err != nil {
-			t.Fatalf("unexpected error: %v", err)
-		}
-		if !strings.Contains(buf.String(), "[stack-b/agy] **[run_command · shell]** Step #2") {
-			t.Errorf("expected stack-labelled step, got: %s", buf.String())
-		}
-	})
-
-	t.Run("GetSuccessJSON", func(t *testing.T) {
-		var buf bytes.Buffer
-		err := runCLI(context.Background(), []string{"get", "--session", "sess-123", "--step", "2", "--json", "--url", server.URL}, &buf)
-		if err != nil {
-			t.Fatalf("unexpected error: %v", err)
-		}
-		var parsed transcript.StepWindowResult
-		if err := json.Unmarshal(buf.Bytes(), &parsed); err != nil {
-			t.Fatalf("failed unmarshaling get json: %v", err)
-		}
-		if parsed.SessionID != "sess-123" || parsed.CenterStep != 2 || len(parsed.Steps) != 1 {
-			t.Errorf("unexpected parsed result: %+v", parsed)
-		}
-	})
-
-	t.Run("GetHTTPErrorSurfacesWithoutFallback", func(t *testing.T) {
-		var buf bytes.Buffer
-		err := runCLI(context.Background(), []string{"get", "--session", "error", "--step", "0", "--url", server.URL}, &buf)
-		if err == nil || !strings.Contains(err.Error(), "get failed: HTTP 500") {
-			t.Fatalf("expected HTTP 500 get error, got: %v", err)
-		}
-	})
-
-	t.Run("GetWriterErrors", func(t *testing.T) {
-		badWriter := &failingWriter{}
-		err := runCLI(context.Background(), []string{"get", "--session", "sess-123", "--step", "0", "--url", server.URL}, badWriter)
-		if err == nil {
-			t.Errorf("expected error on failing writer for get text")
-		}
-
-		err = runCLI(context.Background(), []string{"get", "--session", "sess-123", "--step", "0", "--json", "--url", server.URL}, badWriter)
-		if err == nil {
-			t.Errorf("expected error on failing writer for get json")
-		}
-	})
+	}
 }
 
-func TestRunCLI_HTTPStats(t *testing.T) {
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/api/transcripts/stats" {
-			http.NotFound(w, r)
-			return
-		}
-		w.Header().Set("Content-Type", "application/json")
-		stacks := []db.TranscriptStackStats{{Stack: "stack-a", Sessions: 5000, Steps: 90000}, {Stack: "stack-b", Sessions: 32, Steps: 400}}
-		if r.URL.Query().Get("stack") == "stack-b" {
-			stacks = stacks[1:]
-		}
-		resp := statsResponse{Stacks: stacks, Status: "ok"}
-		for _, st := range stacks {
-			resp.TotalSessions += st.Sessions
-			resp.TotalSteps += st.Steps
-		}
-		_ = json.NewEncoder(w).Encode(resp)
-	}))
-	defer server.Close()
-
-	t.Run("TextFormat", func(t *testing.T) {
-		var buf bytes.Buffer
-		err := runCLI(context.Background(), []string{"stats", "--url", server.URL}, &buf)
-		if err != nil {
-			t.Fatalf("unexpected error: %v", err)
-		}
-		want := "📊 Aerial Transcript Index Stats:\n- Total Indexed Sessions: 5032\n- Total Indexed Steps: 90400\n" +
-			"  - [stack-a] 5000 sessions, 90000 steps\n  - [stack-b] 32 sessions, 400 steps\n- Status: ok\n"
-		if out := buf.String(); out != want {
-			t.Errorf("output = %q, want %q", out, want)
-		}
-	})
-
-	t.Run("StackFilter", func(t *testing.T) {
-		var buf bytes.Buffer
-		if err := runCLI(context.Background(), []string{"stats", "--stack", "stack-b", "--url", server.URL}, &buf); err != nil {
-			t.Fatalf("unexpected error: %v", err)
-		}
-		if out := buf.String(); !strings.Contains(out, "Total Indexed Sessions: 32") || strings.Contains(out, "stack-a") {
-			t.Errorf("expected only stack-b stats, got: %s", out)
-		}
-	})
-
-	t.Run("JSONFormat", func(t *testing.T) {
-		var buf bytes.Buffer
-		err := runCLI(context.Background(), []string{"stats", "--json", "--url", server.URL}, &buf)
-		if err != nil {
-			t.Fatalf("unexpected error: %v", err)
-		}
-		var parsed map[string]any
-		if err := json.Unmarshal(buf.Bytes(), &parsed); err != nil {
-			t.Fatalf("failed unmarshaling json output: %v", err)
-		}
-		if parsed["total_sessions"] != float64(5032) {
-			t.Errorf("unexpected sessions count: %v", parsed["total_sessions"])
-		}
-	})
+// transcriptsWriter is the stdout fake: it records writes, or fails every write with err when set.
+type transcriptsWriter struct {
+	err error
+	buf bytes.Buffer
 }
 
-func TestRunCLI_HTTPSearch(t *testing.T) {
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/api/transcripts/search" {
-			http.NotFound(w, r)
-			return
-		}
-		q := r.URL.Query().Get("q")
-		if q == "error" {
-			http.Error(w, "internal database failure", http.StatusInternalServerError)
-			return
-		}
+func (w *transcriptsWriter) Write(p []byte) (int, error) {
+	if w.err != nil {
+		return 0, w.err
+	}
+	return w.buf.Write(p)
+}
 
-		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(transcript.SearchResult{
-			Query: q,
-			Mode:  r.URL.Query().Get("mode"),
-			Sessions: []db.SessionSummary{
-				{
-					Stack:     r.URL.Query().Get("stack"),
-					Engine:    "claude",
-					SessionID: "sess-abc",
-					Summary:   "Found matching session",
-				},
-			},
-			Total: 1,
+func TestWriteCLIOutput(t *testing.T) {
+	errDiskFull := errors.New("simulated disk full")
+	errMarshal := errors.New("simulated marshal error")
+	tests := []struct {
+		name       string
+		asJSON     bool
+		marshalErr error
+		writeErr   error
+		want       string
+		wantErr    string
+	}{
+		{name: "text", want: "formatted"},
+		{name: "json", asJSON: true, want: "{\n  \"k\": \"v\"\n}\n"},
+		{name: "json marshal error", asJSON: true, marshalErr: errMarshal, wantErr: "simulated marshal error"},
+		{name: "text write error", writeErr: errDiskFull, wantErr: "simulated disk full"},
+		{name: "json write error", asJSON: true, writeErr: errDiskFull, wantErr: "simulated disk full"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			orig := jsonMarshalIndent
+			t.Cleanup(func() { jsonMarshalIndent = orig })
+			jsonMarshalIndent = func(v any, prefix, indent string) ([]byte, error) {
+				if tc.marshalErr != nil {
+					return nil, tc.marshalErr
+				}
+				return orig(v, prefix, indent)
+			}
+			out := &transcriptsWriter{err: tc.writeErr}
+			err := writeCLIOutput(out, tc.asJSON, map[string]string{"k": "v"}, "formatted")
+			if tc.wantErr != "" {
+				if err == nil || err.Error() != tc.wantErr {
+					t.Fatalf("error = %v, want %q", err, tc.wantErr)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if got := out.buf.String(); got != tc.want {
+				t.Errorf("output = %q, want %q", got, tc.want)
+			}
 		})
-	}))
-	defer server.Close()
-
-	t.Run("EmptyQueryError", func(t *testing.T) {
-		var buf bytes.Buffer
-		err := runCLI(context.Background(), []string{"search", "--url", server.URL}, &buf)
-		if err == nil || !strings.Contains(err.Error(), "search query cannot be empty") {
-			t.Fatalf("expected empty query error, got %v", err)
-		}
-	})
-
-	t.Run("SearchSuccessText", func(t *testing.T) {
-		var buf bytes.Buffer
-		err := runCLI(context.Background(), []string{"search", "docker", "--url", server.URL}, &buf)
-		if err != nil {
-			t.Fatalf("unexpected error: %v", err)
-		}
-		out := buf.String()
-		if !strings.Contains(out, "Found matching session") {
-			t.Errorf("unexpected output: %s", out)
-		}
-	})
-
-	t.Run("SearchSuccessJSON", func(t *testing.T) {
-		var buf bytes.Buffer
-		err := runCLI(context.Background(), []string{"search", "docker", "--json", "--url", server.URL}, &buf)
-		if err != nil {
-			t.Fatalf("unexpected error: %v", err)
-		}
-		var parsed transcript.SearchResult
-		if err := json.Unmarshal(buf.Bytes(), &parsed); err != nil {
-			t.Fatalf("failed unmarshaling search json: %v", err)
-		}
-		if len(parsed.Sessions) != 1 || parsed.Sessions[0].SessionID != "sess-abc" {
-			t.Errorf("unexpected parsed result: %+v", parsed)
-		}
-	})
-
-	t.Run("SearchHTTPErrorSurfacesWithoutFallback", func(t *testing.T) {
-		var buf bytes.Buffer
-		err := runCLI(context.Background(), []string{"search", "error", "--url", server.URL}, &buf)
-		if err == nil || !strings.Contains(err.Error(), "search failed: HTTP 500") {
-			t.Fatalf("expected HTTP 500 search error, got: %v", err)
-		}
-	})
-
-	t.Run("SearchForwardsStackFilter", func(t *testing.T) {
-		var buf bytes.Buffer
-		if err := runCLI(context.Background(), []string{"search", "docker", "--stack", "stack-b", "--url", server.URL}, &buf); err != nil {
-			t.Fatalf("unexpected error: %v", err)
-		}
-		if !strings.Contains(buf.String(), "- [stack-b/claude] Session [sess-abc]") {
-			t.Errorf("expected stack-labelled session, got: %s", buf.String())
-		}
-	})
-
-	t.Run("HTTPToolAndSessionFilterParams", func(t *testing.T) {
-		var buf bytes.Buffer
-		err := runCLI(context.Background(), []string{"search", "docker", "-t", "run_command", "-s", "sess-filter", "--url", server.URL}, &buf)
-		if err != nil {
-			t.Fatalf("unexpected error: %v", err)
-		}
-	})
-}
-
-func TestHTTPErrors(t *testing.T) {
-	badJSONServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte("{invalid-json"))
-	}))
-	defer badJSONServer.Close()
-
-	errServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		http.Error(w, "server error", http.StatusInternalServerError)
-	}))
-	defer errServer.Close()
-
-	t.Run("ExecuteSearchHTTP_InvalidURL", func(t *testing.T) {
-		cfg := CLIConfig{BaseURL: "://bad-url", Query: "test"}
-		_, err := executeSearchHTTP(context.Background(), cfg)
-		if err == nil {
-			t.Fatal("expected error on invalid URL")
-		}
-	})
-
-	t.Run("ExecuteSearchHTTP_BadJSON", func(t *testing.T) {
-		cfg := CLIConfig{BaseURL: badJSONServer.URL, Query: "test"}
-		_, err := executeSearchHTTP(context.Background(), cfg)
-		if err == nil {
-			t.Fatal("expected error on bad JSON")
-		}
-	})
-
-	t.Run("ExecuteSearchHTTP_Status500", func(t *testing.T) {
-		cfg := CLIConfig{BaseURL: errServer.URL, Query: "test"}
-		_, err := executeSearchHTTP(context.Background(), cfg)
-		if err == nil {
-			t.Fatal("expected error on 500 status")
-		}
-	})
-
-	t.Run("ExecuteStatsHTTP_InvalidURL", func(t *testing.T) {
-		cfg := CLIConfig{BaseURL: "://bad-url"}
-		_, err := executeStatsHTTP(context.Background(), cfg)
-		if err == nil {
-			t.Fatal("expected error on invalid URL")
-		}
-	})
-
-	t.Run("ExecuteStatsHTTP_BadJSON", func(t *testing.T) {
-		cfg := CLIConfig{BaseURL: badJSONServer.URL}
-		_, err := executeStatsHTTP(context.Background(), cfg)
-		if err == nil {
-			t.Fatal("expected error on bad JSON")
-		}
-	})
-
-	t.Run("ExecuteStatsHTTP_Status500", func(t *testing.T) {
-		cfg := CLIConfig{BaseURL: errServer.URL}
-		_, err := executeStatsHTTP(context.Background(), cfg)
-		if err == nil {
-			t.Fatal("expected error on 500 status")
-		}
-	})
-
-	t.Run("ExecuteGetHTTP_InvalidURL", func(t *testing.T) {
-		cfg := CLIConfig{BaseURL: "://bad-url", Session: "s", Step: 0}
-		_, err := executeGetHTTP(context.Background(), cfg)
-		if err == nil {
-			t.Fatal("expected error on invalid URL")
-		}
-	})
-
-	t.Run("ExecuteGetHTTP_BadJSON", func(t *testing.T) {
-		cfg := CLIConfig{BaseURL: badJSONServer.URL, Session: "s", Step: 0}
-		_, err := executeGetHTTP(context.Background(), cfg)
-		if err == nil {
-			t.Fatal("expected error on bad JSON")
-		}
-	})
-
-	t.Run("ExecuteGetHTTP_Status500", func(t *testing.T) {
-		cfg := CLIConfig{BaseURL: errServer.URL, Session: "s", Step: 0}
-		_, err := executeGetHTTP(context.Background(), cfg)
-		if err == nil {
-			t.Fatal("expected error on 500 status")
-		}
-	})
-
-	t.Run("ExecuteGetHTTP_NetworkError", func(t *testing.T) {
-		cfg := CLIConfig{BaseURL: "http://127.0.0.1:59996", Session: "s", Step: 0}
-		_, err := executeGetHTTP(context.Background(), cfg)
-		if err == nil {
-			t.Fatal("expected network error")
-		}
-	})
-
-	t.Run("ExecuteSearchHTTP_NetworkError", func(t *testing.T) {
-		cfg := CLIConfig{BaseURL: "http://127.0.0.1:59996", Query: "test"}
-		_, err := executeSearchHTTP(context.Background(), cfg)
-		if err == nil {
-			t.Fatal("expected network error")
-		}
-	})
-
-	t.Run("ExecuteStatsHTTP_NetworkError", func(t *testing.T) {
-		cfg := CLIConfig{BaseURL: "http://127.0.0.1:59996"}
-		_, err := executeStatsHTTP(context.Background(), cfg)
-		if err == nil {
-			t.Fatal("expected network error")
-		}
-	})
-
-	t.Run("RunCLI_StatsError", func(t *testing.T) {
-		var buf bytes.Buffer
-		err := runCLI(context.Background(), []string{"stats", "--url", errServer.URL}, &buf)
-		if err == nil {
-			t.Fatal("expected error for stats on 500 status")
-		}
-	})
+	}
 }
 
 func TestRunMain(t *testing.T) {
-	t.Run("Success", func(t *testing.T) {
-		var out, errOut bytes.Buffer
-		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			w.Header().Set("Content-Type", "application/json")
-			_ = json.NewEncoder(w).Encode(map[string]any{"total_sessions": 10, "status": "ok"})
-		}))
-		defer server.Close()
-
-		code := runMain([]string{"stats", "--url", server.URL}, &out, &errOut)
-		if code != 0 {
-			t.Fatalf("expected exit code 0, got %d, err: %s", code, errOut.String())
-		}
-	})
-
-	t.Run("Failure", func(t *testing.T) {
-		var out, errOut bytes.Buffer
-		code := runMain([]string{"search", "--url", "http://127.0.0.1:59998"}, &out, &errOut)
-		if code != 1 {
-			t.Fatalf("expected exit code 1, got %d", code)
-		}
-		if !strings.Contains(errOut.String(), "Error:") {
-			t.Errorf("expected Error: in stderr, got: %s", errOut.String())
-		}
-	})
-}
-
-func TestRunCLIEdges(t *testing.T) {
-	t.Run("RunCLI_ParseError", func(t *testing.T) {
-		var buf bytes.Buffer
-		err := runCLI(context.Background(), []string{"--invalid-flag"}, &buf)
-		if err == nil {
-			t.Fatal("expected error on invalid flag to runCLI")
-		}
-	})
-
-	t.Run("RunCLI_WriterErrors", func(t *testing.T) {
-		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			w.Header().Set("Content-Type", "application/json")
-			if strings.Contains(r.URL.Path, "stats") {
-				_ = json.NewEncoder(w).Encode(map[string]any{"total_sessions": 5, "status": "ok"})
-			} else {
-				_ = json.NewEncoder(w).Encode(transcript.SearchResult{Query: "test", Mode: "auto"})
+	srv := newTranscriptsServers(t)
+	errDiskFull := errors.New("simulated disk full")
+	statsText := "📊 Aerial Transcript Index Stats:\n- Total Indexed Sessions: 5032\n- Total Indexed Steps: 90400\n" +
+		"  - [stack-a] 5000 sessions, 90000 steps\n  - [stack-b] 32 sessions, 400 steps\n- Status: ok\n"
+	getArgs := []string{"get", "--session", "sess-123", "--step", "2"}
+	tests := []struct {
+		name       string
+		args       []string
+		url        string
+		writeErr   error
+		wantCode   int
+		wantOut    []string
+		wantStderr string
+	}{
+		{name: "parse error", args: []string{"--invalid-flag"}, wantCode: 1, wantStderr: "Error: flag provided but not defined: -invalid-flag\n"},
+		{
+			name:       "search empty query",
+			args:       []string{"search"},
+			url:        srv.echo,
+			wantCode:   1,
+			wantStderr: "Error: search query cannot be empty (usage: transcript-search search <query>)\n",
+		},
+		{
+			name:    "search text",
+			args:    []string{"search", "docker"},
+			url:     srv.echo,
+			wantOut: []string{"🔍 Search Results for: `docker` (mode: auto)", "- [?/claude] Session [sess-abc]"},
+		},
+		{
+			name:    "search stack and tool filters",
+			args:    []string{"search", "docker", "--stack", "stack-b", "-t", "run_command", "-s", "s1"},
+			url:     srv.echo,
+			wantOut: []string{"- [stack-b/claude] Session [sess-abc]", "limit=10&mode=auto&q=docker&session=s1&stack=stack-b&tool=run_command"},
+		},
+		{
+			name:    "search json",
+			args:    []string{"search", "docker", "--json"},
+			url:     srv.echo,
+			wantOut: []string{`"query": "docker"`, `"session_id": "sess-abc"`},
+		},
+		{
+			name:       "search http error",
+			args:       []string{"search", "docker"},
+			url:        srv.status500,
+			wantCode:   1,
+			wantStderr: "Error: search failed: HTTP 500: server error\n\n",
+		},
+		{
+			name:       "search write error",
+			args:       []string{"search", "docker"},
+			url:        srv.echo,
+			writeErr:   errDiskFull,
+			wantCode:   1,
+			wantStderr: "Error: simulated disk full\n",
+		},
+		{
+			name:    "get text",
+			args:    getArgs,
+			url:     srv.echo,
+			wantOut: []string{"▶ [?/agy] **[run_command · shell]** Step #2 (2026-01-02 03:04:05)", "context=2&session=sess-123&step=2"},
+		},
+		{
+			name:    "get stack filter",
+			args:    []string{"get", "--session", "sess-123", "--step", "2", "--stack", "stack-b"},
+			url:     srv.echo,
+			wantOut: []string{"[stack-b/agy] **[run_command · shell]** Step #2"},
+		},
+		{
+			name:    "get json",
+			args:    []string{"get", "--session", "sess-123", "--step", "2", "--json"},
+			url:     srv.echo,
+			wantOut: []string{`"session_id": "sess-123"`, `"step": 2`},
+		},
+		{name: "get http error", args: getArgs, url: srv.status500, wantCode: 1, wantStderr: "Error: get failed: HTTP 500: server error\n\n"},
+		{name: "get write error", args: getArgs, url: srv.echo, writeErr: errDiskFull, wantCode: 1, wantStderr: "Error: simulated disk full\n"},
+		{name: "stats text", args: []string{"stats"}, url: srv.echo, wantOut: []string{statsText}},
+		{
+			name:    "stats stack filter",
+			args:    []string{"stats", "--stack", "stack-b"},
+			url:     srv.echo,
+			wantOut: []string{"Total Indexed Sessions: 32\n- Total Indexed Steps: 400\n  - [stack-b] 32 sessions, 400 steps\n- Status: ok\n"},
+		},
+		{name: "stats json", args: []string{"stats", "--json"}, url: srv.echo, wantOut: []string{`"total_sessions": 5032`}},
+		{
+			name:       "stats http error",
+			args:       []string{"stats"},
+			url:        srv.status500,
+			wantCode:   1,
+			wantStderr: "Error: failed fetching stats: HTTP 500: server error\n\n",
+		},
+		{name: "stats write error", args: []string{"stats"}, url: srv.echo, writeErr: errDiskFull, wantCode: 1, wantStderr: "Error: simulated disk full\n"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			args := tc.args
+			if tc.url != "" {
+				args = append(append([]string{}, tc.args...), "--url", tc.url)
 			}
-		}))
-		defer server.Close()
-
-		badWriter := &failingWriter{}
-
-		// stats text writer error
-		err := runCLI(context.Background(), []string{"stats", "--url", server.URL}, badWriter)
-		if err == nil {
-			t.Errorf("expected error on failing writer for stats text")
-		}
-
-		// stats json writer error
-		err = runCLI(context.Background(), []string{"stats", "--json", "--url", server.URL}, badWriter)
-		if err == nil {
-			t.Errorf("expected error on failing writer for stats json")
-		}
-
-		// search text writer error
-		err = runCLI(context.Background(), []string{"search", "test", "--url", server.URL}, badWriter)
-		if err == nil {
-			t.Errorf("expected error on failing writer for search text")
-		}
-
-		// search json writer error
-		err = runCLI(context.Background(), []string{"search", "test", "--json", "--url", server.URL}, badWriter)
-		if err == nil {
-			t.Errorf("expected error on failing writer for search json")
-		}
-	})
-}
-
-type failingWriter struct{}
-
-func (*failingWriter) Write(p []byte) (n int, err error) {
-	return 0, errors.New("simulated disk full write error")
-}
-
-func TestHTTPConnectionTruncatedBody(t *testing.T) {
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Length", "500")
-		w.WriteHeader(http.StatusOK)
-		_, _ = w.Write([]byte("truncated"))
-		if hijacker, ok := w.(http.Hijacker); ok {
-			conn, _, _ := hijacker.Hijack()
-			_ = conn.Close()
-		}
-	}))
-	defer server.Close()
-
-	t.Run("ExecuteSearchHTTP_TruncatedBody", func(t *testing.T) {
-		cfg := CLIConfig{BaseURL: server.URL, Query: "test"}
-		_, err := executeSearchHTTP(context.Background(), cfg)
-		if err == nil {
-			t.Fatal("expected error on truncated body in executeSearchHTTP")
-		}
-	})
-
-	t.Run("ExecuteStatsHTTP_TruncatedBody", func(t *testing.T) {
-		cfg := CLIConfig{BaseURL: server.URL}
-		_, err := executeStatsHTTP(context.Background(), cfg)
-		if err == nil {
-			t.Fatal("expected error on truncated body in executeStatsHTTP")
-		}
-	})
-}
-
-func TestNewRequestWithContextErrors(t *testing.T) {
-	oldFn := newRequestWithContext
-	defer func() { newRequestWithContext = oldFn }()
-
-	newRequestWithContext = func(ctx context.Context, method, url string, body io.Reader) (*http.Request, error) {
-		return nil, errors.New("simulated request creation failure")
+			out := &transcriptsWriter{err: tc.writeErr}
+			var errOut bytes.Buffer
+			if code := runMain(args, out, &errOut); code != tc.wantCode {
+				t.Errorf("exit code = %d, want %d", code, tc.wantCode)
+			}
+			if got := errOut.String(); got != tc.wantStderr {
+				t.Errorf("stderr = %q, want %q", got, tc.wantStderr)
+			}
+			for _, want := range tc.wantOut {
+				if !strings.Contains(out.buf.String(), want) {
+					t.Errorf("stdout missing %q:\n%s", want, out.buf.String())
+				}
+			}
+		})
 	}
-
-	t.Run("ExecuteSearchHTTP_NewRequestError", func(t *testing.T) {
-		cfg := CLIConfig{BaseURL: "http://localhost:8080", Query: "test"}
-		_, err := executeSearchHTTP(context.Background(), cfg)
-		if err == nil || !strings.Contains(err.Error(), "simulated request creation failure") {
-			t.Fatalf("expected simulated error, got %v", err)
-		}
-	})
-
-	t.Run("ExecuteStatsHTTP_NewRequestError", func(t *testing.T) {
-		cfg := CLIConfig{BaseURL: "http://localhost:8080"}
-		_, err := executeStatsHTTP(context.Background(), cfg)
-		if err == nil || !strings.Contains(err.Error(), "simulated request creation failure") {
-			t.Fatalf("expected simulated error, got %v", err)
-		}
-	})
-
-	t.Run("ExecuteGetHTTP_NewRequestError", func(t *testing.T) {
-		cfg := CLIConfig{BaseURL: "http://localhost:8080", Session: "s", Step: 0}
-		_, err := executeGetHTTP(context.Background(), cfg)
-		if err == nil || !strings.Contains(err.Error(), "simulated request creation failure") {
-			t.Fatalf("expected simulated error, got %v", err)
-		}
-	})
-}
-
-func TestJSONMarshalIndentErrors(t *testing.T) {
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		switch {
-		case strings.Contains(r.URL.Path, "stats"):
-			_ = json.NewEncoder(w).Encode(map[string]any{"total_sessions": 10, "status": "ok"})
-		case strings.Contains(r.URL.Path, "steps"):
-			_ = json.NewEncoder(w).Encode(transcript.StepWindowResult{SessionID: "s", CenterStep: 0})
-		default:
-			_ = json.NewEncoder(w).Encode(transcript.SearchResult{Query: "test", Mode: "auto"})
-		}
-	}))
-	defer server.Close()
-
-	oldFn := jsonMarshalIndent
-	defer func() { jsonMarshalIndent = oldFn }()
-
-	jsonMarshalIndent = func(v any, prefix, indent string) ([]byte, error) {
-		return nil, errors.New("simulated json marshal indent error")
-	}
-
-	t.Run("RunCLI_StatsJSONMarshalError", func(t *testing.T) {
-		var buf bytes.Buffer
-		err := runCLI(context.Background(), []string{"stats", "--json", "--url", server.URL}, &buf)
-		if err == nil || !strings.Contains(err.Error(), "simulated json marshal indent error") {
-			t.Fatalf("expected marshal error in stats json, got %v", err)
-		}
-	})
-
-	t.Run("RunCLI_SearchJSONMarshalError", func(t *testing.T) {
-		var buf bytes.Buffer
-		err := runCLI(context.Background(), []string{"search", "test", "--json", "--url", server.URL}, &buf)
-		if err == nil || !strings.Contains(err.Error(), "simulated json marshal indent error") {
-			t.Fatalf("expected marshal error in search json, got %v", err)
-		}
-	})
-
-	t.Run("RunCLI_GetJSONMarshalError", func(t *testing.T) {
-		var buf bytes.Buffer
-		err := runCLI(context.Background(), []string{"get", "--session", "sess-123", "--step", "0", "--json", "--url", server.URL}, &buf)
-		if err == nil || !strings.Contains(err.Error(), "simulated json marshal indent error") {
-			t.Fatalf("expected marshal error in get json, got %v", err)
-		}
-	})
 }
 
 func TestClient_GetJSON(t *testing.T) {
@@ -1031,34 +832,16 @@ func TestClient_GetJSON(t *testing.T) {
 			body:     `{"message":"ok"}`,
 			wantAuth: "Bearer secret-agent-token",
 		},
-		{
-			name:      "skips auth when token file is missing",
-			tokenPath: "/nonexistent/path/to/token",
-			status:    http.StatusOK,
-			body:      `{"message":"ok"}`,
-			wantAuth:  "",
-		},
-		{
-			name:     "skips auth when token file is empty",
-			token:    "   \n  \t  ",
-			status:   http.StatusOK,
-			body:     `{"message":"ok"}`,
-			wantAuth: "",
-		},
+		{name: "skips auth when token file is missing", tokenPath: "/nonexistent/path/to/token", status: http.StatusOK, body: `{"message":"ok"}`},
+		{name: "skips auth when token file is empty", token: "   \n  \t  ", status: http.StatusOK, body: `{"message":"ok"}`},
 		{
 			name:       "returns error on http 403 status",
 			token:      "invalid-token",
 			status:     http.StatusForbidden,
 			body:       "forbidden",
-			wantAuth:   "Bearer invalid-token",
 			wantErrSub: "HTTP 403: forbidden",
 		},
-		{
-			name:       "returns error on invalid json",
-			status:     http.StatusOK,
-			body:       "{invalid-json",
-			wantErrSub: "failed unmarshaling response",
-		},
+		{name: "returns error on invalid json", status: http.StatusOK, body: "{invalid-json", wantErrSub: "failed unmarshaling response"},
 	}
 
 	for _, tc := range tests {
@@ -1105,6 +888,78 @@ func TestClient_GetJSON(t *testing.T) {
 			}
 			if resp.Message != "ok" {
 				t.Errorf("expected response message 'ok', got %q", resp.Message)
+			}
+		})
+	}
+}
+
+func writeTestToken(t *testing.T, path string) {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatalf("mkdir %s: %v", path, err)
+	}
+	if err := os.WriteFile(path, []byte("tok"), 0o600); err != nil {
+		t.Fatalf("write %s: %v", path, err)
+	}
+}
+
+func TestResolveSATokenPath(t *testing.T) {
+	tests := []struct {
+		name         string
+		envTokenPath string
+		hasDefault   bool
+		hasHome      bool
+		wantHome     bool
+		wantExact    string
+	}{
+		{
+			name:         "returns explicit AERIAL_SA_TOKEN_PATH when set",
+			envTokenPath: "/custom/sa/token",
+			wantExact:    "/custom/sa/token",
+		},
+		{
+			name:       "prefers readable default path when both default and home token exist",
+			hasDefault: true,
+			hasHome:    true,
+		},
+		{
+			name:     "falls back to HOME turn_env sa-token when default unreadable",
+			hasHome:  true,
+			wantHome: true,
+		},
+		{
+			name: "falls back to defaultSATokenPath when neither readable",
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			origDefault := defaultSATokenPath
+			defer func() { defaultSATokenPath = origDefault }()
+
+			t.Setenv("AERIAL_SA_TOKEN_PATH", tc.envTokenPath)
+			homeDir := t.TempDir()
+			t.Setenv("HOME", homeDir)
+
+			defaultSATokenPath = filepath.Join(t.TempDir(), "default-token")
+			if tc.hasDefault {
+				writeTestToken(t, defaultSATokenPath)
+			}
+
+			homeTokPath := filepath.Join(homeDir, ".gemini", "turn_env", "sa-token")
+			if tc.hasHome {
+				writeTestToken(t, homeTokPath)
+			}
+
+			got := resolveSATokenPath()
+			want := defaultSATokenPath
+			switch {
+			case tc.wantExact != "":
+				want = tc.wantExact
+			case tc.wantHome:
+				want = homeTokPath
+			}
+			if got != want {
+				t.Errorf("resolveSATokenPath() = %q, want %q", got, want)
 			}
 		})
 	}

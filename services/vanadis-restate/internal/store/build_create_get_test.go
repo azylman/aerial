@@ -2,362 +2,97 @@ package store
 
 import (
 	"context"
-	"database/sql"
-	"encoding/json"
 	"errors"
-	"fmt"
-	"reflect"
-	"strings"
+	"slices"
 	"testing"
 	"time"
 
-	"github.com/jackc/pgx/v5"
-	"github.com/jackc/pgx/v5/pgconn"
+	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/azylman/aerial/services/vanadis-restate/internal/model"
 )
 
-type (
-	bareStore struct{ store *Store }
-	dbScript  struct {
-		bare                        *bareStore
-		routes                      []sqlRoute
-		row, buildRow, countRow     pgx.Row
-		chunks                      []model.VanadisChunk
-		builds                      []model.VanadisBuild
-		beginErr, queryErr, scanErr error
-		rowsErr, execErr, commitErr error
-		rollbackErr                 error
-		failExec, execTag           string
-	}
-)
+// cgSkipBuildInsertSQL makes every build INSERT affect zero rows without a
+// stored row, as an ON CONFLICT race whose winner vanished would.
+const cgSkipBuildInsertSQL = `CREATE FUNCTION pgtest_skip() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RETURN NULL; END $$;
+CREATE TRIGGER pgtest_skip BEFORE INSERT ON vanadis_builds FOR EACH ROW EXECUTE FUNCTION pgtest_skip();`
 
-type sqlRoute struct {
-	match string
-	row   pgx.Row
-}
+// cgIndexSquatterSQL inserts a chunk at index 0 of every new build inside
+// the creating transaction, so the request's first chunk hits
+// uq_vanadis_chunks_build_index.
+const cgIndexSquatterSQL = `CREATE FUNCTION pgtest_squat() RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+	INSERT INTO vanadis_chunks (id, build_id, chunk_index, mode, repo, title, instructions) VALUES ('squatter', NEW.id, 0, 'pr', 'aerial', 'S', 'S');
+	RETURN NULL;
+END $$;
+CREATE TRIGGER pgtest_squat AFTER INSERT ON vanadis_builds FOR EACH ROW EXECUTE FUNCTION pgtest_squat();`
 
-func (s dbScript) resolveQueryRow(query string, args []any, candidates *[]string) pgx.Row {
-	for _, arg := range args {
-		if cands, ok := arg.([]string); ok {
-			*candidates = cands
-			break
-		}
-	}
-	if strings.Contains(query, "RETURNING ci_fail_count") {
-		for _, r := range s.routes {
-			if strings.Contains(query, r.match) {
-				return r.row
-			}
-		}
-		if s.row != nil {
-			return s.row
-		}
-		if s.execTag == "UPDATE 0" {
-			return errRow(pgx.ErrNoRows)
-		}
-		return valuesRow(1)
-	}
-	for _, r := range s.routes {
-		if strings.Contains(query, r.match) {
-			return r.row
-		}
-	}
-	if strings.Contains(query, "COALESCE(pr_number, 0), stall_nudges FROM vanadis_chunks") && len(s.chunks) > 0 && !isActionRow(s.row) {
-		c := s.chunks[0]
-		return valuesRow(c.ID, c.BuildID, c.ChunkIndex, c.Mode, c.Title, c.Status, c.PRNumber, c.StallNudges)
-	}
-	if strings.HasPrefix(query, "SELECT id FROM vanadis_builds WHERE id = (SELECT build_id") {
-		return valuesRow("b1")
-	}
-	if s.countRow != nil && strings.Contains(query, "COUNT(*)") {
-		return s.countRow
-	}
-	if s.buildRow != nil && strings.Contains(query, "FROM vanadis_builds") {
-		return s.buildRow
-	}
-	return s.row
-}
+// cgUnknownUniqueSQL adds a unique index build creation does not own.
+const cgUnknownUniqueSQL = `CREATE UNIQUE INDEX pgtest_unknown_unique ON vanadis_chunks (title);`
 
-func (s dbScript) open() (*Store, *[]string) {
-	candidates := new([]string)
-	if s.bare != nil {
-		return s.bare.store, candidates
-	}
-	tag := FirstNonEmpty(s.execTag, "UPDATE 1")
-	queryRow := func(_ context.Context, query string, args ...any) pgx.Row {
-		return s.resolveQueryRow(query, args, candidates)
-	}
-	query := func(context.Context, string, ...any) (pgx.Rows, error) {
-		if s.queryErr != nil {
-			return nil, s.queryErr
-		}
-		return &mockRows{items: s.chunks, builds: s.builds, scanErr: s.scanErr, rowsErr: s.rowsErr}, nil
-	}
-	exec := func(_ context.Context, query string, _ ...any) (pgconn.CommandTag, error) {
-		if s.execErr != nil && strings.Contains(query, s.failExec) {
-			return pgconn.CommandTag{}, s.execErr
-		}
-		return pgconn.NewCommandTag(tag), nil
-	}
-	tx := &mockTx{commitErr: s.commitErr, rollbackErr: s.rollbackErr, queryRowFn: queryRow, queryFn: query, execFn: exec}
-	return New(mockDB{
-		queryRowFn: queryRow,
-		queryFn:    query,
-		execFn:     exec,
-		beginFn: func(context.Context) (pgx.Tx, error) {
-			if s.beginErr != nil {
-				return nil, s.beginErr
-			}
-			return tx, nil
-		},
-	}), candidates
-}
+// cgDeadlockSQL makes chunk inserts fail with a non-unique SQLSTATE that
+// still names a creation-owned constraint.
+const cgDeadlockSQL = `CREATE FUNCTION pgtest_deadlock() RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+	RAISE EXCEPTION 'deadlock detected' USING ERRCODE = '40P01', CONSTRAINT = 'vanadis_chunks_pkey';
+END $$;
+CREATE TRIGGER pgtest_deadlock BEFORE INSERT ON vanadis_chunks FOR EACH ROW EXECUTE FUNCTION pgtest_deadlock();`
 
-func isActionRow(row pgx.Row) bool { _, ok := row.(*genericMockRow); return ok }
+// cgBreakChunkPrepareSQL renames a selected chunk column so chunk reads fail
+// to prepare while build reads keep working.
+const cgBreakChunkPrepareSQL = `ALTER TABLE vanadis_chunks RENAME COLUMN banner TO banner_gone;`
 
-func errRow(err error) *mockRow { return &mockRow{err: err} }
-func assertStoreErr(t *testing.T, err, wantErrIs error, wantErr bool) bool {
+// cgBreakBuildPrepareSQL renames a selected build column so build reads fail.
+const cgBreakBuildPrepareSQL = `ALTER TABLE vanadis_builds RENAME COLUMN quiet TO quiet_gone;`
+
+// cgOtherBuild owns rows that collide with the build under test.
+var cgOtherBuild = model.VanadisBuild{ID: "b0", ThreadID: "th0"}
+
+// cgStore opens a private database unless the row asks for a nil receiver or
+// a Store without a database.
+func cgStore(t *testing.T, nilReceiver, nilDB bool) (*Store, *pgxpool.Pool) {
 	t.Helper()
+	st, pool := openStore(t)
 	switch {
-	case wantErrIs != nil:
-		if !errors.Is(err, wantErrIs) {
-			t.Fatalf("err = %v, want %v", err, wantErrIs)
+	case nilReceiver:
+		return nil, pool
+	case nilDB:
+		return &Store{}, pool
+	}
+	return st, pool
+}
+
+// cgStoredChunkIDs lists the chunk IDs stored for buildID in index order;
+// a missing build yields nil.
+func cgStoredChunkIDs(t *testing.T, pool *pgxpool.Pool, buildID string) []string {
+	t.Helper()
+	rows, err := pool.Query(context.Background(), `SELECT id FROM vanadis_chunks WHERE build_id = $1 ORDER BY chunk_index`, buildID)
+	if err != nil {
+		t.Fatalf("list chunks: %v", err)
+	}
+	defer rows.Close()
+	var ids []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			t.Fatalf("scan chunk id: %v", err)
 		}
-		return true
-	case wantErr:
-		if err == nil {
-			t.Fatal("expected error, got nil")
-		}
-		return true
-	case err != nil:
-		t.Fatalf("unexpected error: %v", err)
+		ids = append(ids, id)
 	}
-	return false
+	if err := rows.Err(); err != nil {
+		t.Fatalf("iterate chunk ids: %v", err)
+	}
+	return ids
 }
 
-type genericMockRow struct {
-	scanFn func(dest ...any) error
-}
-
-func valuesRow(vals ...any) *genericMockRow {
-	return &genericMockRow{scanFn: func(dest ...any) error { return scanValues(dest, vals...) }}
-}
-
-func scanValues(dest []any, vals ...any) error {
-	if len(vals) > len(dest) {
-		return fmt.Errorf("scan: %d values for %d destinations", len(vals), len(dest))
+// cgBuildExists reports whether a build row with id is stored.
+func cgBuildExists(t *testing.T, pool *pgxpool.Pool, id string) bool {
+	t.Helper()
+	var exists bool
+	if err := pool.QueryRow(context.Background(), `SELECT EXISTS (SELECT 1 FROM vanadis_builds WHERE id = $1)`, id).Scan(&exists); err != nil {
+		t.Fatalf("check build: %v", err)
 	}
-	for i, v := range vals {
-		if v == nil {
-			continue
-		}
-		ptr, val := reflect.ValueOf(dest[i]), reflect.ValueOf(v)
-		if ptr.Kind() != reflect.Pointer || ptr.IsNil() || ptr.Elem().Type() != val.Type() {
-			return fmt.Errorf("scan column %d: destination %T cannot hold %T", i, dest[i], v)
-		}
-		ptr.Elem().Set(val)
-	}
-	return nil
-}
-
-func (r *genericMockRow) Scan(dest ...any) error {
-	if r.scanFn != nil {
-		return r.scanFn(dest...)
-	}
-	return nil
-}
-
-type mockRow struct {
-	b   *model.VanadisBuild
-	err error
-}
-
-func fillBuildDest(b model.VanadisBuild, dest []any) error {
-	if len(dest) == 7 {
-		return scanValues(dest, b.ID, b.ThreadID, b.Tier, b.Title, b.Objective, b.Status, b.StatusMessageID)
-	}
-	if len(dest) != 12 {
-		return fmt.Errorf("scan build: %d destinations, want 12", len(dest))
-	}
-	agent := b.Agent
-	if agent == "" {
-		agent = "aerial"
-	}
-	return scanValues(dest, b.ID, agent, b.ThreadID, b.Tier, b.Title, b.Objective, b.SharedContext, b.Status, b.StatusMessageID, b.Quiet, b.CreatedAt, b.UpdatedAt)
-}
-
-func (r *mockRow) Scan(dest ...any) error {
-	if r.err != nil {
-		return r.err
-	}
-	if len(dest) == 1 && r.b != nil {
-		return scanValues(dest, r.b.Status)
-	}
-	if r.b != nil {
-		return fillBuildDest(*r.b, dest)
-	}
-	return nil
-}
-
-type mockRows struct {
-	pgx.Rows
-
-	items            []model.VanadisChunk
-	builds           []model.VanadisBuild
-	idx              int
-	scanErr, rowsErr error
-}
-
-func (*mockRows) Close()       {}
-func (r *mockRows) Err() error { return r.rowsErr }
-func (r *mockRows) Next() bool {
-	if len(r.builds) > 0 && len(r.items) == 0 {
-		r.idx++
-		return r.idx <= len(r.builds)
-	}
-	if r.idx < len(r.items) {
-		r.idx++
-		return true
-	}
-	return false
-}
-
-func (r *mockRows) scan12(dest []any) error {
-	if len(r.builds) > 0 && r.idx > 0 && r.idx <= len(r.builds) {
-		return fillBuildDest(r.builds[r.idx-1], dest)
-	}
-	if len(r.items) > 0 && r.idx > 0 && r.idx <= len(r.items) {
-		c := r.items[r.idx-1]
-		b := model.VanadisBuild{ID: c.BuildID, Title: c.Title}
-		return fillBuildDest(b, dest)
-	}
-	return nil
-}
-
-func (r *mockRows) scan10(dest []any) error {
-	if len(r.items) > 0 && r.idx > 0 && r.idx <= len(r.items) {
-		c := r.items[r.idx-1]
-		return scanValues(dest, c.ID, c.ChunkIndex, c.Mode, c.Repo, c.Title, c.Status, c.PRNumber, c.StartedAt, c.CompletedAt, c.UpdatedAt)
-	}
-	return nil
-}
-
-func (r *mockRows) scan18(dest []any) error {
-	if len(r.items) > 0 && r.idx > 0 && r.idx <= len(r.items) {
-		c := r.items[r.idx-1]
-		return scanValues(dest, c.ID, c.BuildID, c.ChunkIndex, c.Mode, c.Repo, c.Title, c.Instructions, c.TargetFiles, c.TargetSymbols, c.Effort, c.AcceptanceCriteria, c.Status, c.PRNumber, c.StallNudges, sql.NullTime{Time: c.StartedAt, Valid: !c.StartedAt.IsZero()}, sql.NullTime{Time: c.CompletedAt, Valid: !c.CompletedAt.IsZero()}, c.CreatedAt, c.UpdatedAt)
-	}
-	return nil
-}
-
-func (r *mockRows) scan25(dest []any) error {
-	if len(r.items) > 0 && r.idx > 0 && r.idx <= len(r.items) {
-		c := r.items[r.idx-1]
-		rawCIChecks := recoveryFixtureChecks(c)
-		rawRolloutState := []byte(`{"expected_jobs":["eri"]}`)
-		return scanValues(dest, c.ID, c.BuildID, c.ChunkIndex, c.Mode, c.Repo, c.Title, c.Instructions, c.TargetFiles, c.TargetSymbols, c.Effort, c.AcceptanceCriteria, c.Status, c.PRNumber, c.StallNudges, c.DependsOn, c.CIFailCount, rawCIChecks, rawRolloutState, c.Banner, c.MergeAwakeableID, c.DeployAwakeableID, sql.NullTime{Time: c.StartedAt, Valid: !c.StartedAt.IsZero()}, sql.NullTime{Time: c.CompletedAt, Valid: !c.CompletedAt.IsZero()}, c.CreatedAt, c.UpdatedAt)
-	}
-	return scanValues(dest, "c1", "b1", 0, "pr", "aerial", "c1", "inst", []string{}, []string{}, "medium", []string{}, "pending", 0, 0, []string{}, 0, []byte("{}"), []byte("{}"), "", "", "", sql.NullTime{}, sql.NullTime{}, time.Now(), time.Now())
-}
-
-func (r *mockRows) Scan(dest ...any) error {
-	if r.scanErr != nil {
-		return r.scanErr
-	}
-	switch len(dest) {
-	case 2:
-		if len(r.items) > 0 && r.idx > 0 && r.idx <= len(r.items) {
-			return scanValues(dest, r.items[r.idx-1].BuildID, r.items[r.idx-1].ID)
-		}
-		return nil
-	case 12:
-		return r.scan12(dest)
-	case 10:
-		return r.scan10(dest)
-	case 18:
-		return r.scan18(dest)
-	case 25:
-		return r.scan25(dest)
-	default:
-		return nil
-	}
-}
-
-type mockTx struct {
-	pgx.Tx
-
-	execFn                 func(ctx context.Context, sql string, arguments ...any) (pgconn.CommandTag, error)
-	queryFn                func(ctx context.Context, sql string, args ...any) (pgx.Rows, error)
-	queryRowFn             func(ctx context.Context, sql string, args ...any) pgx.Row
-	commitErr, rollbackErr error
-}
-
-func (t *mockTx) Exec(ctx context.Context, query string, args ...any) (pgconn.CommandTag, error) {
-	if t.execFn != nil {
-		return t.execFn(ctx, query, args...)
-	}
-	return pgconn.NewCommandTag("INSERT 0 1"), nil
-}
-
-func (t *mockTx) Query(ctx context.Context, query string, args ...any) (pgx.Rows, error) {
-	if t.queryFn != nil {
-		return t.queryFn(ctx, query, args...)
-	}
-	return &mockRows{}, nil
-}
-
-func (t *mockTx) QueryRow(ctx context.Context, query string, args ...any) pgx.Row {
-	if t.queryRowFn != nil {
-		return t.queryRowFn(ctx, query, args...)
-	}
-	return &mockRow{}
-}
-func (t *mockTx) Commit(_ context.Context) error   { return t.commitErr }
-func (t *mockTx) Rollback(_ context.Context) error { return t.rollbackErr }
-
-type mockDB struct {
-	execFn     func(ctx context.Context, sql string, args ...any) (pgconn.CommandTag, error)
-	queryFn    func(ctx context.Context, sql string, args ...any) (pgx.Rows, error)
-	queryRowFn func(ctx context.Context, sql string, args ...any) pgx.Row
-	beginFn    func(ctx context.Context) (pgx.Tx, error)
-}
-
-func (db mockDB) Exec(ctx context.Context, s string, a ...any) (pgconn.CommandTag, error) {
-	if db.execFn != nil {
-		return db.execFn(ctx, s, a...)
-	}
-	return pgconn.NewCommandTag("UPDATE 1"), nil
-}
-
-func (db mockDB) Query(ctx context.Context, s string, a ...any) (pgx.Rows, error) {
-	if db.queryFn != nil {
-		return db.queryFn(ctx, s, a...)
-	}
-	return &mockRows{}, nil
-}
-
-func (db mockDB) QueryRow(ctx context.Context, s string, a ...any) pgx.Row {
-	if db.queryRowFn != nil {
-		return db.queryRowFn(ctx, s, a...)
-	}
-	return &mockRow{}
-}
-
-func (db mockDB) Begin(ctx context.Context) (pgx.Tx, error) {
-	if db.beginFn != nil {
-		return db.beginFn(ctx)
-	}
-	return &mockTx{}, nil
-}
-
-func recoveryFixtureChecks(c model.VanadisChunk) []byte {
-	if c.HeadSHA == "" && c.MergeSHA == "" {
-		return []byte(`{"lint":"passed"}`)
-	}
-	checks := map[string]string{"_head_sha": c.HeadSHA, "_merge_sha": c.MergeSHA}
-	raw, _ := json.Marshal(checks)
-	return raw
+	return exists
 }
 
 func TestPostgresVanadisStore_BuildCRUD(t *testing.T) {
@@ -366,67 +101,204 @@ func TestPostgresVanadisStore_BuildCRUD(t *testing.T) {
 	c1 := []model.VanadisChunk{{ID: "c1", BuildID: "b1", Repo: "aerial", Title: "Chunk 1", Instructions: "Inst 1", DependsOn: []string{}}}
 
 	tests := []struct {
-		name      string
-		db        dbScript
-		wantErr   bool
-		wantErrIs error
+		name        string
+		nilReceiver bool
+		nilDB       bool
+		closed      bool
+		build       model.VanadisBuild
+		// chunks replaces the c1 request chunks when set.
+		chunks []model.VanadisChunk
+		// precreate commits b1/c1 through CreateBuild before setup runs.
+		precreate bool
+		// collide seeds b0 with chunk c1 so the request's chunk ID collides.
+		collide       bool
+		setup         string
+		wantErr       bool
+		wantErrIs     error
+		wantObjective string
+		wantChunks    []string
 	}{
-		{name: "create build success", db: dbScript{}},
-		{name: "replay build read failure", db: dbScript{execTag: "INSERT 0 0", buildRow: errRow(errors.New("read failed"))}, wantErr: true},
-		{name: "replay chunks read failure", db: dbScript{execTag: "INSERT 0 0", buildRow: &mockRow{b: &b1}, queryErr: errors.New("read failed")}, wantErr: true},
-		{name: "replay chunks scan failure", db: dbScript{execTag: "INSERT 0 0", buildRow: &mockRow{b: &b1}, chunks: c1, scanErr: errors.New("scan failed")}, wantErr: true},
-		{name: "identical committed replay", db: dbScript{execTag: "INSERT 0 0", buildRow: &mockRow{b: &b1}, chunks: c1}},
-		{name: "evolved committed replay", db: dbScript{execTag: "INSERT 0 0", buildRow: &mockRow{b: &model.VanadisBuild{ID: "b1", ThreadID: "th1", Title: "Build 1", Objective: "Obj 1", Status: "running", StatusMessageID: "widget"}}, chunks: c1}},
-		{name: "different objective replay", db: dbScript{execTag: "INSERT 0 0", buildRow: &mockRow{b: &model.VanadisBuild{ID: "b1", ThreadID: "th1", Title: "Build 1", Objective: "different"}}, chunks: c1}, wantErrIs: ErrBuildConflict},
-		{name: "partial replay", db: dbScript{execTag: "INSERT 0 0", buildRow: &mockRow{b: &b1}, chunks: nil}, wantErrIs: ErrBuildConflict},
-		{name: "different chunk replay", db: dbScript{execTag: "INSERT 0 0", buildRow: &mockRow{b: &b1}, chunks: []model.VanadisChunk{{ID: "c1", BuildID: "b1", Repo: "aerial", Title: "changed", DependsOn: []string{}}}}, wantErrIs: ErrBuildConflict},
-		{name: "chunk id conflict", db: dbScript{failExec: "INSERT INTO vanadis_chunks", execErr: fmt.Errorf("wrapped: %w", &pgconn.PgError{Code: "23505", ConstraintName: "vanadis_chunks_pkey", Detail: "private"})}, wantErrIs: ErrBuildConflict},
-		{name: "chunk index conflict", db: dbScript{failExec: "INSERT INTO vanadis_chunks", execErr: fmt.Errorf("wrapped: %w", &pgconn.PgError{Code: "23505", ConstraintName: "uq_vanadis_chunks_build_index", Detail: "private"})}, wantErrIs: ErrBuildConflict},
-		{name: "unknown unique", db: dbScript{failExec: "INSERT INTO vanadis_chunks", execErr: fmt.Errorf("wrapped: %w", &pgconn.PgError{Code: "23505", ConstraintName: "foreign_constraint", Detail: "private"})}, wantErr: true},
-		{name: "deadlock", db: dbScript{failExec: "INSERT INTO vanadis_chunks", execErr: fmt.Errorf("wrapped: %w", &pgconn.PgError{Code: "40P01", ConstraintName: "vanadis_chunks_pkey", Detail: "private"})}, wantErr: true},
-		{name: "create build begin error", db: dbScript{beginErr: errors.New("begin error")}, wantErr: true},
-		{name: "create build exec build error", db: dbScript{failExec: "INSERT INTO vanadis_builds", execErr: errors.New("exec build error")}, wantErr: true},
-		{name: "create build exec chunk error", db: dbScript{failExec: "INSERT INTO vanadis_chunks", execErr: errors.New("exec chunk error")}, wantErr: true},
+		{name: "create build success", build: b1, wantObjective: "Obj 1", wantChunks: []string{"c1"}},
+		{name: "nil receiver", nilReceiver: true, build: b1, wantErr: true},
+		{name: "nil db", nilDB: true, build: b1, wantErr: true},
+		{name: "invalid input", build: model.VanadisBuild{ID: "b1", Objective: "Obj 1"}, wantErr: true},
+		{name: "invalid dag", build: b1, chunks: []model.VanadisChunk{{ID: "c1", Repo: "aerial", Title: "Chunk 1", Instructions: "Inst 1", DependsOn: []string{"c2"}}, {ID: "c2", Repo: "aerial", Title: "Chunk 2", Instructions: "Inst 2", DependsOn: []string{"c1"}}}, wantErr: true},
+		{name: "replay build read failure", build: b1, setup: cgSkipBuildInsertSQL, wantErr: true},
+		{name: "replay chunks read failure", build: b1, precreate: true, setup: cgBreakChunkPrepareSQL, wantErr: true},
+		{name: "replay chunks scan failure", build: b1, precreate: true, setup: breakChunkScanSQL, wantErr: true},
+		{name: "identical committed replay", build: b1, precreate: true, wantObjective: "Obj 1", wantChunks: []string{"c1"}},
+		{
+			name: "evolved committed replay", build: b1, precreate: true, setup: `UPDATE vanadis_builds SET status = 'running', status_message_id = 'widget'`,
+			wantObjective: "Obj 1", wantChunks: []string{"c1"},
+		},
+		{name: "different objective replay", build: b1, precreate: true, setup: `UPDATE vanadis_builds SET objective = 'different'`, wantErrIs: ErrBuildConflict},
+		{name: "partial replay", build: b1, precreate: true, setup: `DELETE FROM vanadis_chunks`, wantErrIs: ErrBuildConflict},
+		{name: "different chunk replay", build: b1, precreate: true, setup: `UPDATE vanadis_chunks SET title = 'changed'`, wantErrIs: ErrBuildConflict},
+		{name: "chunk id conflict", build: b1, collide: true, wantErrIs: ErrBuildConflict},
+		{name: "chunk index conflict", build: b1, setup: cgIndexSquatterSQL, wantErrIs: ErrBuildConflict},
+		{name: "unknown unique", build: b1, setup: cgUnknownUniqueSQL + ` INSERT INTO vanadis_builds (id, thread_id, objective) VALUES ('b0', 'th0', 'O'); INSERT INTO vanadis_chunks (id, build_id, chunk_index, repo, title, instructions) VALUES ('c0', 'b0', 0, 'aerial', 'Chunk 1', 'I');`, wantErr: true},
+		{name: "deadlock", build: b1, setup: cgDeadlockSQL, wantErr: true},
+		{name: "create build begin error", build: b1, closed: true, wantErr: true},
+		{name: "create build exec build error", build: b1, setup: failStatement("vanadis_builds", "INSERT"), wantErr: true},
+		{name: "create build exec chunk error", build: b1, setup: failStatement("vanadis_chunks", "INSERT"), wantErr: true},
+		{name: "create build commit error", build: b1, setup: failCommit("vanadis_builds", "INSERT"), wantErr: true},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			st, _ := tc.db.open()
-			err := st.CreateBuild(context.Background(), b1, c1)
-			assertStoreErr(t, err, tc.wantErrIs, tc.wantErr)
+			st, pool := cgStore(t, tc.nilReceiver, tc.nilDB)
+			cgArrange(t, st, pool, b1, c1, tc.precreate, tc.collide, tc.setup, tc.closed)
+			chunks := c1
+			if tc.chunks != nil {
+				chunks = tc.chunks
+			}
+			err := st.CreateBuild(context.Background(), tc.build, chunks)
+			if assertStoreErr(t, err, tc.wantErrIs, tc.wantErr) {
+				cgAssertCreateFailure(t, pool, err, tc.wantErrIs == nil, !tc.precreate && !tc.closed)
+				return
+			}
+			if got := loadBuild(t, pool, "b1"); got.Objective != tc.wantObjective || got.Title != "Build 1" || got.ThreadID != "th1" {
+				t.Errorf("stored build = %+v, want objective %q title Build 1 thread th1", got, tc.wantObjective)
+			}
+			if got := cgStoredChunkIDs(t, pool, "b1"); !slices.Equal(got, tc.wantChunks) {
+				t.Errorf("stored chunks = %v, want %v", got, tc.wantChunks)
+			}
+		})
+	}
+}
+
+// cgArrange prepares a BuildCRUD row's database: an optional committed
+// b1/c1, a colliding chunk c1 in b0, setup SQL, and an optionally closed pool.
+func cgArrange(t *testing.T, st *Store, pool *pgxpool.Pool, b model.VanadisBuild, chunks []model.VanadisChunk, precreate, collide bool, setup string, closed bool) {
+	t.Helper()
+	if precreate {
+		if err := st.CreateBuild(context.Background(), b, chunks); err != nil {
+			t.Fatalf("precreate: %v", err)
+		}
+	}
+	if collide {
+		seed(t, pool, []model.VanadisBuild{cgOtherBuild}, []model.VanadisChunk{{ID: "c1", BuildID: "b0"}})
+	}
+	mustExec(t, pool, setup)
+	if closed {
+		pool.Close()
+	}
+}
+
+// cgAssertCreateFailure checks a failed CreateBuild: a plain failure must not
+// be classified as a conflict, and a rolled-back creation leaves no b1.
+func cgAssertCreateFailure(t *testing.T, pool *pgxpool.Pool, err error, wantPlain, wantRolledBack bool) {
+	t.Helper()
+	if wantPlain && errors.Is(err, ErrBuildConflict) {
+		t.Errorf("err = %v, want a non-conflict failure", err)
+	}
+	if wantRolledBack && cgBuildExists(t, pool, "b1") {
+		t.Error("failed creation left build b1 stored, want rolled back")
+	}
+}
+
+// TestPostgresVanadisStore_CreateBuildConflictAtomicity pins rollback on a
+// chunk unique conflict: the build insert never becomes durable.
+func TestPostgresVanadisStore_CreateBuildConflictAtomicity(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name    string
+		collide bool
+		setup   string
+	}{
+		{name: "chunk ID", collide: true},
+		{name: "chunk index", setup: cgIndexSquatterSQL},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			st, pool := openStore(t)
+			if tc.collide {
+				seed(t, pool, []model.VanadisBuild{cgOtherBuild}, []model.VanadisChunk{{ID: "c1", BuildID: "b0"}})
+			}
+			mustExec(t, pool, tc.setup)
+			err := st.CreateBuild(context.Background(), model.VanadisBuild{ID: "b1", ThreadID: "th1", Objective: "Obj"}, []model.VanadisChunk{{ID: "c1", Title: "Chunk", Instructions: "Work", Repo: "aerial", DependsOn: []string{}}})
+			assertStoreErr(t, err, ErrBuildConflict, false)
+			if cgBuildExists(t, pool, "b1") {
+				t.Fatal("build b1 is durable after the chunk conflict, want rolled back")
+			}
+			if got := cgStoredChunkIDs(t, pool, "b1"); got != nil {
+				t.Fatalf("chunks for b1 = %v, want none", got)
+			}
 		})
 	}
 }
 
 func TestPostgresVanadisStore_GetBuild(t *testing.T) {
 	t.Parallel()
+	stamp := time.Date(2026, 5, 1, 12, 0, 0, 0, time.UTC)
 	b1 := model.VanadisBuild{ID: "b1", ThreadID: "th1", Title: "Build 1"}
+	full := model.VanadisChunk{
+		ID: "c1", BuildID: "b1", Title: "C1", Status: "running", Mode: "pr", Repo: "aerial",
+		StartedAt: stamp, CompletedAt: stamp,
+		TargetFiles: []string{"f.go"}, TargetSymbols: []string{"S"}, AcceptanceCriteria: []string{"AC"},
+		DependsOn: []string{"dep"}, Effort: "medium",
+	}
+	boom := model.VanadisChunk{ID: "c1", BuildID: "b1", Banner: "boom"}
 	tests := []struct {
-		name      string
-		buildID   string
-		db        dbScript
-		wantErr   bool
-		wantErrIs error
+		name        string
+		nilReceiver bool
+		buildID     string
+		builds      []model.VanadisBuild
+		chunks      []model.VanadisChunk
+		sabotage    string
+		wantErr     bool
+		wantErrIs   error
+		wantChunk   model.VanadisChunk
 	}{
-		{name: "get build not found", buildID: "b1", db: dbScript{row: errRow(pgx.ErrNoRows)}, wantErrIs: ErrBuildNotFound},
-		{name: "get build query error", buildID: "b1", db: dbScript{row: errRow(errors.New("db error"))}, wantErr: true},
-		{name: "get build chunks query error", buildID: "b1", db: dbScript{row: &mockRow{b: &b1}, queryErr: errors.New("chunks err")}, wantErr: true},
-		{name: "get build success", buildID: "b1", db: dbScript{
-			row: &mockRow{b: &b1},
-			chunks: []model.VanadisChunk{{
+		{name: "nil receiver", nilReceiver: true, buildID: "b1", wantErr: true},
+		{name: "empty id", buildID: "  ", wantErr: true},
+		{name: "get build not found", buildID: "b1", wantErrIs: ErrBuildNotFound},
+		{name: "get build query error", buildID: "b1", builds: []model.VanadisBuild{b1}, sabotage: cgBreakBuildPrepareSQL, wantErr: true},
+		{name: "get build chunks query error", buildID: "b1", builds: []model.VanadisBuild{b1}, sabotage: cgBreakChunkPrepareSQL, wantErr: true},
+		{name: "get build chunks scan error", buildID: "b1", builds: []model.VanadisBuild{b1}, chunks: []model.VanadisChunk{full}, sabotage: breakChunkScanSQL, wantErr: true},
+		{name: "get build chunks rows error", buildID: "b1", builds: []model.VanadisBuild{b1}, chunks: []model.VanadisChunk{boom}, sabotage: failChunkRowsSQL, wantErr: true},
+		{
+			name: "get build success", buildID: " b1 ", builds: []model.VanadisBuild{b1}, chunks: []model.VanadisChunk{full},
+			wantChunk: model.VanadisChunk{
 				ID: "c1", BuildID: "b1", Title: "C1", Status: "running", Mode: "pr", Repo: "aerial",
-				StartedAt: time.Now(), CompletedAt: time.Now(),
+				StartedAt: stamp, CompletedAt: stamp,
 				TargetFiles: []string{"f.go"}, TargetSymbols: []string{"S"}, AcceptanceCriteria: []string{"AC"},
 				DependsOn: []string{"dep"}, Effort: "medium",
-			}},
-		}},
+			},
+		},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			st, _ := tc.db.open()
-			_, _, err := st.GetBuild(context.Background(), tc.buildID)
-			assertStoreErr(t, err, tc.wantErrIs, tc.wantErr)
+			st, pool := cgStore(t, tc.nilReceiver, false)
+			seed(t, pool, tc.builds, tc.chunks)
+			mustExec(t, pool, tc.sabotage)
+			b, chunks, err := st.GetBuild(context.Background(), tc.buildID)
+			if assertStoreErr(t, err, tc.wantErrIs, tc.wantErr) {
+				return
+			}
+			if b.ID != "b1" || b.ThreadID != "th1" || b.Title != "Build 1" || b.Status != "running" || b.Agent != "aerial" {
+				t.Errorf("GetBuild build = %+v", b)
+			}
+			if len(chunks) != 1 {
+				t.Fatalf("GetBuild chunks = %+v, want one", chunks)
+			}
+			got := chunks[0]
+			got.StartedAt, got.CompletedAt = got.StartedAt.UTC(), got.CompletedAt.UTC()
+			got.CreatedAt, got.UpdatedAt = time.Time{}, time.Time{}
+			if !cgChunkEqual(got, tc.wantChunk) {
+				t.Errorf("GetBuild chunk = %+v\nwant %+v", got, tc.wantChunk)
+			}
 		})
 	}
+}
+
+// cgChunkEqual compares chunks field by field (slices by value).
+func cgChunkEqual(a, b model.VanadisChunk) bool {
+	return a.ID == b.ID && a.BuildID == b.BuildID && a.ChunkIndex == b.ChunkIndex && a.Mode == b.Mode && a.Repo == b.Repo &&
+		a.Title == b.Title && a.Status == b.Status && a.Effort == b.Effort && a.PRNumber == b.PRNumber &&
+		a.StartedAt.Equal(b.StartedAt) && a.CompletedAt.Equal(b.CompletedAt) &&
+		slices.Equal(a.TargetFiles, b.TargetFiles) && slices.Equal(a.TargetSymbols, b.TargetSymbols) &&
+		slices.Equal(a.AcceptanceCriteria, b.AcceptanceCriteria) && slices.Equal(a.DependsOn, b.DependsOn)
 }

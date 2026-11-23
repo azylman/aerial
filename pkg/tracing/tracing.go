@@ -5,7 +5,7 @@
 // outbound clients with Transport. Span attributes never carry request content: no tool
 // arguments, credentials, URL paths or query strings. Prompt and response text is recorded
 // only when an operator sets capture_content, and then only through ContentAttr, which
-// redacts and caps it.
+// caps it. Secret values are masked by the OpenTelemetry Collector in front of VictoriaTraces.
 package tracing
 
 import (
@@ -34,8 +34,6 @@ import (
 	"go.opentelemetry.io/otel/trace"
 	"go.opentelemetry.io/otel/trace/noop"
 	"gopkg.in/yaml.v3"
-
-	"github.com/azylman/aerial/pkg/sanitizer"
 )
 
 // ScopeName is the instrumentation scope used for spans created by this package.
@@ -66,7 +64,7 @@ type Config struct {
 	SampleRatio float64 `yaml:"sample_ratio"`
 	Agent       string  `yaml:"agent"`
 	Stack       string  `yaml:"stack"`
-	// CaptureContent records redacted, size-capped prompt and response text on agent spans.
+	// CaptureContent records size-capped prompt and response text on agent spans.
 	// Off by default: span content is otherwise limited to names, sizes and usage.
 	CaptureContent bool `yaml:"capture_content"`
 }
@@ -419,7 +417,7 @@ func (t *transport) RoundTrip(r *http.Request) (*http.Response, error) {
 	}
 	resp, err := t.base.RoundTrip(out)
 	if err != nil {
-		span.SetStatus(codes.Error, Redact(transportErrorMessage(err)))
+		span.SetStatus(codes.Error, transportErrorMessage(err))
 		return resp, err
 	}
 	span.SetAttributes(attribute.Int("http.response.status_code", resp.StatusCode))
@@ -435,6 +433,11 @@ func (t *transport) CloseIdleConnections() {
 	if c, ok := t.base.(interface{ CloseIdleConnections() }); ok {
 		c.CloseIdleConnections()
 	}
+}
+
+// Unwrap returns the underlying RoundTripper so callers can inspect or unwrap it.
+func (t *transport) Unwrap() http.RoundTripper {
+	return t.base
 }
 
 func originOnly(u *url.URL) string {
@@ -476,12 +479,6 @@ func MCPRequestAttrs(body []byte) []attribute.KeyValue {
 	return attrs
 }
 
-// Redact masks GitHub PATs, bearer tokens, basic auth credentials and other known secrets
-// before a string becomes a span status or attribute.
-func Redact(s string) string {
-	return sanitizer.SanitizeString(s)
-}
-
 // MaxContentRunes caps the text ContentAttr records, truncation marker included.
 const MaxContentRunes = 16384
 
@@ -491,7 +488,7 @@ const (
 )
 
 // ContentAttr returns key set to text as OpenTelemetry gen_ai message JSON
-// ([{"role":role,"parts":[{"type":"text","content":text}]}]). The text is redacted first, then
+// ([{"role":role,"parts":[{"type":"text","content":text}]}]). The text is
 // capped at MaxContentRunes: user input keeps its tail (prompts put history first and the request
 // last), anything else keeps its head.
 func ContentAttr(key attribute.Key, role, text string) attribute.KeyValue {
@@ -506,7 +503,7 @@ func ContentAttr(key attribute.Key, role, text string) attribute.KeyValue {
 	var buf strings.Builder
 	enc := json.NewEncoder(&buf)
 	enc.SetEscapeHTML(false) // keep Discord mentions like <@123> readable
-	if err := enc.Encode([]message{{Role: role, Parts: []part{{Type: "text", Content: capContent(role, Redact(text))}}}}); err != nil {
+	if err := enc.Encode([]message{{Role: role, Parts: []part{{Type: "text", Content: capContent(role, text)}}}}); err != nil {
 		return key.String("") // unreachable: string-only structs always encode
 	}
 	return key.String(strings.TrimSuffix(buf.String(), "\n"))

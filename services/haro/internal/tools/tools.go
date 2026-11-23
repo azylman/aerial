@@ -11,6 +11,9 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"log"
+	"net/http"
+	"net/url"
 	"regexp"
 	"strconv"
 	"strings"
@@ -21,6 +24,7 @@ import (
 
 	"github.com/google/uuid"
 
+	"github.com/azylman/aerial/pkg/restateingress"
 	"github.com/azylman/aerial/services/haro/internal/config"
 	"github.com/azylman/aerial/services/haro/internal/model"
 	"github.com/azylman/aerial/services/haro/internal/store"
@@ -95,20 +99,15 @@ func ParseRunAtWithTimezone(input string, timezone string, now time.Time) (time.
 	return time.Time{}, fmt.Errorf("unrecognized run_at format %q: expected ISO timestamp (e.g. 2026-08-28T21:00:00Z) or relative duration (e.g. 30m, 2h, 1d)", raw)
 }
 
-// CalculateNextCronRun delegates to the internal/model cron parser so tool
-// callers keep compiling; the logic lives in internal/model/cron.go.
-func CalculateNextCronRun(cronExpr, timezone string, from time.Time) (time.Time, error) {
-	return model.CalculateNextCronRun(cronExpr, timezone, from)
-}
-
 // ToolHandler executes haro MCP tool calls against the schedule store.
 // Fields are exported so the compiler-enforced layering (not yet moved
 // server.go) can construct and read handlers across packages; root
 // package main aliases this struct until the final purge.
 type ToolHandler struct {
-	Cfg      *config.Config
-	DB       *sql.DB
-	Timezone string
+	Cfg        *config.Config
+	DB         *sql.DB
+	Timezone   string
+	httpClient *http.Client
 }
 
 // NewToolHandler builds a ToolHandler over database, propagating the
@@ -120,7 +119,49 @@ func NewToolHandler(cfg *config.Config, database *sql.DB) *ToolHandler {
 	if cfg.VanadisURL != "" {
 		store.SetVanadisURL(cfg.VanadisURL)
 	}
-	return &ToolHandler{Cfg: cfg, DB: database, Timezone: cfg.Timezone}
+	return &ToolHandler{Cfg: cfg, DB: database, Timezone: cfg.Timezone, httpClient: http.DefaultClient}
+}
+
+func (h *ToolHandler) RestateIngressURL() string {
+	if h != nil && h.Cfg != nil {
+		return strings.TrimRight(strings.TrimSpace(h.Cfg.RestateIngressURL), "/")
+	}
+	return ""
+}
+
+func (h *ToolHandler) armSchedule(ctx context.Context, scheduleType, id string) {
+	ingressURL := h.RestateIngressURL()
+	id = strings.TrimSpace(id)
+	if ingressURL == "" || id == "" {
+		return
+	}
+	idempotencyKey := fmt.Sprintf("haro:arm:%s:%s:%d", scheduleType, id, time.Now().UnixNano())
+	endpoint := fmt.Sprintf("%s/HaroSchedule/%s/Arm/send", ingressURL, url.PathEscape(id))
+	payload := map[string]any{model.FieldScheduleType: scheduleType}
+	client := http.DefaultClient
+	if h != nil && h.httpClient != nil {
+		client = h.httpClient
+	}
+	if _, postErr := restateingress.Post(ctx, client, endpoint, idempotencyKey, payload, 0); postErr != nil {
+		log.Printf("[Haro Tools] warning: restate arm schedule %s failed: %v", id, postErr)
+	}
+}
+
+func (h *ToolHandler) cancelSchedule(ctx context.Context, id string) {
+	ingressURL := h.RestateIngressURL()
+	id = strings.TrimSpace(id)
+	if ingressURL == "" || id == "" {
+		return
+	}
+	idempotencyKey := fmt.Sprintf("haro:cancel:%s:%d", id, time.Now().UnixNano())
+	endpoint := fmt.Sprintf("%s/HaroSchedule/%s/Cancel/send", ingressURL, url.PathEscape(id))
+	client := http.DefaultClient
+	if h != nil && h.httpClient != nil {
+		client = h.httpClient
+	}
+	if _, postErr := restateingress.Post(ctx, client, endpoint, idempotencyKey, struct{}{}, 0); postErr != nil {
+		log.Printf("[Haro Tools] warning: restate cancel schedule %s failed: %v", id, postErr)
+	}
 }
 
 type ScheduleRecurringArgs struct {
@@ -159,7 +200,7 @@ func handleScheduleRecurring(ctx context.Context, database *sql.DB, defaultTZ st
 	}
 
 	now := time.Now().UTC()
-	nextRun, err := CalculateNextCronRun(args.CronExpression, args.Timezone, now)
+	nextRun, err := model.CalculateNextCronRun(args.CronExpression, args.Timezone, now)
 	if err != nil {
 		return ScheduleRecurringOutput{}, err
 	}
@@ -188,7 +229,11 @@ func (h *ToolHandler) ScheduleRecurring(ctx context.Context, args ScheduleRecurr
 	if h != nil {
 		tz, db = h.Timezone, h.DB
 	}
-	return handleScheduleRecurring(ctx, db, tz, args)
+	out, err := handleScheduleRecurring(ctx, db, tz, args)
+	if err == nil && h != nil {
+		h.armSchedule(ctx, model.ScheduleTypeCron, out.ScheduleID)
+	}
+	return out, err
 }
 
 type ScheduleOnceArgs struct {
@@ -260,7 +305,11 @@ func (h *ToolHandler) ScheduleOnce(ctx context.Context, args ScheduleOnceArgs) (
 	if h != nil {
 		args.Timezone, db = resolveTimezone(args.Timezone, h.Timezone), h.DB
 	}
-	return handleScheduleOnce(ctx, db, args)
+	out, err := handleScheduleOnce(ctx, db, args)
+	if err == nil && h != nil {
+		h.armSchedule(ctx, model.ScheduleTypeOneShot, out.ScheduleID)
+	}
+	return out, err
 }
 
 type ListSchedulesArgs struct {
@@ -389,6 +438,9 @@ func (h *ToolHandler) CancelSchedule(ctx context.Context, args CancelScheduleArg
 	if !deleted {
 		return CancelScheduleOutput{}, fmt.Errorf("schedule with ID %q not found", id)
 	}
+	if h != nil {
+		h.cancelSchedule(ctx, id)
+	}
 	return CancelScheduleOutput{Status: model.StatusSuccess, ScheduleID: id, Message: "Schedule cancelled successfully."}, nil
 }
 
@@ -429,6 +481,15 @@ func (h *ToolHandler) UpdateCronSchedule(ctx context.Context, args UpdateCronSch
 		return UpdateCronScheduleOutput{}, fmt.Errorf("failed to update recurring schedule: %w", err)
 	}
 
+	if h != nil {
+		sched, getErr := store.GetCronSchedule(ctx, h.DB, id)
+		if getErr == nil && !sched.Enabled {
+			h.cancelSchedule(ctx, id)
+		} else {
+			h.armSchedule(ctx, model.ScheduleTypeCron, id)
+		}
+	}
+
 	resp := UpdateCronScheduleOutput{Status: model.StatusSuccess, ScheduleID: id, Message: "Recurring schedule updated successfully."}
 	if args.Effort != nil {
 		resp.Effort = store.NormalizeScheduleEffort(*args.Effort)
@@ -452,7 +513,7 @@ func (h *ToolHandler) recomputeCronNextRun(ctx context.Context, id, newExpr, new
 		expr = newExpr
 	}
 	tz := resolveTimezone(newTZ, resolveTimezone(sched.Timezone, h.Timezone))
-	return CalculateNextCronRun(expr, tz, time.Now().UTC())
+	return model.CalculateNextCronRun(expr, tz, time.Now().UTC())
 }
 
 func trimmedOrEmpty(s *string) string {

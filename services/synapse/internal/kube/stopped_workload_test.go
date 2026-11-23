@@ -1,12 +1,13 @@
 package kube
 
 import (
+	"cmp"
 	"context"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
-	"sync"
 	"testing"
 
 	"github.com/azylman/aerial/services/synapse/internal/model"
@@ -17,37 +18,39 @@ const (
 	testStoppedRSJSON     = `{"metadata":{"name":"worker-old","namespace":"work","uid":"child","generation":2,"ownerReferences":[{"apiVersion":"restate.dev/v1beta1","kind":"RestateDeployment","name":"worker","uid":"parent","controller":true}]},"spec":{"replicas":0},"status":{"observedGeneration":2}}`
 )
 
-type mockKubeServer struct {
-	mu     sync.Mutex
-	routes map[string]struct {
-		status int
-		body   string
-	}
+// kubeRoute is one scripted kube API response; status 0 means 200. A set
+// wantQuery or wantBody must match the request exactly, otherwise the route
+// answers 400 so the caller's error names the mismatch.
+type kubeRoute struct {
+	status    int
+	body      string
+	wantQuery string
+	wantBody  string
 }
 
-func newMockKubeServer(routes map[string]struct {
-	status int
-	body   string
-},
-) *httptest.Server {
-	m := &mockKubeServer{routes: routes}
+// newMockKubeServer serves routes keyed by "METHOD /path" (query ignored). The "*" route answers every unlisted
+// request; without it unlisted requests get a kube NotFound status.
+func newMockKubeServer(routes map[string]kubeRoute) *httptest.Server {
 	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		m.mu.Lock()
-		key := r.Method + " " + r.URL.Path
-		resp, ok := m.routes[key]
-		m.mu.Unlock()
+		resp, ok := routes[r.Method+" "+r.URL.Path]
 		if !ok {
-			resp = struct {
-				status int
-				body   string
-			}{status: http.StatusNotFound, body: `{"kind":"Status","reason":"NotFound"}`}
+			resp, ok = routes["*"]
 		}
-		status := resp.status
-		if status == 0 {
-			status = http.StatusOK
+		if !ok {
+			resp = kubeRoute{status: http.StatusNotFound, body: `{"kind":"Status","reason":"NotFound"}`}
+		}
+		reqBody, err := io.ReadAll(r.Body)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		if resp.wantQuery != "" && r.URL.RawQuery != resp.wantQuery {
+			resp = kubeRoute{status: http.StatusBadRequest, body: "unexpected query " + r.URL.RawQuery}
+		} else if resp.wantBody != "" && string(reqBody) != resp.wantBody {
+			resp = kubeRoute{status: http.StatusBadRequest, body: "unexpected body " + string(reqBody)}
 		}
 		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(status)
+		w.WriteHeader(cmp.Or(resp.status, http.StatusOK))
 		_, _ = w.Write([]byte(resp.body))
 	}))
 }
@@ -104,10 +107,7 @@ func TestStoppedWorkloadEvidence(t *testing.T) {
 			if parent == "" {
 				parent = initial
 			}
-			routes := map[string]struct {
-				status int
-				body   string
-			}{
+			routes := map[string]kubeRoute{
 				"GET /apis/apps/v1/deployments":                                           {body: emptyList},
 				"GET /apis/apps/v1/statefulsets":                                          {body: emptyList},
 				"GET /apis/apps/v1/daemonsets":                                            {body: emptyList},
@@ -132,9 +132,15 @@ func TestStoppedWorkloadEvidence(t *testing.T) {
 			if len(ws) != 1 {
 				t.Fatalf("workloads = %v", ws)
 			}
-			done, failed, _ := StoppedRestateDeploymentComplete(ws[0])
+			done, failed, reason := StoppedRestateDeploymentComplete(ws[0])
 			if done != tc.wantDone || failed {
-				t.Fatalf("done=%v failed=%v, want done %v", done, failed, tc.wantDone)
+				t.Fatalf("done=%v failed=%v (reason: %q), want done %v", done, failed, reason, tc.wantDone)
+			}
+			if tc.wantDone && reason != "" {
+				t.Errorf("reason = %q, want empty", reason)
+			}
+			if !tc.wantDone && reason != "waiting for stopped child evidence" {
+				t.Errorf("reason = %q, want %q", reason, "waiting for stopped child evidence")
 			}
 		})
 	}
@@ -239,58 +245,38 @@ func TestStoppedPodRelevant(t *testing.T) {
 	}
 }
 
-func TestStoppedChildrenComplete_MissingChildrenAndErrors(t *testing.T) {
+func TestStoppedChildrenComplete(t *testing.T) {
 	t.Parallel()
-
-	// nil StoppedChildren
-	if StoppedChildrenComplete(model.WorkloadRollout{UID: "u1", Namespace: "n", Name: "w", Generation: 1}) {
-		t.Errorf("expected false for nil StoppedChildren")
-	}
-
-	// invalid selector
-	invalidSel := model.WorkloadRollout{
-		UID:        "u1",
-		Namespace:  "n",
-		Name:       "w",
-		Generation: 1,
-		Selector: &model.KubeLabelSelector{MatchExpressions: []struct {
-			Key      string   `json:"key"`
-			Operator string   `json:"operator"`
-			Values   []string `json:"values"`
-		}{{Key: "k", Operator: "Invalid"}}},
-		StoppedChildren: &model.StoppedChildObservation{},
-	}
-	if StoppedChildrenComplete(invalidSel) {
-		t.Errorf("expected false for invalid selector")
-	}
-
-	// duplicate child UID
 	zero := int32(0)
-	rs := model.StoppedReplicaSet{
-		Metadata: model.KubeObjectMeta{
-			Name: "rs1", UID: "uid1", Namespace: "n", Generation: 1,
-			OwnerReferences: []model.KubeOwnerReference{{Kind: "RestateDeployment", Name: "w", UID: "u1", APIVersion: "restate.dev/v1beta1", Controller: true}},
-		},
-		Spec: struct {
-			Replicas *int32 `json:"replicas"`
-		}{Replicas: &zero},
-		Status: struct {
-			ObservedGeneration   int64 `json:"observedGeneration"`
-			Replicas             int32 `json:"replicas"`
-			ReadyReplicas        int32 `json:"readyReplicas"`
-			AvailableReplicas    int32 `json:"availableReplicas"`
-			FullyLabeledReplicas int32 `json:"fullyLabeledReplicas"`
-		}{ObservedGeneration: 1},
+	owner := model.KubeOwnerReference{Kind: "RestateDeployment", Name: "w", UID: "u1", APIVersion: "restate.dev/v1beta1", Controller: true}
+	rs := model.StoppedReplicaSet{Metadata: model.KubeObjectMeta{Name: "rs1", UID: "uid1", Namespace: "n", Generation: 1, OwnerReferences: []model.KubeOwnerReference{owner}}}
+	rs.Spec.Replicas = &zero
+	rs.Status.ObservedGeneration = 1
+	invalid := &model.KubeLabelSelector{}
+	invalid.MatchExpressions = append(invalid.MatchExpressions, struct {
+		Key      string   `json:"key"`
+		Operator string   `json:"operator"`
+		Values   []string `json:"values"`
+	}{Key: "k", Operator: "Invalid"})
+	valid := &model.KubeLabelSelector{MatchLabels: map[string]string{"app": "test"}}
+	tests := []struct {
+		name     string
+		selector *model.KubeLabelSelector
+		children *model.StoppedChildObservation
+		want     bool
+	}{
+		{"nil children", valid, nil, false},
+		{"invalid selector", invalid, &model.StoppedChildObservation{}, false},
+		{"duplicate child UID", valid, &model.StoppedChildObservation{ReplicaSets: []model.StoppedReplicaSet{rs, rs}}, false},
+		{"single stopped child", valid, &model.StoppedChildObservation{ReplicaSets: []model.StoppedReplicaSet{rs}}, true},
 	}
-	dupChild := model.WorkloadRollout{
-		UID:             "u1",
-		Namespace:       "n",
-		Name:            "w",
-		Generation:      1,
-		Selector:        &model.KubeLabelSelector{MatchLabels: map[string]string{"app": "test"}},
-		StoppedChildren: &model.StoppedChildObservation{ReplicaSets: []model.StoppedReplicaSet{rs, rs}},
-	}
-	if StoppedChildrenComplete(dupChild) {
-		t.Errorf("expected false for duplicate child UID")
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			w := model.WorkloadRollout{UID: "u1", Namespace: "n", Name: "w", Generation: 1, Selector: tc.selector, StoppedChildren: tc.children}
+			if got := StoppedChildrenComplete(w); got != tc.want {
+				t.Errorf("StoppedChildrenComplete() = %v, want %v", got, tc.want)
+			}
+		})
 	}
 }

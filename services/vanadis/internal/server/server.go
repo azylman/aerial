@@ -1,7 +1,7 @@
 // Package server holds the L3 Vanadis HTTP service: VanadisServer, routes and
 // handlers, PostgreSQL initialization, and the RunApp lifecycle (over the
 // unexported runServer).
-// It is the only package that wires L0 config/model, L1 dag/store/restate/
+// It is the only package that wires L0 config/model, L1 store/restate/
 // metrics, and the L2 MCP handler into HTTP endpoints.
 package server
 
@@ -12,15 +12,19 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
-	"os"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 
+	"github.com/azylman/aerial/pkg/agent"
+	"github.com/azylman/aerial/pkg/buildplan"
+	"github.com/azylman/aerial/pkg/discordutil"
 	"github.com/azylman/aerial/pkg/httpkit"
 	"github.com/azylman/aerial/pkg/k8sauth"
+	"github.com/azylman/aerial/pkg/strutil"
 	"github.com/azylman/aerial/pkg/tracing"
 	"github.com/azylman/aerial/services/vanadis/internal/config"
 	vanadismcp "github.com/azylman/aerial/services/vanadis/internal/mcp"
@@ -42,12 +46,6 @@ var (
 	LoadConfig = config.LoadConfig
 	// LoadConfigFromEnv initializes configuration from environment variables with optional CONFIG_PATH fallback.
 	LoadConfigFromEnv = config.LoadConfigFromEnv
-	// NormalizeAgentName trims whitespace for per-agent scoped Restate names.
-	NormalizeAgentName = config.NormalizeAgentName
-	// BuildServiceName derives the Restate Build Virtual Object name for an agent.
-	BuildServiceName = config.BuildServiceName
-	// BuildRouterServiceName derives the Restate BuildRouter service name for an agent.
-	BuildRouterServiceName = config.BuildRouterServiceName
 	// LoadRestateConfig loads Restate configuration from an optional YAML file with environment variable overrides.
 	LoadRestateConfig = config.LoadRestateConfig
 )
@@ -61,8 +59,6 @@ var (
 	ErrBuildConflict = model.ErrBuildConflict
 	// ErrInvalidBuildInput indicates invalid inputs for a VanadisBuild or chunk mutation.
 	ErrInvalidBuildInput = model.ErrInvalidBuildInput
-
-	firstNonEmpty = model.FirstNonEmpty
 )
 
 type (
@@ -81,27 +77,10 @@ type (
 )
 
 var (
-	capChunkEffort = model.CapChunkEffort
-	// NormalizeChunkEffort validates and normalizes a chunk effort value.
-	NormalizeChunkEffort = model.NormalizeChunkEffort
-	normalizeChunkEffort = model.NormalizeChunkEffort
 	// ClassifyBuildQueueState computes the overall queue state ("running", "queued", or "completed") based on buildStatus and child chunks.
 	ClassifyBuildQueueState = model.ClassifyBuildQueueState
 	// SummarizeBuildEntry constructs a VanadisBuildEntry with non-nil chunks, chunk status counts, and computed queue state.
 	SummarizeBuildEntry = model.SummarizeBuildEntry
-	// GenerateBuildID generates a unique build identifier.
-	GenerateBuildID = model.GenerateBuildID
-	generateBuildID = model.GenerateBuildID
-	// NormalizeRepo trims whitespace from a repository reference.
-	NormalizeRepo = model.NormalizeRepo
-	normalizeRepo = model.NormalizeRepo
-
-	normalizeChunkMode = model.NormalizeChunkMode
-
-	// ValidateChunkModeAndRepo validates the mode/repo/target combination for chunk idx.
-	ValidateChunkModeAndRepo = model.ValidateChunkModeAndRepo
-
-	isValidVanadisChunkID = model.IsValidVanadisChunkID
 )
 
 type (
@@ -118,8 +97,6 @@ var (
 	ScanBuild = store.ScanBuild
 	// ScanChunks scans ordered vanadis_chunks rows into VanadisChunk values.
 	ScanChunks = store.ScanChunks
-	// repoMatchCandidates returns the repo spellings a PR lookup should match.
-	repoMatchCandidates = store.RepoMatchCandidates
 )
 
 // ExecuteChunkArgs defines the job payload for executing a single Vanadis build chunk.
@@ -132,18 +109,27 @@ type ExecuteChunkArgs struct {
 
 // VanadisServer manages HTTP endpoints and JetStream worker coordination for Vanadis builds.
 type VanadisServer struct {
-	cfg        Config
-	restateCfg RestateConfig
-	httpClient *http.Client
-	store      VanadisStore
-	queueStats consumerStatsQuerier
-	auth       *k8sauth.Authenticator
+	cfg                   Config
+	restateCfg            RestateConfig
+	httpClient            *http.Client
+	store                 VanadisStore
+	queueStats            consumerStatsQuerier
+	auth                  *k8sauth.Authenticator
+	activeStepMu          sync.Mutex
+	stepsByBuild          map[string]map[string]string
+	inFlightBuilds        map[string]bool
+	lastForwardedAt       map[string]time.Time
+	dirtyBuilds           map[string]bool
+	trailingTimer         map[string]*time.Timer
+	minActiveStepInterval time.Duration
+	nowFn                 func() time.Time
 }
 
-// NewVanadisServer constructs a new VanadisServer instance.
-func NewVanadisServer(cfg Config, st VanadisStore, httpClient *http.Client, auth ...*k8sauth.Authenticator) *VanadisServer {
+// NewVanadisServer constructs a new VanadisServer instance. restateCfg is
+// resolved once by app wiring (RunApp); the server never reads env itself.
+func NewVanadisServer(cfg Config, restateCfg RestateConfig, st VanadisStore, httpClient *http.Client, auth ...*k8sauth.Authenticator) *VanadisServer {
 	if httpClient == nil {
-		httpClient = &http.Client{Timeout: 15 * time.Second}
+		httpClient = &http.Client{Timeout: 35 * time.Second}
 	}
 	var a *k8sauth.Authenticator
 	if len(auth) > 0 {
@@ -153,11 +139,18 @@ func NewVanadisServer(cfg Config, st VanadisStore, httpClient *http.Client, auth
 	}
 	// Traced so eri turns join the chunk dispatch span (and widget/wake posts carry traceparent).
 	return &VanadisServer{
-		cfg:        cfg,
-		restateCfg: LoadRestateConfig(os.Getenv("CONFIG_PATH")),
-		httpClient: tracing.Client(httpClient),
-		store:      st,
-		auth:       a,
+		cfg:                   cfg,
+		restateCfg:            restateCfg,
+		httpClient:            tracing.Client(httpClient),
+		store:                 st,
+		auth:                  a,
+		stepsByBuild:          make(map[string]map[string]string),
+		inFlightBuilds:        make(map[string]bool),
+		lastForwardedAt:       make(map[string]time.Time),
+		dirtyBuilds:           make(map[string]bool),
+		trailingTimer:         make(map[string]*time.Timer),
+		minActiveStepInterval: 2 * time.Second,
+		nowFn:                 time.Now,
 	}
 }
 
@@ -193,49 +186,8 @@ func (s *VanadisServer) consumerStatsQuerier() consumerStatsQuerier {
 	return s.queueStats
 }
 
-func normalizeDiscordThreadID(s string) string {
-	clean := strings.TrimSpace(s)
-	if idx := strings.LastIndex(clean, ":"); idx >= 0 {
-		clean = strings.TrimSpace(clean[idx+1:])
-	}
-	return strings.TrimSpace(strings.TrimPrefix(clean, "discord-"))
-}
-
-func isNumericSnowflake(s string) bool {
-	if s == "" {
-		return false
-	}
-	for _, r := range s {
-		if r < '0' || r > '9' {
-			return false
-		}
-	}
-	return true
-}
-
 func writeErr(w http.ResponseWriter, status int, msg string) {
 	httpkit.WriteJSON(w, status, map[string]string{"error": msg})
-}
-
-func mapAuthOrStoreStatus(err error) int {
-	if _, ok := errors.AsType[*k8sauth.ValidationError](err); ok {
-		return http.StatusBadRequest
-	}
-	if _, ok := errors.AsType[*k8sauth.UnauthorizedError](err); ok {
-		return http.StatusUnauthorized
-	}
-	if _, ok := errors.AsType[*k8sauth.ForbiddenError](err); ok {
-		return http.StatusForbidden
-	}
-	return 0
-}
-
-func writeAuthErr(w http.ResponseWriter, err error) {
-	status := http.StatusInternalServerError
-	if s := mapAuthOrStoreStatus(err); s != 0 {
-		status = s
-	}
-	writeErr(w, status, err.Error())
 }
 
 // writeStoreErr maps a store or Restate error onto its HTTP status and writes it. Server-side
@@ -252,8 +204,12 @@ func writeStoreErr(ctx context.Context, w http.ResponseWriter, err error) {
 	case errors.Is(err, ErrBuildConflict):
 		status = http.StatusConflict
 	default:
-		if s := mapAuthOrStoreStatus(err); s != 0 {
-			status = s
+		if _, ok := errors.AsType[interface {
+			error
+			StatusCode() int
+		}](err); ok {
+			k8sauth.WriteError(w, err)
+			return
 		}
 	}
 	if status >= http.StatusInternalServerError {
@@ -291,16 +247,11 @@ func SetupMux(server *VanadisServer) http.Handler {
 	} {
 		mux.HandleFunc(p, h)
 	}
-	authMiddleware := func(next http.Handler) http.Handler {
-		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			if server != nil && server.authEnabled() {
-				server.auth.Middleware("/health", "/healthz", "/readyz", "/metrics", "/debug/coverage/flush")(next).ServeHTTP(w, r)
-				return
-			}
-			next.ServeHTTP(w, r)
-		})
+	var auth *k8sauth.Authenticator
+	if server != nil {
+		auth = server.auth
 	}
-	return tracing.Middleware("vanadis", authMiddleware(mux))
+	return tracing.Middleware("vanadis", auth.Middleware(k8sauth.DefaultExemptPaths...)(mux))
 }
 
 // Routes returns the HTTP handler for the server.
@@ -336,9 +287,9 @@ func (s *VanadisServer) handleCreateBuild(w http.ResponseWriter, r *http.Request
 		writeErr(w, http.StatusBadRequest, "invalid json payload")
 		return
 	}
-	threadID, objective := normalizeDiscordThreadID(req.ThreadID), strings.TrimSpace(req.Objective)
+	threadID, objective := discordutil.NormalizeThreadID(req.ThreadID), strings.TrimSpace(req.Objective)
 	switch {
-	case !isNumericSnowflake(threadID):
+	case !discordutil.IsSnowflake(threadID):
 		writeErr(w, http.StatusBadRequest, "thread_id is required and must be a numeric Discord snowflake")
 		return
 	case objective == "":
@@ -348,7 +299,7 @@ func (s *VanadisServer) handleCreateBuild(w http.ResponseWriter, r *http.Request
 		writeErr(w, http.StatusBadRequest, "at least one chunk is required")
 		return
 	}
-	buildID := firstNonEmpty(strings.TrimSpace(req.ID), generateBuildID())
+	buildID := strutil.FirstNonEmpty(req.ID, buildplan.GenerateBuildID())
 	tier := req.Tier
 	if tier <= 0 {
 		tier = 2
@@ -362,7 +313,7 @@ func (s *VanadisServer) handleCreateBuild(w http.ResponseWriter, r *http.Request
 		req.Title = objective
 	}
 
-	chunks, err := parseCreateBuildChunks(buildID, now, req.Chunks)
+	chunks, err := model.ParseCreateBuildChunks(buildID, now, req.Chunks)
 	if err != nil {
 		writeErr(w, http.StatusBadRequest, err.Error())
 		return
@@ -372,12 +323,12 @@ func (s *VanadisServer) handleCreateBuild(w http.ResponseWriter, r *http.Request
 	if s.authEnabled() {
 		caller, ok := k8sauth.CallerFromContext(r.Context())
 		if !ok {
-			writeAuthErr(w, &k8sauth.UnauthorizedError{Message: errMissingCallerIdentity})
+			k8sauth.WriteError(w, &k8sauth.UnauthorizedError{Message: errMissingCallerIdentity})
 			return
 		}
 		resolved, err := s.auth.AuthorizeTarget(r.Context(), caller, "builds", "create", req.Agent)
 		if err != nil {
-			writeAuthErr(w, err)
+			k8sauth.WriteError(w, err)
 			return
 		}
 		targetAgent = resolved
@@ -390,7 +341,7 @@ func (s *VanadisServer) handleCreateBuild(w http.ResponseWriter, r *http.Request
 	req.Agent = targetAgent
 
 	var created VanadisBuild
-	if err := s.callRestateIngress(r.Context(), s.restateObjectPath(buildID, "Create"), req, &created); err != nil {
+	if err := s.callRestateIngress(r.Context(), s.restateObjectPath(agent.Default, buildID, "Create"), req, &created); err != nil {
 		writeStoreErr(r.Context(), w, err)
 		return
 	}
@@ -408,23 +359,12 @@ func (s *VanadisServer) handleBuildCancel(w http.ResponseWriter, r *http.Request
 		writeErr(w, http.StatusMethodNotAllowed, "method not allowed")
 		return
 	}
-	if s.authEnabled() {
-		if s.store == nil {
-			writeErr(w, http.StatusInternalServerError, "vanadis store not configured")
-			return
-		}
-		build, _, err := s.store.GetBuild(r.Context(), id)
-		if err != nil {
-			writeStoreErr(r.Context(), w, err)
-			return
-		}
-		if err := s.authorizeBuildUpdate(r.Context(), build.Agent); err != nil {
-			writeAuthErr(w, err)
-			return
-		}
+	build, ok := s.authorizeBuildMutation(w, r, id)
+	if !ok {
+		return
 	}
 	var cancelled VanadisBuild
-	if err := s.callRestateIngress(r.Context(), s.restateObjectPath(id, "Cancel"), CancelBuildRequest{}, &cancelled); err != nil {
+	if err := s.mutateBuildObject(r.Context(), build, "Cancel", CancelBuildRequest{}, &cancelled); err != nil {
 		writeStoreErr(r.Context(), w, err)
 		return
 	}
@@ -436,7 +376,7 @@ func (s *VanadisServer) handleBuildRoot(w http.ResponseWriter, r *http.Request, 
 	switch r.Method {
 	case http.MethodGet:
 		if err := s.authorizeBuildRead(r.Context(), "get"); err != nil {
-			writeAuthErr(w, err)
+			k8sauth.WriteError(w, err)
 			return
 		}
 		build, chunks, err := s.store.GetBuild(r.Context(), id)
@@ -531,7 +471,7 @@ func (s *VanadisServer) handleListBuilds(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	if err := s.authorizeBuildRead(r.Context(), "list"); err != nil {
-		writeAuthErr(w, err)
+		k8sauth.WriteError(w, err)
 		return
 	}
 	limit := 50

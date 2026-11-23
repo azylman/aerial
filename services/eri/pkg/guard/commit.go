@@ -1,27 +1,22 @@
 package guard
 
 import (
-	"bytes"
+	"cmp"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
-	"net/http"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"regexp"
-	"strconv"
+	"slices"
 	"strings"
-	"time"
 
 	"github.com/azylman/aerial/pkg/sanitizer"
 )
 
 // categoryInternalClusterDomain flags internal cluster hostnames in commit scans.
 const categoryInternalClusterDomain = "InternalClusterDomain"
-
-// GuardScanURL is the loopback URL for eri's internal guard scan endpoint.
-var GuardScanURL = "http://127.0.0.1:8080/internal/guard/scan"
 
 // Violation represents a secret or PII detection in a commit diff.
 type Violation struct {
@@ -51,25 +46,14 @@ var BuiltinPatterns = []PatternRule{
 	{Category: "JWTToken", Regex: regexp.MustCompile(`\beyJ[A-Za-z0-9_-]{10,}\.eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\b`)},
 }
 
-// gitCmdRunner executes git commands. Package variable to enable hermetic mocking in tests.
-var gitCmdRunner = func(dir string, args ...string) (string, error) {
-	cmd := exec.Command(binGit, args...)
-	if dir != "" {
-		cmd.Dir = dir
-	}
-	out, err := cmd.Output()
-	return string(out), err
-}
-
 // LoadCustomPatterns reads dynamic patterns from ~/.gemini/config/commit-guard.json,
-// ~/.gemini/config/guard.json, or the AERIAL_COMMIT_GUARD_PATTERNS environment variable.
-func LoadCustomPatterns(homeDir string) []PatternRule {
+// ~/.gemini/config/guard.json, or the AERIAL_COMMIT_GUARD_PATTERNS variable resolved through getenv.
+// An empty homeDir falls back to getenv("HOME").
+func LoadCustomPatterns(homeDir string, getenv func(string) string) []PatternRule {
 	var rules []PatternRule
 
 	if homeDir == "" {
-		if uHome, err := os.UserHomeDir(); err == nil {
-			homeDir = uHome
-		}
+		homeDir = getenv("HOME")
 	}
 
 	// 1. Check file candidates in homeDir
@@ -87,7 +71,7 @@ func LoadCustomPatterns(homeDir string) []PatternRule {
 	}
 
 	// 2. Check environment variable
-	if envVal := os.Getenv("AERIAL_COMMIT_GUARD_PATTERNS"); strings.TrimSpace(envVal) != "" {
+	if envVal := getenv("AERIAL_COMMIT_GUARD_PATTERNS"); strings.TrimSpace(envVal) != "" {
 		rules = append(rules, parsePatternPayload([]byte(envVal))...)
 	}
 
@@ -181,9 +165,9 @@ func parsePatternPayload(data []byte) []PatternRule {
 	return parseDelimitedPatternLines(trimmed)
 }
 
-// GetActivePatterns returns BuiltinPatterns augmented with any custom user patterns.
-func GetActivePatterns() []PatternRule {
-	custom := LoadCustomPatterns("")
+// GetActivePatterns returns BuiltinPatterns augmented with any custom user patterns found via getenv.
+func GetActivePatterns(getenv func(string) string) []PatternRule {
+	custom := LoadCustomPatterns("", getenv)
 	if len(custom) == 0 {
 		return BuiltinPatterns
 	}
@@ -191,174 +175,6 @@ func GetActivePatterns() []PatternRule {
 	result = append(result, BuiltinPatterns...)
 	result = append(result, custom...)
 	return result
-}
-
-// isTestFile returns true if the file path indicates a test file or test fixture.
-func isTestFile(path string) bool {
-	normalized := filepath.ToSlash(strings.TrimSpace(path))
-	if normalized == "" {
-		return false
-	}
-
-	// Test extensions
-	testSuffixes := []string{
-		"_test.go",
-		"_test.py",
-		".test.ts",
-		".test.js",
-		".spec.ts",
-		".spec.js",
-	}
-	for _, suffix := range testSuffixes {
-		if strings.HasSuffix(normalized, suffix) {
-			return true
-		}
-	}
-
-	// Fixture and testdata directories
-	if strings.Contains(normalized, "/fixtures/") || strings.HasPrefix(normalized, "fixtures/") ||
-		strings.Contains(normalized, "/testdata/") || strings.HasPrefix(normalized, "testdata/") {
-		return true
-	}
-
-	return false
-}
-
-func isImplicitHunkStart(inHunk bool, lineNum int, line string) bool {
-	return !inHunk && lineNum == 0 && (strings.HasPrefix(line, "+") || strings.HasPrefix(line, " "))
-}
-
-func isDiffContextLine(inHunk bool, line string) bool {
-	return inHunk && (strings.HasPrefix(line, " ") || line == "")
-}
-
-func scanAddedLinePatterns(content, currentFile string, lineNum int, patterns []PatternRule) []Violation {
-	var violations []Violation
-	for _, p := range patterns {
-		if match := p.Regex.FindString(content); match != "" {
-			violations = append(violations, Violation{
-				Category: p.Category,
-				Pattern:  p.Regex.String(),
-				Sample:   match,
-				File:     currentFile,
-				LineNum:  lineNum,
-			})
-		}
-	}
-	return violations
-}
-
-type diffParseState struct {
-	currentFile string
-	lineNum     int
-	inHunk      bool
-	isBinary    bool
-}
-
-func parseDiffHeaderLine(line string, st *diffParseState) bool {
-	if strings.HasPrefix(line, "diff --git ") {
-		st.inHunk = false
-		st.isBinary = false
-		st.lineNum = 0
-		if _, after, ok := strings.Cut(line, " b/"); ok {
-			st.currentFile = strings.TrimSpace(after)
-		}
-		return true
-	}
-	if strings.HasPrefix(line, "--- ") {
-		st.inHunk = false
-		return true
-	}
-	if strings.HasPrefix(line, "+++ ") {
-		st.inHunk = false
-		if line != "+++ /dev/null" {
-			target := strings.TrimPrefix(line, "+++ ")
-			target = strings.TrimPrefix(target, "b/")
-			st.currentFile = strings.TrimSpace(target)
-		}
-		return true
-	}
-	if strings.HasPrefix(line, "Binary files ") && strings.HasSuffix(line, "differ") {
-		st.isBinary = true
-		return true
-	}
-	if strings.HasPrefix(line, "@@ ") {
-		st.inHunk = true
-		st.lineNum = parseHunkLineNum(line)
-		return true
-	}
-	return false
-}
-
-func iterateDiffAddedLines(diff string, checkTestFiles bool, onAddedLine func(content, file string, lineNum int)) {
-	if diff == "" {
-		return
-	}
-
-	lines := strings.Split(diff, "\n")
-	var st diffParseState
-
-	for _, line := range lines {
-		if parseDiffHeaderLine(line, &st) {
-			continue
-		}
-
-		if st.isBinary {
-			continue
-		}
-
-		if isImplicitHunkStart(st.inHunk, st.lineNum, line) {
-			st.inHunk = true
-			st.lineNum = 1
-		}
-
-		if strings.HasPrefix(line, "+") && !strings.HasPrefix(line, "+++") {
-			currentLineNum := st.lineNum
-			st.lineNum++
-
-			if !checkTestFiles && isTestFile(st.currentFile) {
-				continue
-			}
-
-			onAddedLine(line[1:], st.currentFile, currentLineNum)
-			continue
-		}
-
-		if isDiffContextLine(st.inHunk, line) {
-			st.lineNum++
-			continue
-		}
-	}
-}
-
-// ScanDiffForSecrets scans a diff against both active patterns and registered Infisical secrets.
-func ScanDiffForSecrets(diff string, checkTestFiles bool, patterns []PatternRule) []Violation {
-	violations := ScanDiffWithPatterns(diff, checkTestFiles, patterns)
-	iterateDiffAddedLines(diff, checkTestFiles, func(content, file string, lineNum int) {
-		for _, sample := range sanitizer.MatchSensitiveTokens(content) {
-			violations = append(violations, Violation{
-				Category: "InfisicalSecret",
-				Pattern:  "registered_secret",
-				File:     file,
-				LineNum:  lineNum,
-				Sample:   sample,
-			})
-		}
-	})
-	return violations
-}
-
-// ScanDiffWithPatterns parses a unified diff and checks added lines against the supplied patterns.
-func ScanDiffWithPatterns(diff string, checkTestFiles bool, patterns []PatternRule) []Violation {
-	if diff == "" || len(patterns) == 0 {
-		return nil
-	}
-
-	var violations []Violation
-	iterateDiffAddedLines(diff, checkTestFiles, func(content, file string, lineNum int) {
-		violations = append(violations, scanAddedLinePatterns(content, file, lineNum, patterns)...)
-	})
-	return violations
 }
 
 // ScanTextForSecrets scans text line-by-line against registered Infisical secrets and pattern rules.
@@ -403,101 +219,10 @@ func ScanTextForSecrets(text, sourceLabel string, patterns []PatternRule) []Viol
 	return violations
 }
 
-// GuardScanClient is the HTTP client used to query GuardScanURL.
-var GuardScanClient = &http.Client{
-	Timeout: 1500 * time.Millisecond,
-	Transport: &http.Transport{
-		DisableKeepAlives: true,
-	},
-}
-
-func queryLoopbackGuardScan(diff, text, sourceLabel string, checkTestFiles, ignoreInternalDomain bool) ([]Violation, bool) {
-	if GuardScanURL == "" {
-		return nil, false
-	}
-	reqBody, err := json.Marshal(map[string]any{
-		"diff":                   diff,
-		"text":                   text,
-		"source_label":           sourceLabel,
-		"check_test_files":       checkTestFiles,
-		"ignore_internal_domain": ignoreInternalDomain,
-	})
-	if err != nil {
-		return nil, false
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), 1500*time.Millisecond)
-	defer cancel()
-	httpReq, reqErr := http.NewRequestWithContext(ctx, http.MethodPost, GuardScanURL, bytes.NewReader(reqBody))
-	if reqErr != nil {
-		return nil, false
-	}
-	httpReq.Header.Set("Content-Type", "application/json")
-	client := GuardScanClient
-	if client == nil {
-		client = http.DefaultClient
-	}
-	resp, doErr := client.Do(httpReq)
-	if doErr != nil {
-		return nil, false
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		return nil, false
-	}
-	var scanResp struct {
-		Decision   string      `json:"decision"`
-		Reason     string      `json:"reason"`
-		Violations []Violation `json:"violations"`
-	}
-	if decodeErr := json.NewDecoder(resp.Body).Decode(&scanResp); decodeErr != nil {
-		return nil, false
-	}
-	return scanResp.Violations, true
-}
-
-// scanViaLoopbackOrLocal attempts to call eri's POST /internal/guard/scan loopback endpoint;
-// if GuardScanURL is empty, unreachable, or returns a non-200 status, it falls back to local scanning.
-func scanViaLoopbackOrLocal(diff, text, sourceLabel string, checkTestFiles, ignoreInternalDomain bool) []Violation {
-	if violations, ok := queryLoopbackGuardScan(diff, text, sourceLabel, checkTestFiles, ignoreInternalDomain); ok {
-		return violations
-	}
-
-	var violations []Violation
-	patterns := GetActivePatterns()
-	if diff != "" {
-		pats := patterns
-		if ignoreInternalDomain {
-			filtered := make([]PatternRule, 0, len(patterns))
-			for _, p := range patterns {
-				if p.Category != categoryInternalClusterDomain {
-					filtered = append(filtered, p)
-				}
-			}
-			pats = filtered
-		}
-		violations = append(violations, ScanDiffForSecrets(diff, checkTestFiles, pats)...)
-	}
-	if text != "" {
-		violations = append(violations, ScanTextForSecrets(text, sourceLabel, patterns)...)
-	}
-	return violations
-}
-
-// parseHunkLineNum extracts the start line of the target file from hunk header @@ -a,b +c,d @@.
-func parseHunkLineNum(hunkHeader string) int {
-	_, after, ok := strings.Cut(hunkHeader, "+")
-	if !ok {
-		return 1
-	}
-	part := after
-	endIdx := strings.IndexAny(part, ", ")
-	if endIdx != -1 {
-		part = part[:endIdx]
-	}
-	if n, err := strconv.Atoi(strings.TrimSpace(part)); err == nil && n > 0 {
-		return n
-	}
-	return 1
+// scanLocal scans text in-process against registered secrets and the active
+// pattern rules. Pushed content is scanned by the eri-restate GitHub proxy.
+func scanLocal(text, sourceLabel string, getenv func(string) string) []Violation {
+	return ScanTextForSecrets(text, sourceLabel, GetActivePatterns(getenv))
 }
 
 // unwrapShellScriptCommand unwraps bash/sh/zsh -c <script> commands.
@@ -517,407 +242,192 @@ func unwrapShellScriptCommand(tokens []string) (string, bool) {
 	return "", false
 }
 
-func findSubmitTargetDir(tokens []string) string {
-	for _, tok := range tokens {
-		if !strings.HasPrefix(tok, "-") {
-			return tok
-		}
-	}
-	return ""
-}
-
-func matchAerialPRSubmit(tokens []string) (bool, string) {
-	for i, t := range tokens {
-		base := filepath.Base(t)
-		if base != "aerial-pr.sh" && !strings.HasSuffix(t, "aerial-pr.sh") {
-			continue
-		}
-		for j := i + 1; j < len(tokens); j++ {
-			if tokens[j] == "submit" {
-				return true, findSubmitTargetDir(tokens[j+1:])
-			}
-		}
-	}
-	return false, ""
-}
-
-func matchGitCommitTokens(tokens []string) (bool, string) {
-	if len(tokens) == 0 {
-		return false, ""
-	}
-	bin := strings.ToLower(filepath.Base(tokens[0]))
-	if bin != binGit {
-		return false, ""
-	}
-	var foundDir string
-	for i := 1; i < len(tokens); i++ {
-		tok := tokens[i]
-		switch {
-		case tok == "-C" && i+1 < len(tokens):
-			foundDir = tokens[i+1]
-			i++
-		case strings.HasPrefix(tok, "-C") && len(tok) > 2:
-			foundDir = strings.TrimPrefix(tok, "-C")
-		case tok == gitSubcommandCommit:
-			return true, foundDir
-		}
-	}
-	return false, ""
-}
-
-// IsCommitCommand determines whether a command executes a git commit or aerial-pr.sh submit.
-// It parses compound commands (&&, ;, ||, |) and extracts target directory and submit flag.
-func IsCommitCommand(cmd string) (isCommit bool, targetDir string, isSubmit bool) {
-	subCommands := splitPipeline(cmd)
-	for _, sub := range subCommands {
-		tokens := tokenizeQuoteAware(sub)
-		if len(tokens) == 0 {
-			continue
-		}
-
-		// Unwrap bash -c <script> or sh -c <script>
-		if script, ok := unwrapShellScriptCommand(tokens); ok {
-			if c, d, s := IsCommitCommand(script); c {
-				return c, d, s
-			}
-		}
-
-		// 1. Check for aerial-pr.sh submit
-		if matched, dir := matchAerialPRSubmit(tokens); matched {
-			return true, dir, true
-		}
-
-		// 2. Check for git commit
-		if matched, dir := matchGitCommitTokens(tokens); matched {
-			return true, dir, false
-		}
-	}
-	return false, "", false
-}
-
-func matchGitWorktreeOrSubmodule(dir string, match func(string) bool) bool {
-	gitFile := filepath.Join(dir, ".git")
-	data, err := os.ReadFile(gitFile)
-	if err != nil {
-		return false
-	}
-	content := string(data)
-	if match(content) {
-		return true
-	}
-	if !strings.HasPrefix(strings.TrimSpace(content), "gitdir:") {
-		return false
-	}
-	gitDir := strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(content), "gitdir:"))
-	if !filepath.IsAbs(gitDir) {
-		gitDir = filepath.Join(dir, gitDir)
-	}
-	if cfgData, readFileErr := os.ReadFile(filepath.Join(gitDir, "config")); readFileErr == nil && match(string(cfgData)) {
-		return true
-	}
-	commonData, err := os.ReadFile(filepath.Join(gitDir, "commondir"))
-	if err != nil {
-		return false
-	}
-	commonDir := strings.TrimSpace(string(commonData))
-	if !filepath.IsAbs(commonDir) {
-		commonDir = filepath.Join(gitDir, commonDir)
-	}
-	cfgData, err := os.ReadFile(filepath.Join(commonDir, "config"))
-	return err == nil && match(string(cfgData))
-}
-
-// hasRepoOriginMatch inspects .git/config, worktree gitdir/commondir, and git remote origin against a matcher func.
-func hasRepoOriginMatch(targetDir string, match func(string) bool) bool {
-	dir := targetDir
-	if dir == "" {
-		dir = "."
-	}
-
-	// 1. Inspect .git/config in targetDir if present
-	gitConfigFile := filepath.Join(dir, ".git", "config")
-	if data, err := os.ReadFile(gitConfigFile); err == nil {
-		if match(string(data)) {
-			return true
-		}
-	}
-
-	// 2. Handle git worktree or submodule where .git is a file
-	if matchGitWorktreeOrSubmodule(dir, match) {
-		return true
-	}
-
-	// 3. Query git remote get-url origin
-	if out, err := gitCmdRunner(dir, "remote", "get-url", "origin"); err == nil {
-		if match(strings.TrimSpace(out)) {
-			return true
-		}
-	}
-
-	return false
-}
-
-// IsAerialConfig checks if the target repository or command targets aerial-config,
-// where commit guard enforcement is intentionally disabled per user instructions.
-func IsAerialConfig(targetDir string, cmd string) bool {
-	if strings.Contains(targetDir, "aerial-config") || strings.Contains(cmd, "aerial-config") {
-		return true
-	}
-	return hasRepoOriginMatch(targetDir, func(content string) bool {
-		return strings.Contains(content, "aerial-config")
-	})
-}
-
-// IsCoreAerial returns true if targetDir or cmd targets the core aerial monorepo
-// (which legitimately uses *.aerial for Nomad service discovery mesh).
-func IsCoreAerial(targetDir string, cmd string) bool {
-	if IsAerialConfig(targetDir, cmd) {
-		return false
-	}
-	dir := targetDir
-	if dir == "" {
-		dir = "."
-	}
-	matchAerial := func(raw string) bool {
-		content := strings.ToLower(raw)
-		return (strings.Contains(content, "/aerial.git") || strings.Contains(content, "/aerial\"") || strings.HasSuffix(content, "/aerial") || strings.Contains(content, "azylman/aerial")) &&
-			!strings.Contains(content, "aerial-config") && !strings.Contains(content, "aerial-sidecars")
-	}
-	if hasRepoOriginMatch(dir, matchAerial) {
-		return true
-	}
-	// Fallback check for core aerial repo structure
-	if _, err1 := os.Stat(filepath.Join(dir, "services", "eri", "go.mod")); err1 == nil {
-		if _, err2 := os.Stat(filepath.Join(dir, "scripts", "aerial-pr.sh")); err2 == nil {
-			return true
-		}
-	}
-	if _, err1 := os.Stat(filepath.Join(dir, "brain", "go.mod")); err1 == nil {
-		if _, err2 := os.Stat(filepath.Join(dir, "scripts", "aerial-pr.sh")); err2 == nil {
-			return true
-		}
-	}
-	return false
-}
-
-func hasGitCommitAllFlags(tokens []string) bool {
-	if len(tokens) == 0 {
-		return false
-	}
-	bin := strings.ToLower(filepath.Base(tokens[0]))
-	if bin != binGit {
-		return false
-	}
-	isCommit := false
-	hasAll := false
-	for _, tok := range tokens[1:] {
-		if tok == gitSubcommandCommit {
-			isCommit = true
-		}
-		if tok == "-a" || tok == "--all" || strings.HasPrefix(tok, "-a") || (strings.HasPrefix(tok, "-") && !strings.HasPrefix(tok, "--") && strings.Contains(tok, "a")) {
-			hasAll = true
-		}
-	}
-	return isCommit && hasAll
-}
-
-// isAllCommit checks if git commit was called with -a, -am, or --all flags.
-func isAllCommit(cmd string) bool {
-	subCommands := splitPipeline(cmd)
-	for _, sub := range subCommands {
-		tokens := tokenizeQuoteAware(sub)
-		if len(tokens) == 0 {
-			continue
-		}
-		if script, ok := unwrapShellScriptCommand(tokens); ok {
-			if isAllCommit(script) {
-				return true
-			}
-		}
-		if hasGitCommitAllFlags(tokens) {
-			return true
-		}
-	}
-	return false
-}
-
 // FormatCommitDenyReason constructs a human-readable explanation of detected violations.
+// Samples are masked so a matched token is never echoed back into the transcript.
 func FormatCommitDenyReason(violations []Violation) string {
 	var sb strings.Builder
 	sb.WriteString("Commit blocked by commit-safety-guard: sensitive pattern violations detected:\n")
 	for _, v := range violations {
 		fmt.Fprintf(&sb, "- %s:%d [%s] matches '%s' (sample: %s)\n",
-			v.File, v.LineNum, v.Category, v.Pattern, v.Sample)
+			v.File, v.LineNum, v.Category, v.Pattern, maskSampleOnce(v.Sample))
 	}
 	sb.WriteString("Please remove secrets, tokens, or PII before committing. ")
 	sb.WriteString("If this is a configuration change intended for aerial-config, author changes in aerial-config where this guard is disabled.")
 	return sb.String()
 }
 
-func appendUntrackedFilesDiff(diffBuilder *strings.Builder, dir, untrackedOut string) {
-	for f := range strings.SplitSeq(untrackedOut, "\n") {
-		f = strings.TrimSpace(f)
-		if f == "" {
-			continue
+// maskSampleOnce masks sample unless it already is a masked sample (first2***last2 or [REDACTED]).
+func maskSampleOnce(sample string) string {
+	if sample == "[REDACTED]" || strings.Contains(sample, "***") {
+		return sample
+	}
+	return sanitizer.MaskTokenSample(sample)
+}
+
+// toolExec is Codex's code-mode custom tool; MCP calls are made from the JavaScript it runs.
+const toolExec = "exec"
+
+// codexMCPRefPattern matches mcp__<server>__<tool> identifiers referenced from Codex exec code
+// (tools.mcp__a__b(...), tools["mcp__a__b"], destructuring). Every reference counts, not only
+// call sites, so aliasing a tool before calling it is still scanned.
+var codexMCPRefPattern = regexp.MustCompile(`\bmcp__[A-Za-z0-9_$-]+`)
+
+// resolveMCPCall derives the MCP destination (Server is empty when the shape cannot be parsed) from every engine's PreToolUse shape: Claude and
+// muse mcp__<server>__<tool>, Codex namespace="mcp__<server>" + name=<tool>, muse/Codex
+// mcp:<server>:<tool> and agy call_mcp_tool (canonical fields, then lowercase fallbacks).
+// ok is false when the call is not an MCP call at all.
+func resolveMCPCall(toolName string, raw json.RawMessage, args ToolArgs) (EgressScanRequest, bool) {
+	trimmed := strings.TrimSpace(toolName)
+	lower := strings.ToLower(trimmed)
+	switch {
+	case isClaudeMCPToolName(trimmed):
+		parts := strings.Split(trimmed, "__")
+		return EgressScanRequest{Server: strings.Join(parts[1:len(parts)-1], "__"), Tool: parts[len(parts)-1], Arguments: raw}, true
+	case strings.HasPrefix(strings.ToLower(strings.TrimSpace(args.Namespace)), "mcp__"):
+		return EgressScanRequest{Server: strings.TrimSpace(args.Namespace)[len("mcp__"):], Tool: trimmed, Arguments: raw}, true
+	case strings.HasPrefix(lower, "mcp:"):
+		parts := strings.Split(trimmed, ":")
+		if len(parts) < 3 {
+			return EgressScanRequest{Tool: trimmed, Arguments: raw}, true
 		}
-		filePath := filepath.Join(dir, f)
-		fi, statErr := os.Stat(filePath)
-		if statErr != nil || fi.IsDir() || fi.Size() >= 1024*1024 {
-			continue
+		return EgressScanRequest{Server: strings.Join(parts[1:len(parts)-1], ":"), Tool: parts[len(parts)-1], Arguments: raw}, true
+	case normalizeToolName(trimmed) == toolCallMCPTool:
+		call := EgressScanRequest{
+			Server:    cmp.Or(strings.TrimSpace(args.ServerName), strings.TrimSpace(args.ServerNameLower)),
+			Tool:      cmp.Or(strings.TrimSpace(args.ToolName), strings.TrimSpace(args.ToolNameLower)),
+			Arguments: args.Arguments,
 		}
-		data, readErr := os.ReadFile(filePath)
-		if readErr != nil {
-			continue
+		if len(call.Arguments) == 0 {
+			call.Arguments = args.ArgumentsLower
 		}
-		diffBuilder.WriteString("\ndiff --git a/" + f + " b/" + f + "\n")
-		diffBuilder.WriteString("--- /dev/null\n")
-		diffBuilder.WriteString("+++ b/" + f + "\n")
-		diffBuilder.WriteString("@@ -0,0 +1,1 @@\n")
-		for line := range strings.SplitSeq(string(data), "\n") {
-			diffBuilder.WriteString("+" + line + "\n")
-		}
+		return call, true
+	case strings.HasPrefix(lower, "mcp_"):
+		return EgressScanRequest{Arguments: raw}, true
+	default:
+		return EgressScanRequest{}, false
 	}
 }
 
-func collectSubmitDiff(dir string) string {
-	var diffBuilder strings.Builder
-	diffOut, err := gitCmdRunner(dir, "diff", "HEAD")
+// codexExecMCPCalls returns the distinct non-Infisical MCP destinations referenced by a Codex
+// exec input, each carrying the full exec input encoded as a JSON string, sorted by server/tool.
+func codexExecMCPCalls(raw json.RawMessage, args ToolArgs) []EgressScanRequest {
+	text := args.Input
+	if text == "" {
+		if err := json.Unmarshal(raw, &text); err != nil {
+			text = string(raw)
+		}
+	}
+	encoded, err := json.Marshal(text)
 	if err != nil {
-		emptyTree := "4b825dc642cb6eb9a060e54bf8d69288fbee4904"
-		diffOut, err = gitCmdRunner(dir, "diff", emptyTree)
-		if err != nil {
-			if fallbackDiff, diffErr := gitCmdRunner(dir, "diff"); diffErr == nil {
-				diffOut = fallbackDiff
-			}
+		return nil
+	}
+	seen := make(map[string]bool)
+	var calls []EgressScanRequest
+	for _, ref := range codexMCPRefPattern.FindAllString(text, -1) {
+		parts := strings.Split(ref[len("mcp__"):], "__")
+		if len(parts) < 2 {
+			continue
 		}
+		server, tool := strings.Join(parts[:len(parts)-1], "__"), parts[len(parts)-1]
+		key := strings.ToLower(server + "/" + tool)
+		if server == "" || tool == "" || isInfisicalMCPCall(server) || seen[key] {
+			continue
+		}
+		seen[key] = true
+		calls = append(calls, EgressScanRequest{Server: server, Tool: tool, Arguments: encoded})
 	}
-	diffBuilder.WriteString(diffOut)
-
-	if untrackedOut, err := gitCmdRunner(dir, "ls-files", "--others", "--exclude-standard"); err == nil {
-		appendUntrackedFilesDiff(&diffBuilder, dir, untrackedOut)
-	}
-	return diffBuilder.String()
+	slices.SortFunc(calls, func(a, b EgressScanRequest) int {
+		return cmp.Or(cmp.Compare(a.Server, b.Server), cmp.Compare(a.Tool, b.Tool))
+	})
+	return calls
 }
 
-func collectCommitDiff(dir, cmdLine string) string {
-	var diffBuilder strings.Builder
-	if cachedDiff, err := gitCmdRunner(dir, "diff", "--cached"); err == nil {
-		diffBuilder.WriteString(cachedDiff)
-	}
-
-	if isAllCommit(cmdLine) {
-		if unstagedDiff, err := gitCmdRunner(dir, "diff"); err == nil {
-			diffBuilder.WriteString("\n")
-			diffBuilder.WriteString(unstagedDiff)
-		}
-	}
-	return diffBuilder.String()
-}
-
-// CheckCommit evaluates run_command and bash tool calls against commit safety guard invariants.
-// Guaranteed fail-open: returns DecisionAllow on any unexpected error or non-commit command.
-func CheckCommit(toolName string, args ToolArgs) *Decision {
-	normalizedName := normalizeToolName(toolName)
-
-	if normalizedName != toolRunCommand && normalizedName != toolBash {
-		return CheckOutboundSecrets(toolName, args)
-	}
-
-	isCommit, targetDir, isSubmit := IsCommitCommand(args.CommandLine)
-	if !isCommit {
-		return CheckOutboundSecrets(toolName, args)
-	}
-
-	dir := targetDir
-	if dir == "" {
-		dir = args.Cwd
-	} else if !filepath.IsAbs(dir) && args.Cwd != "" {
-		dir = filepath.Join(args.Cwd, dir)
-	}
-	if dir == "" {
-		dir = "."
-	}
-
-	if IsAerialConfig(dir, args.CommandLine) {
-		return &Decision{Decision: DecisionAllow}
-	}
-
-	var diff string
-	if isSubmit {
-		diff = collectSubmitDiff(dir)
-	} else {
-		diff = collectCommitDiff(dir, args.CommandLine)
-	}
-
-	ignoreInternalDomain := IsCoreAerial(dir, args.CommandLine)
-	violations := scanViaLoopbackOrLocal(diff, args.CommandLine, string(ModeCommit), false, ignoreInternalDomain)
-	if len(violations) > 0 {
-		return &Decision{
-			Decision: DecisionDeny,
-			Reason:   FormatCommitDenyReason(violations),
-		}
-	}
-
-	return &Decision{Decision: DecisionAllow}
-}
-
-// CheckOutboundSecrets inspects run_command (args.CommandLine) and call_mcp_tool / mcp_*
-// (marshaling args.Arguments/Extra + args.CommandLine) against registered Infisical secrets and pattern rules.
-func CheckOutboundSecrets(toolName string, args ToolArgs) *Decision {
-	rawLower := strings.ToLower(strings.TrimSpace(toolName))
+// CheckOutboundSecrets guards outbound tool calls. Shell commands (run_command / Bash) are
+// regex-scanned locally. MCP calls (every engine shape, including Codex exec code referencing
+// mcp__ tools) are sent to the eri-restate egress scan endpoint, which scans only blocklisted
+// destinations against registered secret values and the pattern rules. Infisical MCP calls
+// pass unscanned. A missing or failing scanner, or an MCP call whose server cannot be derived,
+// denies (fail closed). raw is the payload's tool input; getenv resolves the custom pattern
+// sources for the local shell scan.
+func CheckOutboundSecrets(toolName string, raw json.RawMessage, args ToolArgs, getenv func(string) string, scanner EgressScanner) *Decision {
 	cleanName := normalizeToolName(toolName)
-	if isInfisicalMCPCall(toolName, args) {
-		return &Decision{Decision: DecisionAllow}
-	}
-	var textToScan string
-
 	switch {
 	case cleanName == toolRunCommand || cleanName == toolBash:
-		textToScan = args.CommandLine
-	case cleanName == toolCallMCPTool || strings.HasPrefix(cleanName, "mcp_") || strings.HasPrefix(rawLower, "mcp_") || strings.HasPrefix(rawLower, "mcp:"):
-		parts := []string{
-			args.CommandLine,
-			string(args.Arguments),
-			string(args.ArgumentsLower),
-			args.ToolName,
-			args.ToolNameLower,
-			args.ServerName,
-			args.ServerNameLower,
-		}
-		textToScan = strings.TrimSpace(strings.Join(parts, "\n"))
-	default:
+		return checkShellSecrets(args.CommandLine, cleanName, getenv)
+	case cleanName == toolExec && args.Namespace == "":
+		return checkEgress(codexExecMCPCalls(raw, args), scanner)
+	}
+	call, ok := resolveMCPCall(toolName, raw, args)
+	if !ok {
 		return &Decision{Decision: DecisionAllow}
 	}
-
-	if textToScan == "" {
-		return &Decision{Decision: DecisionAllow}
-	}
-
-	violations := scanViaLoopbackOrLocal("", textToScan, cleanName, true, true)
-	if len(violations) > 0 {
+	if call.Server == "" || call.Tool == "" {
 		return &Decision{
 			Decision: DecisionDeny,
-			Reason:   FormatCommitDenyReason(violations),
+			Reason: fmt.Sprintf("Outbound secret guard: could not derive the MCP server and tool from tool name %q, "+
+				"so the MCP call was blocked (unrecognized MCP call shape; teach guard.resolveMCPCall this engine's format).", toolName),
 		}
 	}
+	if isInfisicalMCPCall(call.Server) {
+		return &Decision{Decision: DecisionAllow}
+	}
+	return checkEgress([]EgressScanRequest{call}, scanner)
+}
 
+// checkShellSecrets regex-scans a shell command line in-process.
+func checkShellSecrets(commandLine, label string, getenv func(string) string) *Decision {
+	if strings.TrimSpace(commandLine) == "" {
+		return &Decision{Decision: DecisionAllow}
+	}
+	if violations := scanLocal(commandLine, label, getenv); len(violations) > 0 {
+		return &Decision{Decision: DecisionDeny, Reason: FormatCommitDenyReason(violations)}
+	}
 	return &Decision{Decision: DecisionAllow}
+}
+
+// checkEgress asks scanner about each MCP destination and denies on the first blocked result or
+// scan error. A nil scanner counts as unavailable.
+func checkEgress(calls []EgressScanRequest, scanner EgressScanner) *Decision {
+	for _, call := range calls {
+		if scanner == nil {
+			return egressUnavailableDecision(call, errors.New("no egress scanner configured"))
+		}
+		result, err := scanner.Scan(context.Background(), call)
+		if err != nil {
+			return egressUnavailableDecision(call, err)
+		}
+		if result.Blocked {
+			return &Decision{Decision: DecisionDeny, Reason: formatEgressDenyReason(call, result.Violations)}
+		}
+	}
+	return &Decision{Decision: DecisionAllow}
+}
+
+func egressUnavailableDecision(call EgressScanRequest, err error) *Decision {
+	return &Decision{
+		Decision: DecisionDeny,
+		Reason: fmt.Sprintf("Outbound secret guard: the egress scan is unavailable (%v), so the MCP call to %s/%s was blocked. "+
+			"Retry once eri-restate's egress scan endpoint is healthy.", err, call.Server, call.Tool),
+	}
+}
+
+// formatEgressDenyReason lists category and masked sample of each violation, never raw values.
+func formatEgressDenyReason(call EgressScanRequest, violations []EgressViolation) string {
+	var sb strings.Builder
+	fmt.Fprintf(&sb, "Outbound secret guard: MCP call to %s/%s blocked because its arguments carry secrets:\n", call.Server, call.Tool)
+	for _, v := range violations {
+		fmt.Fprintf(&sb, "- [%s] sample: %s\n", v.Category, maskSampleOnce(v.Sample))
+	}
+	sb.WriteString("This destination never legitimately receives secrets; remove the secret from the arguments.")
+	return sb.String()
 }
 
 // infisicalMCPServer is the server name the Infisical MCP is registered under on both stacks.
 const infisicalMCPServer = "infisical"
 
-// isInfisicalMCPCall reports whether a tool call targets the Infisical MCP server, whose whole
-// purpose is reading and writing secrets (every call carries the registered project ID), so the
-// outbound secret scan would deny all of them. The server segment must match exactly.
-func isInfisicalMCPCall(toolName string, args ToolArgs) bool {
-	if isClaudeMCPToolName(toolName) {
-		parts := strings.Split(strings.TrimSpace(toolName), "__")
-		return strings.EqualFold(strings.Join(parts[1:len(parts)-1], "__"), infisicalMCPServer)
-	}
-	if normalizeToolName(toolName) != toolCallMCPTool {
-		return false
-	}
-	return strings.EqualFold(strings.TrimSpace(args.ServerName), infisicalMCPServer) ||
-		strings.EqualFold(strings.TrimSpace(args.ServerNameLower), infisicalMCPServer)
+// isInfisicalMCPCall reports whether server is the Infisical MCP server, whose whole purpose is
+// reading and writing secrets (every call carries the registered project ID), so the outbound
+// secret scan would deny all of them. The server must match exactly (case-insensitive).
+func isInfisicalMCPCall(server string) bool {
+	return strings.EqualFold(strings.TrimSpace(server), infisicalMCPServer)
 }

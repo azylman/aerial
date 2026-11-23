@@ -247,30 +247,6 @@ CREATE INDEX IF NOT EXISTS idx_transcript_steps_fts ON transcript_steps USING GI
 CREATE INDEX IF NOT EXISTS idx_transcript_steps_tool ON transcript_steps(tool_name);
 CREATE INDEX IF NOT EXISTS idx_transcript_steps_tool_kind ON transcript_steps(tool_kind);
 
--- Pull Request and Deployment Registry Table
-CREATE TABLE IF NOT EXISTS pr_registry (
-    id BIGSERIAL PRIMARY KEY,
-    agent TEXT NOT NULL DEFAULT 'aerial',
-    repo TEXT NOT NULL,
-    pr_number INTEGER NOT NULL,
-    branch TEXT NOT NULL,
-    head_sha TEXT NOT NULL,
-    merge_sha TEXT,
-    target_id TEXT NOT NULL,
-    status TEXT NOT NULL DEFAULT 'open',
-    title TEXT NOT NULL DEFAULT '',
-    metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
-    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    CONSTRAINT uq_pr_registry_repo_pr UNIQUE (repo, pr_number)
-);
-
-CREATE INDEX IF NOT EXISTS idx_pr_registry_head_sha ON pr_registry (repo, head_sha);
-CREATE INDEX IF NOT EXISTS idx_pr_registry_merge_sha ON pr_registry (repo, merge_sha);
-CREATE INDEX IF NOT EXISTS idx_pr_registry_status ON pr_registry (status);
-CREATE INDEX IF NOT EXISTS idx_pr_registry_target_id ON pr_registry (target_id);
-CREATE INDEX IF NOT EXISTS idx_pr_registry_agent_status ON pr_registry(agent, status);
-
 -- Production Code Coverage Table
 CREATE TABLE IF NOT EXISTS production_code_coverage (
     service TEXT NOT NULL,
@@ -327,8 +303,6 @@ CREATE TABLE IF NOT EXISTS vanadis_chunks (
     ci_checks JSONB NOT NULL DEFAULT '{}'::jsonb,
     rollout_state JSONB NOT NULL DEFAULT '{}'::jsonb,
     banner TEXT NOT NULL DEFAULT '',
-    merge_awakeable_id TEXT NOT NULL DEFAULT '',
-    deploy_awakeable_id TEXT NOT NULL DEFAULT '',
     started_at TIMESTAMPTZ,
     completed_at TIMESTAMPTZ,
     created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,

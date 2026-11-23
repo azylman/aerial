@@ -1,0 +1,197 @@
+{
+  "name": "12-squash-push-before-closed",
+  "description": "The squash-merge push resolves the PR from its (#N) commit message before pull_request.closed: it merges the row on the merge SHA, publishes merged keyed on the merge commit, runs the cascade and dispatches git push for the PR; the later closed event publishes merged keyed on the PR head without moving the row.",
+  "github_routes": {
+    "GET /repos/azylman/aerial/pulls": "[]",
+    "GET /repos/azylman/aerial/commits/c112/pulls": "[]"
+  },
+  "synapse": [
+    {
+      "kind": "register",
+      "register": {
+        "repo": "azylman/aerial",
+        "pr_number": 112,
+        "branch": "feat/squash",
+        "head_sha": "h112",
+        "target_id": "100000000000000001",
+        "title": "Squash PR",
+        "agent": "aerial"
+      }
+    },
+    {
+      "kind": "github",
+      "event": "push",
+      "payload": {
+        "ref": "refs/heads/main",
+        "after": "c112",
+        "repository": {
+          "full_name": "azylman/aerial"
+        },
+        "head_commit": {
+          "id": "c112",
+          "message": "Squash PR (#112)"
+        }
+      }
+    },
+    {
+      "kind": "github",
+      "event": "pull_request",
+      "payload": {
+        "action": "closed",
+        "number": 112,
+        "repository": {
+          "full_name": "azylman/aerial"
+        },
+        "pull_request": {
+          "number": 112,
+          "title": "Squash PR",
+          "state": "closed",
+          "merged": true,
+          "head": {
+            "ref": "feat/squash",
+            "sha": "h112"
+          },
+          "base": {
+            "ref": "main"
+          },
+          "merge_commit_sha": "c112"
+        }
+      }
+    }
+  ],
+  "restate": [
+    {
+      "object": "PRObject",
+      "handler": "Register",
+      "event": {
+        "repo": "azylman/aerial",
+        "pr_number": 112,
+        "branch": "feat/squash",
+        "head_sha": "h112",
+        "target_id": "100000000000000001",
+        "title": "Squash PR",
+        "agent": "aerial",
+        "bot_id": "aerial",
+        "metadata": {
+          "agent": "aerial",
+          "bot_id": "aerial"
+        }
+      }
+    },
+    {
+      "object": "RepoObject",
+      "handler": "HandleMainPush",
+      "event": {
+        "main_sha": "c112",
+        "repo": "azylman/aerial"
+      }
+    },
+    {
+      "object": "PRObject",
+      "handler": "HandleMerged",
+      "event": {
+        "pr_number": 112,
+        "head_sha": "c112",
+        "merge_sha": "c112",
+        "facts": [
+          {
+            "event": "merged",
+            "repo": "azylman/aerial",
+            "pr_number": 112,
+            "head_sha": "c112",
+            "merge_sha": "c112"
+          }
+        ],
+        "repo": "azylman/aerial"
+      }
+    },
+    {
+      "object": "RepoObject",
+      "handler": "HandleAutoUpdate",
+      "event": {
+        "main_sha": "c112",
+        "auto_update": {
+          "authors": [
+            "azylman"
+          ],
+          "default_owner": true
+        },
+        "repo": "azylman/aerial"
+      }
+    },
+    {
+      "object": "RepoObject",
+      "handler": "HandleGitPush",
+      "event": {
+        "main_sha": "c112",
+        "pr_number": 112,
+        "ref": "refs/heads/main",
+        "target_id": "100000000000000001",
+        "repo": "azylman/aerial"
+      }
+    },
+    {
+      "object": "PRObject",
+      "handler": "HandleMerged",
+      "event": {
+        "pr_number": 112,
+        "head_sha": "h112",
+        "merge_sha": "c112",
+        "branch": "feat/squash",
+        "facts": [
+          {
+            "event": "merged",
+            "repo": "azylman/aerial",
+            "pr_number": 112,
+            "head_sha": "h112",
+            "merge_sha": "c112"
+          }
+        ],
+        "repo": "azylman/aerial"
+      }
+    }
+  ],
+  "effects": [
+    {
+      "kind": "pr_fact_merged",
+      "key": "azylman/aerial#112@c112:pr_fact_merged"
+    },
+    {
+      "kind": "github_auto_update",
+      "key": "azylman/aerial#0@c112:github_auto_update"
+    },
+    {
+      "kind": "flux_git_push",
+      "key": "azylman/aerial#112@c112:flux_git_push"
+    },
+    {
+      "kind": "pr_fact_merged",
+      "key": "azylman/aerial#112@h112:pr_fact_merged"
+    }
+  ],
+  "fact_rollout_states": [
+    {
+      "key": "azylman/aerial#112@c112:pr_fact_merged",
+      "rollout_state": null
+    },
+    {
+      "key": "azylman/aerial#112@h112:pr_fact_merged",
+      "rollout_state": null
+    }
+  ],
+  "rows": [
+    {
+      "repo": "azylman/aerial",
+      "pr_number": 112,
+      "branch": "feat/squash",
+      "head_sha": "h112",
+      "merge_sha": "c112",
+      "target_id": "100000000000000001",
+      "status": "merged",
+      "title": "Squash PR",
+      "metadata": {
+        "agent": "aerial"
+      }
+    }
+  ]
+}

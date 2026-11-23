@@ -10,16 +10,10 @@ import (
 	"time"
 
 	"github.com/azylman/aerial/pkg/pubsub"
+	"github.com/azylman/aerial/pkg/restateingress"
+	"github.com/azylman/aerial/services/prospera/internal/delivery"
 	"github.com/azylman/aerial/services/prospera/internal/model"
 )
-
-func nakBackoffDelay(numDelivered uint64) time.Duration {
-	if numDelivered <= 1 {
-		return 1 * time.Second
-	}
-	shift := min(numDelivered-1, 4)
-	return time.Duration(1<<shift) * time.Second
-}
 
 func nakOrDropJob(ctx context.Context, msg pubsub.Message, jobName, entityID string, err error) error {
 	if msg == nil {
@@ -33,7 +27,7 @@ func nakOrDropJob(ctx context.Context, msg pubsub.Message, jobName, entityID str
 		}
 		return nil
 	}
-	if nakErr := msg.NakWithDelay(nakBackoffDelay(delivered)); nakErr != nil {
+	if nakErr := msg.NakWithDelay(pubsub.NakBackoff(delivered, 16*time.Second)); nakErr != nil {
 		slog.WarnContext(ctx, "prospera: nak job error", "job", jobName, "error", nakErr)
 	}
 	return err
@@ -90,6 +84,17 @@ func (s *Server) HandleReportJob(ctx context.Context, msg pubsub.Message) error 
 			slog.WarnContext(ctx, "prospera: term empty call_id report job failed", "error", termErr)
 		}
 		return nil
+	}
+
+	cfg := s.cfgSrc.Current()
+	if cfg != nil && strings.TrimSpace(cfg.RestateIngressURL) != "" {
+		endpoint := fmt.Sprintf("%s/ProsperaReport/%s/DeliverReport/send", strings.TrimRight(cfg.RestateIngressURL, "/"), callID)
+		idempotencyKey := "prospera:report:" + callID
+		_, ingressErr := restateingress.Post(ctx, s.httpClient, endpoint, idempotencyKey, delivery.DeliverReportRequest{CallID: callID}, 1024)
+		if ingressErr == nil {
+			return nil
+		}
+		slog.WarnContext(ctx, "jobs: post to restate ingress failed, falling back to direct delivery", "call_id", callID, "error", ingressErr)
 	}
 
 	if err := s.reporter.DeliverCallReport(ctx, callID); err != nil {

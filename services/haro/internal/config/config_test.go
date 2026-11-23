@@ -13,9 +13,15 @@ func TestResolveConfigPath(t *testing.T) {
 	tmpDir := t.TempDir()
 	validLocal, emptyLocal, nonExistent := filepath.Join(tmpDir, "valid.yaml"), filepath.Join(tmpDir, "empty.yaml"), filepath.Join(tmpDir, "missing.yaml")
 	fallbackFile := filepath.Join(tmpDir, "haro.yaml")
-	_ = os.WriteFile(validLocal, []byte("port: '4004'\n"), 0o644)
-	_ = os.WriteFile(emptyLocal, []byte{}, 0o644)
-	_ = os.WriteFile(fallbackFile, []byte("port: '4004'\n"), 0o644)
+	if err := os.WriteFile(validLocal, []byte("port: '4004'\n"), 0o644); err != nil {
+		t.Fatalf("write valid.yaml: %v", err)
+	}
+	if err := os.WriteFile(emptyLocal, []byte{}, 0o644); err != nil {
+		t.Fatalf("write empty.yaml: %v", err)
+	}
+	if err := os.WriteFile(fallbackFile, []byte("port: '4004'\n"), 0o644); err != nil {
+		t.Fatalf("write haro.yaml: %v", err)
+	}
 
 	fallback := "/config/haro.yaml"
 	tests := []struct {
@@ -52,11 +58,21 @@ func TestLoadConfigFile(t *testing.T) {
 	tmpDir := t.TempDir()
 	validPath, noPortPath, noTZPath, malformedPath := filepath.Join(tmpDir, "valid.yaml"), filepath.Join(tmpDir, "no_port.yaml"), filepath.Join(tmpDir, "no_tz.yaml"), filepath.Join(tmpDir, "malformed.yaml")
 	extraPath := filepath.Join(tmpDir, "extra.yaml")
-	_ = os.WriteFile(validPath, []byte("port: '4005'\ntimezone: 'America/Chicago'\neri_url: 'http://eri:8080'\nvanadis_url: 'http://vanadis:8080'\n"), 0o644)
-	_ = os.WriteFile(extraPath, []byte("port: '4005'\ntimezone: 'America/Chicago'\neri_url: 'http://eri:8080'\nvanadis_url: 'http://vanadis:8080'\nextra_event_sources:\n  - ' Custom_Source '\n  - ''\n  - 'custom_source'\n"), 0o644)
-	_ = os.WriteFile(noPortPath, []byte("timezone: 'America/Chicago'\neri_url: 'http://eri:8080'\nvanadis_url: 'http://vanadis:8080'\n"), 0o644)
-	_ = os.WriteFile(noTZPath, []byte("port: '4005'\neri_url: 'http://eri:8080'\nvanadis_url: 'http://vanadis:8080'\n"), 0o644)
-	_ = os.WriteFile(malformedPath, []byte("port: [unclosed"), 0o644)
+	if err := os.WriteFile(validPath, []byte("port: '4005'\ntimezone: 'America/Chicago'\neri_url: 'http://eri:8080'\nvanadis_url: 'http://vanadis:8080'\n"), 0o644); err != nil {
+		t.Fatalf("write valid.yaml: %v", err)
+	}
+	if err := os.WriteFile(extraPath, []byte("port: '4005'\ntimezone: 'America/Chicago'\neri_url: 'http://eri:8080'\nvanadis_url: 'http://vanadis:8080'\nextra_event_sources:\n  - ' Custom_Source '\n  - ''\n  - 'custom_source'\n"), 0o644); err != nil {
+		t.Fatalf("write extra.yaml: %v", err)
+	}
+	if err := os.WriteFile(noPortPath, []byte("timezone: 'America/Chicago'\neri_url: 'http://eri:8080'\nvanadis_url: 'http://vanadis:8080'\n"), 0o644); err != nil {
+		t.Fatalf("write no_port.yaml: %v", err)
+	}
+	if err := os.WriteFile(noTZPath, []byte("port: '4005'\neri_url: 'http://eri:8080'\nvanadis_url: 'http://vanadis:8080'\n"), 0o644); err != nil {
+		t.Fatalf("write no_tz.yaml: %v", err)
+	}
+	if err := os.WriteFile(malformedPath, []byte("port: [unclosed"), 0o644); err != nil {
+		t.Fatalf("write malformed.yaml: %v", err)
+	}
 
 	tests := []struct {
 		name        string
@@ -107,87 +123,126 @@ func TestLoadConfigFile(t *testing.T) {
 	}
 }
 
+func writeTestConfigs(t *testing.T, tmpDir string) (pathWithBoth, pathWithoutEri, pathWithoutVanadis, pathWithRestate string) {
+	t.Helper()
+	pathWithBoth = filepath.Join(tmpDir, "with_both.yaml")
+	pathWithoutEri = filepath.Join(tmpDir, "without_eri.yaml")
+	pathWithoutVanadis = filepath.Join(tmpDir, "without_vanadis.yaml")
+	pathWithRestate = filepath.Join(tmpDir, "with_restate.yaml")
+	for _, f := range []struct {
+		path    string
+		content string
+	}{
+		{pathWithBoth, "port: '4005'\ntimezone: 'UTC'\neri_url: 'http://yaml.eri:8088/'\nvanadis_url: 'http://yaml.vanadis:4025/'\n"},
+		{pathWithoutEri, "port: '4005'\ntimezone: 'UTC'\nvanadis_url: 'http://yaml.vanadis:8080'\n"},
+		{pathWithoutVanadis, "port: '4005'\ntimezone: 'UTC'\neri_url: 'http://yaml.eri:8080'\n"},
+		{pathWithRestate, "port: '4005'\ntimezone: 'UTC'\neri_url: 'http://yaml.eri:8088/'\nvanadis_url: 'http://yaml.vanadis:4025/'\nrestate_url: 'http://yaml.restate:8080/'\nagent_name: 'agent-alpha'\n"},
+	} {
+		if err := os.WriteFile(f.path, []byte(f.content), 0o644); err != nil {
+			t.Fatalf("write %s: %v", f.path, err)
+		}
+	}
+	return
+}
+
 func TestLoadConfig_URLResolution(t *testing.T) {
 	tmpDir := t.TempDir()
-	pathWithBoth := filepath.Join(tmpDir, "with_both.yaml")
-	pathWithoutEri := filepath.Join(tmpDir, "without_eri.yaml")
-	pathWithoutVanadis := filepath.Join(tmpDir, "without_vanadis.yaml")
-	pathWithRestate := filepath.Join(tmpDir, "with_restate.yaml")
-	_ = os.WriteFile(pathWithBoth, []byte("port: '4005'\ntimezone: 'UTC'\neri_url: 'http://yaml.eri:8088/'\nvanadis_url: 'http://yaml.vanadis:4025/'\n"), 0o644)
-	_ = os.WriteFile(pathWithoutEri, []byte("port: '4005'\ntimezone: 'UTC'\nvanadis_url: 'http://yaml.vanadis:8080'\n"), 0o644)
-	_ = os.WriteFile(pathWithoutVanadis, []byte("port: '4005'\ntimezone: 'UTC'\neri_url: 'http://yaml.eri:8080'\n"), 0o644)
-	_ = os.WriteFile(pathWithRestate, []byte("port: '4005'\ntimezone: 'UTC'\neri_url: 'http://yaml.eri:8088/'\nvanadis_url: 'http://yaml.vanadis:4025/'\nrestate_url: 'http://yaml.restate:8080/'\nagent_name: 'miorine'\n"), 0o644)
+	pathWithBoth, pathWithoutEri, pathWithoutVanadis, pathWithRestate := writeTestConfigs(t, tmpDir)
 
 	tests := []struct {
-		name           string
-		path           string
-		envEri         string
-		envVanadis     string
-		envRestate     string
-		envAgent       string
-		envDB          string
-		wantErr        bool
-		wantEriURL     string
-		wantVanadisURL string
-		wantRestateURL string
-		wantAgentName  string
+		name             string
+		path             string
+		envEri           string
+		envVanadis       string
+		envRestate       string
+		envRestatePort   string
+		envRestateAdmin  string
+		envRestateAdv    string
+		envAgent         string
+		envDB            string
+		wantErr          bool
+		wantEriURL       string
+		wantVanadisURL   string
+		wantRestateURL   string
+		wantRestatePort  string
+		wantRestateAdmin string
+		wantRestateAdv   string
+		wantAgentName    string
 	}{
 		{
-			name:           "env eri url takes precedence over yaml",
-			path:           pathWithBoth,
-			envEri:         "http://eri.aerial:9001/",
-			envVanadis:     "",
-			envDB:          "postgres://localhost/db",
-			wantEriURL:     "http://eri.aerial:9001",
-			wantVanadisURL: "http://yaml.vanadis:4025",
-			wantRestateURL: "",
-			wantAgentName:  "aerial",
+			name:             "env eri url takes precedence over yaml",
+			path:             pathWithBoth,
+			envEri:           "http://eri.aerial:9001/",
+			envVanadis:       "",
+			envDB:            "postgres://localhost/db",
+			wantEriURL:       "http://eri.aerial:9001",
+			wantVanadisURL:   "http://yaml.vanadis:4025",
+			wantRestateURL:   "http://restate.aerial:8080",
+			wantRestatePort:  "9080",
+			wantRestateAdmin: "http://restate.aerial:9070",
+			wantRestateAdv:   "http://haro.default.svc.cluster.local:9080",
+			wantAgentName:    "aerial",
 		},
 		{
-			name:           "env vanadis url takes precedence over yaml",
-			path:           pathWithBoth,
-			envEri:         "",
-			envVanadis:     "http://env.vanadis:4025/",
-			envDB:          "postgres://localhost/db",
-			wantEriURL:     "http://yaml.eri:8088",
-			wantVanadisURL: "http://env.vanadis:4025",
-			wantRestateURL: "",
-			wantAgentName:  "aerial",
+			name:             "env vanadis url takes precedence over yaml",
+			path:             pathWithBoth,
+			envEri:           "",
+			envVanadis:       "http://env.vanadis:4025/",
+			envDB:            "postgres://localhost/db",
+			wantEriURL:       "http://yaml.eri:8088",
+			wantVanadisURL:   "http://env.vanadis:4025",
+			wantRestateURL:   "http://restate.aerial:8080",
+			wantRestatePort:  "9080",
+			wantRestateAdmin: "http://restate.aerial:9070",
+			wantRestateAdv:   "http://haro.default.svc.cluster.local:9080",
+			wantAgentName:    "aerial",
 		},
 		{
-			name:           "yaml urls used when env empty",
-			path:           pathWithBoth,
-			envEri:         "",
-			envVanadis:     "",
-			envDB:          "postgres://localhost/db",
-			wantEriURL:     "http://yaml.eri:8088",
-			wantVanadisURL: "http://yaml.vanadis:4025",
-			wantRestateURL: "",
-			wantAgentName:  "aerial",
+			name:             "yaml urls used when env empty",
+			path:             pathWithBoth,
+			envEri:           "",
+			envVanadis:       "",
+			envDB:            "postgres://localhost/db",
+			wantEriURL:       "http://yaml.eri:8088",
+			wantVanadisURL:   "http://yaml.vanadis:4025",
+			wantRestateURL:   "http://restate.aerial:8080",
+			wantRestatePort:  "9080",
+			wantRestateAdmin: "http://restate.aerial:9070",
+			wantRestateAdv:   "http://haro.default.svc.cluster.local:9080",
+			wantAgentName:    "aerial",
 		},
 		{
-			name:           "restate url and agent name loaded from yaml",
-			path:           pathWithRestate,
-			envEri:         "",
-			envVanadis:     "",
-			envDB:          "postgres://localhost/db",
-			wantEriURL:     "http://yaml.eri:8088",
-			wantVanadisURL: "http://yaml.vanadis:4025",
-			wantRestateURL: "http://yaml.restate:8080",
-			wantAgentName:  "miorine",
+			name:             "restate url and agent name loaded from yaml",
+			path:             pathWithRestate,
+			envEri:           "",
+			envVanadis:       "",
+			envDB:            "postgres://localhost/db",
+			wantEriURL:       "http://yaml.eri:8088",
+			wantVanadisURL:   "http://yaml.vanadis:4025",
+			wantRestateURL:   "http://yaml.restate:8080",
+			wantRestatePort:  "9080",
+			wantRestateAdmin: "http://restate.aerial:9070",
+			wantRestateAdv:   "http://haro.default.svc.cluster.local:9080",
+			wantAgentName:    "agent-alpha",
 		},
 		{
-			name:           "env restate url and agent name take precedence over yaml",
-			path:           pathWithRestate,
-			envEri:         "",
-			envVanadis:     "",
-			envRestate:     "http://env.restate:8080/",
-			envAgent:       "suletta",
-			envDB:          "postgres://localhost/db",
-			wantEriURL:     "http://yaml.eri:8088",
-			wantVanadisURL: "http://yaml.vanadis:4025",
-			wantRestateURL: "http://env.restate:8080",
-			wantAgentName:  "suletta",
+			name:             "env restate url and agent name take precedence over yaml",
+			path:             pathWithRestate,
+			envEri:           "",
+			envVanadis:       "",
+			envRestate:       "http://env.restate:8080/",
+			envRestatePort:   "9099",
+			envRestateAdmin:  "http://admin.restate:9070/",
+			envRestateAdv:    "http://adv.restate:9080/",
+			envAgent:         "agent-beta",
+			envDB:            "postgres://localhost/db",
+			wantEriURL:       "http://yaml.eri:8088",
+			wantVanadisURL:   "http://yaml.vanadis:4025",
+			wantRestateURL:   "http://env.restate:8080",
+			wantRestatePort:  "9099",
+			wantRestateAdmin: "http://admin.restate:9070",
+			wantRestateAdv:   "http://adv.restate:9080",
+			wantAgentName:    "agent-beta",
 		},
 		{
 			name:       "missing eri url returns error",
@@ -212,6 +267,9 @@ func TestLoadConfig_URLResolution(t *testing.T) {
 			t.Setenv("ERI_URL", tc.envEri)
 			t.Setenv("VANADIS_URL", tc.envVanadis)
 			t.Setenv("RESTATE_INGRESS_URL", tc.envRestate)
+			t.Setenv("RESTATE_PORT", tc.envRestatePort)
+			t.Setenv("RESTATE_ADMIN_URL", tc.envRestateAdmin)
+			t.Setenv("RESTATE_ADVERTISE_URL", tc.envRestateAdv)
 			t.Setenv("AGENT_NAME", tc.envAgent)
 			t.Setenv("DATABASE_URL", tc.envDB)
 			t.Setenv("POSTGRES_URL", "")
@@ -225,9 +283,9 @@ func TestLoadConfig_URLResolution(t *testing.T) {
 			if (err != nil) != tc.wantErr {
 				t.Fatalf("LoadConfig() err = %v, wantErr = %v", err, tc.wantErr)
 			}
-			if !tc.wantErr && (cfg.EriURL != tc.wantEriURL || cfg.VanadisURL != tc.wantVanadisURL || cfg.RestateURL != tc.wantRestateURL || cfg.AgentName != tc.wantAgentName) {
-				t.Errorf("cfg.EriURL = %q (want %q), cfg.VanadisURL = %q (want %q), cfg.RestateURL = %q (want %q), cfg.AgentName = %q (want %q)",
-					cfg.EriURL, tc.wantEriURL, cfg.VanadisURL, tc.wantVanadisURL, cfg.RestateURL, tc.wantRestateURL, cfg.AgentName, tc.wantAgentName)
+			if !tc.wantErr && (cfg.EriURL != tc.wantEriURL || cfg.VanadisURL != tc.wantVanadisURL || cfg.RestateURL != tc.wantRestateURL || cfg.RestatePort != tc.wantRestatePort || cfg.RestateAdminURL != tc.wantRestateAdmin || cfg.RestateAdvertiseURL != tc.wantRestateAdv || cfg.AgentName != tc.wantAgentName) {
+				t.Errorf("cfg.EriURL = %q (want %q), cfg.VanadisURL = %q (want %q), cfg.RestateURL = %q (want %q), cfg.RestatePort = %q (want %q), cfg.RestateAdminURL = %q (want %q), cfg.RestateAdvertiseURL = %q (want %q), cfg.AgentName = %q (want %q)",
+					cfg.EriURL, tc.wantEriURL, cfg.VanadisURL, tc.wantVanadisURL, cfg.RestateURL, tc.wantRestateURL, cfg.RestatePort, tc.wantRestatePort, cfg.RestateAdminURL, tc.wantRestateAdmin, cfg.RestateAdvertiseURL, tc.wantRestateAdv, cfg.AgentName, tc.wantAgentName)
 			}
 		})
 	}
@@ -239,7 +297,9 @@ func TestRegisterConfigTokens_TableDriven(t *testing.T) {
 	if err := os.MkdirAll(secretsDir, 0o755); err != nil {
 		t.Fatalf("failed to create secrets dir: %v", err)
 	}
-	_ = os.WriteFile(filepath.Join(secretsDir, "DISCORD_TOKEN"), []byte("shared_bot_token_secret"), 0o600)
+	if err := os.WriteFile(filepath.Join(secretsDir, "DISCORD_TOKEN"), []byte("shared_bot_token_secret"), 0o600); err != nil {
+		t.Fatalf("write DISCORD_TOKEN: %v", err)
+	}
 
 	oldPath := sanitizer.DefaultSharedSecretsPath
 	sanitizer.DefaultSharedSecretsPath = secretsDir

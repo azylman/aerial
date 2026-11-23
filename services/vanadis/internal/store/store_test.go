@@ -13,6 +13,7 @@ import (
 	"github.com/jackc/pgx/v5/pgconn"
 
 	"github.com/azylman/aerial/services/vanadis/internal/model"
+	"github.com/azylman/aerial/services/vanadis/internal/storetest"
 )
 
 type scriptRow struct {
@@ -115,7 +116,7 @@ func (r *mockRows) Scan(dest ...any) error {
 			rawCIChecks = []byte(`null`)
 			rawRolloutState = []byte(`{}`)
 		}
-		return scanValues(dest, c.ID, c.BuildID, c.ChunkIndex, c.Mode, c.Repo, c.Title, c.Instructions, c.TargetFiles, c.TargetSymbols, c.Effort, c.AcceptanceCriteria, c.Status, c.PRNumber, c.StallNudges, c.DependsOn, c.CIFailCount, rawCIChecks, rawRolloutState, c.Banner, c.MergeAwakeableID, c.DeployAwakeableID, sql.NullTime{Time: c.StartedAt, Valid: !c.StartedAt.IsZero()}, sql.NullTime{Time: c.CompletedAt, Valid: !c.CompletedAt.IsZero()}, c.CreatedAt, c.UpdatedAt)
+		return scanValues(dest, c.ID, c.BuildID, c.ChunkIndex, c.Mode, c.Repo, c.Title, c.Instructions, c.TargetFiles, c.TargetSymbols, c.Effort, c.AcceptanceCriteria, c.Status, c.PRNumber, c.StallNudges, c.DependsOn, c.CIFailCount, rawCIChecks, rawRolloutState, c.Banner, sql.NullTime{Time: c.StartedAt, Valid: !c.StartedAt.IsZero()}, sql.NullTime{Time: c.CompletedAt, Valid: !c.CompletedAt.IsZero()}, c.CreatedAt, c.UpdatedAt)
 	}
 	return nil
 }
@@ -123,10 +124,14 @@ func (r *mockRows) Scan(dest ...any) error {
 type mockDB struct {
 	queryRowFn func(ctx context.Context, query string, args ...any) pgx.Row
 	queryFn    func(ctx context.Context, query string, args ...any) (pgx.Rows, error)
+	execFn     func(ctx context.Context, query string, args ...any) (pgconn.CommandTag, error)
 	beginFn    func(ctx context.Context) (pgx.Tx, error)
 }
 
-func (*mockDB) Exec(context.Context, string, ...any) (pgconn.CommandTag, error) {
+func (db *mockDB) Exec(ctx context.Context, s string, a ...any) (pgconn.CommandTag, error) {
+	if db.execFn != nil {
+		return db.execFn(ctx, s, a...)
+	}
 	return pgconn.NewCommandTag("UPDATE 1"), nil
 }
 
@@ -289,6 +294,11 @@ var (
 	nilDB       = &bareStore{store: &PostgresVanadisStore{}}
 )
 
+type execCall struct {
+	query string
+	args  []any
+}
+
 type dbScript struct {
 	bare         *bareStore
 	buildVals    []any
@@ -301,19 +311,15 @@ type dbScript struct {
 	chunksErr    error
 	chunkScanErr error
 	chunkRowsErr error
+	execErr      error
+	recordedExec *[]execCall
 }
 
-func (s dbScript) open() (*PostgresVanadisStore, *[]string) {
-	candidates := new([]string)
+func (s dbScript) open() *PostgresVanadisStore {
 	if s.bare != nil {
-		return s.bare.store, candidates
+		return s.bare.store
 	}
-	queryRow := func(_ context.Context, _ string, args ...any) pgx.Row {
-		if len(args) > 0 {
-			if c, ok := args[0].([]string); ok {
-				*candidates = c
-			}
-		}
+	queryRow := func(context.Context, string, ...any) pgx.Row {
 		if s.buildErr != nil {
 			return &scriptRow{err: s.buildErr}
 		}
@@ -331,18 +337,16 @@ func (s dbScript) open() (*PostgresVanadisStore, *[]string) {
 		}
 		return &mockRows{items: s.chunks, scanErr: s.chunkScanErr, rowsErr: s.chunkRowsErr}, nil
 	}
-	return &PostgresVanadisStore{db: &mockDB{queryRowFn: queryRow, queryFn: query}}, candidates
-}
-
-func mkBuild(id, threadID, title, objective, status string) model.VanadisBuild {
-	return model.VanadisBuild{ID: id, ThreadID: threadID, Title: title, Objective: objective, Status: status, Tier: 2}
-}
-
-func mkChunk(id, buildID string, idx int, title, instr, effort, status string) model.VanadisChunk {
-	if effort == "" {
-		effort = "medium"
+	exec := func(_ context.Context, query string, args ...any) (pgconn.CommandTag, error) {
+		if s.recordedExec != nil {
+			*s.recordedExec = append(*s.recordedExec, execCall{query: query, args: args})
+		}
+		if s.execErr != nil {
+			return pgconn.CommandTag{}, s.execErr
+		}
+		return pgconn.NewCommandTag("UPDATE 1"), nil
 	}
-	return model.VanadisChunk{ID: id, BuildID: buildID, ChunkIndex: idx, Mode: "pr", Repo: "aerial", Title: title, Instructions: instr, Effort: effort, Status: status, TargetFiles: []string{}, TargetSymbols: []string{}, AcceptanceCriteria: []string{}, DependsOn: []string{}}
+	return &PostgresVanadisStore{db: &mockDB{queryRowFn: queryRow, queryFn: query, execFn: exec}}
 }
 
 func buildVals(b model.VanadisBuild) []any {
@@ -367,7 +371,7 @@ type getBuildCase struct {
 
 func TestGetBuild(t *testing.T) {
 	t.Parallel()
-	pop := mkBuild("b-1", "thread-1", "Build Title", "Objective", "running")
+	pop := storetest.Build("b-1", "thread-1", "Build Title", "Objective", "running")
 	tests := []getBuildCase{
 		{name: "nil receiver errors", bare: nilReceiver, buildID: "b-1", wantErr: true},
 		{name: "nil db errors", bare: nilDB, buildID: "b-1", wantErr: true},
@@ -375,16 +379,16 @@ func TestGetBuild(t *testing.T) {
 		{name: "missing build maps to not found", buildID: "b-404", buildErr: pgx.ErrNoRows, wantErrIs: model.ErrBuildNotFound},
 		{name: "build query error propagates", buildID: "b-err", buildErr: errors.New("db down"), wantErr: true},
 		{name: "chunks query error propagates", buildID: "b-1", build: pop, chunksErr: errors.New("chunks down"), wantErr: true},
-		{name: "chunk scan error propagates", buildID: "b-1", build: pop, chunks: []model.VanadisChunk{mkChunk("c-1", "b-1", 0, "T", "I", "", "")}, scanErr: errors.New("scan down"), wantErr: true},
-		{name: "chunk rows error propagates", buildID: "b-1", build: pop, chunks: []model.VanadisChunk{mkChunk("c-1", "b-1", 0, "T", "I", "", "")}, rowsErr: errors.New("rows down"), wantErr: true},
-		{name: "success scans build and chunks", buildID: "b-1", build: pop, chunks: []model.VanadisChunk{mkChunk("c-1", "b-1", 0, "T1", "I1", "medium", ""), mkChunk("c-2", "b-1", 1, "T2", "I2", "low", "")}, wantChunks: 2},
-		{name: "null json leaves maps nil", buildID: "b-1", build: pop, chunks: []model.VanadisChunk{mkChunk("c-9", "b-1", 0, "null-json", "I", "medium", "")}, wantChunks: 1, wantNilMaps: true},
-		{name: "invalid json leaves maps nil", buildID: "b-1", build: pop, chunks: []model.VanadisChunk{mkChunk("c-10", "b-1", 0, "bad-json", "I", "medium", "")}, wantChunks: 1, wantNilMaps: true},
+		{name: "chunk scan error propagates", buildID: "b-1", build: pop, chunks: []model.VanadisChunk{storetest.Chunk("c-1", "b-1", 0, "T", "I", "", "")}, scanErr: errors.New("scan down"), wantErr: true},
+		{name: "chunk rows error propagates", buildID: "b-1", build: pop, chunks: []model.VanadisChunk{storetest.Chunk("c-1", "b-1", 0, "T", "I", "", "")}, rowsErr: errors.New("rows down"), wantErr: true},
+		{name: "success scans build and chunks", buildID: "b-1", build: pop, chunks: []model.VanadisChunk{storetest.Chunk("c-1", "b-1", 0, "T1", "I1", "medium", ""), storetest.Chunk("c-2", "b-1", 1, "T2", "I2", "low", "")}, wantChunks: 2},
+		{name: "null json leaves maps nil", buildID: "b-1", build: pop, chunks: []model.VanadisChunk{storetest.Chunk("c-9", "b-1", 0, "null-json", "I", "medium", "")}, wantChunks: 1, wantNilMaps: true},
+		{name: "invalid json leaves maps nil", buildID: "b-1", build: pop, chunks: []model.VanadisChunk{storetest.Chunk("c-10", "b-1", 0, "bad-json", "I", "medium", "")}, wantChunks: 1, wantNilMaps: true},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			s, _ := dbScript{bare: tc.bare, buildVals: buildVals(tc.build), buildErr: tc.buildErr, chunks: tc.chunks, chunksErr: tc.chunksErr, chunkScanErr: tc.scanErr, chunkRowsErr: tc.rowsErr}.open()
+			s := dbScript{bare: tc.bare, buildVals: buildVals(tc.build), buildErr: tc.buildErr, chunks: tc.chunks, chunksErr: tc.chunksErr, chunkScanErr: tc.scanErr, chunkRowsErr: tc.rowsErr}.open()
 			gotB, gotC, err := s.GetBuild(context.Background(), tc.buildID)
 			if tc.wantErrIs != nil {
 				if !errors.Is(err, tc.wantErrIs) {
@@ -430,7 +434,7 @@ type listBuildsCase struct {
 func TestListBuilds(t *testing.T) {
 	t.Parallel()
 	now := time.Now().UTC()
-	b1, b2 := mkBuild("b-1", "100", "", "", "running"), mkBuild("b-2", "101", "", "", "completed")
+	b1, b2 := storetest.Build("b-1", "100", "", "", "running"), storetest.Build("b-2", "101", "", "", "completed")
 	b1.CreatedAt, b2.CreatedAt = now.Add(-time.Hour), now.Add(-2*time.Hour)
 	tests := []listBuildsCase{
 		{name: "nil receiver errors", bare: nilReceiver, wantErr: true},
@@ -440,9 +444,9 @@ func TestListBuilds(t *testing.T) {
 		{name: "build rows error propagates", builds: []model.VanadisBuild{b1}, rowsErr: errors.New("rows down"), wantErr: true},
 		{name: "empty builds returns empty entries", wantTotal: 0},
 		{name: "chunks query error propagates", builds: []model.VanadisBuild{b1}, chunksErr: errors.New("chunks down"), wantErr: true},
-		{name: "success groups chunks by build", builds: []model.VanadisBuild{b1, b2}, chunks: []model.VanadisChunk{mkChunk("c-1", "b-1", 0, "C1", "", "", "running"), mkChunk("c-3", "b-2", 0, "C3", "", "", "merged")}, wantTotal: 2, wantStates: []string{"running", "completed"}},
-		{name: "nonpositive limit clamps to default", limit: 0, builds: []model.VanadisBuild{b1}, chunks: []model.VanadisChunk{mkChunk("c-1", "b-1", 0, "C1", "", "", "running")}, wantTotal: 1, wantLimit: 50},
-		{name: "oversize limit clamps to default", limit: 500, builds: []model.VanadisBuild{b1}, chunks: []model.VanadisChunk{mkChunk("c-1", "b-1", 0, "C1", "", "", "running")}, wantTotal: 1, wantLimit: 50},
+		{name: "success groups chunks by build", builds: []model.VanadisBuild{b1, b2}, chunks: []model.VanadisChunk{storetest.Chunk("c-1", "b-1", 0, "C1", "", "", "running"), storetest.Chunk("c-3", "b-2", 0, "C3", "", "", "merged")}, wantTotal: 2, wantStates: []string{"running", "completed"}},
+		{name: "nonpositive limit clamps to default", limit: 0, builds: []model.VanadisBuild{b1}, chunks: []model.VanadisChunk{storetest.Chunk("c-1", "b-1", 0, "C1", "", "", "running")}, wantTotal: 1, wantLimit: 50},
+		{name: "oversize limit clamps to default", limit: 500, builds: []model.VanadisBuild{b1}, chunks: []model.VanadisChunk{storetest.Chunk("c-1", "b-1", 0, "C1", "", "", "running")}, wantTotal: 1, wantLimit: 50},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -471,7 +475,7 @@ func captureBuildLimit(s *PostgresVanadisStore, wantLimit int, gotLimit *any) {
 
 func runListBuildsCase(t *testing.T, tc listBuildsCase) {
 	t.Helper()
-	s, _ := dbScript{bare: tc.bare, builds: tc.builds, buildsErr: tc.buildsErr, buildScanErr: tc.scanErr, buildRowsErr: tc.rowsErr, chunks: tc.chunks, chunksErr: tc.chunksErr}.open()
+	s := dbScript{bare: tc.bare, builds: tc.builds, buildsErr: tc.buildsErr, buildScanErr: tc.scanErr, buildRowsErr: tc.rowsErr, chunks: tc.chunks, chunksErr: tc.chunksErr}.open()
 	var gotLimit any
 	captureBuildLimit(s, tc.wantLimit, &gotLimit)
 	got, err := s.ListBuilds(context.Background(), tc.limit)
@@ -531,12 +535,12 @@ func TestGetChunk(t *testing.T) {
 		{name: "missing chunk maps to not found", chunkID: "c1", wantErrIs: model.ErrChunkNotFound},
 		{name: "missing build maps to not found", chunkID: "c1", chunks: c1, buildErr: pgx.ErrNoRows, wantErrIs: model.ErrBuildNotFound},
 		{name: "build query error propagates", chunkID: "c1", chunks: c1, buildErr: errors.New("build down"), wantErr: true},
-		{name: "success returns chunk and build", chunkID: "c1", chunks: c1, build: mkBuild("b1", "", "Build Title", "", ""), wantChunk: "c1", wantBuild: "b1"},
+		{name: "success returns chunk and build", chunkID: "c1", chunks: c1, build: storetest.Build("b1", "", "Build Title", "", ""), wantChunk: "c1", wantBuild: "b1"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			s, _ := dbScript{bare: tc.bare, buildVals: buildVals(tc.build), buildErr: tc.buildErr, chunks: tc.chunks, chunksErr: tc.queryErr, chunkScanErr: tc.scanErr, chunkRowsErr: tc.rowsErr}.open()
+			s := dbScript{bare: tc.bare, buildVals: buildVals(tc.build), buildErr: tc.buildErr, chunks: tc.chunks, chunksErr: tc.queryErr, chunkScanErr: tc.scanErr, chunkRowsErr: tc.rowsErr}.open()
 			c, b, err := s.GetChunk(context.Background(), tc.chunkID)
 			if tc.wantErrIs != nil {
 				if !errors.Is(err, tc.wantErrIs) {
@@ -560,131 +564,6 @@ func TestGetChunk(t *testing.T) {
 	}
 }
 
-type getChunkByPRCase struct {
-	name           string
-	bare           *bareStore
-	repo           string
-	prNumber       int
-	rowErr         error
-	rowEffort      string
-	wantErr        bool
-	wantLookup     VanadisChunkPRLookup
-	wantCandidates []string
-}
-
-func TestGetChunkByPR(t *testing.T) {
-	t.Parallel()
-	tests := []getChunkByPRCase{
-		{name: "nil receiver errors", bare: nilReceiver, repo: "aerial", prNumber: 1, wantErr: true},
-		{name: "nil db errors", bare: nilDB, repo: "aerial", prNumber: 1, wantErr: true},
-		{name: "invalid args return unmatched", repo: "", prNumber: 0, wantLookup: VanadisChunkPRLookup{}},
-		{name: "no rows returns unmatched", repo: "aerial", prNumber: 101, rowErr: pgx.ErrNoRows, wantLookup: VanadisChunkPRLookup{}, wantCandidates: []string{"aerial", "azylman/aerial"}},
-		{name: "chunk query error propagates", repo: "aerial", prNumber: 101, rowErr: errors.New("db down"), wantErr: true, wantCandidates: []string{"aerial", "azylman/aerial"}},
-		{name: "successful match returns lookup", repo: "aerial", prNumber: 101, rowEffort: "low", wantLookup: VanadisChunkPRLookup{Matched: true, ChunkID: "c1", BuildID: "b1", Effort: "low"}, wantCandidates: []string{"aerial", "azylman/aerial"}},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			runGetChunkByPRCase(t, tc)
-		})
-	}
-}
-
-func stubPRRow(s *PostgresVanadisStore, gotCandidates *[]string, rowErr error, rowEffort string) {
-	if s == nil {
-		return
-	}
-	db, ok := s.db.(*mockDB)
-	if !ok {
-		return
-	}
-	db.queryRowFn = func(_ context.Context, query string, args ...any) pgx.Row {
-		if len(args) > 0 {
-			captureCandidates(args[0], gotCandidates)
-		}
-		if rowErr != nil {
-			return checkedQueryRow(query, &scriptRow{err: rowErr})
-		}
-		return checkedQueryRow(query, &scriptRow{vals: []any{"c1", "b1", 0, rowEffort, true}})
-	}
-}
-
-func captureCandidates(arg any, gotCandidates *[]string) {
-	c, ok := arg.([]string)
-	if !ok {
-		return
-	}
-	*gotCandidates = c
-}
-
-func checkCandidates(t *testing.T, gotCandidates *[]string, want []string) {
-	t.Helper()
-	if len(*gotCandidates) != len(want) {
-		t.Errorf("GetChunkByPR candidates = %v, want %v", *gotCandidates, want)
-		return
-	}
-	for i := range want {
-		if (*gotCandidates)[i] != want[i] {
-			t.Errorf("GetChunkByPR candidates = %v, want %v", *gotCandidates, want)
-			return
-		}
-	}
-}
-
-func runGetChunkByPRCase(t *testing.T, tc getChunkByPRCase) {
-	t.Helper()
-	s, gotCandidates := dbScript{bare: tc.bare}.open()
-	stubPRRow(s, gotCandidates, tc.rowErr, tc.rowEffort)
-	got, err := s.GetChunkByPR(context.Background(), tc.repo, tc.prNumber)
-	if tc.wantErr {
-		if err == nil {
-			t.Fatal("expected error, got nil")
-		}
-		return
-	}
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if *got != tc.wantLookup {
-		t.Errorf("GetChunkByPR() = %+v, want %+v", *got, tc.wantLookup)
-	}
-	if len(tc.wantCandidates) > 0 {
-		checkCandidates(t, gotCandidates, tc.wantCandidates)
-	}
-}
-
-type repoCandidatesCase struct {
-	name     string
-	input    string
-	expected []string
-}
-
-func TestRepoMatchCandidates(t *testing.T) {
-	t.Parallel()
-	tests := []repoCandidatesCase{
-		{name: "empty repo returns nil", input: "", expected: nil},
-		{name: "bare repo adds default owner prefix", input: "aerial", expected: []string{"aerial", "azylman/aerial"}},
-		{name: "whitespace trims then prefixes", input: "  aerial  ", expected: []string{"aerial", "azylman/aerial"}},
-		{name: "prefixed repo adds bare candidate", input: "azylman/aerial", expected: []string{"azylman/aerial", "aerial"}},
-		{name: "other org repo returns single candidate", input: "other-org/aerial", expected: []string{"other-org/aerial"}},
-		{name: "nested slash returns single candidate", input: "azylman/sub/repo", expected: []string{"azylman/sub/repo"}},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			got := RepoMatchCandidates(tc.input)
-			if len(got) != len(tc.expected) {
-				t.Fatalf("RepoMatchCandidates(%q) = %v, want %v", tc.input, got, tc.expected)
-			}
-			for i := range tc.expected {
-				if got[i] != tc.expected[i] {
-					t.Fatalf("RepoMatchCandidates(%q) = %v, want %v", tc.input, got, tc.expected)
-				}
-			}
-		})
-	}
-}
-
 type scanChunksCase struct {
 	name       string
 	items      []model.VanadisChunk
@@ -699,14 +578,14 @@ func TestScanChunks(t *testing.T) {
 	t.Parallel()
 	start := time.Date(2026, 10, 16, 18, 0, 0, 0, time.UTC)
 	complete := time.Date(2026, 10, 16, 18, 15, 0, 0, time.UTC)
-	timed := mkChunk("c-1", "b-1", 0, "T1", "I1", "", "")
+	timed := storetest.Chunk("c-1", "b-1", 0, "T1", "I1", "", "")
 	timed.StartedAt, timed.CompletedAt = start, complete
 	tests := []scanChunksCase{
 		{name: "empty rows scan to empty", wantTotal: 0},
-		{name: "scan error propagates", items: []model.VanadisChunk{mkChunk("c-1", "b-1", 0, "T", "I", "", "")}, scanErr: errors.New("scan down")},
-		{name: "rows error propagates", items: []model.VanadisChunk{mkChunk("c-1", "b-1", 0, "T", "I", "", "")}, rowsErr: errors.New("rows down")},
+		{name: "scan error propagates", items: []model.VanadisChunk{storetest.Chunk("c-1", "b-1", 0, "T", "I", "", "")}, scanErr: errors.New("scan down")},
+		{name: "rows error propagates", items: []model.VanadisChunk{storetest.Chunk("c-1", "b-1", 0, "T", "I", "", "")}, rowsErr: errors.New("rows down")},
 		{name: "times and checks decode", items: []model.VanadisChunk{timed}, wantTotal: 1, wantEffort: "medium", wantChecks: true},
-		{name: "low effort preserved", items: []model.VanadisChunk{mkChunk("c-2", "b-1", 1, "T2", "I2", "low", "")}, wantTotal: 1, wantEffort: "low"},
+		{name: "low effort preserved", items: []model.VanadisChunk{storetest.Chunk("c-2", "b-1", 1, "T2", "I2", "low", "")}, wantTotal: 1, wantEffort: "low"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -734,5 +613,73 @@ func TestScanChunks(t *testing.T) {
 				t.Errorf("ScanChunks decoded fields mismatch: %+v", got[0])
 			}
 		})
+	}
+}
+
+type preRecordChunkPRCase struct {
+	name       string
+	bare       *bareStore
+	chunkID    string
+	repo       string
+	prNumber   int
+	execErr    error
+	wantErr    bool
+	wantSubstr string
+	wantExecs  int
+}
+
+func assertPreRecordExec(t *testing.T, call execCall, prNumber int, chunkID, repo string) {
+	t.Helper()
+	if !strings.Contains(call.query, "UPDATE vanadis_chunks") {
+		t.Errorf("exec query %q missing UPDATE vanadis_chunks", call.query)
+	}
+	if len(call.args) != 3 || call.args[0] != prNumber || call.args[1] != strings.TrimSpace(chunkID) || call.args[2] != strings.TrimSpace(repo) {
+		t.Errorf("exec args = %v, want [%v %v %v]", call.args, prNumber, strings.TrimSpace(chunkID), strings.TrimSpace(repo))
+	}
+}
+
+func TestPreRecordChunkPR(t *testing.T) {
+	t.Parallel()
+	tests := []preRecordChunkPRCase{
+		{name: "nil receiver errors", bare: nilReceiver, chunkID: "c1", repo: "aerial", prNumber: 42, wantErr: true, wantSubstr: "database connection is nil"},
+		{name: "nil db errors", bare: nilDB, chunkID: "c1", repo: "aerial", prNumber: 42, wantErr: true, wantSubstr: "database connection is nil"},
+		{name: "empty chunk id no-op", chunkID: "   ", repo: "aerial", prNumber: 42},
+		{name: "nonpositive pr number no-op", chunkID: "c1", repo: "aerial", prNumber: 0},
+		{name: "negative pr number no-op", chunkID: "c1", repo: "aerial", prNumber: -5},
+		{name: "exec error propagates", chunkID: "c1", repo: "aerial", prNumber: 42, execErr: errors.New("exec down"), wantErr: true, wantSubstr: "prerecord chunk pr c1 (#42)", wantExecs: 1},
+		{name: "success executes update", chunkID: "c1", repo: "aerial", prNumber: 42, wantExecs: 1},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			var calls []execCall
+			s := dbScript{bare: tc.bare, execErr: tc.execErr, recordedExec: &calls}.open()
+			err := s.PreRecordChunkPR(context.Background(), tc.chunkID, tc.repo, tc.prNumber)
+			if tc.wantErr {
+				if err == nil {
+					t.Fatal("expected error, got nil")
+				}
+				if tc.wantSubstr != "" && !strings.Contains(err.Error(), tc.wantSubstr) {
+					t.Fatalf("err %q does not contain %q", err.Error(), tc.wantSubstr)
+				}
+			} else if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if len(calls) != tc.wantExecs {
+				t.Fatalf("exec calls = %d, want %d", len(calls), tc.wantExecs)
+			}
+			if tc.wantExecs > 0 {
+				assertPreRecordExec(t, calls[0], tc.prNumber, tc.chunkID, tc.repo)
+			}
+		})
+	}
+}
+
+func TestNewPostgresVanadisStore(t *testing.T) {
+	t.Parallel()
+	db := &mockDB{}
+	s := NewPostgresVanadisStore(db)
+	if s == nil || s.db != db {
+		t.Fatalf("NewPostgresVanadisStore() = %+v, want db set", s)
 	}
 }

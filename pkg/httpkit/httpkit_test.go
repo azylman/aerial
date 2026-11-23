@@ -1,21 +1,17 @@
 package httpkit
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"io"
+	"log"
 	"net"
 	"net/http"
 	"net/http/httptest"
-	"os"
-	"path/filepath"
-	"reflect"
 	"strings"
 	"syscall"
 	"testing"
-
-	sdktrace "go.opentelemetry.io/otel/sdk/trace"
-	"go.opentelemetry.io/otel/sdk/trace/tracetest"
 )
 
 type mockCloser struct {
@@ -41,42 +37,12 @@ func TestIsClientDisconnect_TableDriven(t *testing.T) {
 		err      error
 		expected bool
 	}{
-		{
-			name:     "nil error",
-			req:      reqNormal,
-			err:      nil,
-			expected: false,
-		},
-		{
-			name:     "canceled request context",
-			req:      reqWithCanceledCtx,
-			err:      errors.New("arbitrary error"),
-			expected: true,
-		},
-		{
-			name:     "broken pipe syscall EPIPE",
-			req:      reqNormal,
-			err:      syscall.EPIPE,
-			expected: true,
-		},
-		{
-			name:     "connection reset syscall ECONNRESET",
-			req:      reqNormal,
-			err:      syscall.ECONNRESET,
-			expected: true,
-		},
-		{
-			name:     "net ErrClosed",
-			req:      reqNormal,
-			err:      net.ErrClosed,
-			expected: true,
-		},
-		{
-			name:     "generic unrelated error",
-			req:      reqNormal,
-			err:      errors.New("unrelated disk error"),
-			expected: false,
-		},
+		{"nil error", reqNormal, nil, false},
+		{"canceled request context", reqWithCanceledCtx, errors.New("arbitrary error"), true},
+		{"broken pipe syscall EPIPE", reqNormal, syscall.EPIPE, true},
+		{"connection reset syscall ECONNRESET", reqNormal, syscall.ECONNRESET, true},
+		{"net ErrClosed", reqNormal, net.ErrClosed, true},
+		{"generic unrelated error", reqNormal, errors.New("unrelated disk error"), false},
 	}
 
 	for _, tc := range tests {
@@ -133,27 +99,15 @@ func TestWriteJSON_TableDriven(t *testing.T) {
 		wantBodySubstr string
 	}{
 		{
-			name:           "valid map with default content-type",
-			status:         http.StatusOK,
-			data:           map[string]string{"foo": "bar"},
-			existingCT:     "",
-			wantStatus:     http.StatusOK,
+			name: "valid map with default content-type", status: http.StatusOK, data: map[string]string{"foo": "bar"}, wantStatus: http.StatusOK,
 			wantBodySubstr: `{"foo":"bar"}`,
 		},
 		{
-			name:           "valid map with custom content-type preserved",
-			status:         http.StatusCreated,
-			data:           map[string]int{"count": 42},
-			existingCT:     "application/vnd.api+json",
-			wantStatus:     http.StatusCreated,
-			wantBodySubstr: `{"count":42}`,
+			name: "valid map with custom content-type preserved", status: http.StatusCreated, data: map[string]int{"count": 42},
+			existingCT: "application/vnd.api+json", wantStatus: http.StatusCreated, wantBodySubstr: `{"count":42}`,
 		},
 		{
-			name:           "unmarshalable type returns 500 internal error",
-			status:         http.StatusOK,
-			data:           make(chan int),
-			existingCT:     "",
-			wantStatus:     http.StatusInternalServerError,
+			name: "unmarshalable type returns 500 internal error", status: http.StatusOK, data: make(chan int), wantStatus: http.StatusInternalServerError,
 			wantBodySubstr: "Internal error",
 		},
 	}
@@ -179,597 +133,32 @@ func TestWriteJSON_TableDriven(t *testing.T) {
 }
 
 func TestCloseWarn_TableDriven(t *testing.T) {
-	t.Parallel()
-
-	tests := []struct {
-		name   string
-		closer io.Closer
-	}{
-		{
-			name:   "nil closer",
-			closer: nil,
-		},
-		{
-			name:   "closer without error",
-			closer: &mockCloser{err: nil},
-		},
-		{
-			name:   "closer with error",
-			closer: &mockCloser{err: errors.New("close failure")},
-		},
-	}
-
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			CloseWarn(tc.closer, "test-resource")
-		})
-	}
-}
-
-func TestNormalizeMCPToolPrefix_TableDriven(t *testing.T) {
-	t.Parallel()
-
-	tests := []struct {
-		name      string
-		body      string
-		oldPrefix string
-		newPrefix string
-		wantBody  string
-	}{
-		{
-			name:      "empty old prefix returns untouched",
-			body:      `{"method":"tools/call","params":{"name":"scheduler_run"}}`,
-			oldPrefix: "",
-			newPrefix: "",
-			wantBody:  `{"method":"tools/call","params":{"name":"scheduler_run"}}`,
-		},
-		{
-			name:      "body does not contain prefix",
-			body:      `{"method":"tools/call","params":{"name":"unrelated_tool"}}`,
-			oldPrefix: "scheduler_",
-			newPrefix: "",
-			wantBody:  `{"method":"tools/call","params":{"name":"unrelated_tool"}}`,
-		},
-		{
-			name:      "compact name without space",
-			body:      `{"method":"tools/call","params":{"name":"memory_memory_search"}}`,
-			oldPrefix: "memory_memory_",
-			newPrefix: "memory_",
-			wantBody:  `{"method":"tools/call","params":{"name":"memory_search"}}`,
-		},
-		{
-			name:      "single space after colon",
-			body:      `{"method":"tools/call","params":{"name": "scheduler_schedule_once"}}`,
-			oldPrefix: "scheduler_",
-			newPrefix: "",
-			wantBody:  `{"method":"tools/call","params":{"name": "schedule_once"}}`,
-		},
-		{
-			name:      "double space after colon",
-			body:      `{"method":"tools/call","params":{"name":  "scheduler_schedule_once"}}`,
-			oldPrefix: "scheduler_",
-			newPrefix: "",
-			wantBody:  `{"method":"tools/call","params":{"name": "schedule_once"}}`,
-		},
-	}
-
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-
-			got := NormalizeMCPToolPrefix([]byte(tc.body), tc.oldPrefix, tc.newPrefix)
-			if string(got) != tc.wantBody {
-				t.Errorf("NormalizeMCPToolPrefix() = %s, want %s", string(got), tc.wantBody)
-			}
-		})
-	}
-}
-
-type serveMCPStreamTestCase struct {
-	name           string
-	method         string
-	body           string
-	readyBanner    string
-	oldToolPrefix  string
-	newToolPrefix  string
-	wantStatus     int
-	wantBodySubstr string
-	wantHeaderCT   string
-	startSpan      string
-	wantSpanName   string
-	wantSpanAttrs  map[string]string
-}
-
-func runServeMCPStreamCase(t *testing.T, tc serveMCPStreamTestCase) {
-	t.Helper()
-	sr := tracetest.NewSpanRecorder()
-	tp := sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(sr))
-	t.Cleanup(func() { _ = tp.Shutdown(context.Background()) })
-
-	streamHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		b, _ := io.ReadAll(r.Body)
-		if strings.Contains(string(b), `"name":"list"`) {
-			w.WriteHeader(http.StatusOK)
-			_, _ = w.Write([]byte("invoked:list"))
-			return
-		}
-		w.WriteHeader(http.StatusOK)
-		_, _ = w.Write([]byte("stream-handled"))
+	// Not t.Parallel(): CloseWarn logs through the standard logger, which this test redirects.
+	var logBuf bytes.Buffer
+	origOut, origFlags := log.Writer(), log.Flags()
+	log.SetOutput(&logBuf)
+	log.SetFlags(0)
+	t.Cleanup(func() {
+		log.SetOutput(origOut)
+		log.SetFlags(origFlags)
 	})
 
-	req := httptest.NewRequest(tc.method, "/mcp", strings.NewReader(tc.body))
-	rec := httptest.NewRecorder()
-	if tc.startSpan != "" {
-		ctx, span := tp.Tracer("test").Start(req.Context(), tc.startSpan)
-		req = req.WithContext(ctx)
-		ServeMCPStream(rec, req, streamHandler, tc.readyBanner, tc.oldToolPrefix, tc.newToolPrefix)
-		span.End()
-	} else {
-		ServeMCPStream(rec, req, streamHandler, tc.readyBanner, tc.oldToolPrefix, tc.newToolPrefix)
-	}
-
-	assertServeMCPStreamResult(t, tc, rec, sr)
-}
-
-func assertServeMCPStreamResult(t *testing.T, tc serveMCPStreamTestCase, rec *httptest.ResponseRecorder, sr *tracetest.SpanRecorder) {
-	t.Helper()
-	spans := sr.Ended()
-	if tc.startSpan == "" && len(spans) != 0 {
-		t.Errorf("ServeMCPStream without an active span recorded %d spans, want 0", len(spans))
-	}
-	if tc.startSpan != "" {
-		if len(spans) != 1 {
-			t.Fatalf("recorded %d spans, want 1", len(spans))
-		}
-		if spans[0].Name() != tc.wantSpanName {
-			t.Errorf("span name = %q, want %q", spans[0].Name(), tc.wantSpanName)
-		}
-		got := map[string]string{}
-		for _, kv := range spans[0].Attributes() {
-			got[string(kv.Key)] = kv.Value.AsString()
-		}
-		if !reflect.DeepEqual(got, tc.wantSpanAttrs) {
-			t.Errorf("span attrs = %v, want %v", got, tc.wantSpanAttrs)
-		}
-	}
-
-	if rec.Code != tc.wantStatus {
-		t.Errorf("ServeMCPStream status = %d, want %d", rec.Code, tc.wantStatus)
-	}
-	if !strings.Contains(rec.Body.String(), tc.wantBodySubstr) {
-		t.Errorf("ServeMCPStream body = %q, want substring %q", rec.Body.String(), tc.wantBodySubstr)
-	}
-	if tc.wantHeaderCT != "" && rec.Header().Get("Content-Type") != tc.wantHeaderCT {
-		t.Errorf("ServeMCPStream Content-Type = %q, want %q", rec.Header().Get("Content-Type"), tc.wantHeaderCT)
-	}
-}
-
-func TestServeMCPStream_TableDriven(t *testing.T) {
-	t.Parallel()
-
-	tests := []serveMCPStreamTestCase{
-		{
-			name:           "get readiness banner",
-			method:         http.MethodGet,
-			readyBanner:    "Memory Service Ready\n",
-			wantStatus:     http.StatusOK,
-			wantBodySubstr: "Memory Service Ready\n",
-			wantHeaderCT:   "text/plain; charset=utf-8",
-		},
-		{
-			name:           "put disallowed method",
-			method:         http.MethodPut,
-			wantStatus:     http.StatusMethodNotAllowed,
-			wantBodySubstr: "Method not allowed",
-		},
-		{
-			name:           "post empty body rejected",
-			method:         http.MethodPost,
-			body:           "   ",
-			wantStatus:     http.StatusBadRequest,
-			wantBodySubstr: "Empty request body",
-		},
-		{
-			name:           "post valid body with tool normalization",
-			method:         http.MethodPost,
-			body:           `{"jsonrpc":"2.0","method":"tools/call","params":{"name":"scheduler_list"}}`,
-			oldToolPrefix:  "scheduler_",
-			newToolPrefix:  "",
-			wantStatus:     http.StatusOK,
-			wantBodySubstr: "invoked:list",
-		},
-		{
-			name:           "tools/call annotates active span without arguments",
-			method:         http.MethodPost,
-			body:           `{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"scheduler_list","arguments":{"note":"ghp_leak123"}}}`,
-			oldToolPrefix:  "scheduler_",
-			wantStatus:     http.StatusOK,
-			wantBodySubstr: "invoked:list",
-			startSpan:      "POST /mcp",
-			wantSpanName:   "mcp tools/call",
-			wantSpanAttrs:  map[string]string{"mcp.method.name": "tools/call", "gen_ai.tool.name": "list"},
-		},
-		{
-			name:           "non-tool method sets method only",
-			method:         http.MethodPost,
-			body:           `{"jsonrpc":"2.0","id":2,"method":"initialize","params":{"clientInfo":{"name":"agy"}}}`,
-			wantStatus:     http.StatusOK,
-			wantBodySubstr: "stream-handled",
-			startSpan:      "POST /mcp",
-			wantSpanName:   "mcp initialize",
-			wantSpanAttrs:  map[string]string{"mcp.method.name": "initialize"},
-		},
-		{
-			name:           "unparseable body leaves span untouched",
-			method:         http.MethodPost,
-			body:           `not json`,
-			wantStatus:     http.StatusOK,
-			wantBodySubstr: "stream-handled",
-			startSpan:      "POST /mcp",
-			wantSpanName:   "POST /mcp",
-			wantSpanAttrs:  map[string]string{},
-		},
-	}
-
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			runServeMCPStreamCase(t, tc)
-		})
-	}
-}
-
-func TestResolveConfigPathWithLocal_TableDriven(t *testing.T) {
-	// Not t.Parallel() because it modifies environment variables
-	tempDir := t.TempDir()
-	validLocal := filepath.Join(tempDir, "local_valid.yaml")
-	_ = os.WriteFile(validLocal, []byte("key: val\n"), 0o644)
-
-	emptyLocal := filepath.Join(tempDir, "local_empty.yaml")
-	_ = os.WriteFile(emptyLocal, []byte(""), 0o644)
-
-	fallback1 := filepath.Join(tempDir, "fallback1.yaml")
-	_ = os.WriteFile(fallback1, []byte("fb1"), 0o644)
-
-	nonExistent := filepath.Join(tempDir, "does_not_exist.yaml")
-
 	tests := []struct {
-		name          string
-		envKey        string
-		envVal        string
-		localPath     string
-		fallbackPaths []string
-		wantResult    string
+		name    string
+		closer  io.Closer
+		wantLog string
 	}{
-		{
-			name:       "env variable explicit key set",
-			envKey:     "MY_CONFIG",
-			envVal:     "/etc/config/my_app.yaml",
-			wantResult: "/etc/config/my_app.yaml",
-		},
-		{
-			name:       "default env key CONFIG_PATH set",
-			envKey:     "",
-			envVal:     "/etc/default/config.yaml",
-			wantResult: "/etc/default/config.yaml",
-		},
-		{
-			name:       "local path exists with positive size",
-			envKey:     "UNSET_ENV",
-			localPath:  validLocal,
-			wantResult: validLocal,
-		},
-		{
-			name:          "local path empty size falls back to existing fallback",
-			envKey:        "UNSET_ENV",
-			localPath:     emptyLocal,
-			fallbackPaths: []string{fallback1},
-			wantResult:    fallback1,
-		},
-		{
-			name:          "none exist returns fallbackPaths[0]",
-			envKey:        "UNSET_ENV",
-			localPath:     nonExistent,
-			fallbackPaths: []string{nonExistent},
-			wantResult:    nonExistent,
-		},
-		{
-			name:          "none exist and fallbackPaths empty returns empty string",
-			envKey:        "UNSET_ENV",
-			localPath:     nonExistent,
-			fallbackPaths: nil,
-			wantResult:    "",
-		},
+		{"nil closer", nil, ""},
+		{"closer without error", &mockCloser{err: nil}, ""},
+		{"closer with error", &mockCloser{err: errors.New("close failure")}, "Warning closing test-resource: close failure\n"},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			if tc.envKey != "" {
-				t.Setenv(tc.envKey, tc.envVal)
-			} else if tc.envVal != "" {
-				t.Setenv("CONFIG_PATH", tc.envVal)
-			}
-
-			got := ResolveConfigPathWithLocal(tc.envKey, tc.localPath, tc.fallbackPaths...)
-			if got != tc.wantResult {
-				t.Errorf("ResolveConfigPathWithLocal() = %q, want %q", got, tc.wantResult)
-			}
-		})
-	}
-}
-
-type failingWriter struct {
-	err error
-}
-
-func (f *failingWriter) Write([]byte) (int, error) {
-	return 0, f.err
-}
-
-func TestArchiveCoverageDir_TableDriven(t *testing.T) {
-	t.Parallel()
-
-	tmpDir := t.TempDir()
-	_ = os.WriteFile(filepath.Join(tmpDir, "file1.txt"), []byte("sample-data"), 0o600)
-
-	subDirParent := t.TempDir()
-	_ = os.Mkdir(filepath.Join(subDirParent, "nested"), 0o700)
-
-	tests := []struct {
-		name       string
-		writer     io.Writer
-		dir        string
-		wantErrMsg string
-	}{
-		{
-			name:   "successful archive",
-			writer: io.Discard,
-			dir:    tmpDir,
-		},
-		{
-			name:       "nonexistent directory error",
-			writer:     io.Discard,
-			dir:        filepath.Join(tmpDir, "nonexistent"),
-			wantErrMsg: "no such file or directory",
-		},
-		{
-			name:       "unreadable subdirectory entry error",
-			writer:     io.Discard,
-			dir:        subDirParent,
-			wantErrMsg: "is a directory",
-		},
-		{
-			name:       "failing writer error",
-			writer:     &failingWriter{err: errors.New("write failure")},
-			dir:        tmpDir,
-			wantErrMsg: "write failure",
-		},
-	}
-
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			err := archiveCoverageDir(tc.writer, tc.dir)
-			if tc.wantErrMsg == "" {
-				if err != nil {
-					t.Fatalf("unexpected error: %v", err)
-				}
-				return
-			}
-			if err == nil || !strings.Contains(err.Error(), tc.wantErrMsg) {
-				t.Fatalf("expected error containing %q, got: %v", tc.wantErrMsg, err)
-			}
-		})
-	}
-}
-
-func TestHandleCoverageFlush_TableDriven(t *testing.T) {
-	// Not t.Parallel() because it mutates package variables WriteCountersDirFn/WriteMetaDirFn and TMPDIR
-	origCounters := WriteCountersDirFn
-	origMeta := WriteMetaDirFn
-	origArchive := archiveCoverageDir
-	defer func() {
-		WriteCountersDirFn = origCounters
-		WriteMetaDirFn = origMeta
-		archiveCoverageDir = origArchive
-	}()
-
-	tests := []struct {
-		name           string
-		invalidTmpDir  bool
-		writeDummyFile bool
-		archiveErr     error
-		metaErr        error
-		countersErr    error
-		wantStatus     int
-		wantCT         string
-		wantBodySubstr string
-	}{
-		{
-			name:           "successful flush streams tar archive",
-			writeDummyFile: true,
-			wantStatus:     http.StatusOK,
-			wantCT:         "application/x-tar",
-			wantBodySubstr: "covmeta.test",
-		},
-		{
-			name:       "meta error still succeeds when counters succeed",
-			metaErr:    errors.New("meta failure"),
-			wantStatus: http.StatusOK,
-			wantCT:     "application/x-tar",
-		},
-		{
-			name:           "counters error returns 500",
-			countersErr:    errors.New("counters write failed"),
-			wantStatus:     http.StatusInternalServerError,
-			wantBodySubstr: "counters write failed",
-		},
-		{
-			name:          "mkdirtemp error returns 500",
-			invalidTmpDir: true,
-			wantStatus:    http.StatusInternalServerError,
-		},
-		{
-			name:           "archive error returns 500",
-			archiveErr:     errors.New("tar archive failed"),
-			wantStatus:     http.StatusInternalServerError,
-			wantBodySubstr: "tar archive failed",
-		},
-	}
-
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			if tc.invalidTmpDir {
-				t.Setenv("TMPDIR", filepath.Join(t.TempDir(), "nonexistent", "subdir"))
-			}
-
-			WriteMetaDirFn = func(dir string) error {
-				if tc.writeDummyFile {
-					_ = os.WriteFile(filepath.Join(dir, "covmeta.test"), []byte("meta-bytes"), 0o600)
-				}
-				return tc.metaErr
-			}
-			WriteCountersDirFn = func(string) error {
-				return tc.countersErr
-			}
-			archiveCoverageDir = func(w io.Writer, dir string) error {
-				if tc.archiveErr != nil {
-					return tc.archiveErr
-				}
-				return origArchive(w, dir)
-			}
-
-			handler := HandleCoverageFlush("test-svc")
-			req := httptest.NewRequest(http.MethodPost, "/debug/coverage/flush", http.NoBody)
-			rec := httptest.NewRecorder()
-
-			handler.ServeHTTP(rec, req)
-
-			if rec.Code != tc.wantStatus {
-				t.Errorf("HandleCoverageFlush status = %d, want %d", rec.Code, tc.wantStatus)
-			}
-			if tc.wantCT != "" && rec.Header().Get("Content-Type") != tc.wantCT {
-				t.Errorf("HandleCoverageFlush Content-Type = %q, want %q", rec.Header().Get("Content-Type"), tc.wantCT)
-			}
-			if tc.wantBodySubstr != "" && !strings.Contains(rec.Body.String(), tc.wantBodySubstr) {
-				t.Errorf("HandleCoverageFlush body = %q, want substring %q", rec.Body.String(), tc.wantBodySubstr)
-			}
-		})
-	}
-}
-
-func TestBuildPostgresDSN(t *testing.T) {
-	t.Parallel()
-
-	tests := []struct {
-		name      string
-		lookupMap map[string]string
-		isNil     bool
-		defaultDB string
-		expected  string
-	}{
-		{
-			name:      "nil lookup returns empty",
-			isNil:     true,
-			defaultDB: "aerial",
-			expected:  "",
-		},
-		{
-			name:      "empty env returns empty",
-			lookupMap: map[string]string{},
-			defaultDB: "aerial",
-			expected:  "",
-		},
-		{
-			name: "postgres url precedence over database url",
-			lookupMap: map[string]string{
-				"POSTGRES_URL": "postgres://pguser:pgpass@pghost:5432/primary_db",
-				"DATABASE_URL": "postgres://dbuser:dbpass@dbhost:5432/ignored_db",
-			},
-			defaultDB: "aerial",
-			expected:  "postgres://pguser:pgpass@pghost:5432/primary_db",
-		},
-		{
-			name: "database url with explicit postgres db path override",
-			lookupMap: map[string]string{
-				"DATABASE_URL": "postgres://app:secret@db:5432/olddb",
-				"POSTGRES_DB":  "overridedb",
-			},
-			defaultDB: "aerial",
-			expected:  "postgres://app:secret@db:5432/overridedb",
-		},
-		{
-			name: "postgres password only auto defaults host to postgres",
-			lookupMap: map[string]string{
-				"POSTGRES_PASSWORD": "secretpassword",
-			},
-			defaultDB: "aerial",
-			expected:  "postgres://aerial:secretpassword@postgres:5432/aerial?sslmode=disable",
-		},
-		{
-			name: "custom host port user and db",
-			lookupMap: map[string]string{
-				"POSTGRES_HOST":     "custom-pg",
-				"POSTGRES_PORT":     "5433",
-				"POSTGRES_USER":     "myuser",
-				"POSTGRES_PASSWORD": "mypassword",
-				"POSTGRES_DB":       "mydb",
-			},
-			defaultDB: "aerial",
-			expected:  "postgres://myuser:mypassword@custom-pg:5433/mydb?sslmode=disable",
-		},
-		{
-			name: "kubernetes service link tcp port normalized",
-			lookupMap: map[string]string{
-				"POSTGRES_PASSWORD": "secretpassword",
-				"POSTGRES_PORT":     "tcp://10.43.183.188:5432",
-			},
-			defaultDB: "aerial",
-			expected:  "postgres://aerial:secretpassword@postgres:5432/aerial?sslmode=disable",
-		},
-		{
-			name: "default db fallback when postgres db unset",
-			lookupMap: map[string]string{
-				"POSTGRES_HOST":     "postgres",
-				"POSTGRES_PASSWORD": "pass",
-			},
-			defaultDB: "custom_default",
-			expected:  "postgres://aerial:pass@postgres:5432/custom_default?sslmode=disable",
-		},
-		{
-			name: "default db fallback to aerial when both unset",
-			lookupMap: map[string]string{
-				"POSTGRES_HOST": "postgres",
-			},
-			defaultDB: "",
-			expected:  "postgres://aerial:aerial_secure_pass@postgres:5432/aerial?sslmode=disable",
-		},
-		{
-			name: "special character url encoding in passwords",
-			lookupMap: map[string]string{
-				"POSTGRES_HOST":     "postgres",
-				"POSTGRES_PASSWORD": "p@ss:w/ord",
-			},
-			defaultDB: "aerial",
-			expected:  "postgres://aerial:p%40ss%3Aw%2Ford@postgres:5432/aerial?sslmode=disable",
-		},
-	}
-
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-
-			var lookup func(string) string
-			if !tc.isNil {
-				lookup = func(k string) string {
-					return tc.lookupMap[k]
-				}
-			}
-
-			got := BuildPostgresDSN(lookup, tc.defaultDB)
-			if got != tc.expected {
-				t.Errorf("BuildPostgresDSN() = %q, want %q", got, tc.expected)
+			logBuf.Reset()
+			CloseWarn(tc.closer, "test-resource")
+			if got := logBuf.String(); got != tc.wantLog {
+				t.Errorf("CloseWarn log = %q, want %q", got, tc.wantLog)
 			}
 		})
 	}
@@ -788,32 +177,39 @@ func TestSetupHealthMux(t *testing.T) {
 
 	stubMetrics := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusOK)
-		_, _ = w.Write([]byte("stub-metrics"))
+		if _, err := w.Write([]byte("stub-metrics")); err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+		}
 	})
 
 	tests := []struct {
-		name       string
-		service    string
-		metrics    http.Handler
-		method     string
-		path       string
-		wantStatus int
-		wantBody   string
-		wantCT     string
+		name        string
+		metrics     http.Handler
+		method      string
+		path        string
+		wantStatus  int
+		wantBody    string
+		wantBodySub string
+		wantCT      string
 	}{
-		{name: "GET /health returns ok JSON", service: "test-svc", metrics: stubMetrics, method: http.MethodGet, path: "/health", wantStatus: http.StatusOK, wantBody: `{"status":"ok"}`},
-		{name: "GET /healthz returns ok JSON", service: "test-svc", metrics: stubMetrics, method: http.MethodGet, path: "/healthz", wantStatus: http.StatusOK, wantBody: `{"status":"ok"}`},
-		{name: "GET /metrics served when handler non-nil", service: "test-svc", metrics: stubMetrics, method: http.MethodGet, path: "/metrics", wantStatus: http.StatusOK, wantBody: "stub-metrics"},
-		{name: "GET /metrics missing when handler nil", service: "test-svc", metrics: nil, method: http.MethodGet, path: "/metrics", wantStatus: http.StatusNotFound},
-		{name: "POST /debug/coverage/flush streams tar", service: "test-svc", metrics: stubMetrics, method: http.MethodPost, path: "/debug/coverage/flush", wantStatus: http.StatusOK, wantCT: "application/x-tar"},
-		{name: "GET /debug/coverage/flush streams tar", service: "test-svc", metrics: stubMetrics, method: http.MethodGet, path: "/debug/coverage/flush", wantStatus: http.StatusOK, wantCT: "application/x-tar"},
-		{name: "unknown route returns 404", service: "test-svc", metrics: stubMetrics, method: http.MethodGet, path: "/nope", wantStatus: http.StatusNotFound},
-		{name: "POST /health is not registered", service: "test-svc", metrics: stubMetrics, method: http.MethodPost, path: "/health", wantStatus: http.StatusMethodNotAllowed},
+		{name: "GET /health returns ok JSON", metrics: stubMetrics, method: http.MethodGet, path: "/health", wantStatus: http.StatusOK, wantBody: `{"status":"ok"}`},
+		{name: "GET /healthz returns ok JSON", metrics: stubMetrics, method: http.MethodGet, path: "/healthz", wantStatus: http.StatusOK, wantBody: `{"status":"ok"}`},
+		{
+			name: "GET /metrics served when handler non-nil", metrics: stubMetrics, method: http.MethodGet, path: "/metrics", wantStatus: http.StatusOK,
+			wantBodySub: "stub-metrics",
+		},
+		{name: "GET /metrics missing when handler nil", method: http.MethodGet, path: "/metrics", wantStatus: http.StatusNotFound},
+		{
+			name: "POST /debug/coverage/flush streams tar", metrics: stubMetrics, method: http.MethodPost, path: "/debug/coverage/flush", wantStatus: http.StatusOK,
+			wantCT: "application/x-tar",
+		},
+		{name: "unknown route returns 404", metrics: stubMetrics, method: http.MethodGet, path: "/nope", wantStatus: http.StatusNotFound},
+		{name: "POST /health is not registered", metrics: stubMetrics, method: http.MethodPost, path: "/health", wantStatus: http.StatusMethodNotAllowed},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			mux := SetupHealthMux(tc.service, tc.metrics)
+			mux := SetupHealthMux("test-svc", tc.metrics)
 			req := httptest.NewRequest(tc.method, tc.path, http.NoBody)
 			rec := httptest.NewRecorder()
 			mux.ServeHTTP(rec, req)
@@ -821,14 +217,11 @@ func TestSetupHealthMux(t *testing.T) {
 			if rec.Code != tc.wantStatus {
 				t.Errorf("SetupHealthMux %s %s status = %d, want %d", tc.method, tc.path, rec.Code, tc.wantStatus)
 			}
-			if tc.wantBody != "" {
-				if strings.Contains(tc.wantBody, `"status"`) {
-					if strings.TrimSpace(rec.Body.String()) != tc.wantBody {
-						t.Errorf("SetupHealthMux %s %s body = %q, want %q", tc.method, tc.path, rec.Body.String(), tc.wantBody)
-					}
-				} else if !strings.Contains(rec.Body.String(), tc.wantBody) {
-					t.Errorf("SetupHealthMux %s %s body = %q, want substring %q", tc.method, tc.path, rec.Body.String(), tc.wantBody)
-				}
+			if body := strings.TrimSpace(rec.Body.String()); tc.wantBody != "" && body != tc.wantBody {
+				t.Errorf("SetupHealthMux %s %s body = %q, want %q", tc.method, tc.path, body, tc.wantBody)
+			}
+			if !strings.Contains(rec.Body.String(), tc.wantBodySub) {
+				t.Errorf("SetupHealthMux %s %s body = %q, want substring %q", tc.method, tc.path, rec.Body.String(), tc.wantBodySub)
 			}
 			if tc.wantCT != "" && rec.Header().Get("Content-Type") != tc.wantCT {
 				t.Errorf("SetupHealthMux %s %s Content-Type = %q, want %q", tc.method, tc.path, rec.Header().Get("Content-Type"), tc.wantCT)

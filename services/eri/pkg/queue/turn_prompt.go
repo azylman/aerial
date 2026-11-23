@@ -10,6 +10,7 @@ import (
 	"github.com/bwmarrin/discordgo"
 	"go.opentelemetry.io/otel/trace"
 
+	"github.com/azylman/aerial/pkg/discordutil"
 	"github.com/azylman/aerial/services/eri/pkg/config"
 	"github.com/azylman/aerial/services/eri/pkg/db"
 	"github.com/azylman/aerial/services/eri/pkg/discord"
@@ -43,24 +44,6 @@ func (te *turnExecution) isBurstMessage(id string) bool {
 		}
 	}
 	return false
-}
-
-func (te *turnExecution) liveSessionIDForMessage(msgID string) (string, bool) {
-	te.activeSessionMu.Lock()
-	defer te.activeSessionMu.Unlock()
-	if !te.ownsTurnItem(msgID) {
-		return "", false
-	}
-	if te.activeSessionID != "" {
-		return te.activeSessionID, true
-	}
-	if te.leaseSessionID != "" {
-		return te.leaseSessionID, true
-	}
-	if !te.isEphemeral && te.currentSessionID != "" {
-		return te.currentSessionID, true
-	}
-	return "", true
 }
 
 func convertDiscordMessageToDBMessage(dm *discordgo.Message, threadID string, batch ...*discordgo.Message) db.Message {
@@ -123,12 +106,12 @@ func (te *turnExecution) getRecentThreadMessages(threadID string, limit int) ([]
 		return nil, nil
 	}
 	dg := te.pool.getDiscordSession()
-	if dg == nil || threadID == "" || !IsNumericSnowflake(threadID) {
+	if dg == nil || threadID == "" || !discordutil.IsSnowflake(threadID) {
 		return nil, nil
 	}
 
 	beforeID := ""
-	if len(te.burst) > 0 && IsNumericSnowflake(te.burst[0].ID) {
+	if len(te.burst) > 0 && discordutil.IsSnowflake(te.burst[0].ID) {
 		beforeID = te.burst[0].ID
 	}
 
@@ -158,11 +141,14 @@ type attemptConfig struct {
 	apiKey            string
 }
 
+// applyAppConfigOverrides overlays the live config snapshot onto cfg. The turn cap is always
+// resolved here, per attempt, so a turn_timeout_minutes edit applies to the next attempt.
 func applyAppConfigOverrides(cfg *attemptConfig, appCfg *config.Config) {
-	if appCfg == nil {
-		return
+	var cur *config.ConfigData
+	if appCfg != nil {
+		cur = appCfg.Current()
 	}
-	cur := appCfg.Current()
+	cfg.timeoutMinutes = cur.TurnTimeout()
 	if cur == nil {
 		return
 	}
@@ -193,7 +179,7 @@ func (te *turnExecution) resolveAttemptConfig(ctx context.Context, attempt int) 
 	}
 	te.pool.mu.Lock()
 	cfg.model, cfg.lowEffortModel, cfg.mediumEffortModel = te.pool.cfg.Model, te.pool.cfg.LowEffortModel, te.pool.cfg.MediumEffortModel
-	cfg.timeoutMinutes, cfg.agyBin, cfg.apiKey = te.pool.cfg.TimeoutMinutes, te.pool.cfg.AgyBin, te.pool.cfg.APIKey
+	cfg.agyBin, cfg.apiKey = te.pool.cfg.AgyBin, te.pool.cfg.APIKey
 	overrideModel := te.pool.overrideModel
 	te.pool.mu.Unlock()
 
@@ -311,7 +297,7 @@ func (te *turnExecution) fetchLatestThreadHistory(fetchCtx context.Context, limi
 }
 
 func (te *turnExecution) fetchThreadHistoryBefore(fetchCtx context.Context, beforeID string, limit int) []HistoryMessage {
-	if !IsNumericSnowflake(te.threadID) && (te.pool == nil || te.pool.cfg.HistoryFetcher == nil) {
+	if !discordutil.IsSnowflake(te.threadID) && (te.pool == nil || te.pool.cfg.HistoryFetcher == nil) {
 		return nil
 	}
 	fetchCtx, span := te.startPromptStep(fetchCtx, spanPromptHistoryFetch, attrPromptHistoryLimit.Int(limit))
@@ -595,7 +581,7 @@ func (te *turnExecution) runTurnEndSummaryRefresh(ctx context.Context) (string, 
 func newestBurstMessageID(burst []db.Message) string {
 	var newest string
 	for _, m := range burst {
-		if IsNumericSnowflake(m.ID) && (newest == "" || compareSnowflakeIDs(m.ID, newest) > 0) {
+		if discordutil.IsSnowflake(m.ID) && (newest == "" || compareSnowflakeIDs(m.ID, newest) > 0) {
 			newest = m.ID
 		}
 	}
@@ -617,7 +603,7 @@ func dropNextBurstMessages(msgs []HistoryMessage, newestBurstID string) []Histor
 		return msgs
 	}
 	return slices.DeleteFunc(slices.Clone(msgs), func(m HistoryMessage) bool {
-		return IsNumericSnowflake(m.ID) && compareSnowflakeIDs(m.ID, cutoff) >= 0
+		return discordutil.IsSnowflake(m.ID) && compareSnowflakeIDs(m.ID, cutoff) >= 0
 	})
 }
 

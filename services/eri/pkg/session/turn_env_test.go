@@ -15,41 +15,13 @@ func TestNormalizeEnvTargetID(t *testing.T) {
 		id   string
 		want string
 	}{
-		{
-			name: "empty id",
-			id:   "",
-			want: "",
-		},
-		{
-			name: "whitespace only",
-			id:   "   ",
-			want: "",
-		},
-		{
-			name: "discord target with whitespace",
-			id:   "  discord-9876543210  ",
-			want: "9876543210",
-		},
-		{
-			name: "pooled worker target without discord prefix",
-			id:   "discord:worker-0",
-			want: "",
-		},
-		{
-			name: "ephemeral worker target",
-			id:   "ephemeral:worker-0",
-			want: "",
-		},
-		{
-			name: "worker target ignored",
-			id:   "worker-pool-1",
-			want: "",
-		},
-		{
-			name: "raw numeric discord id",
-			id:   "1234567890",
-			want: "1234567890",
-		},
+		{name: "empty id", id: "", want: ""},
+		{name: "whitespace only", id: "   ", want: ""},
+		{name: "discord target with whitespace", id: "  discord-9876543210  ", want: "9876543210"},
+		{name: "pooled worker target without discord prefix", id: "discord:worker-0", want: ""},
+		{name: "ephemeral worker target", id: "ephemeral:worker-0", want: ""},
+		{name: "worker target ignored", id: "worker-pool-1", want: ""},
+		{name: "raw numeric discord id", id: "1234567890", want: "1234567890"},
 	}
 
 	for _, tc := range tests {
@@ -69,6 +41,7 @@ func TestFormatTurnEnvFileContent(t *testing.T) {
 		name           string
 		targetID       string
 		vanadisChunkID string
+		saTokenPath    string
 		wantContains   []string
 		wantNotContain []string
 	}{
@@ -85,76 +58,32 @@ func TestFormatTurnEnvFileContent(t *testing.T) {
 					"unset VANADIS_CHUNK_ID\n" +
 					"fi\n",
 			},
-			wantNotContain: nil,
+		},
+		{name: "empty target and chunk unsets vanadis chunk id", wantContains: []string{"unset VANADIS_CHUNK_ID\n"}, wantNotContain: []string{"export AERIAL_TARGET_ID"}},
+		{
+			name: "escaping single quotes preserves vanadis chunk id", targetID: "foo'bar", vanadisChunkID: "chunk'escaped'test",
+			wantContains: []string{"export VANADIS_CHUNK_ID='chunk'\\''escaped'\\''test'\n"},
 		},
 		{
-			name:           "empty target and chunk unsets vanadis chunk id",
-			targetID:       "",
-			vanadisChunkID: "",
-			wantContains: []string{
-				"unset VANADIS_CHUNK_ID\n",
-			},
-			wantNotContain: []string{
-				"export AERIAL_TARGET_ID",
-			},
+			name: "exports AERIAL_SA_TOKEN_PATH when provided", targetID: "discord-123", saTokenPath: "/data/runtimes/discord/.gemini/turn_env/sa-token",
+			wantContains: []string{"export AERIAL_SA_TOKEN_PATH='/data/runtimes/discord/.gemini/turn_env/sa-token'\n"},
 		},
-		{
-			name:           "escaping single quotes preserves vanadis chunk id",
-			targetID:       "foo'bar",
-			vanadisChunkID: "chunk'escaped'test",
-			wantContains: []string{
-				"export VANADIS_CHUNK_ID='chunk'\\''escaped'\\''test'\n",
-			},
-			wantNotContain: nil,
-		},
+		{name: "omits AERIAL_SA_TOKEN_PATH when blank", targetID: "discord-123", saTokenPath: "   ", wantNotContain: []string{"AERIAL_SA_TOKEN_PATH"}},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			got := FormatTurnEnvFileContent(tc.targetID, tc.vanadisChunkID)
+			got := FormatTurnEnvFileContent(tc.targetID, tc.vanadisChunkID, tc.saTokenPath)
 			for _, exp := range tc.wantContains {
 				if !strings.Contains(got, exp) {
-					t.Errorf("FormatTurnEnvFileContent(%q, %q) missing %q; got:\n%s", tc.targetID, tc.vanadisChunkID, exp, got)
+					t.Errorf("FormatTurnEnvFileContent(%q, %q, %q) missing %q; got:\n%s", tc.targetID, tc.vanadisChunkID, tc.saTokenPath, exp, got)
 				}
 			}
 			for _, unexpected := range tc.wantNotContain {
 				if strings.Contains(got, unexpected) {
-					t.Errorf("FormatTurnEnvFileContent(%q, %q) unexpectedly contains %q; got:\n%s", tc.targetID, tc.vanadisChunkID, unexpected, got)
+					t.Errorf("FormatTurnEnvFileContent(%q, %q, %q) unexpectedly contains %q; got:\n%s", tc.targetID, tc.vanadisChunkID, tc.saTokenPath, unexpected, got)
 				}
-			}
-		})
-	}
-}
-
-func TestFormatTurnEnvFileContent_WithSATokenPath(t *testing.T) {
-	t.Parallel()
-	tests := []struct {
-		name        string
-		saTokenPath string
-		wantContain string
-		wantOmit    string
-	}{
-		{
-			name:        "exports AERIAL_SA_TOKEN_PATH when provided",
-			saTokenPath: "/data/runtimes/discord/.gemini/turn_env/sa-token",
-			wantContain: "export AERIAL_SA_TOKEN_PATH='/data/runtimes/discord/.gemini/turn_env/sa-token'\n",
-		},
-		{
-			name:        "omits AERIAL_SA_TOKEN_PATH when blank",
-			saTokenPath: "   ",
-			wantOmit:    "AERIAL_SA_TOKEN_PATH",
-		},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			got := FormatTurnEnvFileContent("discord-123", "", tc.saTokenPath)
-			if tc.wantContain != "" && !strings.Contains(got, tc.wantContain) {
-				t.Errorf("expected %q in output:\n%s", tc.wantContain, got)
-			}
-			if tc.wantOmit != "" && strings.Contains(got, tc.wantOmit) {
-				t.Errorf("expected %q omitted from output:\n%s", tc.wantOmit, got)
 			}
 		})
 	}
@@ -235,28 +164,10 @@ func TestSyncTurnSATokenFile(t *testing.T) {
 			euid:      0,
 			wantToken: "eyJhbGciOiJSUzI1NiJ9.token\n",
 		},
-		{
-			name:      "syncs trimmed token without chown when non-root",
-			srcToken:  "non-root-token",
-			euid:      1000,
-			wantToken: "non-root-token\n",
-		},
-		{
-			name:    "returns empty without error when source missing",
-			missing: true,
-			euid:    0,
-		},
-		{
-			name:     "returns empty without error when source blank",
-			srcToken: "   \n\t ",
-			euid:     0,
-		},
-		{
-			name:      "returns empty without error when dest path blank",
-			srcToken:  "valid-token",
-			emptyDest: true,
-			euid:      0,
-		},
+		{name: "syncs trimmed token without chown when non-root", srcToken: "non-root-token", euid: 1000, wantToken: "non-root-token\n"},
+		{name: "returns empty without error when source missing", missing: true, euid: 0},
+		{name: "returns empty without error when source blank", srcToken: "   \n\t ", euid: 0},
+		{name: "returns empty without error when dest path blank", srcToken: "valid-token", emptyDest: true, euid: 0},
 		{
 			name:     "returns error when chown fails as root",
 			srcToken: "valid-token",

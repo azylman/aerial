@@ -7,13 +7,12 @@ package model
 
 import (
 	"fmt"
-	"net/url"
 	"regexp"
 	"strconv"
 	"strings"
 	"time"
 
-	"github.com/azylman/aerial/pkg/sanitizer"
+	"github.com/azylman/aerial/pkg/agent"
 )
 
 // Schedule types shared by the schedule tables, metrics labels and run records.
@@ -49,18 +48,19 @@ const (
 
 // Shared field keys for tool responses and HTTP error bodies.
 const (
-	FieldStatus  = "status"
-	FieldEffort  = "effort"
-	FieldMessage = "message"
-	FieldError   = "error"
+	FieldStatus       = "status"
+	FieldEffort       = "effort"
+	FieldMessage      = "message"
+	FieldError        = "error"
+	FieldScheduleType = "schedule_type"
 )
 
 // DefaultAgent is the fallback agent tenancy identifier across haro schedules.
-const DefaultAgent = "aerial"
+const DefaultAgent = agent.Default
 
-// NormalizeAgent trims agent and defaults empty strings to DefaultAgent.
-func NormalizeAgent(agent string) string {
-	if trimmed := strings.TrimSpace(agent); trimmed != "" {
+// NormalizeAgent trims name and defaults empty strings to DefaultAgent.
+func NormalizeAgent(name string) string {
+	if trimmed := strings.TrimSpace(name); trimmed != "" {
 		return trimmed
 	}
 	return DefaultAgent
@@ -127,16 +127,17 @@ type HeartbeatSchedule = CronSchedule
 
 // EventTrigger is an event-watch trigger row.
 type EventTrigger struct {
-	ID         string    `json:"id"`
-	Agent      string    `json:"agent"`
-	ChannelID  string    `json:"channel_id"`
-	Source     string    `json:"source"`
-	Target     string    `json:"target"`
-	EventType  string    `json:"event_type"`
-	Prompt     string    `json:"prompt"`
-	Effort     string    `json:"effort"`
-	CreatedAt  time.Time `json:"created_at"`
-	Persistent bool      `json:"persistent"`
+	ID         string     `json:"id"`
+	Agent      string     `json:"agent"`
+	ChannelID  string     `json:"channel_id"`
+	Source     string     `json:"source"`
+	Target     string     `json:"target"`
+	EventType  string     `json:"event_type"`
+	Prompt     string     `json:"prompt"`
+	Effort     string     `json:"effort"`
+	CreatedAt  time.Time  `json:"created_at"`
+	UpdatedAt  *time.Time `json:"updated_at,omitempty"`
+	Persistent bool       `json:"persistent"`
 }
 
 // ScheduleRun is a schedule execution record row.
@@ -167,16 +168,6 @@ func IsScheduleStale(scheduledAt, now time.Time, maxOverdue time.Duration) bool 
 // ShouldPruneRuns reports whether runs should be pruned given the last prune time, interval, and now.
 func ShouldPruneRuns(now, lastPrune time.Time, interval time.Duration) bool {
 	return interval > 0 && (lastPrune.IsZero() || now.Sub(lastPrune) >= interval)
-}
-
-// FirstNonEmpty returns the first non-blank string after trimming spaces.
-func FirstNonEmpty(vals ...string) string {
-	for _, v := range vals {
-		if trimmed := strings.TrimSpace(v); trimmed != "" {
-			return trimmed
-		}
-	}
-	return ""
 }
 
 // BuildHeartbeatPrompt wraps a raw heartbeat prompt with runtime instructions for the LLM.
@@ -235,20 +226,6 @@ func NormalizeEffort(effort string) (string, error) {
 	default:
 		return "", fmt.Errorf("invalid effort tier %q: expected 'low', 'medium', or 'high'", effort)
 	}
-}
-
-// IsNumericSnowflake reports whether id is a non-empty string consisting only of ASCII digits [0-9].
-func IsNumericSnowflake(id string) bool {
-	id = strings.TrimSpace(id)
-	if id == "" {
-		return false
-	}
-	for i := range len(id) {
-		if id[i] < '0' || id[i] > '9' {
-			return false
-		}
-	}
-	return true
 }
 
 var (
@@ -526,11 +503,6 @@ func FormatCronDescription(cronExpr string) string {
 	return fmt.Sprintf("At %s (cron: %s)", timeStr, expr)
 }
 
-// SanitizeScheduleText redacts GitHub PATs, Bearer tokens, and secret key assignments.
-func SanitizeScheduleText(s string) string {
-	return sanitizer.SanitizeString(s)
-}
-
 // CronScheduleWithDesc is a recurring schedule serialized with a cron description.
 type CronScheduleWithDesc struct {
 	ID              string    `json:"id"`
@@ -584,10 +556,10 @@ func buildRecurringScheduleWithDesc(id, targetID, titlePrefix, cronExpr, prompt,
 		ID:              id,
 		TargetID:        targetID,
 		ChannelID:       targetID,
-		TitlePrefix:     SanitizeScheduleText(titlePrefix),
+		TitlePrefix:     titlePrefix,
 		CronExpr:        cronExpr,
 		CronDescription: FormatCronDescription(cronExpr),
-		Prompt:          SanitizeScheduleText(prompt),
+		Prompt:          prompt,
 		Timezone:        timezone,
 		NextRunAt:       nextRunAt,
 		Enabled:         enabled,
@@ -625,26 +597,11 @@ func FormatOneShotSchedulesJSON(raw []OneShotSchedule) []OneShotScheduleJSON {
 		oneShots = append(oneShots, OneShotScheduleJSON{
 			ID:        s.ID,
 			ThreadID:  s.ThreadID,
-			Prompt:    SanitizeScheduleText(s.Prompt),
+			Prompt:    s.Prompt,
 			RunAt:     s.RunAt,
 			CreatedAt: s.CreatedAt,
 			Effort:    s.Effort,
 		})
 	}
 	return oneShots
-}
-
-// RedactDSN returns a log-safe form of a database DSN: query string and fragment
-// are dropped, any userinfo password is masked, and unparseable or host-less
-// inputs (including libpq key=value DSNs) collapse to "[redacted]".
-func RedactDSN(dsn string) string {
-	u, err := url.Parse(strings.TrimSpace(dsn))
-	if err != nil || u.Host == "" {
-		return "[redacted]"
-	}
-	u.RawQuery = ""
-	u.ForceQuery = false
-	u.Fragment = ""
-	u.RawFragment = ""
-	return u.Redacted()
 }

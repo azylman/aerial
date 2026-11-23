@@ -162,7 +162,7 @@ func TestStore_MessageFlattenedFieldsRoundTrip(t *testing.T) {
 		AuthorName: "Alice", Content: "Hey Aerial, check this out!", Summary: "Hey Aerial, check this out!", Status: StatusPending,
 		ChannelID: "chan-meta-1", ThreadName: "thread-meta-1",
 		AuthorGlobalName: "Alice In Wonderland", IsAdmin: true,
-		Mentions: []string{"aerial"}, MentionUserIDs: []string{"1542035925603713086"}, MentionRoleIDs: []string{"role-aerial"},
+		Mentions: []string{"aerial"}, MentionUserIDs: []string{"1000000000000000001"}, MentionRoleIDs: []string{"role-aerial"},
 		Attachments: []string{"https://example.com/photo.jpg"},
 		Traceparent: "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01",
 		CreatedAt:   time.Now().UTC().Truncate(time.Second), UpdatedAt: time.Now().UTC().Truncate(time.Second),
@@ -177,12 +177,8 @@ func TestStore_MessageFlattenedFieldsRoundTrip(t *testing.T) {
 	if fetched.Traceparent != "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01" {
 		t.Errorf("GetMessage Traceparent mismatch: %q", fetched.Traceparent)
 	}
-	if len(fetched.MentionUserIDs) != 1 || fetched.MentionUserIDs[0] != "1542035925603713086" {
+	if len(fetched.MentionUserIDs) != 1 || fetched.MentionUserIDs[0] != "1000000000000000001" {
 		t.Errorf("GetMessage MentionUserIDs mismatch: %v", fetched.MentionUserIDs)
-	}
-	pending, err := store.GetPendingOrProcessingMessages(ctx, 10)
-	if err != nil || len(pending) != 1 || pending[0].ChannelID != "chan-meta-1" || pending[0].Traceparent != "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01" {
-		t.Fatalf("GetPendingMessages metadata mismatch: %+v (err: %v)", pending, err)
 	}
 	recent, err := store.GetRecentThreadMessages(ctx, msg.ThreadID, 10)
 	if err != nil || len(recent) != 1 || recent[0].AuthorGlobalName != "Alice In Wonderland" {

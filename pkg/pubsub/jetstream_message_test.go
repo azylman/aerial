@@ -3,17 +3,16 @@ package pubsub
 import (
 	"context"
 	"errors"
-	"net"
+	"maps"
 	"net/http"
+	"reflect"
 	"slices"
-	"strconv"
-	"strings"
 	"sync"
 	"testing"
 	"time"
 
 	"github.com/nats-io/nats.go"
-	"go.opentelemetry.io/otel/codes"
+	"github.com/nats-io/nats.go/jetstream"
 	"go.opentelemetry.io/otel/propagation"
 	"go.opentelemetry.io/otel/trace"
 )
@@ -35,72 +34,50 @@ func traceparentHeader(traceparent, msgID string) nats.Header {
 	return h
 }
 
-// recordingNatsDialer is a fake NATS server that records every byte the
-// client writes, so tests can observe ack frames published on reply subjects.
-type recordingNatsDialer struct {
-	mu   sync.Mutex
-	wire strings.Builder
+// fakeMsg is a jetstream.Msg double that records the settlement tokens
+// (+ACK, -NAK, +WPI, +TERM) the bus sends, in order, and fails every
+// settlement call with settleErr.
+type fakeMsg struct {
+	subject   string
+	data      []byte
+	header    nats.Header
+	meta      *jetstream.MsgMetadata
+	settleErr error
+
+	mu     sync.Mutex
+	tokens []string
 }
 
-func (d *recordingNatsDialer) Dial(string, string) (net.Conn, error) {
-	c1, c2 := net.Pipe()
-	go func() {
-		defer c2.Close()
-		_, _ = c2.Write([]byte("INFO {\"server_id\":\"TEST\",\"version\":\"2.10.0\",\"proto\":1,\"jetstream\":true,\"max_payload\":1048576}\r\n"))
-		buf := make([]byte, 1024)
-		for {
-			n, err := c2.Read(buf)
-			if err != nil {
-				return
-			}
-			d.mu.Lock()
-			d.wire.Write(buf[:n])
-			d.mu.Unlock()
-			if strings.Contains(string(buf[:n]), "PING") {
-				_, _ = c2.Write([]byte("PONG\r\n"))
-			}
-		}
-	}()
-	return c1, nil
+func (f *fakeMsg) record(token string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.tokens = append(f.tokens, token)
+	return f.settleErr
 }
 
-// ackTokens returns the leading token (+ACK, -NAK, +WPI, +TERM, ...) of every
-// payload the client published to reply, in order. Call it after nc.Flush so
-// the fake server has read every prior frame.
-func (d *recordingNatsDialer) ackTokens(reply string) []string {
-	d.mu.Lock()
-	wire := d.wire.String()
-	d.mu.Unlock()
-	var tokens []string
-	prefix := "PUB " + reply + " "
-	for {
-		i := strings.Index(wire, prefix)
-		if i < 0 {
-			return tokens
-		}
-		size, rest, _ := strings.Cut(wire[i+len(prefix):], "\r\n")
-		n, _ := strconv.Atoi(size)
-		tokens = append(tokens, strings.Fields(rest[:n])[0])
-		wire = rest[n:]
-	}
+func (f *fakeMsg) recorded() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return slices.Clone(f.tokens)
 }
 
-// boundTestSub connects a NATS client to a recording fake server and returns
-// a subscription the dispatched message can be bound to for acking.
-func boundTestSub(t *testing.T) (*nats.Conn, *nats.Subscription, *recordingNatsDialer) {
-	t.Helper()
-	dialer := &recordingNatsDialer{}
-	nc, err := nats.Connect("nats://127.0.0.1:4222", nats.SetCustomDialer(dialer), nats.Timeout(time.Second), nats.NoReconnect())
-	if err != nil {
-		t.Fatalf("nats.Connect failed: %v", err)
+func (f *fakeMsg) Metadata() (*jetstream.MsgMetadata, error) {
+	if f.meta == nil {
+		return nil, jetstream.ErrNotJSMessage
 	}
-	t.Cleanup(nc.Close)
-	sub, err := nc.SubscribeSync("aerial.events.>")
-	if err != nil {
-		t.Fatalf("SubscribeSync failed: %v", err)
-	}
-	return nc, sub, dialer
+	return f.meta, nil
 }
+func (f *fakeMsg) Data() []byte                     { return f.data }
+func (f *fakeMsg) Headers() nats.Header             { return f.header }
+func (f *fakeMsg) Subject() string                  { return f.subject }
+func (*fakeMsg) Reply() string                      { return "" }
+func (f *fakeMsg) Ack() error                       { return f.record("+ACK") }
+func (f *fakeMsg) DoubleAck(context.Context) error  { return f.record("+ACK") }
+func (f *fakeMsg) Nak() error                       { return f.record("-NAK") }
+func (f *fakeMsg) NakWithDelay(time.Duration) error { return f.record("-NAK") }
+func (f *fakeMsg) InProgress() error                { return f.record("+WPI") }
+func (f *fakeMsg) Term() error                      { return f.record("+TERM") }
+func (f *fakeMsg) TermWithReason(string) error      { return f.record("+TERM") }
 
 func TestJetStreamBus_Dispatch(t *testing.T) {
 	t.Parallel()
@@ -108,7 +85,7 @@ func TestJetStreamBus_Dispatch(t *testing.T) {
 	tests := []struct {
 		name          string
 		subject       string
-		reply         string
+		meta          *jetstream.MsgMetadata
 		data          string
 		group         string
 		header        nats.Header
@@ -119,62 +96,48 @@ func TestJetStreamBus_Dispatch(t *testing.T) {
 		wantSpan      spanShape
 	}{
 		{
-			// $JS.ACK.<stream>.<consumer>.<numDelivered>.<streamSeq>.<consumerSeq>.<timestamp>.<numPending>
-			name:    "ack reply metadata exposes delivery count",
-			subject: "aerial.events.meta", reply: "$JS.ACK.AERIAL_EVENTS.durable.4.1.1.1600000000.0", data: "with-meta", group: "durable",
+			name:    "message metadata exposes delivery count",
+			subject: "aerial.events.meta", meta: &jetstream.MsgMetadata{NumDelivered: 4}, data: "with-meta", group: "durable",
 			want:     dispatchObservation{invoked: true, subject: "aerial.events.meta", data: "with-meta", numDelivered: 4},
 			wantAcks: []string{"+ACK"},
-			wantSpan: spanShape{key: "proc", name: "aerial.events.meta process", kind: trace.SpanKindConsumer, attrs: map[string]string{
-				"messaging.system": "nats", "messaging.operation.type": "process", "messaging.destination.name": "aerial.events.meta",
-				"messaging.consumer.group.name": "durable", "messaging.nats.message.delivery_count": "4",
-			}},
+			wantSpan: procSpan("proc", "", "aerial.events.meta", "durable", "", 4),
 		},
 		{
 			name:    "traceparent header parents the process span seen by the handler",
-			subject: "aerial.events.head", reply: "_INBOX.head", data: "h", group: "workers",
+			subject: "aerial.events.head", data: "h", group: "workers",
 			header:   traceparentHeader(testTraceparent, "evt-head"),
 			want:     dispatchObservation{invoked: true, subject: "aerial.events.head", data: "h", numDelivered: 1, traceID: testTraceID},
 			wantAcks: []string{"+ACK"},
-			wantSpan: spanShape{key: "proc", name: "aerial.events.head process", kind: trace.SpanKindConsumer, parent: parentRemote, attrs: map[string]string{
-				"messaging.system": "nats", "messaging.operation.type": "process", "messaging.destination.name": "aerial.events.head",
-				"messaging.consumer.group.name": "workers", "messaging.nats.message.delivery_count": "1", "messaging.message.id": "evt-head",
-			}},
+			wantSpan: procSpan("proc", parentRemote, "aerial.events.head", "workers", "evt-head", 1),
 		},
 		{
 			name:    "handler error is auto-naked and fails the process span",
-			subject: "aerial.events.err", reply: "_INBOX.err", data: "err",
+			subject: "aerial.events.err", data: "err",
 			handlerErr: errors.New("handler failed"),
 			want:       dispatchObservation{invoked: true, subject: "aerial.events.err", data: "err", numDelivered: 1},
 			wantAcks:   []string{"-NAK"},
-			wantSpan: spanShape{key: "proc", name: "aerial.events.err process", kind: trace.SpanKindConsumer, status: codes.Error, attrs: map[string]string{
-				"messaging.system": "nats", "messaging.operation.type": "process", "messaging.destination.name": "aerial.events.err",
-				"messaging.nats.message.delivery_count": "1",
-			}},
+			wantSpan:   procSpan("proc", "", "aerial.events.err", "", "", 1).failed(),
 		},
 		{
 			name:    "handler settling via InProgress and Term skips auto-settlement",
-			subject: "aerial.events.term", reply: "_INBOX.term", data: "term",
+			subject: "aerial.events.term", data: "term",
 			termInHandler: true,
 			want:          dispatchObservation{invoked: true, subject: "aerial.events.term", data: "term", numDelivered: 1},
 			wantAcks:      []string{"+WPI", "+TERM"},
-			wantSpan: spanShape{key: "proc", name: "aerial.events.term process", kind: trace.SpanKindConsumer, attrs: map[string]string{
-				"messaging.system": "nats", "messaging.operation.type": "process", "messaging.destination.name": "aerial.events.term",
-				"messaging.nats.message.delivery_count": "1",
-			}},
+			wantSpan:      procSpan("proc", "", "aerial.events.term", "", "", 1),
 		},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			nc, sub, dialer := boundTestSub(t)
 			bus := newJetStreamBusWithContext(nil, &mockJetStream{existingStreams: make(map[string]*nats.StreamInfo)})
 			// Keep the background heartbeat out of the recorded ack stream.
 			bus.heartbeatInterval = time.Hour
 
 			var got dispatchObservation
 			var handlerSpan trace.SpanID
-			msg := &nats.Msg{Subject: tc.subject, Reply: tc.reply, Sub: sub, Data: []byte(tc.data), Header: tc.header}
+			msg := &fakeMsg{subject: tc.subject, meta: tc.meta, data: []byte(tc.data), header: tc.header}
 			bus.dispatch(t.Context(), msg, tc.group, func(ctx context.Context, msg Message) error {
 				got = dispatchObservation{invoked: true, subject: msg.Subject(), data: string(msg.Data()), numDelivered: msg.NumDelivered()}
 				spanCtx := trace.SpanContextFromContext(ctx)
@@ -183,7 +146,9 @@ func TestJetStreamBus_Dispatch(t *testing.T) {
 					got.traceID = spanCtx.TraceID().String()
 				}
 				if tc.termInHandler {
-					_ = msg.InProgress()
+					if err := msg.InProgress(); err != nil {
+						return err
+					}
 					return msg.Term()
 				}
 				return tc.handlerErr
@@ -191,10 +156,7 @@ func TestJetStreamBus_Dispatch(t *testing.T) {
 			if got != tc.want {
 				t.Errorf("handler observed %+v, want %+v", got, tc.want)
 			}
-			if err := nc.Flush(); err != nil {
-				t.Fatalf("Flush failed: %v", err)
-			}
-			if acks := dialer.ackTokens(tc.reply); !slices.Equal(acks, tc.wantAcks) {
+			if acks := msg.recorded(); !slices.Equal(acks, tc.wantAcks) {
 				t.Errorf("ack frames = %v, want %v", acks, tc.wantAcks)
 			}
 			spans := assertSpanShapes(t, testSpans.await(tc.subject, 1), []spanShape{tc.wantSpan})
@@ -217,32 +179,30 @@ func TestJetStreamBus_PublishWithHeader(t *testing.T) {
 		publishErr  error
 		wantErr     bool
 		wantHeader  string
+		wantData    string
 		wantSpan    spanShape
 	}{
 		{
 			name:    "traced publish injects the producer span and keeps custom headers",
 			subject: "aerial.jobs.pubspan.ok", msgID: "job-7", traceparent: testTraceparent, data: "payload",
-			wantHeader: "Custom-Val",
-			wantSpan: spanShape{key: "pub", name: "aerial.jobs.pubspan.ok publish", kind: trace.SpanKindProducer, parent: parentRemote, attrs: map[string]string{
-				"messaging.system": "nats", "messaging.operation.type": "send", "messaging.operation.name": "publish",
-				"messaging.destination.name": "aerial.jobs.pubspan.ok", "messaging.message.id": "job-7",
-			}},
+			wantHeader: "Custom-Val", wantData: "payload",
+			wantSpan: pubSpan("pub", parentRemote, "aerial.jobs.pubspan.ok", "job-7"),
+		},
+		{
+			name:    "structured payload is published as JSON",
+			subject: "aerial.jobs.pubspan.json", msgID: "job-9", data: map[string]string{"foo": "bar"},
+			wantHeader: "Custom-Val", wantData: `{"foo":"bar"}`,
+			wantSpan: pubSpan("pub", "", "aerial.jobs.pubspan.json", "job-9"),
 		},
 		{
 			name:    "server publish failure fails the producer span",
 			subject: "aerial.jobs.pubspan.err", data: "payload", publishErr: errors.New("pub failed"), wantErr: true,
-			wantSpan: spanShape{key: "pub", name: "aerial.jobs.pubspan.err publish", kind: trace.SpanKindProducer, status: codes.Error, attrs: map[string]string{
-				"messaging.system": "nats", "messaging.operation.type": "send", "messaging.operation.name": "publish",
-				"messaging.destination.name": "aerial.jobs.pubspan.err",
-			}},
+			wantSpan: pubSpan("pub", "", "aerial.jobs.pubspan.err", "").failed(),
 		},
 		{
 			name:    "unmarshalable payload fails the producer span",
 			subject: "aerial.jobs.pubspan.marshal", msgID: "job-8", data: make(chan int), wantErr: true,
-			wantSpan: spanShape{key: "pub", name: "aerial.jobs.pubspan.marshal publish", kind: trace.SpanKindProducer, status: codes.Error, attrs: map[string]string{
-				"messaging.system": "nats", "messaging.operation.type": "send", "messaging.operation.name": "publish",
-				"messaging.destination.name": "aerial.jobs.pubspan.marshal", "messaging.message.id": "job-8",
-			}},
+			wantSpan: pubSpan("pub", "", "aerial.jobs.pubspan.marshal", "job-8").failed(),
 		},
 	}
 
@@ -270,38 +230,12 @@ func TestJetStreamBus_PublishWithHeader(t *testing.T) {
 			if got := h.Get("Custom-Key"); got != tc.wantHeader {
 				t.Errorf("Custom-Key = %q, want %q", got, tc.wantHeader)
 			}
+			if got := string(mjs.publishedMsgs[0].Data); got != tc.wantData {
+				t.Errorf("data = %q, want %q", got, tc.wantData)
+			}
 			injected := trace.SpanContextFromContext(propagation.TraceContext{}.Extract(context.Background(), propagation.HeaderCarrier(http.Header(h))))
 			if pub := spans["pub"]; pub != nil && injected.SpanID() != pub.SpanContext().SpanID() {
 				t.Errorf("injected traceparent span = %s, want producer span %s", injected.SpanID(), pub.SpanContext().SpanID())
-			}
-		})
-	}
-}
-
-func TestJSMessage_SettledSettlementIsNoop(t *testing.T) {
-	t.Parallel()
-
-	msg := &jsMessage{
-		raw:     &nats.Msg{Subject: "aerial.jobs.jsmsg", Data: []byte("raw"), Header: nats.Header{}},
-		bus:     newJetStreamBusWithContext(nil, &mockJetStream{}),
-		settled: true,
-	}
-	tests := []struct {
-		name string
-		err  error
-	}{
-		{name: "Ack", err: msg.Ack()},
-		{name: "NakWithDelay", err: msg.NakWithDelay(0)},
-		{name: "Term", err: msg.Term()},
-		{name: "Snooze", err: msg.Snooze(0)},
-		{name: "InProgress", err: msg.InProgress()},
-	}
-
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			if tc.err != nil {
-				t.Errorf("%s on settled jsMessage = %v, want nil", tc.name, tc.err)
 			}
 		})
 	}
@@ -313,50 +247,31 @@ type plainBus struct {
 	Bus
 }
 
-func setupSnoozeRawMsg(t *testing.T, boundSub bool, dialer *recordingNatsDialer, header nats.Header) (*nats.Msg, func()) {
-	t.Helper()
-	if !boundSub {
-		return &nats.Msg{
-			Subject: "aerial.jobs.snooze",
-			Data:    []byte("s"),
-			Header:  header,
-		}, func() {}
-	}
-
-	nc, err := nats.Connect("nats://127.0.0.1:4222",
-		nats.SetCustomDialer(dialer),
-		nats.Timeout(1*time.Second),
-		nats.NoReconnect(),
-		nats.MaxReconnects(0),
-	)
-	if err != nil {
-		t.Fatalf("Connect failed: %v", err)
-	}
-
-	sub, err := nc.SubscribeSync("aerial.jobs.snooze")
-	if err != nil {
-		nc.Close()
-		t.Fatalf("SubscribeSync failed: %v", err)
-	}
-
-	raw := &nats.Msg{
-		Subject: "aerial.jobs.snooze",
-		Reply:   "test.reply.inbox",
-		Sub:     sub,
-		Data:    []byte("s"),
-		Header:  header,
-	}
-	return raw, func() { nc.Close() }
-}
-
-func countInProgressTokens(dialer *recordingNatsDialer, reply string) int {
+func countInProgressTokens(tokens []string) int {
 	var count int
-	for _, tok := range dialer.ackTokens(reply) {
+	for _, tok := range tokens {
 		if tok == "+WPI" {
 			count++
 		}
 	}
 	return count
+}
+
+// snoozeContinuation returns the msg id (generated ids as "msg-N") and snooze sequence headers
+// of the one continuation mjs received, or empty strings when none was published.
+func snoozeContinuation(t *testing.T, mjs *mockJetStream) (msgID, seq string) {
+	t.Helper()
+	mjs.mu.Lock()
+	defer mjs.mu.Unlock()
+	switch len(mjs.publishedMsgs) {
+	case 0:
+		return "", ""
+	case 1:
+		h := mjs.publishedMsgs[0].Header
+		return memGeneratedMsgID.ReplaceAllString(h.Get(HeaderMsgID), "msg-N"), h.Get(HeaderSnoozeSeq)
+	}
+	t.Errorf("published %d continuations, want at most 1", len(mjs.publishedMsgs))
+	return "", ""
 }
 
 func TestJSMessage_Snooze(t *testing.T) {
@@ -370,69 +285,50 @@ func TestJSMessage_Snooze(t *testing.T) {
 		header            nats.Header
 		publishErr        error
 		plainBus          bool
-		boundSub          bool
+		settleErr         error
+		countInProgress   bool
 		cancelCtx         bool
 		wantErr           error
 		wantSettled       bool
 		wantMinInProgress int
 		wantMaxInProgress int
+		wantMsgID         string
+		wantSeq           string
 	}{
 		{
-			name:        "unbound message without msg id publishes then fails to ack",
-			wantErr:     nats.ErrMsgNotBound,
-			wantSettled: true,
+			name:      "message without msg id publishes a generated id then fails to ack",
+			settleErr: jetstream.ErrMsgNotBound, wantErr: jetstream.ErrMsgNotBound, wantSettled: true, wantMsgID: "msg-N:snooze:1", wantSeq: "1",
+		},
+		{name: "continuation publish failure is returned", publishErr: errContinuation, wantErr: errContinuation},
+		{
+			name:   "existing snooze suffix on a non-header publisher bus publishes without headers",
+			header: nats.Header{HeaderMsgID: []string{"task-1:snooze:2"}}, plainBus: true,
+			settleErr: jetstream.ErrMsgNotBound, wantErr: jetstream.ErrMsgNotBound, wantSettled: true, wantMsgID: "task-1:snooze:1",
+		},
+		{name: "delayed continuation publish failure does not settle", delay: 5 * time.Millisecond, publishErr: errContinuation, wantErr: errContinuation},
+		{
+			name:   "delay rotates an existing snooze sequence after waiting",
+			header: nats.Header{HeaderMsgID: []string{"msg-1"}, HeaderSnoozeSeq: []string{"4"}}, delay: 10 * time.Millisecond,
+			wantSettled: true, wantMsgID: "msg-1:snooze:5", wantSeq: "5",
 		},
 		{
-			name:        "continuation publish failure is returned",
-			publishErr:  errContinuation,
-			wantErr:     errContinuation,
-			wantSettled: false,
+			name:  "message with delay exceeding heartbeat interval triggers in progress and settles",
+			delay: 15 * time.Millisecond, hbInterval: 3 * time.Millisecond, countInProgress: true,
+			wantSettled: true, wantMinInProgress: 1, wantMaxInProgress: 100, wantMsgID: "msg-N:snooze:1", wantSeq: "1",
 		},
 		{
-			name:        "existing snooze sequence on a non-header publisher bus",
-			header:      nats.Header{HeaderMsgID: []string{"task-1:snooze:2"}},
-			plainBus:    true,
-			wantErr:     nats.ErrMsgNotBound,
-			wantSettled: true,
+			name:  "message with delay below heartbeat interval settles without in progress",
+			delay: 5 * time.Millisecond, hbInterval: 50 * time.Millisecond, countInProgress: true,
+			wantSettled: true, wantMsgID: "msg-N:snooze:1", wantSeq: "1",
 		},
-		{
-			name:        "delay with continuation publish failure does not settle",
-			delay:       5 * time.Millisecond,
-			publishErr:  errContinuation,
-			wantErr:     errContinuation,
-			wantSettled: false,
-		},
-		{
-			name:              "bound message with delay exceeding heartbeat interval triggers in progress and settles",
-			delay:             15 * time.Millisecond,
-			hbInterval:        3 * time.Millisecond,
-			boundSub:          true,
-			wantSettled:       true,
-			wantMinInProgress: 1,
-			wantMaxInProgress: 100,
-		},
-		{
-			name:              "bound message with delay below heartbeat interval settles without in progress",
-			delay:             5 * time.Millisecond,
-			hbInterval:        50 * time.Millisecond,
-			boundSub:          true,
-			wantSettled:       true,
-			wantMinInProgress: 0,
-			wantMaxInProgress: 0,
-		},
-		{
-			name:        "canceled context aborts snooze delay and leaves message unsettled",
-			delay:       1 * time.Hour,
-			cancelCtx:   true,
-			wantErr:     context.Canceled,
-			wantSettled: false,
-		},
+		{name: "canceled context aborts snooze delay and leaves message unsettled", delay: time.Hour, cancelCtx: true, wantErr: context.Canceled},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			jsBus := newJetStreamBusWithContext(nil, &mockJetStream{publishErr: tc.publishErr})
+			mjs := &mockJetStream{publishErr: tc.publishErr}
+			jsBus := newJetStreamBusWithContext(nil, mjs)
 			if tc.hbInterval > 0 {
 				jsBus.heartbeatInterval = tc.hbInterval
 			}
@@ -441,9 +337,7 @@ func TestJSMessage_Snooze(t *testing.T) {
 				bus = plainBus{bus}
 			}
 
-			dialer := &recordingNatsDialer{}
-			raw, cleanup := setupSnoozeRawMsg(t, tc.boundSub, dialer, tc.header)
-			defer cleanup()
+			raw := &fakeMsg{subject: "aerial.jobs.snooze", data: []byte("s"), header: tc.header, settleErr: tc.settleErr}
 
 			var doneCh <-chan struct{}
 			if tc.cancelCtx {
@@ -462,11 +356,14 @@ func TestJSMessage_Snooze(t *testing.T) {
 			if settled != tc.wantSettled {
 				t.Errorf("settled = %v, want %v", settled, tc.wantSettled)
 			}
-			if tc.boundSub {
-				gotIP := countInProgressTokens(dialer, "test.reply.inbox")
+			if tc.countInProgress {
+				gotIP := countInProgressTokens(raw.recorded())
 				if gotIP < tc.wantMinInProgress || gotIP > tc.wantMaxInProgress {
 					t.Errorf("inProgress tokens = %d, want between %d and %d", gotIP, tc.wantMinInProgress, tc.wantMaxInProgress)
 				}
+			}
+			if gotMsgID, gotSeq := snoozeContinuation(t, mjs); gotMsgID != tc.wantMsgID || gotSeq != tc.wantSeq {
+				t.Errorf("continuation msg id, seq = %q, %q, want %q, %q", gotMsgID, gotSeq, tc.wantMsgID, tc.wantSeq)
 			}
 		})
 	}
@@ -480,13 +377,9 @@ func TestJSMessage_NumDelivered(t *testing.T) {
 		msg  *jsMessage
 		want uint64
 	}{
-		{name: "cached metadata", msg: &jsMessage{raw: &nats.Msg{}, meta: &nats.MsgMetadata{NumDelivered: 42}}, want: 42},
-		{name: "no metadata defaults to first delivery", msg: &jsMessage{raw: &nats.Msg{}}, want: 1},
-		{
-			name: "parsed from raw ack reply",
-			msg:  &jsMessage{raw: &nats.Msg{Reply: "$JS.ACK.AERIAL_JOBS.test-cons.3.100.200.1600000000.5", Sub: &nats.Subscription{}}},
-			want: 3,
-		},
+		{name: "cached metadata", msg: &jsMessage{raw: &fakeMsg{}, meta: &jetstream.MsgMetadata{NumDelivered: 42}}, want: 42},
+		{name: "no metadata defaults to first delivery", msg: &jsMessage{raw: &fakeMsg{}}, want: 1},
+		{name: "read from raw metadata", msg: &jsMessage{raw: &fakeMsg{meta: &jetstream.MsgMetadata{NumDelivered: 3}}}, want: 3},
 	}
 
 	for _, tc := range tests {
@@ -504,22 +397,21 @@ func TestJSMessage_Header(t *testing.T) {
 
 	tests := []struct {
 		name      string
-		raw       *nats.Msg
+		raw       nats.Header
 		wantValue string
 	}{
-		{name: "existing header is returned as-is", raw: &nats.Msg{Header: nats.Header{"X-Test": []string{"1"}}}, wantValue: "1"},
-		{name: "missing header is initialized on the raw message", raw: &nats.Msg{}, wantValue: ""},
+		{name: "existing header is returned as-is", raw: nats.Header{"X-Test": []string{"1"}}, wantValue: "1"},
+		{name: "missing header is replaced by a stable empty header", raw: nil, wantValue: "set"},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			msg := &jsMessage{raw: tc.raw}
-			h := msg.Header()
-			if h == nil || tc.raw.Header == nil {
-				t.Fatalf("Header() = %v, raw.Header = %v, want both non-nil", h, tc.raw.Header)
+			msg := &jsMessage{raw: &fakeMsg{header: tc.raw}}
+			if msg.Header().Get("X-Test") == "" {
+				msg.Header().Set("X-Test", "set")
 			}
-			if got := h.Get("X-Test"); got != tc.wantValue {
+			if got := msg.Header().Get("X-Test"); got != tc.wantValue {
 				t.Errorf("Header().Get(X-Test) = %q, want %q", got, tc.wantValue)
 			}
 		})
@@ -530,5 +422,257 @@ func TestJetStreamBus_Close(t *testing.T) {
 	t.Parallel()
 	if err := (&JetStreamBus{}).Close(); err != nil {
 		t.Errorf("Close with nil nc = %v, want nil", err)
+	}
+}
+
+func TestMergeStreamLimits(t *testing.T) {
+	t.Parallel()
+
+	hour72 := 72 * time.Hour
+	tests := []struct {
+		name        string
+		desiredAge  time.Duration
+		existingAge time.Duration
+		wantAge     time.Duration
+		desiredMB   int64
+		existingMB  int64
+		wantMB      int64
+	}{
+		{"raise takes desired", hour72, time.Hour, hour72, 128 * 1024 * 1024, 64 * 1024 * 1024, 128 * 1024 * 1024},
+		{"lower keeps existing", time.Hour, hour72, hour72, 64 * 1024 * 1024, 128 * 1024 * 1024, 128 * 1024 * 1024},
+		{"unchanged stays", hour72, hour72, hour72, 128 * 1024 * 1024, 128 * 1024 * 1024, 128 * 1024 * 1024},
+		{"existing unlimited age wins", hour72, 0, 0, 128 * 1024 * 1024, 128 * 1024 * 1024, 128 * 1024 * 1024},
+		{"desired unlimited age wins", 0, hour72, 0, 128 * 1024 * 1024, 128 * 1024 * 1024, 128 * 1024 * 1024},
+		{"existing unlimited bytes wins", hour72, hour72, hour72, 128 * 1024 * 1024, -1, -1},
+		{"desired unlimited bytes wins", hour72, hour72, hour72, -1, 128 * 1024 * 1024, -1},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			desired := &nats.StreamConfig{Name: "DESIRED", MaxAge: tc.desiredAge, MaxBytes: tc.desiredMB}
+			existing := &nats.StreamConfig{Name: "EXISTING", MaxAge: tc.existingAge, MaxBytes: tc.existingMB}
+			got := mergeStreamLimits(desired, existing)
+			if got.MaxAge != tc.wantAge {
+				t.Errorf("MaxAge = %v, want %v", got.MaxAge, tc.wantAge)
+			}
+			if got.MaxBytes != tc.wantMB {
+				t.Errorf("MaxBytes = %d, want %d", got.MaxBytes, tc.wantMB)
+			}
+			if got.Name != "DESIRED" {
+				t.Errorf("Name = %q, want desired config identity", got.Name)
+			}
+		})
+	}
+}
+
+func TestJetStreamBus_EnsureStream(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name            string
+		existing        *nats.StreamConfig
+		streamInfoErr   error
+		addStreamErr    error
+		updateStreamErr error
+		desired         nats.StreamConfig
+		wantErr         string
+		wantMaxAge      time.Duration
+		wantMaxBytes    int64
+	}{
+		{
+			name:         "creates missing stream",
+			desired:      nats.StreamConfig{Name: "S", Subjects: []string{"s.>"}, MaxAge: time.Hour, MaxBytes: 1024},
+			wantMaxAge:   time.Hour,
+			wantMaxBytes: 1024,
+		},
+		{
+			name:         "update preserves higher existing limits",
+			existing:     &nats.StreamConfig{Name: "S", MaxAge: 48 * time.Hour, MaxBytes: 4096},
+			desired:      nats.StreamConfig{Name: "S", Subjects: []string{"s.>"}, MaxAge: time.Hour, MaxBytes: 1024},
+			wantMaxAge:   48 * time.Hour,
+			wantMaxBytes: 4096,
+		},
+		{
+			name:         "update raises lower existing limits",
+			existing:     &nats.StreamConfig{Name: "S", MaxAge: time.Minute, MaxBytes: 10},
+			desired:      nats.StreamConfig{Name: "S", MaxAge: time.Hour, MaxBytes: 1024},
+			wantMaxAge:   time.Hour,
+			wantMaxBytes: 1024,
+		},
+		{
+			name:          "stream info error is returned",
+			streamInfoErr: errors.New("stream info failed"),
+			desired:       nats.StreamConfig{Name: "S"},
+			wantErr:       "stream info failed",
+		},
+		{
+			name:         "add stream error is returned",
+			addStreamErr: errors.New("add stream failed"),
+			desired:      nats.StreamConfig{Name: "S"},
+			wantErr:      "add stream failed",
+		},
+		{
+			name:            "update stream error is returned",
+			existing:        &nats.StreamConfig{Name: "S"},
+			updateStreamErr: errors.New("update stream failed"),
+			desired:         nats.StreamConfig{Name: "S"},
+			wantErr:         "update stream failed",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			mjs := &mockJetStream{
+				existingStreams: make(map[string]*nats.StreamInfo),
+				streamInfoErr:   tc.streamInfoErr,
+				addStreamErr:    tc.addStreamErr,
+				updateStreamErr: tc.updateStreamErr,
+			}
+			if tc.existing != nil {
+				mjs.existingStreams[tc.existing.Name] = &nats.StreamInfo{Config: *tc.existing}
+			}
+			bus := newJetStreamBusWithContext(nil, mjs)
+
+			desired := tc.desired
+			err := bus.EnsureStream(&desired)
+			if tc.wantErr != "" {
+				if err == nil || err.Error() != tc.wantErr {
+					t.Fatalf("EnsureStream error = %v, want %q", err, tc.wantErr)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("EnsureStream unexpected error: %v", err)
+			}
+			got := mjs.existingStreams[tc.desired.Name].Config
+			if got.MaxAge != tc.wantMaxAge || got.MaxBytes != tc.wantMaxBytes {
+				t.Errorf("stream limits = (%v, %d), want (%v, %d)", got.MaxAge, got.MaxBytes, tc.wantMaxAge, tc.wantMaxBytes)
+			}
+		})
+	}
+}
+
+// coreStream is the part of a stream config TestJetStreamBus_EnsureCoreStreams checks.
+type coreStream struct {
+	subjects []string
+	maxAge   time.Duration
+	maxBytes int64
+}
+
+// coreStreamsWith returns the four default core streams with overrides replacing entries.
+func coreStreamsWith(overrides map[string]coreStream) map[string]coreStream {
+	streams := map[string]coreStream{
+		"AERIAL_EVENTS":      {[]string{"aerial.dispatch.>", "aerial.events.>", "aerial.turn.>", "aerial.pr.>"}, 72 * time.Hour, 256 << 20},
+		"AERIAL_JOBS":        {[]string{"aerial.jobs.>"}, 72 * time.Hour, 256 << 20},
+		"AERIAL_COALESCED":   {[]string{"aerial.coalesced.>"}, 72 * time.Hour, 64 << 20},
+		"AERIAL_TRANSCRIPTS": {[]string{"aerial.transcripts.>"}, 72 * time.Hour, 128 << 20},
+	}
+	maps.Copy(streams, overrides)
+	return streams
+}
+
+func TestJetStreamBus_EnsureCoreStreams(t *testing.T) {
+	t.Parallel()
+
+	coalesced, transcripts := []string{"aerial.coalesced.>"}, []string{"aerial.transcripts.>"}
+	tests := []struct {
+		name          string
+		seed          map[string]coreStream
+		streamInfoErr error
+		addStreamErr  error
+		want          map[string]coreStream
+		wantErr       string
+	}{
+		{name: "empty broker gets the four core streams", want: coreStreamsWith(nil)},
+		{name: "existing core streams are updated in place", seed: coreStreamsWith(nil), want: coreStreamsWith(nil)},
+		{
+			name: "coalesced below the floor is raised", seed: map[string]coreStream{"AERIAL_COALESCED": {coalesced, time.Hour, 64 << 20}},
+			want: coreStreamsWith(map[string]coreStream{"AERIAL_COALESCED": {coalesced, 72 * time.Hour, 64 << 20}}),
+		},
+		{
+			name: "coalesced larger age is kept", seed: map[string]coreStream{"AERIAL_COALESCED": {coalesced, 200 * time.Hour, 64 << 20}},
+			want: coreStreamsWith(map[string]coreStream{"AERIAL_COALESCED": {coalesced, 200 * time.Hour, 64 << 20}}),
+		},
+		{
+			name: "coalesced larger bytes are kept", seed: map[string]coreStream{"AERIAL_COALESCED": {coalesced, 72 * time.Hour, 256 << 20}},
+			want: coreStreamsWith(map[string]coreStream{"AERIAL_COALESCED": {coalesced, 72 * time.Hour, 256 << 20}}),
+		},
+		{
+			name: "transcripts below the floor are raised", seed: map[string]coreStream{"AERIAL_TRANSCRIPTS": {transcripts, time.Hour, 1 << 20}},
+			want: coreStreamsWith(nil),
+		},
+		{
+			name: "transcripts unlimited age is kept", seed: map[string]coreStream{"AERIAL_TRANSCRIPTS": {transcripts, 0, 128 << 20}},
+			want: coreStreamsWith(map[string]coreStream{"AERIAL_TRANSCRIPTS": {transcripts, 0, 128 << 20}}),
+		},
+		{
+			name: "transcripts unlimited bytes are kept", seed: map[string]coreStream{"AERIAL_TRANSCRIPTS": {transcripts, 72 * time.Hour, -1}},
+			want: coreStreamsWith(map[string]coreStream{"AERIAL_TRANSCRIPTS": {transcripts, 72 * time.Hour, -1}}),
+		},
+		{
+			name: "stream info error names the stream", streamInfoErr: errors.New("stream info failed"),
+			want: map[string]coreStream{}, wantErr: "ensure stream AERIAL_EVENTS: stream info failed",
+		},
+		{
+			name: "add stream error names the stream", addStreamErr: errors.New("add stream failed"),
+			want: map[string]coreStream{}, wantErr: "ensure stream AERIAL_EVENTS: add stream failed",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			mjs := &mockJetStream{existingStreams: map[string]*nats.StreamInfo{}, streamInfoErr: tc.streamInfoErr, addStreamErr: tc.addStreamErr}
+			for name, s := range tc.seed {
+				cfg := nats.StreamConfig{Name: name, Subjects: s.subjects, Storage: nats.FileStorage, MaxAge: s.maxAge, MaxBytes: s.maxBytes}
+				mjs.existingStreams[name] = &nats.StreamInfo{Config: cfg}
+			}
+			err := newJetStreamBusWithContext(nil, mjs).EnsureCoreStreams(context.Background())
+			gotErr := ""
+			if err != nil {
+				gotErr = err.Error()
+			}
+			if gotErr != tc.wantErr {
+				t.Errorf("EnsureCoreStreams() err = %q, want %q", gotErr, tc.wantErr)
+			}
+			got := map[string]coreStream{}
+			for name, info := range mjs.existingStreams {
+				got[name] = coreStream{info.Config.Subjects, info.Config.MaxAge, info.Config.MaxBytes}
+			}
+			if !reflect.DeepEqual(got, tc.want) {
+				t.Errorf("streams = %+v, want %+v", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestEnsureCoreStreamsBus(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name    string
+		bus     Bus
+		wantErr string
+	}{
+		{name: "nil bus", bus: nil, wantErr: "pubsub: bus is nil"},
+		{name: "bus error propagated", bus: newJetStreamBusWithContext(nil, &mockJetStream{streamInfoErr: errors.New("ensure failed")}), wantErr: "ensure stream AERIAL_EVENTS: ensure failed"},
+		{name: "memory bus ok", bus: NewMemoryBus()},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if tc.bus != nil {
+				t.Cleanup(func() { _ = tc.bus.Close() })
+			}
+			err := EnsureCoreStreams(context.Background(), tc.bus)
+			gotErr := ""
+			if err != nil {
+				gotErr = err.Error()
+			}
+			if gotErr != tc.wantErr {
+				t.Errorf("EnsureCoreStreams() err = %q, want %q", gotErr, tc.wantErr)
+			}
+		})
 	}
 }

@@ -5,7 +5,6 @@ import {
   formatCountdown,
   formatDuration,
   formatElapsedTicker,
-  formatGitSyncDelta,
   formatTimeAgo,
   formatTimestamp,
   formatUptime,
@@ -50,24 +49,6 @@ describe('formatElapsedTicker', () => {
     { input: Number.NaN, want: '00:00s' },
   ])('$input -> $want', ({ input, want }) => {
     expect(formatElapsedTicker(input)).toBe(want);
-  });
-});
-
-describe('formatGitSyncDelta', () => {
-  it.each([
-    { input: 0, want: 'Δ 0s' },
-    { input: 45, want: 'Δ 45s' },
-    { input: 45.9, want: 'Δ 45s' },
-    { input: 60, want: 'Δ 1m' },
-    { input: 125, want: 'Δ 2m 5s' },
-    { input: 3600, want: 'Δ 1h' },
-    { input: 3665, want: 'Δ 1h 1m' },
-    { input: null, want: 'Δ 0s' },
-    { input: undefined, want: 'Δ 0s' },
-    { input: Number.NaN, want: 'Δ 0s' },
-    { input: -10, want: 'Δ 0s' },
-  ])('$input -> $want', ({ input, want }) => {
-    expect(formatGitSyncDelta(input)).toBe(want);
   });
 });
 

@@ -1,0 +1,55 @@
+{
+  "name": "01-register",
+  "description": "aerial-pr.sh register creates the open row and claims the owner; no lifecycle effect fires.",
+  "synapse": [
+    {
+      "kind": "register",
+      "register": {
+        "repo": "azylman/aerial",
+        "pr_number": 101,
+        "branch": "feat/register",
+        "head_sha": "h101",
+        "target_id": "100000000000000001",
+        "title": "Register PR",
+        "agent": "aerial"
+      }
+    }
+  ],
+  "restate": [
+    {
+      "object": "PRObject",
+      "handler": "Register",
+      "event": {
+        "repo": "azylman/aerial",
+        "pr_number": 101,
+        "branch": "feat/register",
+        "head_sha": "h101",
+        "target_id": "100000000000000001",
+        "title": "Register PR",
+        "agent": "aerial",
+        "bot_id": "aerial",
+        "metadata": {
+          "agent": "aerial",
+          "bot_id": "aerial"
+        }
+      }
+    }
+  ],
+  "effects": [],
+  "fact_rollout_states": [],
+  "rows": [
+    {
+      "repo": "azylman/aerial",
+      "pr_number": 101,
+      "branch": "feat/register",
+      "head_sha": "h101",
+      "merge_sha": "",
+      "target_id": "100000000000000001",
+      "status": "open",
+      "title": "Register PR",
+      "metadata": {
+        "agent": "aerial"
+      }
+    }
+  ]
+}

@@ -3,8 +3,6 @@ package main
 import (
 	"bytes"
 	"go/ast"
-	"go/parser"
-	"go/token"
 	"os"
 	"path/filepath"
 	"strings"
@@ -25,7 +23,12 @@ func buildLargeGoSource(fileLines, funcLines int) string {
 	return sb.String()
 }
 
-func buildCloneFuncSource(name string) string {
+// buildCloneFuncSource renders the clone fixture function; gap adds an extra if between the select loop and the switch.
+func buildCloneFuncSource(name string, gap bool) string {
+	gapStmt := ""
+	if gap {
+		gapStmt = "\tif x == 42 {\n\t\treturn 42\n\t}\n"
+	}
 	return `func ` + name + `(x int, ch chan int) int {
 	if x > 0 {
 		println("positive")
@@ -40,39 +43,7 @@ func buildCloneFuncSource(name string) string {
 			break
 		}
 	}
-	switch x {
-	case 1:
-		defer println("defer 1")
-	default:
-		defer println("defer default")
-	}
-	for range []int{1} {
-		println("loop")
-	}
-	return x
-}
-`
-}
-
-func buildGappedCloneFuncSource(name string) string {
-	return `func ` + name + `(x int, ch chan int) int {
-	if x > 0 {
-		println("positive")
-	} else {
-		println("non-positive")
-	}
-	for i := 0; i < x; i++ {
-		select {
-		case <-ch:
-			return -1
-		default:
-			break
-		}
-	}
-	if x == 42 {
-		return 42
-	}
-	switch x {
+` + gapStmt + `	switch x {
 	case 1:
 		defer println("defer 1")
 	default:
@@ -166,17 +137,22 @@ func init() {}
 `
 
 type testRunCase struct {
-	name              string
-	files             map[string]string
-	baselineJSON      string
-	readOnlyBase      bool
-	customArgs        []string
-	targetArgs        []string
-	relTargets        []string
-	wantBaselineFiles map[string]int
-	wantCode          int
-	wantOut           string
-	wantErr           string
+	name                     string
+	files                    map[string]string
+	baselineJSON             string
+	configJSON               string
+	readOnlyBase             bool
+	customArgs               []string
+	rawArgs                  []string // replaces the generated -root/-baseline prefix and targets
+	targetArgs               []string
+	relTargets               []string
+	wantBaselineFiles        map[string]int
+	wantBaselineBlankAssigns map[string]int
+	wantBaselineRootFiles    map[string]int
+	wantFileContains         map[string]string
+	wantCode                 int
+	wantOut                  string
+	wantErr                  string
 }
 
 func TestRun(t *testing.T) {
@@ -194,10 +170,16 @@ func testRunCases() []testRunCase {
 	base := testRunBaseCases()
 	clones := testRunCloneCases()
 	targets := testRunTargetCases()
-	all := make([]testRunCase, 0, len(base)+len(clones)+len(targets))
+	roots := testRunRootFileCases()
+	configs := testRunConfigCases()
+	blank := testRunBlankDiscardCases()
+	all := make([]testRunCase, 0, len(base)+len(clones)+len(targets)+len(roots)+len(configs)+len(blank))
 	all = append(all, base...)
 	all = append(all, clones...)
 	all = append(all, targets...)
+	all = append(all, roots...)
+	all = append(all, configs...)
+	all = append(all, blank...)
 	return all
 }
 
@@ -251,10 +233,8 @@ func testRunBaseCases() []testRunCase {
 			wantOut:    "wrote baseline",
 		},
 		{
-			name: "invalid cli flag returns exit code 2",
-			customArgs: []string{
-				"-unknown-flag",
-			},
+			name:     "invalid cli flag returns exit code 2",
+			rawArgs:  []string{"-unknown-flag"},
 			wantCode: 2,
 			wantErr:  "flag provided but not defined",
 		},
@@ -300,10 +280,8 @@ func testRunBaseCases() []testRunCase {
 			wantErr:      "write baseline",
 		},
 		{
-			name: "missing root directory fails target collection",
-			customArgs: []string{
-				"-root", "/nonexistent-code-health-root-dir-xyz",
-			},
+			name:     "missing root directory fails target collection",
+			rawArgs:  []string{"-root", "/nonexistent-code-health-root-dir-xyz"},
 			wantCode: 1,
 			wantErr:  "collect targets",
 		},
@@ -348,7 +326,7 @@ func testRunCloneCases() []testRunCase {
 		{
 			name: "type-3 near-miss ast clone detected within same package",
 			files: map[string]string{
-				"pkg/clones.go": "package pkg\n\n" + buildCloneFuncSource("CloneA") + "\n" + buildCloneFuncSource("CloneB"),
+				"pkg/clones.go": "package pkg\n\n" + buildCloneFuncSource("CloneA", false) + "\n" + buildCloneFuncSource("CloneB", false),
 			},
 			wantCode: 1,
 			wantErr:  "near-miss AST clone similarity 1.00 exceeds 0.80 ceiling",
@@ -356,7 +334,7 @@ func testRunCloneCases() []testRunCase {
 		{
 			name: "type-3 gapped function clone detected via ast edit distance within same package",
 			files: map[string]string{
-				"pkg/clones.go": "package pkg\n\n" + buildCloneFuncSource("CloneA") + "\n" + buildGappedCloneFuncSource("CloneB"),
+				"pkg/clones.go": "package pkg\n\n" + buildCloneFuncSource("CloneA", false) + "\n" + buildCloneFuncSource("CloneB", true),
 			},
 			wantCode: 1,
 			wantErr:  "near-miss AST edit similarity 0.88 exceeds 0.85 ceiling",
@@ -412,10 +390,19 @@ type SmallB struct {
 			wantOut:  "Checked 1 Go file(s)",
 		},
 		{
-			name: "identical functions in different packages do not trigger clone violation",
+			name: "identical functions in different packages trigger cross-package clone violation",
 			files: map[string]string{
-				"pkg1/a.go": "package pkg1\n\n" + buildCloneFuncSource("CloneA"),
-				"pkg2/b.go": "package pkg2\n\n" + buildCloneFuncSource("CloneA"),
+				"pkg1/a.go": "package pkg1\n\n" + buildCloneFuncSource("CloneA", false),
+				"pkg2/b.go": "package pkg2\n\n" + buildCloneFuncSource("CloneA", false),
+			},
+			wantCode: 1,
+			wantErr:  "near-miss AST clone similarity 1.00 exceeds 0.80 ceiling",
+		},
+		{
+			name: "identical main functions in different packages do not trigger cross-package clone violation",
+			files: map[string]string{
+				"pkg1/main.go": "package main\n\n" + buildCloneFuncSource("main", false),
+				"pkg2/main.go": "package main\n\n" + buildCloneFuncSource("main", false),
 			},
 			wantCode: 0,
 			wantOut:  "Checked 2 Go file(s)",
@@ -423,8 +410,82 @@ type SmallB struct {
 	}
 }
 
+func testRunRootFileCases() []testRunCase {
+	return []testRunCase{
+		{
+			name: "root package exceeding file limit fails check without baseline",
+			files: map[string]string{
+				"services/svc/main.go": "package main\n", "services/svc/main_test.go": "package main\n",
+				"services/svc/goleak_test.go": "package main\n", "services/svc/extra.go": "package main\n",
+				"services/svc/internal/pkg/pkg.go": "package pkg\n", "pkg/util/util.go": "package util\n",
+			},
+			wantCode: 1,
+			wantErr:  "services/svc: root package has 4 Go files, exceeds limit 3 (ceiling 3: main.go, main_test.go, goleak_test.go); move domain logic and tests into internal/* subpackages",
+		},
+		{
+			name: "grandfathered root package file count passes check with baseline",
+			files: map[string]string{
+				"services/svc/main.go": "package main\n", "services/svc/main_test.go": "package main\n",
+				"services/svc/goleak_test.go": "package main\n", "services/svc/extra.go": "package main\n",
+			},
+			baselineJSON: `{"root_files":{"services/svc":4}}`,
+			wantCode:     0,
+			wantOut:      "Checked 4 Go file(s)",
+		},
+		{
+			name: "update mode records root package file count outliers into baseline",
+			files: map[string]string{
+				"services/mysvc/main.go": "package main\n", "services/mysvc/main_test.go": "package main\n",
+				"services/mysvc/goleak_test.go": "package main\n", "services/mysvc/extra.go": "package main\n",
+				"mcp/mysrv/server.go": "package main\n",
+			},
+			customArgs:            []string{"-update"},
+			wantBaselineRootFiles: map[string]int{"services/mysvc": 4},
+			wantCode:              0,
+			wantOut:               "wrote baseline",
+		},
+		{
+			name: "decomposed services with <= 3 root files and internal subpackages omitted from baseline",
+			files: map[string]string{
+				"services/decomposed/main.go":                   "package main\n",
+				"services/decomposed/main_test.go":              "package main\n",
+				"services/decomposed/goleak_test.go":            "package main\n",
+				"services/decomposed/internal/server/server.go": "package server\n",
+			},
+			customArgs:            []string{"-update"},
+			wantBaselineRootFiles: map[string]int{},
+			wantCode:              0,
+			wantOut:               "wrote baseline",
+		},
+	}
+}
+
 func testRunTargetCases() []testRunCase {
 	return []testRunCase{
+		{
+			name: "banned grab-bag filenames rejected in check mode",
+			files: map[string]string{
+				"pkg/helpers.go": "package pkg\n", "pkg/helpers_test.go": "package pkg\n",
+				"pkg/pure.go": "package pkg\n", "pkg/pure_test.go": "package pkg\n",
+				"pkg/utils.go": "package pkg\n", "pkg/utils_test.go": "package pkg\n",
+				"pkg/common.go": "package pkg\n", "pkg/common_test.go": "package pkg\n",
+				"pkg/types.go": "package pkg\n", "pkg/types_test.go": "package pkg\n",
+				"pkg/frozen.go": "package pkg\n", "pkg/frozen_test.go": "package pkg\n",
+				"pkg/foo_part1_test.go": "package pkg\n", "pkg/part_test.go": "package pkg\n",
+			},
+			wantCode: 1,
+			wantErr:  "filename uses banned horizontal split or grab-bag name; name files after their domain concern or move into an internal/* subpackage",
+		},
+		{
+			name: "arbitrary func field in test table slice rejected in check mode",
+			files: map[string]string{
+				"pkg/ok.go": "package pkg\n",
+				"pkg/table_test.go": "package pkg\nimport \"testing\"\nfunc TestTable(t *testing.T) {\n" +
+					"\ttests := []struct{\n\t\tname string\n\t\tonErr func(error)\n\t}{{name: \"case1\"}}\n\t_ = tests\n}\n",
+			},
+			wantCode: 1,
+			wantErr:  `test struct field "onErr" uses a banned closure func type; use declarative expectation fields instead`,
+		},
 		{
 			name: "test file hygiene violations reported in check mode",
 			files: map[string]string{
@@ -525,6 +586,9 @@ func runTestRunCase(t *testing.T, tc testRunCase) {
 	setupTestFiles(t, dir, tc.files)
 	basePath := setupBaseline(t, dir, tc.readOnlyBase, tc.baselineJSON)
 	args := buildTestArgs(dir, basePath, tc)
+	if tc.configJSON != "" {
+		args = append([]string{"-config", setupConfig(t, dir, tc.configJSON)}, args...)
+	}
 
 	var stdout, stderr bytes.Buffer
 	code := run(args, &stdout, &stderr)
@@ -538,6 +602,9 @@ func runTestRunCase(t *testing.T, tc testRunCase) {
 		t.Errorf("stderr %q does not contain %q", stderr.String(), tc.wantErr)
 	}
 	verifyBaselineFiles(t, basePath, tc.wantBaselineFiles)
+	verifyBaselineBlankAssigns(t, basePath, tc.wantBaselineBlankAssigns)
+	verifyBaselineRootFiles(t, basePath, tc.wantBaselineRootFiles)
+	verifyFileContains(t, dir, tc.wantFileContains)
 }
 
 func setupTestFiles(t *testing.T, dir string, files map[string]string) {
@@ -568,11 +635,8 @@ func setupBaseline(t *testing.T, dir string, readOnlyBase bool, baselineJSON str
 }
 
 func buildTestArgs(dir, basePath string, tc testRunCase) []string {
-	if len(tc.customArgs) == 2 && tc.customArgs[0] == "-root" {
-		return tc.customArgs
-	}
-	if len(tc.customArgs) == 1 && tc.customArgs[0] == "-unknown-flag" {
-		return tc.customArgs
+	if tc.rawArgs != nil {
+		return tc.rawArgs
 	}
 	args := []string{"-root", dir, "-baseline", basePath}
 	args = append(args, tc.customArgs...)
@@ -602,6 +666,41 @@ func verifyBaselineFiles(t *testing.T, basePath string, wantBaselineFiles map[st
 	}
 }
 
+func verifyBaselineBlankAssigns(t *testing.T, basePath string, wantBaselineBlankAssigns map[string]int) {
+	t.Helper()
+	if wantBaselineBlankAssigns == nil {
+		return
+	}
+	base, err := loadBaseline(basePath)
+	if err != nil {
+		t.Fatalf("load written baseline: %v", err)
+	}
+	for k, wantBlank := range wantBaselineBlankAssigns {
+		if gotBlank := base.Files[k].BlankAssigns; gotBlank != wantBlank {
+			t.Errorf("baseline file %q blank_assigns = %d, want %d", k, gotBlank, wantBlank)
+		}
+	}
+}
+
+func verifyBaselineRootFiles(t *testing.T, basePath string, wantBaselineRootFiles map[string]int) {
+	t.Helper()
+	if wantBaselineRootFiles == nil {
+		return
+	}
+	base, err := loadBaseline(basePath)
+	if err != nil {
+		t.Fatalf("load written baseline: %v", err)
+	}
+	if len(base.RootFiles) != len(wantBaselineRootFiles) {
+		t.Errorf("baseline root files count = %d, want %d: %v", len(base.RootFiles), len(wantBaselineRootFiles), base.RootFiles)
+	}
+	for k, wantCount := range wantBaselineRootFiles {
+		if gotCount := base.RootFiles[k]; gotCount != wantCount {
+			t.Errorf("baseline root_files[%q] = %d, want %d", k, gotCount, wantCount)
+		}
+	}
+}
+
 func TestExprName(t *testing.T) {
 	t.Parallel()
 
@@ -610,16 +709,8 @@ func TestExprName(t *testing.T) {
 		expr ast.Expr
 		want string
 	}{
-		{
-			name: "parenthesized receiver",
-			expr: &ast.ParenExpr{X: &ast.Ident{Name: "Srv"}},
-			want: "Srv",
-		},
-		{
-			name: "fallback unknown expression",
-			expr: &ast.BasicLit{},
-			want: "recv",
-		},
+		{name: "parenthesized receiver", expr: &ast.ParenExpr{X: &ast.Ident{Name: "Srv"}}, want: "Srv"},
+		{name: "fallback unknown expression", expr: &ast.BasicLit{}, want: "recv"},
 	}
 
 	for _, tc := range tests {
@@ -627,703 +718,6 @@ func TestExprName(t *testing.T) {
 			t.Parallel()
 			if got := exprName(tc.expr); got != tc.want {
 				t.Errorf("exprName() = %q, want %q", got, tc.want)
-			}
-		})
-	}
-}
-
-type analyzeTestCase struct {
-	name           string
-	content        string
-	rel            string
-	nonexistent    bool
-	wantViolations []string
-	wantErr        bool
-}
-
-func runAnalyzeTestFileCase(t *testing.T, tc analyzeTestCase) {
-	t.Helper()
-	dir := t.TempDir()
-	rel := tc.rel
-	if rel == "" {
-		rel = "sample_test.go"
-	}
-	filePath := filepath.Join(dir, filepath.FromSlash(rel))
-	if !tc.nonexistent {
-		if err := os.MkdirAll(filepath.Dir(filePath), 0o755); err != nil {
-			t.Fatalf("mkdir: %v", err)
-		}
-		if err := os.WriteFile(filePath, []byte(tc.content), 0o644); err != nil {
-			t.Fatalf("write file: %v", err)
-		}
-	} else {
-		filePath = filepath.Join(dir, "does_not_exist_test.go")
-		rel = "does_not_exist_test.go"
-	}
-
-	fm, violations, err := analyzeTestFile(filePath, rel)
-	if (err != nil) != tc.wantErr {
-		t.Fatalf("analyzeTestFile() error = %v, wantErr = %v", err, tc.wantErr)
-	}
-	if !tc.wantErr && fm.Lines < 0 {
-		t.Errorf("expected non-negative lines, got %d", fm.Lines)
-	}
-	if len(tc.wantViolations) > 0 {
-		joined := strings.Join(violations, "\n")
-		for _, wv := range tc.wantViolations {
-			if !strings.Contains(joined, wv) {
-				t.Errorf("violations output does not contain expected snippet %q; got:\n%s", wv, joined)
-			}
-		}
-	} else if len(violations) > 0 && !tc.wantErr {
-		t.Errorf("expected 0 violations, got %d: %v", len(violations), violations)
-	}
-}
-
-func TestAnalyzeTestFile(t *testing.T) {
-	t.Parallel()
-
-	for _, tc := range analyzeTestCases() {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			runAnalyzeTestFileCase(t, tc)
-		})
-	}
-}
-
-func analyzeTestCases() []analyzeTestCase {
-	return append(analyzeTestCasesBase(), analyzeTestCasesPorts()...)
-}
-
-func analyzeTestCasesPorts() []analyzeTestCase {
-	return []analyzeTestCase{
-		{
-			name: "reserved live localhost daemon ports in test HTTP calls detected",
-			content: `package pkg
-
-import (
-	"context"
-	"net/http"
-)
-
-func TestReservedPorts(ctx context.Context) {
-	_, _ = http.Get("http://localhost:8080")
-	_, _ = http.Post("http://127.0.0.1:4020/webhook", "application/json", nil)
-	_, _ = http.NewRequest(http.MethodGet, "http://[::1]:8081", nil)
-	_, _ = http.NewRequestWithContext(ctx, http.MethodGet, "http://localhost:8082/builds", nil)
-	_ = NewHTTPPromptDispatcher("http://localhost:8083")
-	_ = haro.NewHTTPPromptDispatcher("http://localhost:8083")
-	_, _ = newRequestWithContext(ctx, http.MethodGet, "http://localhost:8090/test", nil)
-	_, _ = http.Get("http://localhost:8070/call")
-	_, _ = http.Get("http://localhost:9070/status")
-	_, _ = http.Get("http://localhost:8088/alt")
-}
-`,
-			wantViolations: []string{
-				"sample_test.go:9: call to http.Get targeting reserved live daemon port 8080 in tests is prohibited; use httptest.Server or mock transport instead",
-				"sample_test.go:10: call to http.Post targeting reserved live daemon port 4020 in tests is prohibited; use httptest.Server or mock transport instead",
-				"sample_test.go:11: call to http.NewRequest targeting reserved live daemon port 8081 in tests is prohibited; use httptest.Server or mock transport instead",
-				"sample_test.go:12: call to http.NewRequestWithContext targeting reserved live daemon port 8082 in tests is prohibited; use httptest.Server or mock transport instead",
-				"sample_test.go:13: call to NewHTTPPromptDispatcher targeting reserved live daemon port 8083 in tests is prohibited; use httptest.Server or mock transport instead",
-				"sample_test.go:14: call to NewHTTPPromptDispatcher targeting reserved live daemon port 8083 in tests is prohibited; use httptest.Server or mock transport instead",
-				"sample_test.go:15: call to newRequestWithContext targeting reserved live daemon port 8090 in tests is prohibited; use httptest.Server or mock transport instead",
-				"sample_test.go:16: call to http.Get targeting reserved live daemon port 8070 in tests is prohibited; use httptest.Server or mock transport instead",
-				"sample_test.go:17: call to http.Get targeting reserved live daemon port 9070 in tests is prohibited; use httptest.Server or mock transport instead",
-				"sample_test.go:18: call to http.Get targeting reserved live daemon port 8088 in tests is prohibited; use httptest.Server or mock transport instead",
-			},
-		},
-		{
-			name: "safe non-reserved or dynamic HTTP calls produce no violations",
-			content: `package pkg
-
-import (
-	"context"
-	"fmt"
-	"net/http"
-)
-
-func TestAllowedCalls(ctx context.Context, srvURL string) {
-	_, _ = http.Get(srvURL)
-	_, _ = http.Get("http://localhost:54321")
-	_, _ = http.Get("http://example.com:8080")
-	_, _ = http.NewRequest(http.MethodGet, "http://localhost:18080", nil)
-	_ = NewHTTPPromptDispatcher(srvURL)
-	fmt.Println("http://localhost:8080")
-}
-`,
-		},
-	}
-}
-
-func analyzeTestCasesBase() []analyzeTestCase {
-	return []analyzeTestCase{
-		{
-			name: "clean test file produces no violations",
-			content: `package pkg
-
-import (
-	"net/http"
-	"syscall"
-	"time"
-)
-
-func TestValid(rt http.RoundTripper) {
-	_ = time.Now()
-	_ = syscall.Getpid()
-	http.DefaultClient.CloseIdleConnections()
-	_ = &http.Client{Timeout: time.Second, Transport: rt}
-}
-type Case struct {
-	expected int
-}
-`,
-		},
-		{
-			name: "banned time.Sleep, syscall.Kill, DefaultClient, and unairgapped http.Client detected",
-			content: `package pkg
-
-import (
-	"net/http"
-	"syscall"
-	"time"
-)
-
-func TestBannedCalls(req *http.Request) {
-	time.Sleep(time.Millisecond)
-	_ = syscall.Kill(1, syscall.SIGHUP)
-	_, _ = http.DefaultClient.Do(req)
-	_ = &http.Client{}
-	_ = &http.Client{Timeout: time.Second}
-	_ = &http.Client{Transport: nil}
-	_ = &http.Client{Transport: http.DefaultTransport}
-	_ = &http.Client{Transport: &http.Transport{}}
-	_ = &http.Client{Transport: http.Transport{}}
-}
-`,
-			wantViolations: []string{
-				"sample_test.go:10: time.Sleep in tests is prohibited; use event-driven channels, condition variables, or injected delay overrides",
-				"sample_test.go:11: raw syscall.Kill in tests is prohibited; use dependency-injected signal or process-kill functions",
-				"sample_test.go:12: unguarded http.DefaultClient in tests is prohibited; use httptest.Server.Client() or an http.Client with a mock Transport",
-				"sample_test.go:13: http.Client literal without mock Transport in tests is prohibited; inject a mock RoundTripper or use httptest.Server.Client()",
-				"sample_test.go:14: http.Client literal without mock Transport in tests is prohibited; inject a mock RoundTripper or use httptest.Server.Client()",
-				"sample_test.go:15: http.Client literal without mock Transport in tests is prohibited; inject a mock RoundTripper or use httptest.Server.Client()",
-				"sample_test.go:16: http.Client literal without mock Transport in tests is prohibited; inject a mock RoundTripper or use httptest.Server.Client()",
-				"sample_test.go:17: http.Client literal without mock Transport in tests is prohibited; inject a mock RoundTripper or use httptest.Server.Client()",
-				"sample_test.go:18: http.Client literal without mock Transport in tests is prohibited; inject a mock RoundTripper or use httptest.Server.Client()",
-			},
-		},
-		{
-			name: "generated test file is skipped",
-			content: "// Code generated by tool; DO NOT EDIT.\npackage pkg\n//nolint:errcheck\nfunc TestFoo_Extra() {}\n" +
-				"type Case struct {\n\t" + "check" + " " + "func()\n}\n",
-		},
-		{
-			name: "split test names and closure fields detected",
-			content: `package pkg
-
-//nolint:gocyclo
-func TestA_Extra() {}
-func TestB_MoreCases() {}
-func TestC_Additional() {}
-func TestD_Uncovered() {}
-func TestE_EdgeCases() {}
-func TestF_CornerCases() {}
-func TestG_Branches() {}
-func TestH_AllBranches() {}
-func TestI_Chunk1_Cases() {}
-func TestJ_CoverageGaps() {}
-` + buildClosureFieldsSource(),
-			wantViolations: []string{
-				"//nolint:gocyclo is prohibited",
-				"test function TestA_Extra uses banned split/catch-all suffix",
-				"test function TestB_MoreCases uses banned split/catch-all suffix",
-				"test function TestC_Additional uses banned split/catch-all suffix",
-				"test function TestD_Uncovered uses banned split/catch-all suffix",
-				"test function TestE_EdgeCases uses banned split/catch-all suffix",
-				"test function TestF_CornerCases uses banned split/catch-all suffix",
-				"test function TestG_Branches uses banned split/catch-all suffix",
-				"test function TestH_AllBranches uses banned split/catch-all suffix",
-				"test function TestI_Chunk1_Cases uses banned split/catch-all suffix",
-				"test function TestJ_CoverageGaps uses banned split/catch-all suffix",
-				`test struct field "run" uses a banned closure func type`,
-				`test struct field "check" uses a banned closure func type`,
-				`test struct field "extraCheck" uses a banned closure func type`,
-				`test struct field "setup" uses a banned closure func type`,
-				`test struct field "validate" uses a banned closure func type`,
-				`test struct field "validator" uses a banned closure func type`,
-				`test struct field "verify" uses a banned closure func type`,
-				`test struct field "lookup" uses a banned closure func type`,
-			},
-		},
-		{
-			name:        "nonexistent file returns error",
-			nonexistent: true,
-			wantErr:     true,
-		},
-		{
-			name:    "syntax error returns error",
-			content: "package pkg\nfunc (",
-			wantErr: true,
-		},
-		{
-			name:    "catch-all extra test filename detected",
-			rel:     "pkg/foo_extra_test.go",
-			content: "package pkg\n",
-			wantViolations: []string{
-				"pkg/foo_extra_test.go: test filename uses banned catch-all suffix",
-			},
-		},
-		{
-			name:    "catch-all more test filename detected",
-			rel:     "pkg/foo_more_test.go",
-			content: "package pkg\n",
-			wantViolations: []string{
-				"pkg/foo_more_test.go: test filename uses banned catch-all suffix",
-			},
-		},
-		{
-			name:    "catch-all coverage gaps test filename detected",
-			rel:     "pkg/foo_coverage_gaps_test.go",
-			content: "package pkg\n",
-			wantViolations: []string{
-				"pkg/foo_coverage_gaps_test.go: test filename uses banned catch-all suffix",
-			},
-		},
-		{
-			name:    "catch-all additional test filename detected",
-			rel:     "pkg/foo_additional_test.go",
-			content: "package pkg\n",
-			wantViolations: []string{
-				"pkg/foo_additional_test.go: test filename uses banned catch-all suffix",
-			},
-		},
-	}
-}
-
-func TestIsGoBuiltin(t *testing.T) {
-	t.Parallel()
-
-	tests := []struct {
-		name string
-		sym  string
-		want bool
-	}{
-		{name: "len", sym: "len", want: true},
-		{name: "cap", sym: "cap", want: true},
-		{name: "make", sym: "make", want: true},
-		{name: "new", sym: "new", want: true},
-		{name: "append", sym: "append", want: true},
-		{name: "copy", sym: "copy", want: true},
-		{name: "delete", sym: "delete", want: true},
-		{name: "close", sym: "close", want: true},
-		{name: "min", sym: "min", want: true},
-		{name: "max", sym: "max", want: true},
-		{name: "panic", sym: "panic", want: true},
-		{name: "recover", sym: "recover", want: true},
-		{name: "print", sym: "print", want: true},
-		{name: "println", sym: "println", want: true},
-		{name: "complex", sym: "complex", want: true},
-		{name: "real", sym: "real", want: true},
-		{name: "imag", sym: "imag", want: true},
-		{name: "clear", sym: "clear", want: true},
-		{name: "non-builtin custom", sym: "customFunc", want: false},
-		{name: "empty name", sym: "", want: false},
-	}
-
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			if got := isGoBuiltin(tc.sym); got != tc.want {
-				t.Errorf("isGoBuiltin(%q) = %v, want %v", tc.sym, got, tc.want)
-			}
-		})
-	}
-}
-
-func TestJaccardSimilarity(t *testing.T) {
-	t.Parallel()
-
-	tests := []struct {
-		name string
-		a    map[string]struct{}
-		b    map[string]struct{}
-		want float64
-	}{
-		{
-			name: "both empty",
-			a:    nil,
-			b:    nil,
-			want: 0.0,
-		},
-		{
-			name: "left empty",
-			a:    nil,
-			b:    map[string]struct{}{"x": {}},
-			want: 0.0,
-		},
-		{
-			name: "right empty",
-			a:    map[string]struct{}{"x": {}},
-			b:    nil,
-			want: 0.0,
-		},
-		{
-			name: "identical sets",
-			a:    map[string]struct{}{"x": {}, "y": {}},
-			b:    map[string]struct{}{"x": {}, "y": {}},
-			want: 1.0,
-		},
-		{
-			name: "disjoint sets",
-			a:    map[string]struct{}{"x": {}},
-			b:    map[string]struct{}{"y": {}},
-			want: 0.0,
-		},
-		{
-			name: "partial overlap",
-			a:    map[string]struct{}{"x": {}, "y": {}},
-			b:    map[string]struct{}{"y": {}, "z": {}},
-			want: 1.0 / 3.0,
-		},
-	}
-
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			got := jaccardSimilarity(tc.a, tc.b)
-			if diff := got - tc.want; diff > 1e-6 || diff < -1e-6 {
-				t.Errorf("jaccardSimilarity() = %f, want %f", got, tc.want)
-			}
-		})
-	}
-}
-
-func TestCollectTestTargets(t *testing.T) {
-	t.Parallel()
-
-	tests := []struct {
-		name     string
-		files    map[string]string
-		explicit []string
-		want     []string
-		wantErr  bool
-	}{
-		{
-			name: "collects candidates and skips generated and excluded",
-			files: map[string]string{
-				"pkg/a_test.go":          "package pkg\n",
-				"pkg/b_gen.go":           "package pkg\n",
-				"pkg/c.gen.go":           "package pkg\n",
-				"pkg/d.pb.go":            "package pkg\n",
-				"pkg/e_gen_test.go":      "package pkg\n",
-				"pkg/f.gen_test.go":      "package pkg\n",
-				"pkg/g.pb_test.go":       "package pkg\n",
-				"vendor/v/v_test.go":     "package v\n",
-				"testdata/t_test.go":     "package t\n",
-				".hidden/h_test.go":      "package h\n",
-				"node_modules/m_test.go": "package m\n",
-			},
-			want: []string{"pkg/a_test.go"},
-		},
-		{
-			name: "explicit targets filters valid candidates",
-			files: map[string]string{
-				"pkg/a_test.go": "package pkg\n",
-				"pkg/b_test.go": "package pkg\n",
-			},
-			explicit: []string{"pkg/b_test.go", "pkg/nonexistent_test.go", "pkg/regular.go"},
-			want:     []string{"pkg/b_test.go"},
-		},
-	}
-
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			dir := t.TempDir()
-			for rel, content := range tc.files {
-				full := filepath.Join(dir, filepath.FromSlash(rel))
-				if err := os.MkdirAll(filepath.Dir(full), 0o755); err != nil {
-					t.Fatalf("mkdir: %v", err)
-				}
-				if err := os.WriteFile(full, []byte(content), 0o644); err != nil {
-					t.Fatalf("write: %v", err)
-				}
-			}
-
-			var explicitArgs []string
-			for _, exp := range tc.explicit {
-				explicitArgs = append(explicitArgs, filepath.Join(dir, filepath.FromSlash(exp)))
-			}
-
-			got, err := collectTestTargets(dir, explicitArgs)
-			if (err != nil) != tc.wantErr {
-				t.Fatalf("collectTestTargets() error = %v, wantErr = %v", err, tc.wantErr)
-			}
-			if len(got) != len(tc.want) {
-				t.Fatalf("collectTestTargets() returned %d items, want %d: %v", len(got), len(tc.want), got)
-			}
-			for i := range got {
-				if got[i] != tc.want[i] {
-					t.Errorf("target[%d] = %q, want %q", i, got[i], tc.want[i])
-				}
-			}
-		})
-	}
-}
-
-func TestBuildCloneTokens(t *testing.T) {
-	t.Parallel()
-
-	tests := []struct {
-		name       string
-		src        string
-		wantTokens []string
-	}{
-		{
-			name: "call expressions and type switch tokens",
-			src:  buildCallAndTypeSwitchSource(),
-			wantTokens: []string{
-				"switch", "case", "call:.Process", "case", "call:fn",
-			},
-		},
-		{
-			name: "control flow constructs",
-			src: `package sample
-func Control(ch chan int) int {
-	if true {
-		defer close(ch)
-	} else {
-		for i := 0; i < 1; i++ {
-			for range []int{1} {
-				select {
-				case <-ch:
-					return 1
-				default:
-					return 0
-				}
-			}
-		}
-	}
-	return 0
-}
-`,
-			wantTokens: []string{
-				"if", "else", "defer", "for", "range", "select", "comm", "return", "comm", "return", "return",
-			},
-		},
-	}
-
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			fset := token.NewFileSet()
-			f, err := parser.ParseFile(fset, "sample.go", tc.src, 0)
-			if err != nil {
-				t.Fatalf("parse: %v", err)
-			}
-			var body *ast.BlockStmt
-			for _, decl := range f.Decls {
-				if fn, ok := decl.(*ast.FuncDecl); ok && fn.Body != nil {
-					body = fn.Body
-					break
-				}
-			}
-			if body == nil {
-				t.Fatal("no function body found")
-			}
-			got := buildCloneTokens(body)
-			if len(got) != len(tc.wantTokens) {
-				t.Fatalf("buildCloneTokens() got %v, want %v", got, tc.wantTokens)
-			}
-			for i := range got {
-				if got[i] != tc.wantTokens[i] {
-					t.Errorf("token[%d] = %q, want %q", i, got[i], tc.wantTokens[i])
-				}
-			}
-		})
-	}
-}
-
-type scopedCloneCase struct {
-	name       string
-	src        string
-	wantTokens []string
-}
-
-func runScopedCloneCase(t *testing.T, tc scopedCloneCase) {
-	t.Helper()
-	if tc.src == "" {
-		if got := buildScopedCloneTokens(nil); got != nil {
-			t.Fatalf("buildScopedCloneTokens(nil) = %v, want nil", got)
-		}
-		return
-	}
-	fset := token.NewFileSet()
-	f, err := parser.ParseFile(fset, "sample.go", tc.src, 0)
-	if err != nil {
-		t.Fatalf("parse: %v", err)
-	}
-	var body *ast.BlockStmt
-	for _, decl := range f.Decls {
-		if fn, ok := decl.(*ast.FuncDecl); ok && fn.Body != nil {
-			body = fn.Body
-			break
-		}
-	}
-	if body == nil {
-		t.Fatal("no function body found")
-	}
-	got := buildScopedCloneTokens(body)
-	if len(got) != len(tc.wantTokens) {
-		t.Fatalf("buildScopedCloneTokens() got %v, want %v", got, tc.wantTokens)
-	}
-	for i := range got {
-		if got[i] != tc.wantTokens[i] {
-			t.Errorf("token[%d] = %q, want %q", i, got[i], tc.wantTokens[i])
-		}
-	}
-}
-
-func TestBuildScopedCloneTokens(t *testing.T) {
-	t.Parallel()
-
-	tests := []scopedCloneCase{
-		{
-			name: "scoped block delimiters with calls and controls",
-			src: `package sample
-func Scoped() {
-	if true {
-		println("ok")
-	}
-}
-`,
-			wantTokens: []string{
-				"{", "if", "{", "}", "}",
-			},
-		},
-		{
-			name:       "nil body returns nil",
-			src:        "",
-			wantTokens: nil,
-		},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			runScopedCloneCase(t, tc)
-		})
-	}
-}
-
-func TestFormatFieldType(t *testing.T) {
-	t.Parallel()
-
-	tests := []struct {
-		name string
-		expr ast.Expr
-		want string
-	}{
-		{
-			name: "ident",
-			expr: &ast.Ident{Name: "int"},
-			want: "int",
-		},
-		{
-			name: "star expr",
-			expr: &ast.StarExpr{X: &ast.Ident{Name: "string"}},
-			want: "*string",
-		},
-		{
-			name: "selector expr",
-			expr: &ast.SelectorExpr{X: &ast.Ident{Name: "pkg"}, Sel: &ast.Ident{Name: "Type"}},
-			want: "pkg.Type",
-		},
-		{
-			name: "array type",
-			expr: &ast.ArrayType{Elt: &ast.Ident{Name: "byte"}},
-			want: "[]byte",
-		},
-		{
-			name: "map type",
-			expr: &ast.MapType{Key: &ast.Ident{Name: "string"}, Value: &ast.Ident{Name: "int"}},
-			want: "map[string]int",
-		},
-		{
-			name: "fallback",
-			expr: &ast.ChanType{Value: &ast.Ident{Name: "int"}},
-			want: "other",
-		},
-	}
-
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			if got := formatFieldType(tc.expr); got != tc.want {
-				t.Errorf("formatFieldType() = %q, want %q", got, tc.want)
-			}
-		})
-	}
-}
-
-func TestEditSimilarity(t *testing.T) {
-	t.Parallel()
-
-	tests := []struct {
-		name string
-		a    []string
-		b    []string
-		want float64
-	}{
-		{
-			name: "both empty",
-			a:    nil,
-			b:    nil,
-			want: 0.0,
-		},
-		{
-			name: "left empty",
-			a:    nil,
-			b:    []string{"x"},
-			want: 0.0,
-		},
-		{
-			name: "right empty",
-			a:    []string{"x"},
-			b:    nil,
-			want: 0.0,
-		},
-		{
-			name: "identical slices",
-			a:    []string{"a", "b", "c"},
-			b:    []string{"a", "b", "c"},
-			want: 1.0,
-		},
-		{
-			name: "single substitution",
-			a:    []string{"a", "b", "c"},
-			b:    []string{"a", "x", "c"},
-			want: 2.0 / 3.0,
-		},
-		{
-			name: "single insertion",
-			a:    []string{"a", "b"},
-			b:    []string{"a", "x", "b"},
-			want: 2.0 / 3.0,
-		},
-		{
-			name: "completely disjoint",
-			a:    []string{"a", "b"},
-			b:    []string{"c", "d"},
-			want: 0.0,
-		},
-	}
-
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			got := editSimilarity(tc.a, tc.b)
-			if diff := got - tc.want; diff > 1e-6 || diff < -1e-6 {
-				t.Errorf("editSimilarity() = %f, want %f", got, tc.want)
 			}
 		})
 	}

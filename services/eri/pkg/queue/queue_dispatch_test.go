@@ -193,10 +193,10 @@ func TestCancelBurstOnShutdown_Dispatch(t *testing.T) {
 				t.Fatalf("failed to fetch dispatch: %v", err)
 			}
 			if refreshed.Status != db.StatusProcessing {
-				t.Fatalf("expected interrupted dispatch to remain %s in DB for startup recovery, got %+v", db.StatusProcessing, refreshed)
+				t.Fatalf("expected interrupted dispatch to remain %s in DB, got %+v", db.StatusProcessing, refreshed)
 			}
 			if refreshed.RestartCount != 0 {
-				t.Fatalf("expected restart count to remain 0 until RecoverInterrupted runs, got %d", refreshed.RestartCount)
+				t.Fatalf("expected restart count to remain 0, got %d", refreshed.RestartCount)
 			}
 		})
 	}
@@ -493,48 +493,62 @@ func TestTurnExecution_ResolveAttemptConfig(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
-		name      string
-		burst     []db.Message
-		dispatch  *db.Dispatch
-		override  string
-		isEphem   bool
-		lowModel  string
-		medModel  string
-		wantModel string
+		name           string
+		burst          []db.Message
+		dispatch       *db.Dispatch
+		override       string
+		isEphem        bool
+		lowModel       string
+		medModel       string
+		wantModel      string
+		turnTimeout    int
+		wantRunTimeout time.Duration
 	}{
 		{
-			name:      "dispatch with explicit model overrides effort tier",
-			dispatch:  &db.Dispatch{Model: "custom-gemini-pro", Effort: "low"},
-			lowModel:  "gemini-flash-low",
-			medModel:  "gemini-flash-medium",
-			wantModel: "custom-gemini-pro",
+			name:           "dispatch with explicit model overrides effort tier",
+			dispatch:       &db.Dispatch{Model: "custom-gemini-pro", Effort: "low"},
+			lowModel:       "gemini-flash-low",
+			medModel:       "gemini-flash-medium",
+			wantModel:      "custom-gemini-pro",
+			wantRunTimeout: 121 * time.Minute,
 		},
 		{
-			name:      "dispatch with low effort selects low effort model",
-			dispatch:  &db.Dispatch{Effort: "low"},
-			lowModel:  "gemini-flash-low",
-			medModel:  "gemini-flash-medium",
-			wantModel: "gemini-flash-low",
+			name:           "dispatch with low effort selects low effort model",
+			dispatch:       &db.Dispatch{Effort: "low"},
+			lowModel:       "gemini-flash-low",
+			medModel:       "gemini-flash-medium",
+			wantModel:      "gemini-flash-low",
+			wantRunTimeout: 121 * time.Minute,
 		},
 		{
-			name:      "dispatch with medium effort selects medium effort model",
-			dispatch:  &db.Dispatch{Effort: "medium"},
-			lowModel:  "gemini-flash-low",
-			medModel:  "gemini-flash-medium",
-			wantModel: "gemini-flash-medium",
+			name:           "dispatch with medium effort selects medium effort model",
+			dispatch:       &db.Dispatch{Effort: "medium"},
+			lowModel:       "gemini-flash-low",
+			medModel:       "gemini-flash-medium",
+			wantModel:      "gemini-flash-medium",
+			wantRunTimeout: 121 * time.Minute,
 		},
 		{
-			name:      "dispatch ephemeral defaults to medium effort model",
-			dispatch:  &db.Dispatch{},
-			isEphem:   true,
-			lowModel:  "gemini-flash-low",
-			medModel:  "gemini-flash-medium",
-			wantModel: "gemini-flash-medium",
+			name:           "dispatch ephemeral defaults to medium effort model",
+			dispatch:       &db.Dispatch{},
+			isEphem:        true,
+			lowModel:       "gemini-flash-low",
+			medModel:       "gemini-flash-medium",
+			wantModel:      "gemini-flash-medium",
+			wantRunTimeout: 121 * time.Minute,
 		},
 		{
-			name:      "burst message with model override",
-			burst:     []db.Message{{Content: "hello", Model: "burst-model"}},
-			wantModel: "burst-model",
+			name:           "burst message with model override",
+			burst:          []db.Message{{Content: "hello", Model: "burst-model"}},
+			wantModel:      "burst-model",
+			wantRunTimeout: 121 * time.Minute,
+		},
+		{
+			name:           "configured turn timeout 90 gives a 91 minute run context",
+			burst:          []db.Message{{Content: "hello", Model: "burst-model"}},
+			turnTimeout:    90,
+			wantModel:      "burst-model",
+			wantRunTimeout: 91 * time.Minute,
 		},
 	}
 
@@ -542,8 +556,9 @@ func TestTurnExecution_ResolveAttemptConfig(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			appCfg := config.NewFromData(&config.ConfigData{
-				LowEffortModel:    tc.lowModel,
-				MediumEffortModel: tc.medModel,
+				LowEffortModel:     tc.lowModel,
+				MediumEffortModel:  tc.medModel,
+				TurnTimeoutMinutes: tc.turnTimeout,
 			})
 			te := &turnExecution{
 				burst:       tc.burst,
@@ -556,6 +571,9 @@ func TestTurnExecution_ResolveAttemptConfig(t *testing.T) {
 			cfg := te.resolveAttemptConfig(t.Context(), 0)
 			if cfg.model != tc.wantModel {
 				t.Fatalf("cfg.model = %q, want %q", cfg.model, tc.wantModel)
+			}
+			if got := attemptRunTimeout(cfg.timeoutMinutes); got != tc.wantRunTimeout {
+				t.Fatalf("attemptRunTimeout(cfg.timeoutMinutes) = %v, want %v", got, tc.wantRunTimeout)
 			}
 		})
 	}
@@ -654,214 +672,6 @@ func TestResolveDispatchEffort_Matrix(t *testing.T) {
 	}
 }
 
-func TestWorkerPool_ProcessDispatch_ClaimRetry(t *testing.T) {
-	t.Parallel()
-
-	tests := []struct {
-		name        string
-		claimErr    error
-		claimed     bool
-		cancelPool  bool
-		wantRequeue bool
-	}{
-		{
-			name:        "claim error schedules dispatch re-enqueue",
-			claimErr:    errors.New("transient database connection error"),
-			claimed:     false,
-			wantRequeue: true,
-		},
-		{
-			name:        "already claimed skips without re-enqueue",
-			claimErr:    nil,
-			claimed:     false,
-			wantRequeue: false,
-		},
-		{
-			name:        "cancelled pool context does not re-enqueue on claim error",
-			claimErr:    errors.New("db down"),
-			claimed:     false,
-			cancelPool:  true,
-			wantRequeue: false,
-		},
-	}
-
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-
-			fake := dbtest.NewFakeStore()
-			claimStore := &mockClaimStore{
-				Store:            fake,
-				claimDispatchErr: tc.claimErr,
-				claimedDispatch:  tc.claimed,
-			}
-
-			poolCtx, cancel := context.WithCancel(context.Background())
-			if tc.cancelPool {
-				cancel()
-			} else {
-				defer cancel()
-			}
-
-			pool := New(nil, WorkerPoolConfig{
-				Store:              claimStore,
-				RetryDelayOverride: 1 * time.Millisecond,
-			})
-			pool.ctx = poolCtx
-			pool.cancel = cancel
-			defer pool.Stop()
-
-			disp := db.Dispatch{
-				ID:        "disp-claim-retry-" + strings.ReplaceAll(tc.name, " ", "-"),
-				Source:    "vanadis",
-				SessionID: "sess-claim-retry-" + strings.ReplaceAll(tc.name, " ", "-"),
-				Status:    db.StatusPending,
-				Prompt:    "test dispatch",
-			}
-
-			scopeKey := disp.SessionID
-			pool.mu.Lock()
-			state := &threadWorkerState{ch: make(chan queueItem, 10)}
-			pool.threadChs[scopeKey] = state
-			pool.mu.Unlock()
-
-			pool.processDispatch(disp, scopeKey)
-
-			if tc.wantRequeue {
-				select {
-				case item := <-state.ch:
-					if item.dispatch == nil || item.dispatch.ID != disp.ID {
-						t.Fatalf("requeued dispatch mismatch: %+v", item.dispatch)
-					}
-				case <-time.After(1 * time.Second):
-					t.Fatalf("expected dispatch to be re-enqueued on transient error")
-				}
-			} else {
-				select {
-				case item := <-state.ch:
-					t.Fatalf("unexpected dispatch re-enqueued: %+v", item.dispatch)
-				case <-time.After(30 * time.Millisecond):
-				}
-			}
-		})
-	}
-}
-
-func TestTurnExecution_ClaimPendingBurst_TransientErrorRetry(t *testing.T) {
-	t.Parallel()
-
-	tests := []struct {
-		name        string
-		claimErr    error
-		claimed     bool
-		cancelPool  bool
-		wantClaimed int
-		wantRequeue bool
-	}{
-		{
-			name:        "transient claim error re-enqueues message",
-			claimErr:    errors.New("db error"),
-			claimed:     false,
-			wantClaimed: 0,
-			wantRequeue: true,
-		},
-		{
-			name:        "successful claim appends to claimed burst",
-			claimErr:    nil,
-			claimed:     true,
-			wantClaimed: 1,
-			wantRequeue: false,
-		},
-		{
-			name:        "unclaimed message without error skipped without re-enqueue",
-			claimErr:    nil,
-			claimed:     false,
-			wantClaimed: 0,
-			wantRequeue: false,
-		},
-		{
-			name:        "cancelled pool context does not re-enqueue on error",
-			claimErr:    errors.New("pool stopping"),
-			claimed:     false,
-			cancelPool:  true,
-			wantClaimed: 0,
-			wantRequeue: false,
-		},
-	}
-
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-
-			fake := dbtest.NewFakeStore()
-			claimStore := &mockClaimStore{
-				Store:    fake,
-				claimErr: tc.claimErr,
-				claimed:  tc.claimed,
-			}
-
-			poolCtx, cancel := context.WithCancel(context.Background())
-			if tc.cancelPool {
-				cancel()
-			} else {
-				defer cancel()
-			}
-
-			pool := New(nil, WorkerPoolConfig{
-				Store:              claimStore,
-				RetryDelayOverride: 1 * time.Millisecond,
-			})
-			pool.ctx = poolCtx
-			pool.cancel = cancel
-			defer pool.Stop()
-
-			msgID := "msg-claim-" + strings.ReplaceAll(tc.name, " ", "-")
-			threadID := "thread-claim-" + strings.ReplaceAll(tc.name, " ", "-")
-			msg := db.Message{
-				ID:        msgID,
-				ThreadID:  threadID,
-				Content:   "hello",
-				Status:    db.StatusPending,
-				CreatedAt: time.Now().UTC(),
-			}
-
-			scopeKey := pool.resolveScopeKey(msg)
-			pool.mu.Lock()
-			state := &threadWorkerState{ch: make(chan queueItem, 10)}
-			pool.threadChs[scopeKey] = state
-			pool.mu.Unlock()
-
-			te := &turnExecution{
-				pool:     pool,
-				burst:    []db.Message{msg},
-				threadID: threadID,
-			}
-
-			claimedBurst := te.claimPendingBurst()
-			if len(claimedBurst) != tc.wantClaimed {
-				t.Fatalf("len(claimedBurst) = %d, want %d", len(claimedBurst), tc.wantClaimed)
-			}
-
-			if tc.wantRequeue {
-				select {
-				case item := <-state.ch:
-					if item.msg == nil || item.msg.ID != msg.ID {
-						t.Fatalf("requeued message mismatch: %+v", item.msg)
-					}
-				case <-time.After(1 * time.Second):
-					t.Fatalf("expected message to be re-enqueued on claim error")
-				}
-			} else {
-				select {
-				case item := <-state.ch:
-					t.Fatalf("unexpected message re-enqueued: %+v", item.msg)
-				case <-time.After(30 * time.Millisecond):
-				}
-			}
-		})
-	}
-}
-
 func TestExtractVanadisDispatchInfo(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
@@ -929,6 +739,32 @@ func TestExtractVanadisDispatchInfo(t *testing.T) {
 			}
 			if gotBuild != tc.wantBuildID {
 				t.Errorf("buildID = %q, want %q", gotBuild, tc.wantBuildID)
+			}
+		})
+	}
+}
+
+func TestExtractVanadisBuildID(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name      string
+		chunkID   string
+		sessionID string
+		targetID  string
+		want      string
+	}{
+		{name: "chunk ID with chunk suffix", chunkID: "build-1-abc-chunk-2", want: "build-1-abc"},
+		{name: "session ID with chunk suffix", chunkID: "c06a", sessionID: "vanadis-build-2-def-chunk-0", want: "build-2-def"},
+		{name: "target ID with chunk suffix", targetID: "build-3-ghi-chunk-4", want: "build-3-ghi"},
+		{name: "bare build target ID", targetID: "build-4-jkl", want: "build-4-jkl"},
+		{name: "chunk ID prefix without suffix falls through", chunkID: "build-5-mno", sessionID: "vanadis-c06a", want: ""},
+		{name: "no build reference", chunkID: "c06a", sessionID: "heartbeat-1", targetID: "1234567890", want: ""},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got := extractVanadisBuildID(tc.chunkID, tc.sessionID, tc.targetID); got != tc.want {
+				t.Errorf("extractVanadisBuildID(%q, %q, %q) = %q, want %q", tc.chunkID, tc.sessionID, tc.targetID, got, tc.want)
 			}
 		})
 	}

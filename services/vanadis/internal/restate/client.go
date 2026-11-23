@@ -8,14 +8,15 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"net"
 	"net/http"
 	"net/url"
-	"os"
 	"strings"
 	"time"
 
+	"github.com/azylman/aerial/pkg/buildplan"
+	"github.com/azylman/aerial/pkg/restateingress"
+	"github.com/azylman/aerial/pkg/strutil"
 	"github.com/azylman/aerial/services/vanadis/internal/config"
 	"github.com/azylman/aerial/services/vanadis/internal/model"
 )
@@ -31,19 +32,17 @@ func NewClient(cfg config.RestateConfig, httpClient *http.Client) *Client {
 	return &Client{cfg: cfg, httpClient: httpClient}
 }
 
-// BuildServiceName returns the Restate Build Virtual Object name for the configured agent.
-func (c *Client) BuildServiceName() string {
-	return config.BuildServiceName(c.cfg.AgentName)
-}
-
-// BuildRouterServiceName returns the Restate BuildRouter service name for the configured agent.
+// BuildRouterServiceName returns the single shared Restate BuildRouter
+// service name, owned by the configured (default) agent's vanadis-restate.
 func (c *Client) BuildRouterServiceName() string {
-	return config.BuildRouterServiceName(c.cfg.AgentName)
+	return buildplan.BuildRouterServiceName(c.cfg.AgentName)
 }
 
-// ObjectPath returns the Restate ingress path for a Build Virtual Object handler.
-func (c *Client) ObjectPath(buildID, handler string) string {
-	return "/" + c.BuildServiceName() + "/" + url.PathEscape(buildID) + "/" + handler
+// ObjectPath returns the Restate ingress path for a handler on the Build
+// Virtual Object named buildService. Callers derive buildService from the
+// build's runner agent via buildplan.BuildServiceName.
+func (*Client) ObjectPath(buildService, buildID, handler string) string {
+	return "/" + buildService + "/" + url.PathEscape(buildID) + "/" + handler
 }
 
 // RouterPath returns the Restate ingress path for a BuildRouter service handler.
@@ -51,19 +50,11 @@ func (c *Client) RouterPath(handler string) string {
 	return "/" + c.BuildRouterServiceName() + "/" + handler
 }
 
-// IngressURL returns the configured Restate ingress base URL with ENV fallback.
+// IngressURL returns the configured Restate ingress base URL, or "" when
+// none is configured. It never consults the process environment: app wiring
+// resolves env overrides once via config.LoadRestateConfig.
 func (c *Client) IngressURL() string {
-	base := strings.TrimRight(strings.TrimSpace(c.cfg.RestateIngressURL), "/")
-	if base == "" {
-		base = strings.TrimRight(strings.TrimSpace(os.Getenv("RESTATE_INGRESS_URL")), "/")
-	}
-	return base
-}
-
-type restateErrorResponse struct {
-	Message string `json:"message"`
-	Error   string `json:"error"`
-	Code    int    `json:"code"`
+	return strings.TrimRight(strings.TrimSpace(c.cfg.RestateIngressURL), "/")
 }
 
 // MapRestateError maps a Restate ingress error status onto a Vanadis sentinel error.
@@ -100,59 +91,35 @@ func restateCallError(parent context.Context, err error) error {
 
 // CallIngress proxies a synchronous command to Restate ingress.
 func (c *Client) CallIngress(ctx context.Context, path string, payload any, out any) error {
+	return c.CallIngressKeyed(ctx, path, "", payload, out)
+}
+
+// CallIngressKeyed is CallIngress with an Idempotency-Key header when
+// idempotencyKey is non-empty.
+func (c *Client) CallIngressKeyed(ctx context.Context, path, idempotencyKey string, payload any, out any) error {
 	ingressURL := c.IngressURL()
 	if ingressURL == "" {
 		return errors.New("restate ingress URL not configured")
 	}
-	var reqBody io.Reader
+	var body any
 	if payload != nil {
 		b, err := json.Marshal(payload)
 		if err != nil {
 			return fmt.Errorf("marshal restate payload: %w", err)
 		}
-		reqBody = bytes.NewReader(b)
-	} else {
-		reqBody = http.NoBody
+		body = json.RawMessage(b)
 	}
 
 	// Leave five seconds within the server write budget to return an actionable response.
 	parent := ctx
-	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
-	fullURL := ingressURL + path
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, fullURL, reqBody)
-	if err != nil {
-		return fmt.Errorf("create restate request: %w", err)
+	bodyBytes, err := restateingress.Post(ctx, c.httpClient, ingressURL+path, idempotencyKey, body, 2<<20)
+	if httpErr, ok := errors.AsType[*restateingress.HTTPError](err); ok {
+		return MapRestateError(httpErr.Status, strutil.FirstNonEmpty(httpErr.Message, httpErr.Body))
 	}
-	req.Header.Set("Content-Type", "application/json")
-
-	client := http.DefaultClient
-	if c.httpClient != nil {
-		client = c.httpClient
-	}
-
-	resp, err := client.Do(req)
 	if err != nil {
 		return fmt.Errorf("call restate ingress %s: %w", path, restateCallError(parent, err))
-	}
-	defer resp.Body.Close()
-
-	bodyBytes, err := io.ReadAll(io.LimitReader(resp.Body, 2<<20))
-	if err != nil {
-		return fmt.Errorf("read restate response: %w", restateCallError(parent, err))
-	}
-
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		var errResp restateErrorResponse
-		msg := string(bodyBytes)
-		if jsonErr := json.Unmarshal(bodyBytes, &errResp); jsonErr == nil {
-			if errResp.Message != "" {
-				msg = errResp.Message
-			} else if errResp.Error != "" {
-				msg = errResp.Error
-			}
-		}
-		return MapRestateError(resp.StatusCode, msg)
 	}
 
 	if out != nil && len(bodyBytes) > 0 {
@@ -163,30 +130,21 @@ func (c *Client) CallIngress(ctx context.Context, path string, payload any, out 
 	return nil
 }
 
-// CallRetryAction posts a durable action-retry request for a build and decodes the acknowledgement into out.
-func (c *Client) CallRetryAction(ctx context.Context, buildID string, body []byte, idempotencyKey string, out any) error {
+// CallRetryAction posts a durable action-retry request to the build's Build
+// object named buildService and decodes the acknowledgement into out.
+func (c *Client) CallRetryAction(ctx context.Context, buildService, buildID string, body []byte, idempotencyKey string, out any) error {
 	base := c.IngressURL()
 	if base == "" {
 		return errors.New("restate ingress URL not configured")
 	}
-	target := base + "/" + c.BuildServiceName() + "/" + url.PathEscape(buildID) + "/RetryActionChunk"
-	request, err := http.NewRequestWithContext(ctx, http.MethodPost, target, bytes.NewReader(body))
-	if err != nil {
-		return err
-	}
-	request.Header.Set("Content-Type", "application/json")
-	request.Header.Set("Idempotency-Key", idempotencyKey)
+	target := base + c.ObjectPath(buildService, buildID, "RetryActionChunk")
 	client := c.httpClient
 	if client == nil {
 		client = &http.Client{Timeout: 30 * time.Second}
 	}
-	response, err := client.Do(request)
-	if err != nil {
-		return fmt.Errorf("durable retry request: %w", err)
-	}
-	defer response.Body.Close()
-	if response.StatusCode < 200 || response.StatusCode >= 300 {
-		switch response.StatusCode {
+	response, err := restateingress.Post(ctx, client, target, idempotencyKey, json.RawMessage(body), 1<<20)
+	if httpErr, ok := errors.AsType[*restateingress.HTTPError](err); ok {
+		switch httpErr.Status {
 		case http.StatusBadRequest:
 			return fmt.Errorf("%w: retry rejected", model.ErrInvalidBuildInput)
 		case http.StatusNotFound:
@@ -194,9 +152,12 @@ func (c *Client) CallRetryAction(ctx context.Context, buildID string, body []byt
 		case http.StatusConflict:
 			return model.ErrBuildConflict
 		}
-		return fmt.Errorf("durable retry returned HTTP %d", response.StatusCode)
+		return fmt.Errorf("durable retry returned HTTP %d", httpErr.Status)
 	}
-	if err := json.NewDecoder(io.LimitReader(response.Body, 1<<20)).Decode(out); err != nil {
+	if err != nil {
+		return fmt.Errorf("durable retry request: %w", err)
+	}
+	if err := json.NewDecoder(bytes.NewReader(response)).Decode(out); err != nil {
 		return fmt.Errorf("decode durable retry: %w", err)
 	}
 	return nil

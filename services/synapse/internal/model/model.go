@@ -19,6 +19,7 @@ type DeployingPR struct {
 	HeadSHA  string         `json:"head_sha"`
 	MergeSHA string         `json:"merge_sha"`
 	TargetID string         `json:"target_id"`
+	Jobs     []string       `json:"jobs,omitempty"`
 	Metadata map[string]any `json:"metadata"`
 }
 
@@ -43,58 +44,13 @@ func (r PRRegisterRequest) OwningAgent() string {
 	return r.BotID
 }
 
-// PRBuildLifecycle is the registry lifecycle fence image-build consumers read
+// PRBuildLifecycle is the PRObject lifecycle fence image-build consumers read
 // without inspecting transport metadata.
 type PRBuildLifecycle struct {
 	Status   string
 	HeadSHA  string
 	MergeSHA string
 	Started  bool
-}
-
-// KustomizationRequest is the reconcile request recorded for one Flux Kustomization of a PR rollout.
-type KustomizationRequest struct {
-	Namespace   string `json:"namespace"`
-	RequestedAt string `json:"requested_at"`
-}
-
-// PRRegistryUpdater defines the interface for updating PR lifecycle state in PostgreSQL pr_registry.
-type PRRegistryUpdater interface {
-	LoadPRBuildLifecycle(ctx context.Context, repo string, prNumber int) (PRBuildLifecycle, error)
-	RecordPRBuildMetadata(ctx context.Context, repo string, prNumber int, metadata BuildMetadata) (bool, error)
-	LoadPRBuildMetadata(ctx context.Context, repo string, prNumber int) (BuildMetadata, bool, error)
-	RegisterPR(ctx context.Context, req PRRegisterRequest) (string, error)
-	UpdatePRMerged(ctx context.Context, repo string, prNumber int, mergeSHA string) (targetID string, err error)
-	UpdatePRSync(ctx context.Context, repo string, prNumber int, headSHA string) (targetID string, err error)
-	UpdatePRClosedUnmerged(ctx context.Context, repo string, prNumber int) (targetID string, err error)
-	AtomicTransitionCIFailed(ctx context.Context, repo string, prNumber int) (targetID string, updated bool, err error)
-	AtomicTransitionCIFailedByHeadSHA(ctx context.Context, repo string, headSHA string) (targetID string, prNumber int, updated bool, err error)
-	BackfillPushMergeSHA(ctx context.Context, repo string, prNumber int, mergeSHA string) (targetID string, err error)
-	ResolvePRBySHA(ctx context.Context, repo string, sha string) (prNumber int, branch, targetID string, err error)
-	ResolvePRByNumber(ctx context.Context, repo string, prNumber int) (targetID string, branch, headSHA, mergeSHA string, err error)
-	AtomicTransitionConflict(ctx context.Context, repo string, prNumber int) (targetID string, updated bool, err error)
-	TransitionDeploying(ctx context.Context, repo string, prNumber int, jobs []string) (targetID string, err error)
-	AtomicTransitionDeployFailed(ctx context.Context, repo string, prNumber int) (targetID string, updated bool, err error)
-	ListDeployingPRs(ctx context.Context) ([]DeployingPR, error)
-	RecordPRCheckStatus(ctx context.Context, repo string, prNumber int, headSHA, checkName, checkState string) (bool, error)
-	EnsurePRRegistered(ctx context.Context, repo string, prNumber int, branch, headSHA, title, targetID string) (string, error)
-	RecordExpectedJobs(ctx context.Context, repo string, prNumber int, jobs []string) (bool, error)
-	HasExpectedDeployJobs(ctx context.Context, repo string, prNumber int) (bool, error)
-	RecordPRJobState(ctx context.Context, jobName, jobState string) (repo string, prNumber int, updated bool, err error)
-	AppendPRJobs(ctx context.Context, repo string, prNumber int, jobs []string) error
-	RecordKustomizationRequests(ctx context.Context, repo string, prNumber int, requests map[string]KustomizationRequest) error
-	MarkKustomizationsDeployed(ctx context.Context, repo string, prNumber int, names []string) (transitioned bool, err error)
-	MarkJobsDeployed(ctx context.Context, repo string, prNumber int, jobs []string) (bool, error)
-	HasKustomizationRequests(ctx context.Context, repo string, prNumber int) (bool, error)
-	UpdatePRStatus(ctx context.Context, repo string, prNumber int, status string, metadata map[string]any) error
-	AcknowledgeDeployFailedPublished(ctx context.Context, repo string, prNumber int) error
-	LoadRawPRMetadata(ctx context.Context, repo string, prNumber int) (map[string]any, bool, error)
-	IsPRDeployed(ctx context.Context, repo string, prNumber int) (bool, error)
-}
-
-// ReadinessRetryStore defines the interface for retrying PR readiness rollout gates.
-type ReadinessRetryStore interface {
-	RetryPRReadiness(ctx context.Context, repo, merge string, number int) (map[string]KustomizationRequest, error)
 }
 
 // DeployEvent represents a deployment or sync lifecycle event.
@@ -186,6 +142,8 @@ type WorkloadRollout struct {
 	ManagedWorkloads                                                []WorkloadRollout
 	Env                                                             map[string]string
 	Resources                                                       KubeResourceRequirements
+	DeletionTimestamp                                               string
+	Finalizers                                                      []string
 }
 
 // ConfigMapChange records when a Flux-managed ConfigMap was last written.
@@ -197,8 +155,9 @@ type ConfigMapChange struct {
 
 // WorkloadImageRef is the subset of a workload needed to map images to their owning Kustomization.
 type WorkloadImageRef struct {
-	Labels map[string]string `json:"labels"`
-	Images []string          `json:"images"`
+	Labels            map[string]string `json:"labels"`
+	Images            []string          `json:"images"`
+	DeletionTimestamp string            `json:"deletion_timestamp,omitempty"`
 }
 
 // KubeLabelSelector defines Kubernetes label match requirements.
@@ -228,14 +187,16 @@ type KubeManagedField struct {
 
 // KubeObjectMeta is the object metadata read from Kubernetes workloads and ConfigMaps.
 type KubeObjectMeta struct {
-	UID             string               `json:"uid"`
-	Labels          map[string]string    `json:"labels"`
-	OwnerReferences []KubeOwnerReference `json:"ownerReferences"`
-	Name            string               `json:"name"`
-	Namespace       string               `json:"namespace"`
-	Generation      int64                `json:"generation"`
-	Annotations     map[string]string    `json:"annotations"`
-	ManagedFields   []KubeManagedField   `json:"managedFields"`
+	UID               string               `json:"uid"`
+	Labels            map[string]string    `json:"labels"`
+	OwnerReferences   []KubeOwnerReference `json:"ownerReferences"`
+	Name              string               `json:"name"`
+	Namespace         string               `json:"namespace"`
+	Generation        int64                `json:"generation"`
+	Annotations       map[string]string    `json:"annotations"`
+	ManagedFields     []KubeManagedField   `json:"managedFields"`
+	DeletionTimestamp string               `json:"deletionTimestamp,omitempty"`
+	Finalizers        []string             `json:"finalizers,omitempty"`
 }
 
 // KubeResourceRequirements defines CPU and memory limits and requests.
@@ -307,23 +268,6 @@ type DiscordInteractionArgs struct {
 	Interaction   *discordgo.Interaction `json:"interaction"`
 }
 
-type GitPushEventRequest struct {
-	Repo     string `json:"repo"`
-	Ref      string `json:"ref"`
-	Commit   string `json:"commit"`
-	TargetID string `json:"target_id,omitempty"`
-	PRNumber int    `json:"pr_number,omitempty"`
-}
-
-type ImageReadyEventRequest struct {
-	Image     string `json:"image"`
-	Digest    string `json:"digest,omitempty"`
-	Repo      string `json:"repo,omitempty"`
-	CommitSHA string `json:"commit_sha,omitempty"`
-	PRNumber  int    `json:"pr_number,omitempty"`
-	TargetID  string `json:"target_id,omitempty"`
-}
-
 type PromptRequest struct {
 	ChannelID string `json:"channel_id"`
 	Prompt    string `json:"prompt"`
@@ -345,12 +289,10 @@ type DirectMessageRequest struct {
 	Content   string `json:"content"`
 }
 
-// OutboundDispatcher delivers outbound events, prompts, and cluster updates.
+// OutboundDispatcher delivers outbound events and prompts and reads cluster
+// state; it never writes to Kubernetes.
 type OutboundDispatcher interface {
-	DispatchGitPush(ctx context.Context, req GitPushEventRequest) error
 	DiscoverImageKustomizations(ctx context.Context, imageNames []string) ([]FluxKustomizationRef, error)
-	PromoteImageTag(ctx context.Context, req ImageReadyEventRequest) (workloadName string, err error)
-	ReconcileKustomization(ctx context.Context, ref FluxKustomizationRef, requestedAt string) error
 	ListKustomizationWorkloads(ctx context.Context, ref FluxKustomizationRef) ([]WorkloadRollout, error)
 	ListKustomizationConfigMaps(ctx context.Context, ref FluxKustomizationRef) ([]ConfigMapChange, error)
 	ResolveFluxSourceRepo(ctx context.Context, obj FluxInvolvedObject) (string, error)

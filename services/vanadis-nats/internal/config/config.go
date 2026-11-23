@@ -6,6 +6,8 @@ import (
 	"strings"
 
 	"gopkg.in/yaml.v3"
+
+	"github.com/azylman/aerial/pkg/strutil"
 )
 
 // Config holds runtime configuration for the vanadis-nats bridge service.
@@ -31,41 +33,6 @@ var FallbackConfigPaths = []string{
 	"/config/vanadis-nats.yaml",
 }
 
-// FirstNonEmpty returns the first non-blank value.
-func FirstNonEmpty(vals ...string) string {
-	for _, v := range vals {
-		if trimmed := strings.TrimSpace(v); trimmed != "" {
-			return trimmed
-		}
-	}
-	return ""
-}
-
-// NormalizeAgentName trims whitespace for per-agent scoped Restate names.
-func NormalizeAgentName(agent string) string {
-	return strings.ToLower(strings.TrimSpace(agent))
-}
-
-// BuildServiceName derives the Restate Build Virtual Object name for an agent.
-// Empty and aerial resolve to the legacy Build name so Phase 1 stays dark.
-func BuildServiceName(agent string) string {
-	name := NormalizeAgentName(agent)
-	if name == "" || name == "aerial" {
-		return "Build"
-	}
-	return "Build-" + name
-}
-
-// BuildRouterServiceName derives the Restate BuildRouter service name for an agent.
-// Empty and aerial resolve to the legacy BuildRouter name so Phase 1 stays dark.
-func BuildRouterServiceName(agent string) string {
-	name := NormalizeAgentName(agent)
-	if name == "" || name == "aerial" {
-		return "BuildRouter"
-	}
-	return "BuildRouter-" + name
-}
-
 // LoadConfig loads configuration from an optional YAML file with environment variable overrides.
 func LoadConfig(configPath string) Config {
 	var fileCfg NATSBridgeYAMLConfig
@@ -87,11 +54,11 @@ func LoadConfig(configPath string) Config {
 	}
 
 	return Config{
-		Port:              FirstNonEmpty(os.Getenv("PORT"), fileCfg.Port, "4027"),
-		NATSURL:           FirstNonEmpty(os.Getenv("NATS_URL"), fileCfg.NATSURL),
-		RestateIngressURL: strings.TrimRight(strings.TrimSpace(FirstNonEmpty(os.Getenv("RESTATE_INGRESS_URL"), fileCfg.RestateIngressURL, "http://restate.restate.svc.cluster.local:8080")), "/"),
+		Port:              strutil.FirstNonEmpty(os.Getenv("PORT"), fileCfg.Port, "4027"),
+		NATSURL:           strutil.FirstNonEmpty(os.Getenv("NATS_URL"), fileCfg.NATSURL),
+		RestateIngressURL: strings.TrimRight(strings.TrimSpace(strutil.FirstNonEmpty(os.Getenv("RESTATE_INGRESS_URL"), fileCfg.RestateIngressURL, "http://restate.restate.svc.cluster.local:8080")), "/"),
 		ConfigPath:        strings.TrimSpace(configPath),
-		AgentName:         strings.TrimSpace(FirstNonEmpty(os.Getenv("AGENT_NAME"), fileCfg.AgentName, "aerial")),
+		AgentName:         strings.TrimSpace(strutil.FirstNonEmpty(os.Getenv("AGENT_NAME"), fileCfg.AgentName, "aerial")),
 	}
 }
 

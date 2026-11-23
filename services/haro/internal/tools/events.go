@@ -6,12 +6,15 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"net/url"
 	"strings"
 	"time"
 
 	"github.com/google/uuid"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
+	"github.com/azylman/aerial/pkg/discordutil"
+	"github.com/azylman/aerial/pkg/restateingress"
 	"github.com/azylman/aerial/services/haro/internal/model"
 	"github.com/azylman/aerial/services/haro/internal/store"
 )
@@ -218,10 +221,31 @@ func (a CancelEventWatchArgs) ToMap() map[string]any {
 	return m
 }
 
+func syncHeartbeatToRestate(ctx context.Context, ingressURL, id string, enabled bool) {
+	ingressURL = strings.TrimRight(strings.TrimSpace(ingressURL), "/")
+	if ingressURL == "" || id == "" {
+		return
+	}
+	if enabled {
+		key := fmt.Sprintf("haro:arm:%s:%s:%d", model.ScheduleTypeHeartbeat, id, time.Now().UnixNano())
+		endpoint := fmt.Sprintf("%s/HaroSchedule/%s/Arm/send", ingressURL, url.PathEscape(id))
+		payload := map[string]any{model.FieldScheduleType: model.ScheduleTypeHeartbeat}
+		if _, postErr := restateingress.Post(context.WithoutCancel(ctx), nil, endpoint, key, payload, 0); postErr != nil {
+			log.Printf("[Haro Tools] warning: restate arm heartbeat %s failed: %v", id, postErr)
+		}
+		return
+	}
+	key := fmt.Sprintf("haro:cancel:%s:%d", id, time.Now().UnixNano())
+	endpoint := fmt.Sprintf("%s/HaroSchedule/%s/Cancel/send", ingressURL, url.PathEscape(id))
+	if _, postErr := restateingress.Post(context.WithoutCancel(ctx), nil, endpoint, key, struct{}{}, 0); postErr != nil {
+		log.Printf("[Haro Tools] warning: restate cancel heartbeat %s failed: %v", id, postErr)
+	}
+}
+
 // HandleScheduleHeartbeat handles the schedule_heartbeat MCP tool call.
-func HandleScheduleHeartbeat(ctx context.Context, db *sql.DB, defaultTZ string, args map[string]any) (*mcp.CallToolResult, error) {
+func HandleScheduleHeartbeat(ctx context.Context, db *sql.DB, defaultTZ string, args map[string]any, restateIngressURL ...string) (*mcp.CallToolResult, error) {
 	channelID := getMapString(args, "channel_id", "target_id")
-	if !model.IsNumericSnowflake(channelID) {
+	if !discordutil.IsSnowflake(strings.TrimSpace(channelID)) {
 		return nil, fmt.Errorf("'channel_id' is required and must be a valid numeric snowflake")
 	}
 
@@ -252,7 +276,7 @@ func HandleScheduleHeartbeat(ctx context.Context, db *sql.DB, defaultTZ string, 
 	}
 
 	now := time.Now().UTC()
-	nextRun, err := CalculateNextCronRun(cronExpr, tz, now)
+	nextRun, err := model.CalculateNextCronRun(cronExpr, tz, now)
 	if err != nil {
 		return nil, err
 	}
@@ -274,6 +298,10 @@ func HandleScheduleHeartbeat(ctx context.Context, db *sql.DB, defaultTZ string, 
 
 	if err = store.InsertHeartbeatSchedule(ctx, db, hb); err != nil {
 		return nil, fmt.Errorf("failed to persist heartbeat schedule: %w", err)
+	}
+
+	if len(restateIngressURL) > 0 {
+		syncHeartbeatToRestate(ctx, restateIngressURL[0], id, true)
 	}
 
 	out := map[string]any{
@@ -300,7 +328,7 @@ func HandleScheduleHeartbeat(ctx context.Context, db *sql.DB, defaultTZ string, 
 func applyHeartbeatTimingUpdates(args map[string]any, sched *model.HeartbeatSchedule) (bool, error) {
 	recompute := false
 	if cronExpr := getMapString(args, "cron_expr", "cron_expression"); cronExpr != "" {
-		if _, err := CalculateNextCronRun(cronExpr, sched.Timezone, time.Now().UTC()); err != nil {
+		if _, err := model.CalculateNextCronRun(cronExpr, sched.Timezone, time.Now().UTC()); err != nil {
 			return false, err
 		}
 		sched.CronExpr = cronExpr
@@ -324,7 +352,7 @@ func applyHeartbeatTimingUpdates(args map[string]any, sched *model.HeartbeatSche
 
 func applyHeartbeatContentUpdates(args map[string]any, sched *model.HeartbeatSchedule) error {
 	if channelID := getMapString(args, "channel_id", "target_id"); channelID != "" {
-		if !model.IsNumericSnowflake(channelID) {
+		if !discordutil.IsSnowflake(strings.TrimSpace(channelID)) {
 			return fmt.Errorf("'channel_id' must be a valid numeric snowflake")
 		}
 		sched.TargetID = channelID
@@ -348,7 +376,7 @@ func applyHeartbeatContentUpdates(args map[string]any, sched *model.HeartbeatSch
 }
 
 // HandleUpdateHeartbeat handles the update_heartbeat MCP tool call.
-func HandleUpdateHeartbeat(ctx context.Context, db *sql.DB, args map[string]any) (*mcp.CallToolResult, error) {
+func HandleUpdateHeartbeat(ctx context.Context, db *sql.DB, args map[string]any, restateIngressURL ...string) (*mcp.CallToolResult, error) {
 	id := getMapString(args, "id", "schedule_id")
 	if id == "" {
 		return nil, fmt.Errorf("'id' is required")
@@ -369,7 +397,7 @@ func HandleUpdateHeartbeat(ctx context.Context, db *sql.DB, args map[string]any)
 	}
 
 	if recomputeNextRun && sched.Enabled {
-		nextRun, calculateErr := CalculateNextCronRun(sched.CronExpr, sched.Timezone, time.Now().UTC())
+		nextRun, calculateErr := model.CalculateNextCronRun(sched.CronExpr, sched.Timezone, time.Now().UTC())
 		if calculateErr != nil {
 			return nil, calculateErr
 		}
@@ -378,6 +406,10 @@ func HandleUpdateHeartbeat(ctx context.Context, db *sql.DB, args map[string]any)
 
 	if err = store.UpdateHeartbeatSchedule(ctx, db, *sched); err != nil {
 		return nil, fmt.Errorf("failed to update heartbeat schedule: %w", err)
+	}
+
+	if len(restateIngressURL) > 0 {
+		syncHeartbeatToRestate(ctx, restateIngressURL[0], id, sched.Enabled)
 	}
 
 	out := map[string]any{
@@ -403,7 +435,7 @@ func HandleUpdateHeartbeat(ctx context.Context, db *sql.DB, args map[string]any)
 // HandleWatchEvent registers a deterministic one-shot event watch trigger.
 func HandleWatchEvent(ctx context.Context, db *sql.DB, args map[string]any, extraSources ...string) (*mcp.CallToolResult, error) {
 	channelID := getMapString(args, "channel_id", "target_id", "thread_id")
-	if !model.IsNumericSnowflake(channelID) {
+	if !discordutil.IsSnowflake(strings.TrimSpace(channelID)) {
 		return nil, fmt.Errorf("'channel_id' is required and must be a valid numeric snowflake")
 	}
 

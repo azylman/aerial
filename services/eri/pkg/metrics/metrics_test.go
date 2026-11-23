@@ -10,9 +10,10 @@ import (
 	"testing"
 	"time"
 
+	_ "github.com/jackc/pgx/v5/stdlib"
 	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/testutil"
 	dto "github.com/prometheus/client_model/go"
-	_ "modernc.org/sqlite"
 )
 
 func TestMetricsRegistryAndHandler(t *testing.T) {
@@ -48,8 +49,8 @@ func TestMetricsRegistryAndHandler(t *testing.T) {
 	MemorySearchDurationSeconds.Observe(0.015)
 	ConfigReloadsTotal.WithLabelValues("SIGHUP", "success").Inc()
 
-	// Register DB stats with in-memory sqlite
-	db, err := sql.Open("sqlite", ":memory:")
+	// Register DB stats on a lazily opened pgx handle (no connection is made)
+	db, err := sql.Open("pgx", "postgres://127.0.0.1:1/aerial")
 	if err == nil {
 		defer db.Close()
 		RegisterDBStats(db)
@@ -107,6 +108,9 @@ func TestMetricsRegistryAndHandler(t *testing.T) {
 		"aerial_brain_yield_trap_total",
 		"aerial_brain_voice_ttfr_duration_seconds",
 		"aerial_brain_build_info",
+		`aerial_brain_runner_executions_total{model="gemini-2.5-pro",source="discord",status="success"} `,
+		`aerial_brain_runner_executions_total{model="gemini-2.5-flash",source="voice",status="success"} `,
+		`aerial_brain_runner_duration_seconds_bucket{model="gemini-2.5-flash",source="voice",status="success",le="0.25"} `,
 	}
 
 	for _, m := range expectedMetrics {
@@ -192,38 +196,25 @@ func TestSanitizeChannelLabel(t *testing.T) {
 	}
 }
 
-func TestRecordRunnerExecution_SourceLabelAndBuckets(t *testing.T) {
-	RecordRunnerExecution("success", "gemini-2.5-pro", "discord", 1200*time.Millisecond)
-	RecordRunnerExecution("success", "gemini-2.5-flash", "voice", 240*time.Millisecond)
-	RecordRunnerExecution("error", "gemini-2.5-flash", "voice", 50*time.Millisecond)
-
-	handler := Handler()
-	req := httptest.NewRequest(http.MethodGet, "/metrics", http.NoBody)
-	rec := httptest.NewRecorder()
-	handler.ServeHTTP(rec, req)
-
-	if rec.Code != http.StatusOK {
-		t.Fatalf("expected status 200, got %d", rec.Code)
+func TestRecordTurnTimeout(t *testing.T) {
+	// Not parallel: rows read before/after deltas on shared global counter series.
+	tests := []struct {
+		name       string
+		reason     string
+		wantSeries string
+	}{
+		{name: "turn cap", reason: TurnTimeoutReasonCap, wantSeries: "turn_cap"},
+		{name: "watchdog", reason: TurnTimeoutReasonWatchdog, wantSeries: "watchdog"},
+		{name: "empty reason falls back to unknown", reason: "", wantSeries: "unknown"},
 	}
-
-	body := rec.Body.String()
-	// Verify discord execution counter and histogram bucket
-	if !strings.Contains(body, `aerial_brain_runner_executions_total{model="gemini-2.5-pro",`+`source="discord",status="success"}`) &&
-		!strings.Contains(body, `aerial_brain_runner_executions_total{model="gemini-2.5-pro",`+`status="success",source="discord"}`) &&
-		!strings.Contains(body, `source="discord"`) {
-		t.Errorf("expected runner execution metric with source=discord, got:\n%s", body)
-	}
-
-	// Verify voice execution counter and histogram bucket
-	if !strings.Contains(body, `aerial_brain_runner_executions_total{model="gemini-2.5-flash",`+`source="voice",status="success"}`) &&
-		!strings.Contains(body, `aerial_brain_runner_executions_total{model="gemini-2.5-flash",`+`status="success",source="voice"}`) &&
-		!strings.Contains(body, `source="voice"`) {
-		t.Errorf("expected runner execution metric with source=voice, got:\n%s", body)
-	}
-
-	// Verify 0.25 bucket exists in output (proves 250ms bucket resolution for fast voice turns)
-	if !strings.Contains(body, `aerial_brain_runner_duration_seconds_bucket{`) || !strings.Contains(body, `le="0.25"`) {
-		t.Errorf("expected runner duration bucket le=0.25 to exist, got:\n%s", body)
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			before := testutil.ToFloat64(TurnTimeoutsTotal.WithLabelValues(tc.wantSeries))
+			RecordTurnTimeout(tc.reason)
+			if got := testutil.ToFloat64(TurnTimeoutsTotal.WithLabelValues(tc.wantSeries)) - before; got != 1 {
+				t.Errorf("aerial_brain_turn_timeouts_total{reason=%q} delta = %v, want 1", tc.wantSeries, got)
+			}
+		})
 	}
 }
 

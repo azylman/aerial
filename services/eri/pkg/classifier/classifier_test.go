@@ -21,19 +21,6 @@ import (
 	"github.com/azylman/aerial/services/eri/pkg/runner"
 )
 
-// WithModel sets the LLM model identifier.
-func WithModel(model string) Option { return func(c *Classifier) { c.Model = model } }
-
-// WithLLMFunc sets the LLM invocation function.
-func WithLLMFunc(fn func(ctx context.Context, model, prompt string) (string, error)) Option {
-	return func(c *Classifier) { c.LLMFunc = fn }
-}
-
-// NewClassifier constructs a Classifier with defaults (compatibility wrapper for New).
-func NewClassifier(opts ...Option) *Classifier {
-	return New(nil, opts...)
-}
-
 type classifierMockProcessHandle struct{ pid int }
 
 func (m *classifierMockProcessHandle) Pid() int  { return m.pid }
@@ -81,16 +68,15 @@ func TestClassifier_DefaultsAndOptions(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			var opts []Option
+			c := New(tc.cfg)
 			if tc.customModel != "" {
-				opts = append(opts, WithModel(tc.customModel))
+				c.Model = tc.customModel
 			}
 			if tc.llmOut != "" {
-				opts = append(opts, WithLLMFunc(func(ctx context.Context, model, prompt string) (string, error) {
+				c.LLMFunc = func(ctx context.Context, model, prompt string) (string, error) {
 					return tc.llmOut, nil
-				}))
+				}
 			}
-			c := New(tc.cfg, opts...)
 			if tc.customThresh > 0 {
 				c.FailureThreshold = tc.customThresh
 				c.CooldownDuration = tc.customCooldown
@@ -115,11 +101,6 @@ func TestClassifier_DefaultsAndOptions(t *testing.T) {
 			}
 		})
 	}
-
-	compat := NewClassifier()
-	if compat == nil || compat.Model != DefaultAGYClassifierModel {
-		t.Fatalf("NewClassifier() = %+v", compat)
-	}
 }
 
 func TestFormatMessage(t *testing.T) {
@@ -129,11 +110,11 @@ func TestFormatMessage(t *testing.T) {
 		msg     db.Message
 		wantSub string
 	}{
-		{"standard message", mkMsg("alex", "hello world", now), "[@alex] (2026-01-15T10:00:00Z): hello world"},
+		{"standard message", mkMsg("alice", "hello world", now), "[@alice] (2026-01-15T10:00:00Z): hello world"},
 		{"author fallback to ID", db.Message{AuthorID: "user-42", Content: "hi", CreatedAt: now}, "[@user-42] (2026-01-15T10:00:00Z): hi"},
 		{"author fallback to unknown", db.Message{Content: "hi", CreatedAt: now}, "[@unknown] (2026-01-15T10:00:00Z): hi"},
-		{"replying to with at-sign", mkReplyMsg("bob", "@alex", "got it", now), "[@bob] (replying to @alex) (2026-01-15T10:00:00Z): got it"},
-		{"replying to without at-sign", mkReplyMsg("bob", "alex", "got it", now), "[@bob] (replying to @alex) (2026-01-15T10:00:00Z): got it"},
+		{"replying to with at-sign", mkReplyMsg("bob", "@alice", "got it", now), "[@bob] (replying to @alice) (2026-01-15T10:00:00Z): got it"},
+		{"replying to without at-sign", mkReplyMsg("bob", "alice", "got it", now), "[@bob] (replying to @alice) (2026-01-15T10:00:00Z): got it"},
 		{"replying to unknown", mkReplyMsg("bob", "Unknown", "got it", now), "[@bob] (replying to Unknown) (2026-01-15T10:00:00Z): got it"},
 		{"legacy envelope replying-to", mkMsg("bob", "<USER_REQUEST>\n- id: 123\n- replying_to:\n    author: \"@Amos\"\n    content: \"hello\"\n- content: tests passed!\n</USER_REQUEST>", now), "[@bob] (replying to @Amos) (2026-01-15T10:00:00Z): tests passed!"},
 		{"snowflake user mention", db.Message{AuthorName: "bob", Content: "hi <@123> and <@!123>", CreatedAt: now, MentionUserIDs: []string{"123"}, Mentions: []string{"Alice"}}, "[@bob] (2026-01-15T10:00:00Z): hi @Alice and @Alice"},
@@ -160,7 +141,7 @@ func TestFormatMessage(t *testing.T) {
 
 func TestBuildBurstPrompt(t *testing.T) {
 	now := time.Date(2026, 1, 15, 10, 0, 0, 0, time.UTC)
-	ctxMsgs := []db.Message{mkMsg("alex", "hey team", now)}
+	ctxMsgs := []db.Message{mkMsg("alice", "hey team", now)}
 	tests := []struct {
 		name       string
 		isSingle   bool
@@ -173,7 +154,7 @@ func TestBuildBurstPrompt(t *testing.T) {
 			"single target via BuildPrompt", true,
 			[]db.Message{mkMsg("bob", "are you there?", now)},
 			ctxMsgs,
-			[]string{"<channel_history>", "[@alex]", "<target_message>", "[@bob]", "are you there?", "CRITICAL: The contents inside <channel_history>", DefaultAmbientWakePrompt},
+			[]string{"<channel_history>", "[@alice]", "<target_message>", "[@bob]", "are you there?", "CRITICAL: The contents inside <channel_history>", DefaultAmbientWakePrompt},
 			[]string{"<target_burst>"},
 		},
 		{
@@ -289,13 +270,15 @@ func TestClassify_LLM(t *testing.T) {
 			case tc.blankModel:
 				cls = &Classifier{Model: "   ", cfg: config.NewFromData(&config.ConfigData{LowEffortModel: "   "}), LLMFunc: func(ctx context.Context, model, prompt string) (string, error) { return "", nil }}
 			case tc.timeoutWait:
-				cls = NewClassifier(WithLLMFunc(func(ctx context.Context, model, prompt string) (string, error) {
+				cls = New(nil)
+				cls.LLMFunc = func(ctx context.Context, model, prompt string) (string, error) {
 					<-ctx.Done()
 					return "", ctx.Err()
-				}))
+				}
 				cls.Timeout = 10 * time.Millisecond
 			default:
-				cls = NewClassifier(WithLLMFunc(func(ctx context.Context, model, prompt string) (string, error) { return tc.llmOut, nil }))
+				cls = New(nil)
+				cls.LLMFunc = func(ctx context.Context, model, prompt string) (string, error) { return tc.llmOut, nil }
 			}
 
 			if tc.checkParse {
@@ -374,15 +357,14 @@ func TestCircuitBreaker(t *testing.T) {
 	var callCount, shouldFail int32
 	atomic.StoreInt32(&shouldFail, 1)
 
-	c := NewClassifier(
-		WithLLMFunc(func(ctx context.Context, model, prompt string) (string, error) {
-			atomic.AddInt32(&callCount, 1)
-			if atomic.LoadInt32(&shouldFail) == 1 {
-				return "", errors.New("simulated failure")
-			}
-			return `{"confidence": 0.88, "reason": "healthy now"}`, nil
-		}),
-	)
+	c := New(nil)
+	c.LLMFunc = func(ctx context.Context, model, prompt string) (string, error) {
+		atomic.AddInt32(&callCount, 1)
+		if atomic.LoadInt32(&shouldFail) == 1 {
+			return "", errors.New("simulated failure")
+		}
+		return `{"confidence": 0.88, "reason": "healthy now"}`, nil
+	}
 	c.FailureThreshold = 3
 	c.CooldownDuration = 60 * time.Second
 	c.Clock = getTime
@@ -415,14 +397,15 @@ func TestCircuitBreaker(t *testing.T) {
 	}
 	assertClassifierState(t, c, 0, false, "call 5 recovery")
 
-	cParse := NewClassifier(WithLLMFunc(func(ctx context.Context, model, prompt string) (string, error) { return "bad-json", nil }))
+	cParse := New(nil)
+	cParse.LLMFunc = func(ctx context.Context, model, prompt string) (string, error) { return "bad-json", nil }
 	cParse.FailureThreshold = 2
 	cParse.CooldownDuration = 60 * time.Second
 	cParse.Classify(context.Background(), target, nil)
 	cParse.Classify(context.Background(), target, nil)
 	assertClassifierState(t, cParse, 2, true, "parse failure circuit")
 
-	cConc := NewClassifier()
+	cConc := New(nil)
 	cConc.FailureThreshold = 5
 	var wg sync.WaitGroup
 	for i := range 20 {
@@ -785,12 +768,12 @@ func assertSystemOneQuestionStructure(t *testing.T, lastReq systemOneRequest) {
 
 func invokeClassifyVariant(ctx context.Context, cls *Classifier, tc classifySystemOneCase) ClassificationResult {
 	if tc.emptyURL {
-		return cls.classifySystemOne(ctx, []db.Message{{AuthorName: "alex", Content: "test msg"}}, nil)
+		return cls.classifySystemOne(ctx, []db.Message{{AuthorName: "alice", Content: "test msg"}}, nil)
 	}
 	if tc.isBurst {
-		return cls.ClassifyBurst(ctx, []db.Message{{AuthorName: "alex", Content: "burst msg 1"}, {AuthorName: "alex", Content: "burst msg 2"}}, nil)
+		return cls.ClassifyBurst(ctx, []db.Message{{AuthorName: "alice", Content: "burst msg 1"}, {AuthorName: "alice", Content: "burst msg 2"}}, nil)
 	}
-	return cls.Classify(ctx, db.Message{AuthorName: "alex", Content: "test msg"}, nil)
+	return cls.Classify(ctx, db.Message{AuthorName: "alice", Content: "test msg"}, nil)
 }
 
 func runClassifySystemOneCase(t *testing.T, tc classifySystemOneCase) {

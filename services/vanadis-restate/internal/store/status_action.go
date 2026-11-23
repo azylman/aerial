@@ -2,7 +2,7 @@ package store
 
 // Status and action-completion persistence for vanadis-restate.
 //
-// execUpdateByID, UpdateChunkStatus, UpdateBuildStatus,
+// execUpdateByID, UpdateBuildStatus,
 // UpdateBuildStatusMessageID, ReserveChunkForLaunch, CompleteActionChunk and
 // FailChunk plus actionCompletionAllowed and finishActionBuildIfAllCompleted
 // moved here from the root package so they promote through the embedded
@@ -19,6 +19,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"strconv"
 	"strings"
 	"time"
 
@@ -34,35 +35,42 @@ const (
 	statusDeployFailed = "deploy_failed"
 )
 
-func (s *Store) execUpdateByID(ctx context.Context, idLabel, id, valLabel, val string, allowEmptyVal bool, query, opLabel string, notFoundErr error) error {
+func (s *Store) UpdateBuildStatus(ctx context.Context, buildID, status string) error {
 	if s == nil || s.db == nil {
 		return errors.New("database connection is nil")
 	}
-	cleanID, cleanVal := strings.TrimSpace(id), strings.TrimSpace(val)
-	if cleanID == "" || (!allowEmptyVal && cleanVal == "") {
-		return fmt.Errorf("%s and %s cannot be empty", idLabel, valLabel)
+	cleanID, cleanStatus := strings.TrimSpace(buildID), strings.TrimSpace(status)
+	if cleanID == "" || cleanStatus == "" {
+		return errors.New("build id and status cannot be empty")
 	}
-	cmdTag, err := s.db.Exec(ctx, query, cleanVal, cleanID)
+	cmdTag, err := s.db.Exec(ctx, `UPDATE vanadis_builds SET status = $1, updated_at = CURRENT_TIMESTAMP WHERE id = $2;`, cleanStatus, cleanID)
 	switch {
 	case err != nil:
-		return fmt.Errorf("%s: %w", opLabel, err)
+		return fmt.Errorf("failed to update vanadis build status: %w", err)
 	case cmdTag.RowsAffected() == 0:
-		return notFoundErr
+		return ErrBuildNotFound
 	default:
 		return nil
 	}
 }
 
-func (s *Store) UpdateChunkStatus(ctx context.Context, chunkID, status string) error {
-	return s.execUpdateByID(ctx, "chunk id", chunkID, "status", status, false, `UPDATE vanadis_chunks SET status = $1, started_at = CASE WHEN $1 IN ('running', 'coding') THEN COALESCE(started_at, CURRENT_TIMESTAMP) ELSE started_at END, completed_at = CASE WHEN $1 IN ('merged', 'completed', 'failed', 'cancelled') THEN COALESCE(completed_at, CURRENT_TIMESTAMP) ELSE NULL END, updated_at = CURRENT_TIMESTAMP WHERE id = $2;`, "failed to update vanadis chunk status", ErrChunkNotFound)
-}
-
-func (s *Store) UpdateBuildStatus(ctx context.Context, buildID, status string) error {
-	return s.execUpdateByID(ctx, "build id", buildID, "status", status, false, `UPDATE vanadis_builds SET status = $1, updated_at = CURRENT_TIMESTAMP WHERE id = $2;`, "failed to update vanadis build status", ErrBuildNotFound)
-}
-
-func (s *Store) UpdateBuildStatusMessageID(ctx context.Context, buildID, messageID string) error {
-	return s.execUpdateByID(ctx, "build id", buildID, "message_id", messageID, true, `UPDATE vanadis_builds SET status_message_id = $1, updated_at = CURRENT_TIMESTAMP WHERE id = $2;`, "failed to update vanadis build status_message_id", ErrBuildNotFound)
+// CompareAndSwapBuildStatusMessageID stores newID as the build's status message
+// only while the stored ID still equals oldID (NULL counts as ""). It reports
+// whether this caller won; a mismatch or unknown build is (false, nil), so
+// concurrent widget syncs that each re-posted the card leave exactly one stored.
+func (s *Store) CompareAndSwapBuildStatusMessageID(ctx context.Context, buildID, oldID, newID string) (bool, error) {
+	if s == nil || s.db == nil {
+		return false, errors.New("database connection is nil")
+	}
+	cleanID, cleanNew := strings.TrimSpace(buildID), strings.TrimSpace(newID)
+	if cleanID == "" || cleanNew == "" {
+		return false, errors.New("build id and new message_id cannot be empty")
+	}
+	tag, err := s.db.Exec(ctx, `UPDATE vanadis_builds SET status_message_id = $1, updated_at = CURRENT_TIMESTAMP WHERE id = $2 AND COALESCE(status_message_id, '') = $3;`, cleanNew, cleanID, strings.TrimSpace(oldID))
+	if err != nil {
+		return false, fmt.Errorf("failed to compare-and-swap vanadis build status_message_id: %w", err)
+	}
+	return tag.RowsAffected() == 1, nil
 }
 
 func (s *Store) ReserveChunkForLaunch(ctx context.Context, chunkID string) error {
@@ -83,10 +91,55 @@ func (s *Store) ReserveChunkForLaunch(ctx context.Context, chunkID string) error
 	return nil
 }
 
+// maxActionResumes caps the automatic resumes of an action chunk whose turns
+// end without a complete_chunk verdict.
+const maxActionResumes = 12
+
+// MaxActionResumes exposes maxActionResumes to the lifecycle and prompt layers.
+const MaxActionResumes = maxActionResumes
+
+// ActionResumeDispatchID identifies automatic resume k of an action chunk's
+// current generation.
+func ActionResumeDispatchID(chunk model.VanadisChunk, k int) string {
+	return model.ActionDispatchID(chunk) + "-resume-" + strconv.Itoa(k)
+}
+
+// ActionResumeIndex maps a current-generation action dispatch ID to its resume
+// ordinal: 0 for the launch turn, k for resume 1..maxActionResumes. Any other
+// ID, including other generations' IDs, reports false.
+func ActionResumeIndex(chunk model.VanadisChunk, dispatchID string) (int, bool) {
+	launch := model.ActionDispatchID(chunk)
+	if dispatchID == launch {
+		return 0, true
+	}
+	suffix, ok := strings.CutPrefix(dispatchID, launch+"-resume-")
+	if !ok {
+		return 0, false
+	}
+	k, err := strconv.Atoi(suffix)
+	if err != nil || k < 1 || k > maxActionResumes || strconv.Itoa(k) != suffix {
+		return 0, false
+	}
+	return k, true
+}
+
+func currentActionIdentity(chunk model.VanadisChunk, dispatchID string) bool {
+	_, ok := ActionResumeIndex(chunk, dispatchID)
+	return ok
+}
+
+// buildActive reports whether chunk verdicts still apply to a build. A failed
+// build keeps accepting them: a failed chunk blocks only its dependents.
+func buildActive(status string) bool {
+	return status == statusRunning || status == statusFailed
+}
+
 // ActionCompletionAllowed reports whether an action chunk completion applies.
+// A chunk with an attached repair PR qualifies once the repair deployed and
+// moved it back to running.
 func ActionCompletionAllowed(chunk model.VanadisChunk, buildStatus, dispatchID string) bool {
-	identityMatches := dispatchID == model.ActionDispatchID(chunk) || (dispatchID == "" && chunk.StallNudges == 0)
-	return chunk.Mode == chunkModeAction && chunk.Status == statusRunning && buildStatus == statusRunning && chunk.PRNumber == 0 && identityMatches
+	identityMatches := currentActionIdentity(chunk, dispatchID) || (dispatchID == "" && chunk.StallNudges == 0)
+	return chunk.Mode == chunkModeAction && chunk.Status == statusRunning && buildActive(buildStatus) && identityMatches
 }
 
 func (s *Store) CompleteActionChunk(ctx context.Context, chunkID, dispatchID string) (*VanadisAdvancementResult, error) {
@@ -266,14 +319,8 @@ func (s *Store) FailChunk(ctx context.Context, chunkID, reason, dispatchID strin
 		return nil, nil, false, fmt.Errorf("fail chunk %s: %w", chunkID, err)
 	}
 
-	if b.Status != statusFailed && b.Status != statusCancelled {
-		b.Status = statusFailed
-		b.UpdatedAt = now
-		const failBuildSQL = `UPDATE vanadis_builds SET status = 'failed', updated_at = CURRENT_TIMESTAMP WHERE id = $1;`
-		if _, err := tx.Exec(ctx, failBuildSQL, b.ID); err != nil {
-			return nil, nil, false, fmt.Errorf("fail build %s: %w", b.ID, err)
-		}
-	}
+	// Build status is decided only by reconcile: a failed chunk blocks its
+	// dependents while independent chunks keep running.
 
 	if err := tx.Commit(ctx); err != nil {
 		return nil, nil, false, fmt.Errorf("commit fail chunk tx: %w", err)
@@ -282,7 +329,7 @@ func (s *Store) FailChunk(ctx context.Context, chunkID, reason, dispatchID strin
 }
 
 func actionCompletionAccepted(chunk model.VanadisChunk, buildStatus, dispatchID string) bool {
-	if chunk.Status == statusCompleted && (buildStatus == statusRunning || buildStatus == statusCompleted) {
+	if chunk.Status == statusCompleted && (buildActive(buildStatus) || buildStatus == statusCompleted) {
 		chunk.Status = statusRunning
 		buildStatus = statusRunning
 	}
@@ -298,8 +345,8 @@ func ActionFailureAllowed(c model.VanadisChunk, buildStatus, dispatchID string) 
 	// identities, while old action-turn identities must still match the generation.
 	prIdentity := dispatchID == "" || strings.HasPrefix(dispatchID, "vanadis-"+c.ID+"-cifail-") ||
 		dispatchID == "vanadis-conflict-"+c.ID || strings.HasPrefix(dispatchID, "vanadis-conflict-"+c.ID+"-")
-	return buildStatus == statusRunning && c.Status != statusMerged && c.Status != statusDeploying && c.Status != statusDeployFailed &&
-		(prIdentity || dispatchID == model.ActionDispatchID(c))
+	return buildActive(buildStatus) && c.Status != statusMerged && c.Status != statusDeploying && c.Status != statusDeployFailed &&
+		(prIdentity || currentActionIdentity(c, dispatchID))
 }
 
 func failureSkipped(c model.VanadisChunk, buildStatus, dispatchID string) bool {

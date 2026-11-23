@@ -33,8 +33,6 @@ type wantSpan struct {
 	attrs  []attribute.KeyValue
 }
 
-const leakedPAT = "ghp_abcdefghijklmnopqrstuvwxyz0123456789"
-
 type tracingTurnSinkCase struct {
 	name     string
 	events   []sinkEvent
@@ -232,15 +230,17 @@ func TestTracingTurnSink(t *testing.T) {
 			},
 		},
 		{
-			name: "error status is redacted",
+			name: "error status passes through",
 			events: []sinkEvent{
 				{start: true, call: ToolCall{ID: "toolu_x", Name: "Bash"}},
-				{call: ToolCall{ID: "toolu_x", Name: "Bash"}, status: "failed: token " + leakedPAT},
+				{call: ToolCall{ID: "toolu_x", Name: "Bash"}, status: "failed: exit 1"},
 			},
-			turnErr:  errors.New("push failed: https://x-access-token:" + leakedPAT + "@github.com/o/r"),
-			want:     []wantSpan{{name: "execute_tool Bash", parent: "turn", code: codes.Error}, {name: "chat", parent: "turn", code: codes.Error}},
-			innerOK:  2,
-			noLeakOf: leakedPAT,
+			turnErr: errors.New("push failed: remote rejected"),
+			want: []wantSpan{
+				{name: "execute_tool Bash", parent: "turn", code: codes.Error, desc: "failed: exit 1", attrs: []attribute.KeyValue{AttrToolStatus.String("failed: exit 1")}},
+				{name: "chat", parent: "turn", code: codes.Error, desc: "push failed: remote rejected"},
+			},
+			innerOK: 2,
 		},
 	}
 	for _, tc := range tests {
@@ -412,12 +412,19 @@ func TestTracingTurnSink_ClaimToolSpan(t *testing.T) {
 			}
 			got := make([]trace.SpanContext, len(tc.claims))
 			for i, c := range tc.claims[:len(tc.claims)-1] {
-				got[i], _ = sink.ClaimToolSpan(context.Background(), c.server, c.tool, c.callID)
+				sc, ok := sink.ClaimToolSpan(context.Background(), c.server, c.tool, c.callID)
+				if ok != (c.want != "") {
+					t.Fatalf("ClaimToolSpan(%s, %s, %s) ok = %v, want %v", c.server, c.tool, c.callID, ok, c.want != "")
+				}
+				got[i] = sc
 			}
 			last := tc.claims[len(tc.claims)-1]
 			done := make(chan trace.SpanContext, 1)
 			go func() {
-				sc, _ := sink.ClaimToolSpan(context.Background(), last.server, last.tool, last.callID)
+				sc, ok := sink.ClaimToolSpan(context.Background(), last.server, last.tool, last.callID)
+				if ok != (last.want != "") {
+					t.Errorf("ClaimToolSpan(%s, %s, %s) ok = %v, want %v", last.server, last.tool, last.callID, ok, last.want != "")
+				}
 				done <- sc
 			}()
 			if tc.openLater != nil {

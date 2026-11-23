@@ -7,9 +7,12 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 
+	"github.com/azylman/aerial/pkg/prwire"
 	"github.com/azylman/aerial/pkg/pubsub"
+	"github.com/azylman/aerial/pkg/strutil"
 	"github.com/azylman/aerial/services/vanadis-restate/internal/model"
 	"github.com/azylman/aerial/services/vanadis-restate/internal/store"
 )
@@ -23,7 +26,8 @@ const chunkModeAction = "action"
 var declKeywordPrefixes = []string{"func ", "type ", "var ", "const ", "export ", "function ", "class "}
 
 // FormatCIFailurePrompt formats the failure prompt when a CI check fails.
-func FormatCIFailurePrompt(ev pubsub.PRLifecycleEvent, details string) string {
+func FormatCIFailurePrompt(ev pubsub.PRLifecycleEvent, details, chunkID, dispatchID string) string {
+	failChunk := fmt.Sprintf("call fail_chunk(chunk_id=%s, dispatch_id=%s, reason=\"BLOCKED: <reason and the decision needed>\") and then end the turn", chunkID, dispatchID)
 	var extraParts []string
 	cleanBranch := strings.TrimPrefix(strings.TrimSpace(ev.Branch), "refs/heads/")
 	if cleanBranch != "" {
@@ -34,18 +38,19 @@ func FormatCIFailurePrompt(ev pubsub.PRLifecycleEvent, details string) string {
 	}
 	extraLine := strings.Join(extraParts, "\n")
 
-	shortRepo := store.FirstNonEmpty(model.CleanRepoName(ev.Repo), "aerial")
-	branchArg := store.FirstNonEmpty(cleanBranch, "<branch>")
+	shortRepo := strutil.FirstNonEmpty(model.CleanRepoName(ev.Repo), "aerial")
+	branchArg := strutil.FirstNonEmpty(cleanBranch, "<branch>")
 	checkoutAndSubmit := fmt.Sprintf("Check out the existing PR branch via '/share/aerial/scripts/aerial-pr.sh init %s --branch %s' and push updates via '/share/aerial/scripts/aerial-pr.sh submit <scratch_dir> \"<commit_msg>\"' (PR_DESCRIPTION.md is not required when updating an existing PR; never run bare 'git push').", shortRepo, branchArg)
 
 	directive := "[VANADIS CI REMEDIATION — MANDATORY]\n" +
-		"Investigate the failing logs, diagnose the root cause, verify locally, and remediate this turn. This turn must end in exactly one machine-visible outcome: (1) a fix pushed to the existing PR branch, or (2) a final line in the form REMEDIATION BLOCKED: <reason and the decision needed> when genuinely blocked. " + checkoutAndSubmit + "\n" +
-		"Ending this turn with neither a commit nor that blocked final line is a failed remediation, not a completed one. A recommendation, waiver request, or \"no legitimate fix\" conclusion written only in your final response is invisible to the thread and counts as no outcome.\n" +
+		"Investigate the failing logs, diagnose the root cause, verify locally, and remediate this turn. This turn must end in exactly one machine-visible outcome: (1) a fix pushed to the existing PR branch, or (2) when genuinely blocked, " + failChunk + ". " + checkoutAndSubmit + "\n" +
+		"If the details above lack the failing log, list the run's jobs via curl http://127.0.0.1:4028/internal/github-api/repos/<owner>/<repo>/actions/runs/<run_id>/jobs and fetch failed job logs from .../actions/jobs/<job_id>/logs (gh is not installed; github.com job pages need sign-in).\n" +
+		"Ending this turn with none of these outcomes pauses the chunk for human review automatically and is a failed remediation, not a completed one. A recommendation, waiver request, or \"no legitimate fix\" conclusion written only in your final response is invisible to the thread and counts as no outcome.\n" +
 		"If the correct fix conflicts with the chunk's stated boundaries, do not silently stop: apply the smallest boundary-crossing fix that makes the gate pass, note the scope change in the commit and PR description, and let the next chunk absorb it."
-	if isRoboRevCheckName(ev.CheckName) {
+	if prwire.IsRoboRevCheck(ev.CheckName) {
 		directive = "[VANADIS CI REMEDIATION — MANDATORY]\n" +
-			fmt.Sprintf("Please critically evaluate each RoboRev finding against codebase reality and architectural intent. This turn must end in exactly one machine-visible outcome: (1) a verified fix pushed to the existing PR branch, (2) a technical rebuttal recorded via '/share/aerial/scripts/aerial-pr.sh --repo %s override-roborev %d '<technical_rebuttal>'', or (3) a final line in the form REMEDIATION BLOCKED: <reason and the decision needed> when genuinely blocked. %s\n", shortRepo, ev.PRNumber, checkoutAndSubmit) +
-			"Ending this turn with no commit, no override, and no blocked final line is a failed remediation, not a completed one. A recommendation, waiver request, or \"no legitimate fix\" conclusion written only in your final response is invisible to the thread and counts as no outcome.\n" +
+			fmt.Sprintf("Please critically evaluate each RoboRev finding against codebase reality and architectural intent. This turn must end in exactly one machine-visible outcome: (1) a verified fix pushed to the existing PR branch, (2) a technical rebuttal recorded via '/share/aerial/scripts/aerial-pr.sh --repo %s override-roborev %d '<technical_rebuttal>'', or (3) when genuinely blocked, %s. %s\n", shortRepo, ev.PRNumber, failChunk, checkoutAndSubmit) +
+			"Ending this turn with none of these outcomes pauses the chunk for human review automatically and is a failed remediation, not a completed one. A recommendation, waiver request, or \"no legitimate fix\" conclusion written only in your final response is invisible to the thread and counts as no outcome.\n" +
 			"If the correct fix conflicts with the chunk's stated boundaries, do not silently stop: apply the smallest boundary-crossing fix that makes the gate pass, note the scope change in the commit and PR description, and let the next chunk absorb it."
 	}
 	return formatErrorDetailsBlock(
@@ -53,6 +58,35 @@ func FormatCIFailurePrompt(ev pubsub.PRLifecycleEvent, details string) string {
 		details, extraLine,
 		directive,
 	)
+}
+
+// FormatInlineCapRemediationPrompt formats the prompt sent to the build's source thread
+// when worker CI remediation attempts are exhausted.
+func FormatInlineCapRemediationPrompt(ev pubsub.PRLifecycleEvent, details, chunkID string, failCount, maxAttempts int) string {
+	var extraParts []string
+	cleanBranch := strings.TrimPrefix(strings.TrimSpace(ev.Branch), "refs/heads/")
+	if cleanBranch != "" {
+		extraParts = append(extraParts, "Branch: "+cleanBranch)
+	}
+	if cleanURL := strings.TrimSpace(ev.CheckURL); cleanURL != "" {
+		extraParts = append(extraParts, "Check URL: "+cleanURL)
+	}
+	extraLine := strings.Join(extraParts, "\n")
+
+	shortRepo := strutil.FirstNonEmpty(model.CleanRepoName(ev.Repo), "aerial")
+	branchArg := strutil.FirstNonEmpty(cleanBranch, "<branch>")
+	header := fmt.Sprintf("CI check %q failed %d times for PR #%d on %s (chunk: %s, head commit: %s; worker remediation cap %d/%d reached).", ev.CheckName, failCount, ev.PRNumber, ev.Repo, chunkID, ev.HeadSHA, maxAttempts, maxAttempts)
+
+	var directive string
+	if prwire.IsRoboRevCheck(ev.CheckName) {
+		directive = "[VANADIS INLINE THREAD CI REMEDIATION — MANDATORY]\n" +
+			fmt.Sprintf("Worker CI remediation cap (%d/%d) reached. As the source-thread agent running in-line on the thread's high-effort model with full thread context, please remediate in this turn by critically evaluating each RoboRev finding against codebase reality and full thread context and either (1) checking out '/share/aerial/scripts/aerial-pr.sh init %s --branch %s' and pushing a verified fix via '/share/aerial/scripts/aerial-pr.sh submit <scratch_dir> \"<commit_msg>\"', or (2) recording a commit-SHA-bound technical rebuttal via '/share/aerial/scripts/aerial-pr.sh --repo %s override-roborev %d '<technical_rebuttal>''. Note that either action automatically recovers the paused chunk to pr_opened and resumes the build.", maxAttempts, maxAttempts, shortRepo, branchArg, shortRepo, ev.PRNumber)
+	} else {
+		directive = "[VANADIS INLINE THREAD CI REMEDIATION — MANDATORY]\n" +
+			fmt.Sprintf("Worker CI remediation cap (%d/%d) reached. As the source-thread agent running in-line on the thread's high-effort model with full thread context, please remediate in this turn by checking out '/share/aerial/scripts/aerial-pr.sh init %s --branch %s', diagnosing the root cause, verifying locally, and pushing a verified fix via '/share/aerial/scripts/aerial-pr.sh submit <scratch_dir> \"<commit_msg>\"'. Either action automatically recovers the paused chunk to pr_opened and resumes the build.", maxAttempts, maxAttempts, shortRepo, branchArg)
+	}
+
+	return formatErrorDetailsBlock(header, details, extraLine, directive)
 }
 
 // FormatNoPRResumePrompt builds a self-contained resume prompt for a PR chunk
@@ -72,10 +106,40 @@ The original chunk instructions follow.
 %s`, chunkID, chunkID, chunkID, chunkID, chunkPrompt)
 }
 
+// actionVerdictContract states how an action chunk finishes. Both the launch
+// prompt and every automatic resume carry it so a chunk launched under an older
+// prompt learns complete_chunk on its first resume.
+func actionVerdictContract(chunkID, dispatchID string, maxResumes int) string {
+	return fmt.Sprintf(`=== Action Chunk Verdict Contract ===
+- This chunk completes ONLY when you call complete_chunk(chunk_id=%q, dispatch_id=%q, summary="<PASS evidence>"). Ending a turn without it never completes the chunk: Vanadis resumes it automatically (up to %d times) and then fails it as RESUMABLE.
+- Turns stop at about 1h. Wait at most 45 min per turn on anything (deploys, rollouts, backfills). If work remains, write a checkpoint (what is done, what is next) to /tmp/vanadis-%s/checkpoint.md, summarize it in your final message and end the turn; the next automatic resume continues from that checkpoint.
+- A repair PR (/share/aerial/scripts/aerial-pr.sh submit "$SCRATCH_DIR" "<commit_msg>" --vanadis-chunk %s) is a step, not the verdict: after it deploys, re-verify live and then call complete_chunk.
+- For blockers outside this chunk's control, call fail_chunk(chunk_id=%q, dispatch_id=%q, reason="RESUMABLE: <blocker>"). Fix forward on test, lint or CI failures instead.
+`, chunkID, dispatchID, maxResumes, chunkID, chunkID, chunkID, dispatchID)
+}
+
+// FormatActionResumePrompt builds the self-contained prompt for automatic
+// resume k of an action chunk whose previous turn ended without a verdict. It
+// re-includes the full chunk prompt because sessions rotate.
+func FormatActionResumePrompt(chunk model.VanadisChunk, chunkPrompt string, k, maxResumes int) string {
+	chunkID := strings.TrimSpace(chunk.ID)
+	chunk.ID = chunkID
+	dispatchID := store.ActionResumeDispatchID(chunk, k)
+	return fmt.Sprintf(`[VANADIS AUTOMATIC RESUME %d/%d]
+Your previous turn for action chunk %s ended without calling complete_chunk. Dispatch ID for this turn: %s (use it, not the one in the original prompt, for complete_chunk and fail_chunk).
+
+Continue from your checkpoint (/tmp/vanadis-%s/checkpoint.md and your previous final message, if present); do not restart work that is already done and verified.
+
+%s
+The original chunk instructions follow.
+
+%s`, k, maxResumes, chunkID, dispatchID, chunkID, actionVerdictContract(chunkID, dispatchID, maxResumes), chunkPrompt)
+}
+
 // FormatConflictPrompt formats the conflict prompt when merge conflict is detected.
 func FormatConflictPrompt(ev pubsub.PRLifecycleEvent) string {
-	shortRepo := store.FirstNonEmpty(model.CleanRepoName(ev.Repo), "aerial")
-	cleanBranch := store.FirstNonEmpty(strings.TrimPrefix(strings.TrimSpace(ev.Branch), "refs/heads/"), "<branch>")
+	shortRepo := strutil.FirstNonEmpty(model.CleanRepoName(ev.Repo), "aerial")
+	cleanBranch := strutil.FirstNonEmpty(strings.TrimPrefix(strings.TrimSpace(ev.Branch), "refs/heads/"), "<branch>")
 	return fmt.Sprintf("Merge conflict detected on PR #%d on %s (branch: %s, head: %s). Please check out the branch via '/share/aerial/scripts/aerial-pr.sh init %s --branch %s', merge origin/main to resolve conflicts, verify locally, and push to update the PR via '/share/aerial/scripts/aerial-pr.sh submit <scratch_dir> \"<commit_msg>\"' (PR_DESCRIPTION.md is not required when updating an existing PR; never run bare 'git push').", ev.PRNumber, ev.Repo, cleanBranch, ev.HeadSHA, shortRepo, cleanBranch)
 }
 
@@ -104,7 +168,7 @@ func formatDeployFailureHeader(repo, commit, jobName string, prNumber int) strin
 
 // FormatDeployFailurePrompt formats the failure prompt when deployment or git sync fails.
 func FormatDeployFailurePrompt(ev pubsub.PRLifecycleEvent) string {
-	commit := store.FirstNonEmpty(ev.MergeSHA, ev.HeadSHA)
+	commit := strutil.FirstNonEmpty(ev.MergeSHA, ev.HeadSHA)
 	cleanEvent := strings.ToLower(strings.TrimSpace(ev.Event))
 	var extraLine string
 	cleanBranch := strings.TrimPrefix(strings.TrimSpace(ev.Branch), "refs/heads/")
@@ -133,23 +197,9 @@ func formatErrorDetailsBlock(header, details, extraLine, footer string) string {
 	return strings.Join(lines, "\n")
 }
 
-func isRoboRevCheckName(name string) bool {
-	lower := strings.ToLower(strings.TrimSpace(name))
-	return strings.Contains(lower, "roborev")
-}
-
-// TruncatePromptRunes caps s at maxRunes runes with a truncation marker.
-func TruncatePromptRunes(s string, maxRunes int) string {
-	runes := []rune(s)
-	if len(runes) <= maxRunes {
-		return s
-	}
-	return string(runes[:maxRunes]) + "... (truncated)"
-}
-
 // TruncatePromptDetails sanitizes details for prompt embedding.
 func TruncatePromptDetails(s string) string {
-	return TruncatePromptRunes(strings.ReplaceAll(s, "```", "'''"), maxPromptRunes)
+	return strutil.TruncateRunes(strings.ReplaceAll(s, "```", "'''"), maxPromptRunes)
 }
 
 // AST Symbol Spans resolution
@@ -171,15 +221,6 @@ func normalizeSymbolName(symbol string) string {
 		sym = sym[idx+1:]
 	}
 	return strings.TrimSpace(sym)
-}
-
-func hasAnyPrefix(s string, prefixes []string) bool {
-	for _, p := range prefixes {
-		if strings.HasPrefix(s, p) {
-			return true
-		}
-	}
-	return false
 }
 
 func isIdentByte(b byte) bool {
@@ -231,7 +272,7 @@ func FindSymbolSpan(content, symbol string) (int, int, bool) {
 	lines := strings.Split(strings.ReplaceAll(content, "\r\n", "\n"), "\n")
 	for idx, line := range lines {
 		clean := strings.TrimSpace(stripLineComment(line))
-		if hasAnyPrefix(clean, declKeywordPrefixes) && containsIdent(clean, sym) {
+		if slices.ContainsFunc(declKeywordPrefixes, func(p string) bool { return strings.HasPrefix(clean, p) }) && containsIdent(clean, sym) {
 			end := idx + 1
 			for j := idx + 1; j < len(lines); j++ {
 				if strings.HasPrefix(lines[j], "}") {
@@ -297,7 +338,7 @@ func FormatChunkPromptWithShareRoot(build model.VanadisBuild, chunks []model.Van
 	isActionChunk := active.Mode == chunkModeAction
 	activeRepo := ""
 	if !isActionChunk {
-		activeRepo = store.FirstNonEmpty(model.CleanRepoName(active.Repo), "aerial")
+		activeRepo = strutil.FirstNonEmpty(model.CleanRepoName(active.Repo), "aerial")
 	}
 	var sb strings.Builder
 	fmt.Fprintf(&sb, "[VANADIS BUILD CHUNK EXECUTION]\nBuild ID: %s\n", build.ID)
@@ -325,7 +366,7 @@ func FormatChunkPromptWithShareRoot(build model.VanadisBuild, chunks []model.Van
 		sb.WriteString("\n")
 	}
 
-	targetFilesStr := store.FirstNonEmpty(strings.Join(active.TargetFiles, ", "), "(none specified)")
+	targetFilesStr := strutil.FirstNonEmpty(strings.Join(active.TargetFiles, ", "), "(none specified)")
 	fmt.Fprintf(&sb, "=== Active Chunk (Chunk %d of %d) ===\nChunk ID: %s\nTitle: %s\n", activeIdx+1, total, active.ID, active.Title)
 	if isActionChunk {
 		fmt.Fprintf(&sb, "Dispatch ID: %s\nInclude this dispatch_id in action completion and failure calls.\n", model.ActionDispatchID(active))
@@ -352,6 +393,13 @@ func FormatChunkPromptWithShareRoot(build model.VanadisBuild, chunks []model.Van
 		sb.WriteString("\n")
 	}
 
+	if isActionChunk {
+		sb.WriteString(actionVerdictContract(active.ID, model.ActionDispatchID(active), store.MaxActionResumes))
+		fmt.Fprintf(&sb, "\n=== Mandatory Execution Contract ===\n"+
+			"1. Execute chunk instructions directly in this turn.\n"+
+			"2. Finish only with complete_chunk(chunk_id=%q, dispatch_id=%q, summary=\"<PASS evidence>\").\n", active.ID, model.ActionDispatchID(active))
+		return sb.String(), nil
+	}
 	fmt.Fprintf(&sb, "=== Mandatory Execution Contract ===\n"+
 		"1. Execute chunk instructions directly in this turn.\n"+
 		"2. Submit via `/share/aerial/scripts/aerial-pr.sh submit \"$SCRATCH_DIR\" \"<commit_msg>\" --vanadis-chunk %s`.\n", active.ID)

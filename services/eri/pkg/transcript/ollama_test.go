@@ -140,7 +140,9 @@ func setupMockEmbedder(tc generateEmbeddingCase, receivedPrompt *string) *Client
 			return nil, errors.New("connection refused")
 		}
 		var reqBody embeddingRequest
-		_ = json.NewDecoder(req.Body).Decode(&reqBody)
+		if err := json.NewDecoder(req.Body).Decode(&reqBody); err != nil {
+			return nil, err
+		}
 		*receivedPrompt = reqBody.Prompt
 
 		resp := mockJSONResponse(tc.httpStatus, tc.httpBody)
@@ -150,7 +152,7 @@ func setupMockEmbedder(tc generateEmbeddingCase, receivedPrompt *string) *Client
 		return resp, nil
 	})
 
-	baseURL := "http://mock-ollama:11434"
+	baseURL := "http://senses.aerial:8080"
 	if tc.badURL {
 		baseURL = "http://\x7f"
 	}

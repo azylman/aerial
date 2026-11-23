@@ -6,65 +6,57 @@ const fs = require('fs');
 const path = require('path');
 const os = require('os');
 const prepareConfig = require('../prepare-config');
-const { run, resolveDefaultCoreDir, resolveDefaultUserDir, resolveDefaultAppConfigDir, resolveYamlParser, parseYaml, safeRead, writeAtomic, copyFallback, composeParts, resolveThemeAsset, escapeShellValue } = prepareConfig;
+const { run, resolveDefaultCoreDir, resolveDefaultUserDir, resolveDefaultAppConfigDir, copyFallback, composeParts, resolveThemeAsset } = prepareConfig;
 
-test('prepare-config: exports correct functions and omits startWatcher', () => {
-  assert.equal(typeof run, 'function');
-  assert.equal(typeof resolveDefaultCoreDir, 'function');
-  assert.equal(typeof resolveDefaultUserDir, 'function');
-  assert.equal(typeof resolveDefaultAppConfigDir, 'function');
-  assert.equal(typeof resolveYamlParser, 'function');
-  assert.equal(typeof parseYaml, 'function');
-  assert.equal(typeof safeRead, 'function');
-  assert.equal(typeof writeAtomic, 'function');
-  assert.equal(typeof copyFallback, 'function');
-  assert.equal(typeof composeParts, 'function');
-  assert.equal(typeof resolveThemeAsset, 'function');
-  assert.equal(typeof escapeShellValue, 'function');
+const stubJsonYaml = { load: (str) => JSON.parse(str), dump: (obj) => JSON.stringify(obj) };
+
+function makeTree(prefix, dirs = ['user', 'core', 'target']) {
+  const base = fs.mkdtempSync(path.join(os.tmpdir(), prefix));
+  const out = { base };
+  for (const d of dirs) {
+    out[d] = path.join(base, d);
+    fs.mkdirSync(out[d], { recursive: true });
+  }
+  return out;
+}
+
+test('prepare-config: omits startWatcher', () => {
   assert.equal(prepareConfig.startWatcher, undefined);
 });
 
-test('prepare-config: resolveDefaultCoreDir prefers /local/core-homepage/config when present', () => {
-  const dir = resolveDefaultCoreDir((p) => p === '/local/core-homepage/config');
-  assert.equal(dir, '/local/core-homepage/config');
+test('prepare-config: resolveDefaultCoreDir picks the first present candidate', () => {
+  const tests = [
+    { name: '/local mount', present: '/local/core-homepage/config', want: '/local/core-homepage/config' },
+    { name: '/share checkout', present: '/share/aerial/services/homepage/config', want: '/share/aerial/services/homepage/config' },
+    { name: 'image fallback', present: null, want: '/app/core-homepage/config' }
+  ];
+  for (const tc of tests) {
+    assert.equal(resolveDefaultCoreDir((p) => p === tc.present), tc.want, tc.name);
+  }
 });
 
-test('prepare-config: resolveDefaultCoreDir falls back to /share/aerial/services/homepage/config when present', () => {
-  const dir = resolveDefaultCoreDir((p) => p === '/share/aerial/services/homepage/config');
-  assert.equal(dir, '/share/aerial/services/homepage/config');
+test('prepare-config: resolveDefaultUserDir picks the first present candidate', () => {
+  const tests = [
+    { name: '/local mount', present: '/local/user-homepage', want: '/local/user-homepage' },
+    { name: 'share fallback', present: null, want: '/share/aerial-config/homepage' }
+  ];
+  for (const tc of tests) {
+    assert.equal(resolveDefaultUserDir((p) => p === tc.present), tc.want, tc.name);
+  }
 });
 
-test('prepare-config: resolveDefaultCoreDir falls back to /app/core-homepage/config when /local and /share absent', () => {
-  const dir = resolveDefaultCoreDir(() => false);
-  assert.equal(dir, '/app/core-homepage/config');
-});
-
-test('prepare-config: resolveDefaultUserDir prefers /local/user-homepage when present', () => {
-  const dir = resolveDefaultUserDir((p) => p === '/local/user-homepage');
-  assert.equal(dir, '/local/user-homepage');
-});
-
-test('prepare-config: resolveDefaultUserDir falls back to /share/aerial-config/homepage when /local/user-homepage absent', () => {
-  const dir = resolveDefaultUserDir(() => false);
-  assert.equal(dir, '/share/aerial-config/homepage');
-});
-
-test('prepare-config: resolveDefaultAppConfigDir returns /app/config when present and null when absent', () => {
-  assert.equal(resolveDefaultAppConfigDir((p) => p === '/app/config'), '/app/config');
-  assert.equal(resolveDefaultAppConfigDir(() => false), null);
+test('prepare-config: resolveDefaultAppConfigDir returns /app/config only when present', () => {
+  const tests = [
+    { name: 'present', present: '/app/config', want: '/app/config' },
+    { name: 'absent', present: null, want: null }
+  ];
+  for (const tc of tests) {
+    assert.equal(resolveDefaultAppConfigDir((p) => p === tc.present), tc.want, tc.name);
+  }
 });
 
 test('prepare-config: run mirrors configs and composed custom.css to appConfigDir', () => {
-  const tmpBase = fs.mkdtempSync(path.join(os.tmpdir(), 'aerial-prepare-appcfg-'));
-  const userDir = path.join(tmpBase, 'user');
-  const coreDir = path.join(tmpBase, 'core');
-  const targetDir = path.join(tmpBase, 'target');
-  const appConfigDir = path.join(tmpBase, 'app-config');
-
-  fs.mkdirSync(userDir, { recursive: true });
-  fs.mkdirSync(coreDir, { recursive: true });
-  fs.mkdirSync(targetDir, { recursive: true });
-  fs.mkdirSync(appConfigDir, { recursive: true });
+  const { base: tmpBase, user: userDir, core: coreDir, target: targetDir, 'app-config': appConfigDir } = makeTree('aerial-prepare-appcfg-', ['user', 'core', 'target', 'app-config']);
 
   try {
     fs.writeFileSync(path.join(coreDir, 'custom.css'), '/* stale theme */\nbody { background: #000; }\n', 'utf8');
@@ -74,11 +66,7 @@ test('prepare-config: run mirrors configs and composed custom.css to appConfigDi
     fs.writeFileSync(path.join(appConfigDir, 'custom.css'), '/* stale theme */\n', 'utf8');
     fs.writeFileSync(path.join(appConfigDir, 'extra.js'), '', 'utf8');
 
-    const stubYaml = {
-      load: (str) => JSON.parse(str),
-      dump: (obj) => JSON.stringify(obj)
-    };
-    run({ coreDir, userDir, targetDir, appConfigDir, yaml: stubYaml, candidatePaths: [] });
+    run({ coreDir, userDir, targetDir, appConfigDir, yaml: stubJsonYaml, candidatePaths: [] });
 
     assert.equal(fs.readFileSync(path.join(appConfigDir, 'custom.css'), 'utf8'), '/* stale theme */\nbody { background: #000; }\n');
     assert.equal(fs.readFileSync(path.join(targetDir, 'custom.css'), 'utf8'), '/* stale theme */\nbody { background: #000; }\n');
@@ -91,80 +79,9 @@ test('prepare-config: run mirrors configs and composed custom.css to appConfigDi
   }
 });
 
-test('prepare-config: run executes clean one-shot merge', () => {
-  const tmpBase = fs.mkdtempSync(path.join(os.tmpdir(), 'aerial-prepare-test-'));
-  const userDir = path.join(tmpBase, 'user');
-  const coreDir = path.join(tmpBase, 'core');
-  const targetDir = path.join(tmpBase, 'target');
-
-  fs.mkdirSync(userDir, { recursive: true });
-  fs.mkdirSync(coreDir, { recursive: true });
-  fs.mkdirSync(targetDir, { recursive: true });
-
-  try {
-    fs.writeFileSync(path.join(coreDir, 'custom.css'), '/* core css */\n', 'utf8');
-    fs.writeFileSync(path.join(userDir, 'custom.css'), '/* user css */\n', 'utf8');
-
-    run({ coreDir, userDir, targetDir });
-
-    assert.equal(fs.readFileSync(path.join(targetDir, 'custom.css'), 'utf8'), '/* core css */\n/* user css */\n');
-    if (resolveYamlParser()) {
-      const summaryLogPath = path.join(targetDir, 'merge-summary.log');
-      assert.ok(fs.existsSync(summaryLogPath));
-    }
-  } finally {
-    fs.rmSync(tmpBase, { recursive: true, force: true });
-  }
-});
-
-test('prepare-config: candidate config fallback when /local/homepage.yaml is comment-only', () => {
-  const tmpBase = fs.mkdtempSync(path.join(os.tmpdir(), 'aerial-prepare-cand-test-'));
-  const userDir = path.join(tmpBase, 'user');
-  const coreDir = path.join(tmpBase, 'core');
-  const targetDir = path.join(tmpBase, 'target');
-  const localConfig = path.join(tmpBase, 'local.yaml');
-  const fallbackConfig = path.join(tmpBase, 'fallback.yaml');
-
-  fs.mkdirSync(userDir, { recursive: true });
-  fs.mkdirSync(coreDir, { recursive: true });
-  fs.mkdirSync(targetDir, { recursive: true });
-
-  // localConfig has only comments (evaluates to null/empty)
-  fs.writeFileSync(localConfig, '# Config Hash: 1234567890abcdef\n', 'utf8');
-  // fallbackConfig has actual values
-  fs.writeFileSync(fallbackConfig, 'port: "3002"\nallowed_hosts: "*"\n', 'utf8');
-
-  const origConfigPath = process.env.CONFIG_PATH;
-  try {
-    // Point CONFIG_PATH to localConfig, but when it is comment-only, we want to test parseYaml behavior
-    const yaml = resolveYamlParser();
-    if (yaml) {
-      const parsedLocal = parseYaml(yaml, fs.readFileSync(localConfig, 'utf8'), localConfig);
-      assert.equal(parsedLocal, null);
-
-      const parsedFallback = parseYaml(yaml, fs.readFileSync(fallbackConfig, 'utf8'), fallbackConfig);
-      assert.deepEqual(parsedFallback, { port: '3002', allowed_hosts: '*' });
-    }
-  } finally {
-    if (origConfigPath !== undefined) {
-      process.env.CONFIG_PATH = origConfigPath;
-    } else {
-      delete process.env.CONFIG_PATH;
-    }
-    fs.rmSync(tmpBase, { recursive: true, force: true });
-  }
-});
-
 test('prepare-config: run generates runtime.env with generic HOMEPAGE_VAR_<KEY> entries and safe shell literals', () => {
-  const tmpBase = fs.mkdtempSync(path.join(os.tmpdir(), 'aerial-prepare-env-test-'));
-  const userDir = path.join(tmpBase, 'user');
-  const coreDir = path.join(tmpBase, 'core');
-  const targetDir = path.join(tmpBase, 'target');
+  const { base: tmpBase, user: userDir, core: coreDir, target: targetDir } = makeTree('aerial-prepare-env-test-');
   const configFile = path.join(tmpBase, 'homepage.yaml');
-
-  fs.mkdirSync(userDir, { recursive: true });
-  fs.mkdirSync(coreDir, { recursive: true });
-  fs.mkdirSync(targetDir, { recursive: true });
 
   const mockConfig = {
     port: '3005',
@@ -188,15 +105,11 @@ test('prepare-config: run generates runtime.env with generic HOMEPAGE_VAR_<KEY> 
     'invalid-key-hyphen': 'skip-me'
   };
 
-  const stubYaml = {
-    load: (str) => JSON.parse(str),
-    dump: (obj) => JSON.stringify(obj)
-  };
 
   fs.writeFileSync(configFile, JSON.stringify(mockConfig), 'utf8');
 
   try {
-    run({ coreDir, userDir, targetDir, yaml: stubYaml, candidatePaths: [configFile] });
+    run({ coreDir, userDir, targetDir, yaml: stubJsonYaml, candidatePaths: [configFile] });
 
     const envPath = path.join(targetDir, 'runtime.env');
     assert.ok(fs.existsSync(envPath), 'runtime.env should be generated');
@@ -264,16 +177,12 @@ test('prepare-config: loads cleanly and merges core and user configs when /local
     assert.equal(fs.existsSync(path.join(localCoreDir, 'lib', 'merge.js')), false);
     const localPrepare = require(path.join(localCoreDir, 'prepare-config.js'));
 
-    const stubYaml = {
-      load: (str) => JSON.parse(str),
-      dump: (obj) => JSON.stringify(obj)
-    };
 
     localPrepare.run({
       coreDir: localCoreConfigDir,
       userDir,
       targetDir,
-      yaml: stubYaml,
+      yaml: stubJsonYaml,
       candidatePaths: []
     });
 
@@ -315,8 +224,6 @@ test('prepare-config: resolveThemeAsset prefers the core mount, then the repo we
 });
 
 const CORE_REL = 'repo/services/homepage/config';
-const stubJsonYaml = { load: (str) => JSON.parse(str), dump: (obj) => JSON.stringify(obj) };
-
 function writeFixtureTree(base, files) {
   for (const [rel, content] of Object.entries(files)) {
     const full = path.join(base, rel);

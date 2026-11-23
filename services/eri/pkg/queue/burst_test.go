@@ -1,13 +1,11 @@
 package queue
 
 import (
-	"context"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/azylman/aerial/services/eri/pkg/db"
-	"github.com/azylman/aerial/services/eri/pkg/runner"
 )
 
 func mkBurstMsg(id, content string, created ...time.Time) db.Message {
@@ -371,7 +369,7 @@ func TestIsTier1Wake(t *testing.T) {
 		{"structured role in mention_role_ids", db.Message{Content: "<USER_REQUEST>\n- content: check this\n- mention_role_ids: [999888]\n</USER_REQUEST>"}, "123", []string{"999888"}, true},
 		{"non-matching replying_to author", db.Message{Content: "<USER_REQUEST>\n- replying_to:\n  author: @random_user\n- content: hi\n</USER_REQUEST>"}, "123", nil, false},
 		{"bot in mention_user_ids", db.Message{Content: "<USER_REQUEST>\n- content: please help\n- mention_user_ids: [123]\n</USER_REQUEST>"}, "123", nil, true},
-		{"Zero incident quoted role snowflake", db.Message{Content: "<USER_REQUEST>\n- content: verified '<@&1543462881624858624>' role snowflake\n- mentions: [harperwallbanger]\n- mention_user_ids: [179407724335988736]\n- mention_role_ids: []\n</USER_REQUEST>"}, "1542035925603713086", []string{"1543462881624858624"}, false},
+		{"Zero incident quoted role snowflake", db.Message{Content: "<USER_REQUEST>\n- content: verified '<@&1000000000000000003>' role snowflake\n- mentions: [example-user]\n- mention_user_ids: [1000000000000000002]\n- mention_role_ids: []\n</USER_REQUEST>"}, "1000000000000000001", []string{"1000000000000000003"}, false},
 		{"replying_to without author line", db.Message{Content: "<USER_REQUEST>\n- replying_to:\n- mentions: [user]\n- content: hi\n</USER_REQUEST>"}, "bot-123", nil, false},
 		{"body direct snowflake mention", db.Message{Content: "hey <@12345> check this"}, "12345", nil, true},
 		{"body role snowflake mention", db.Message{Content: "hey <@&role999> check this"}, "99999", []string{"role999"}, true},
@@ -507,7 +505,7 @@ func TestAssembleTurnPrompt(t *testing.T) {
 	}
 }
 
-func TestResolvePoolKey_And_ResolveScopeKey_TableDriven(t *testing.T) {
+func TestResolvePoolKey_TableDriven(t *testing.T) {
 	t.Parallel()
 	keys := AllValidPoolKeys()
 	if len(keys) != 5 {
@@ -516,37 +514,25 @@ func TestResolvePoolKey_And_ResolveScopeKey_TableDriven(t *testing.T) {
 
 	trueVal := true
 	falseVal := false
-	dummyPool := &testRunnerAgentPool{}
-	fullPool := New(nil, WorkerPoolConfig{
-		Pools: map[PoolKey]runner.AgentPool{
-			{Ephemeral: false, Effort: "high"}:   dummyPool,
-			{Ephemeral: false, Effort: "medium"}: dummyPool,
-			{Ephemeral: false, Effort: "low"}:    dummyPool,
-			{Ephemeral: true, Effort: "medium"}:  dummyPool,
-			{Ephemeral: true, Effort: "low"}:     dummyPool,
-		},
-	})
-	emptyPool := New(nil, WorkerPoolConfig{})
 
 	tests := []struct {
-		name            string
-		ephemeral       *bool
-		effort          string
-		wantKey         PoolKey
-		wantErr         bool
-		wantMsgScopeKey string
+		name      string
+		ephemeral *bool
+		effort    string
+		wantKey   PoolKey
+		wantErr   bool
 	}{
-		{"default empty effort -> stateful high", nil, "", PoolKey{false, "high"}, false, "th-1"},
-		{"explicit high effort -> stateful high", nil, "HIGH", PoolKey{false, "high"}, false, "th-1"},
-		{"explicit ephemeral false + high -> stateful high", &falseVal, "high", PoolKey{false, "high"}, false, "th-1"},
-		{"explicit ephemeral false + medium -> stateful medium", &falseVal, "medium", PoolKey{false, "medium"}, false, "stateful_medium:th-1"},
-		{"explicit ephemeral false + low -> stateful low", &falseVal, "low", PoolKey{false, "low"}, false, "stateful_low:th-1"},
-		{"default medium effort -> ephemeral medium", nil, "medium", PoolKey{true, "medium"}, false, "stateful_medium:th-1"},
-		{"explicit ephemeral true + medium -> ephemeral medium", &trueVal, "medium", PoolKey{true, "medium"}, false, "stateful_medium:th-1"},
-		{"default low effort -> ephemeral low", nil, "low", PoolKey{true, "low"}, false, "stateful_low:th-1"},
-		{"explicit ephemeral true + low -> ephemeral low", &trueVal, "low", PoolKey{true, "low"}, false, "stateful_low:th-1"},
-		{"invalid ephemeral true + high -> error", &trueVal, "high", PoolKey{true, "high"}, true, "th-1"},
-		{"invalid ephemeral true + empty default high -> error", &trueVal, "", PoolKey{true, "high"}, true, "th-1"},
+		{"default empty effort -> stateful high", nil, "", PoolKey{false, "high"}, false},
+		{"explicit high effort -> stateful high", nil, "HIGH", PoolKey{false, "high"}, false},
+		{"explicit ephemeral false + high -> stateful high", &falseVal, "high", PoolKey{false, "high"}, false},
+		{"explicit ephemeral false + medium -> stateful medium", &falseVal, "medium", PoolKey{false, "medium"}, false},
+		{"explicit ephemeral false + low -> stateful low", &falseVal, "low", PoolKey{false, "low"}, false},
+		{"default medium effort -> ephemeral medium", nil, "medium", PoolKey{true, "medium"}, false},
+		{"explicit ephemeral true + medium -> ephemeral medium", &trueVal, "medium", PoolKey{true, "medium"}, false},
+		{"default low effort -> ephemeral low", nil, "low", PoolKey{true, "low"}, false},
+		{"explicit ephemeral true + low -> ephemeral low", &trueVal, "low", PoolKey{true, "low"}, false},
+		{"invalid ephemeral true + high -> error", &trueVal, "high", PoolKey{true, "high"}, true},
+		{"invalid ephemeral true + empty default high -> error", &trueVal, "", PoolKey{true, "high"}, true},
 	}
 
 	for _, tc := range tests {
@@ -559,103 +545,6 @@ func TestResolvePoolKey_And_ResolveScopeKey_TableDriven(t *testing.T) {
 			if gotKey != tc.wantKey {
 				t.Errorf("ResolvePoolKey() = %+v, want %+v", gotKey, tc.wantKey)
 			}
-			msg := db.Message{
-				ThreadID: "th-1",
-				Effort:   tc.effort,
-			}
-			if gotScope := fullPool.resolveScopeKey(msg); gotScope != tc.wantMsgScopeKey {
-				t.Errorf("fullPool.resolveScopeKey() = %q, want %q", gotScope, tc.wantMsgScopeKey)
-			}
-			if gotEmptyScope := emptyPool.resolveScopeKey(msg); gotEmptyScope != "th-1" {
-				t.Errorf("emptyPool.resolveScopeKey() = %q, want \"th-1\"", gotEmptyScope)
-			}
 		})
 	}
-}
-
-func TestTryPruneIdleThread_And_ResetTimer(t *testing.T) {
-	t.Parallel()
-	timer := time.NewTimer(time.Hour)
-	resetTimer(timer, 10*time.Millisecond)
-	<-timer.C
-	resetTimer(timer, 50*time.Millisecond)
-	timer.Stop()
-
-	pool := New(nil, WorkerPoolConfig{})
-	state := &threadWorkerState{ch: make(chan queueItem, 2)}
-	pool.threadChs["scope-1"] = state
-
-	// Empty queue & zero enqueuers -> pruned
-	if !pool.tryPruneIdleThread("scope-1", state) {
-		t.Errorf("expected tryPruneIdleThread to return true for idle state")
-	}
-
-	// Active enqueuers -> not pruned
-	state.activeEnqueuers = 1
-	pool.threadChs["scope-2"] = state
-	if pool.tryPruneIdleThread("scope-2", state) {
-		t.Errorf("expected tryPruneIdleThread to return false when activeEnqueuers > 0")
-	}
-
-	// Non-empty channel -> not pruned
-	state.activeEnqueuers = 0
-	state.ch <- queueItem{}
-	if pool.tryPruneIdleThread("scope-2", state) {
-		t.Errorf("expected tryPruneIdleThread to return false when channel not empty")
-	}
-}
-
-func TestWaitForNextQueueItem(t *testing.T) {
-	t.Parallel()
-
-	// 1. Context cancelled
-	ctx, cancel := context.WithCancel(context.Background())
-	cancel()
-	pool := &WorkerPool{ctx: ctx}
-	state := &threadWorkerState{ch: make(chan queueItem, 1)}
-	timer := time.NewTimer(time.Hour)
-	defer timer.Stop()
-
-	item, keepRunning := pool.waitForNextQueueItem("scope-1", state, timer, time.Hour)
-	if item != nil || keepRunning {
-		t.Errorf("expected nil, false on cancelled context")
-	}
-
-	// 2. Closed channel
-	pool2 := &WorkerPool{ctx: context.Background()}
-	close(state.ch)
-	item, keepRunning = pool2.waitForNextQueueItem("scope-1", state, timer, time.Hour)
-	if item != nil || keepRunning {
-		t.Errorf("expected nil, false on closed channel")
-	}
-
-	// 3. Popped item
-	state3 := &threadWorkerState{ch: make(chan queueItem, 1)}
-	d := db.Dispatch{ID: "d-1"}
-	state3.ch <- queueItem{dispatch: &d}
-	item, keepRunning = pool2.waitForNextQueueItem("scope-1", state3, timer, time.Hour)
-	if !keepRunning || item == nil || item.dispatch == nil || item.dispatch.ID != "d-1" {
-		t.Errorf("expected dispatch d-1, true")
-	}
-
-	// 4. Timer expired & pruneable
-	pool4 := New(nil, WorkerPoolConfig{})
-	state4 := &threadWorkerState{ch: make(chan queueItem, 1)}
-	pool4.threadChs["scope-4"] = state4
-	expTimer := time.NewTimer(0)
-	item, keepRunning = pool4.waitForNextQueueItem("scope-4", state4, expTimer, time.Millisecond)
-	if item != nil || keepRunning {
-		t.Errorf("expected nil, false on pruned idle worker")
-	}
-
-	// 5. Timer expired & not pruneable
-	pool5 := New(nil, WorkerPoolConfig{})
-	state5 := &threadWorkerState{ch: make(chan queueItem, 1), activeEnqueuers: 1}
-	pool5.threadChs["scope-5"] = state5
-	expTimer5 := time.NewTimer(0)
-	item, keepRunning = pool5.waitForNextQueueItem("scope-5", state5, expTimer5, time.Millisecond)
-	if item != nil || !keepRunning {
-		t.Errorf("expected nil, true on unpruned idle worker")
-	}
-	expTimer5.Stop()
 }

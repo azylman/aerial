@@ -10,7 +10,6 @@ import (
 	"go/token"
 	"io"
 	"io/fs"
-	"net/url"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -24,6 +23,8 @@ const (
 )
 
 const (
+	maxRootMainFiles         = 3
+	minCrossPkgCloneGrams    = 6
 	maxFileLines             = 1500
 	maxDepth                 = 5
 	minCloneFuncLines        = 20
@@ -35,27 +36,15 @@ const (
 	maxStructCloneSimilarity = 0.85
 )
 
-var splitTestRegex = regexp.MustCompile(`^Test.*_(Extra|More.*|Additional.*|Uncovered.*|EdgeCases|CornerCases|Branches|AllBranches|Chunk\d+.*|Coverage.*)$`)
-
-// bannedTestFilenameSuffixes rejects catch-all test filenames that accumulate
-// unrelated coverage-slop cases outside their domain scope. Fold such files
-// into canonical domain-scoped test tables. Extend this list when a new
-// catch-all pattern appears; renaming a file to dodge a listed suffix
-// defeats the ratchet.
-var bannedTestFilenameSuffixes = []string{"_extra_test.go", "_more_test.go", "_coverage_gaps_test.go", "_additional_test.go"}
-
-func isCatchAllTestFilename(rel string) bool {
-	for _, suffix := range bannedTestFilenameSuffixes {
-		if strings.HasSuffix(rel, suffix) {
-			return true
-		}
-	}
-	return false
-}
+var (
+	splitTestRegex = regexp.MustCompile(`^Test.*_(Extra|More.*|Additional.*|Uncovered.*|EdgeCases|CornerCases|Branches|AllBranches|Chunk\d+.*|Coverage.*)$`)
+	partTestRegex  = regexp.MustCompile(`^.*_part\d+_test\.go$`)
+)
 
 // FileMetrics records ratcheted file-level watermarks.
 type FileMetrics struct {
-	Lines int `json:"lines,omitempty"`
+	Lines        int `json:"lines,omitempty"`
+	BlankAssigns int `json:"blank_assigns,omitempty"`
 }
 
 // FuncMetrics records ratcheted function-level watermarks.
@@ -67,22 +56,7 @@ type FuncMetrics struct {
 type Baseline struct {
 	Files     map[string]FileMetrics `json:"files,omitempty"`
 	Functions map[string]FuncMetrics `json:"functions,omitempty"`
-}
-
-type funcCloneSig struct {
-	rel          string
-	pkgKey       string
-	name         string
-	lines        int
-	grams        map[string]struct{}
-	scopedTokens []string
-}
-
-type structCloneSig struct {
-	rel    string
-	pkgKey string
-	name   string
-	fields map[string]struct{}
+	RootFiles map[string]int         `json:"root_files,omitempty"`
 }
 
 func main() {
@@ -103,9 +77,18 @@ func run(args []string, stdout, stderr io.Writer) int {
 	rootDir := fsFlags.String("root", ".", "Repository root directory")
 	baselinePath := fsFlags.String("baseline", ".code-health-baseline.json", "Baseline JSON file path")
 	updateMode := fsFlags.Bool("update", false, "Write updated baseline JSON for current outliers")
+	fixMode := fsFlags.Bool("fix", false, "Auto-sort contiguous server route and handler runs in place")
+	configPath := fsFlags.String("config", "", "Optional JSON file with repo-specific thresholds, banned test patterns and skipped dirs")
 	if err := fsFlags.Parse(args); err != nil {
 		return 2
 	}
+
+	r, err := loadRules(*configPath)
+	if err != nil {
+		writef(stderr, "code-health: load config: %v\n", err)
+		return 1
+	}
+	r.checkOrdering = r.checkOrdering || *fixMode
 
 	absRoot := filepath.Clean(*rootDir)
 	explicit := fsFlags.Args()
@@ -114,22 +97,24 @@ func run(args []string, stdout, stderr io.Writer) int {
 		writef(stderr, "code-health: collect targets: %v\n", err)
 		return 1
 	}
+	targets = r.withoutSkipped(targets)
 
 	testTargets, err := collectTestTargets(absRoot, explicit)
 	if err != nil {
 		writef(stderr, "code-health: collect test targets: %v\n", err)
 		return 1
 	}
+	testTargets = r.withoutSkipped(testTargets)
 
 	if *updateMode {
-		return runUpdate(absRoot, *baselinePath, targets, testTargets, stdout, stderr)
+		return runUpdate(absRoot, *baselinePath, targets, r, stdout, stderr)
 	}
 
-	return runCheck(absRoot, *baselinePath, targets, testTargets, stdout, stderr)
+	return runCheck(absRoot, *baselinePath, targets, testTargets, r, *fixMode, stdout, stderr)
 }
 
-func runUpdate(absRoot, baselinePath string, targets, testTargets []string, stdout, stderr io.Writer) int {
-	base, err := buildBaseline(absRoot, targets, testTargets)
+func runUpdate(absRoot, baselinePath string, targets []string, r rules, stdout, stderr io.Writer) int {
+	base, err := buildBaseline(absRoot, targets, r)
 	if err != nil {
 		writef(stderr, "code-health: analyze: %v\n", err)
 		return 1
@@ -150,13 +135,13 @@ func runUpdate(absRoot, baselinePath string, targets, testTargets []string, stdo
 	return 0
 }
 
-func runCheck(absRoot, baselinePath string, targets, testTargets []string, stdout, stderr io.Writer) int {
+func runCheck(absRoot, baselinePath string, targets, testTargets []string, r rules, fix bool, stdout, stderr io.Writer) int {
 	base, err := loadBaseline(baselinePath)
 	if err != nil {
 		writef(stderr, "code-health: load baseline: %v\n", err)
 		return 1
 	}
-	violations, err := checkTargets(absRoot, targets, testTargets, base)
+	violations, err := checkTargets(absRoot, targets, testTargets, base, r, fix)
 	if err != nil {
 		writef(stderr, "code-health: check: %v\n", err)
 		return 1
@@ -263,10 +248,38 @@ func isCandidateTestGoFile(rel string) bool {
 	return true
 }
 
+func countRootPackageFiles(targets []string) map[string]int {
+	counts := make(map[string]int)
+	for _, target := range targets {
+		normalized := filepath.ToSlash(filepath.Clean(target))
+		parts := strings.Split(normalized, "/")
+		if len(parts) == 3 && (parts[0] == "services" || parts[0] == "mcp") && isCandidateGoFile(normalized) {
+			dir := parts[0] + "/" + parts[1]
+			counts[dir]++
+		}
+	}
+	return counts
+}
+
+func isBannedGrabBagFilename(rel string) bool {
+	base := filepath.Base(rel)
+	switch base {
+	case "pure.go", "pure_test.go",
+		"helpers.go", "helpers_test.go",
+		"utils.go", "utils_test.go",
+		"common.go", "common_test.go",
+		"types.go", "types_test.go",
+		"frozen.go", "frozen_test.go":
+		return true
+	}
+	return partTestRegex.MatchString(base)
+}
+
 func loadBaseline(path string) (Baseline, error) {
 	b := Baseline{
 		Files:     make(map[string]FileMetrics),
 		Functions: make(map[string]FuncMetrics),
+		RootFiles: make(map[string]int),
 	}
 	data, err := os.ReadFile(path)
 	if os.IsNotExist(err) {
@@ -276,13 +289,23 @@ func loadBaseline(path string) (Baseline, error) {
 		return b, err
 	}
 	err = json.Unmarshal(data, &b)
+	if b.Files == nil {
+		b.Files = make(map[string]FileMetrics)
+	}
+	if b.Functions == nil {
+		b.Functions = make(map[string]FuncMetrics)
+	}
+	if b.RootFiles == nil {
+		b.RootFiles = make(map[string]int)
+	}
 	return b, err
 }
 
-func buildBaseline(absRoot string, targets, _ []string) (Baseline, error) {
+func buildBaseline(absRoot string, targets []string, r rules) (Baseline, error) {
 	b := Baseline{
 		Files:     make(map[string]FileMetrics),
 		Functions: make(map[string]FuncMetrics),
+		RootFiles: make(map[string]int),
 	}
 	for _, rel := range targets {
 		fa, err := analyzeFile(filepath.Join(absRoot, rel), rel)
@@ -292,32 +315,76 @@ func buildBaseline(absRoot string, targets, _ []string) (Baseline, error) {
 		if fa.skipped {
 			continue
 		}
-		if fa.metrics.Lines > maxFileLines {
-			b.Files[rel] = fa.metrics
+		var fm FileMetrics
+		if fa.metrics.Lines > r.maxFileLines {
+			fm.Lines = fa.metrics.Lines
+		}
+		if r.testRuleEnabled(ruleBlankErrorDiscard) && fa.metrics.BlankAssigns > 0 {
+			fm.BlankAssigns = fa.metrics.BlankAssigns
+		}
+		if fm.Lines > 0 || fm.BlankAssigns > 0 {
+			b.Files[rel] = fm
 		}
 		for fnName, m := range fa.funcs {
-			if entry, ok := outlierFuncMetrics(m); ok {
+			if entry, ok := outlierFuncMetrics(m, r.maxDepth); ok {
 				b.Functions[rel+"::"+fnName] = entry
 			}
+		}
+	}
+	for dir, count := range countRootPackageFiles(targets) {
+		if count > maxRootMainFiles {
+			b.RootFiles[dir] = count
 		}
 	}
 	return b, nil
 }
 
-func outlierFuncMetrics(m FuncMetrics) (FuncMetrics, bool) {
+func outlierFuncMetrics(m FuncMetrics, depthCeiling int) (FuncMetrics, bool) {
 	var entry FuncMetrics
-	if m.Depth > maxDepth {
+	if m.Depth > depthCeiling {
 		entry.Depth = m.Depth
 	}
 	return entry, entry.Depth > 0
 }
 
-func checkTargets(absRoot string, targets, testTargets []string, base Baseline) ([]string, error) {
+func checkRootPackageViolations(targets []string, base Baseline) []string {
+	var violations []string
+	rootCounts := countRootPackageFiles(targets)
+	dirs := make([]string, 0, len(rootCounts))
+	for dir := range rootCounts {
+		dirs = append(dirs, dir)
+	}
+	sort.Strings(dirs)
+	for _, dir := range dirs {
+		count := rootCounts[dir]
+		limit := max(maxRootMainFiles, base.RootFiles[dir])
+		if count > limit {
+			violations = append(violations, fmt.Sprintf("%s: root package has %d Go files, exceeds limit %d (ceiling %d: main.go, main_test.go, goleak_test.go); move domain logic and tests into internal/* subpackages", dir, count, limit, maxRootMainFiles))
+		}
+	}
+	return violations
+}
+
+func checkTargets(absRoot string, targets, testTargets []string, base Baseline, r rules, fix bool) ([]string, error) {
 	var violations []string
 	var allFuncSigs []funcCloneSig
 	var allStructSigs []structCloneSig
+
+	violations = append(violations, checkRootPackageViolations(targets, base)...)
+
 	for _, rel := range targets {
-		fa, err := analyzeFile(filepath.Join(absRoot, rel), rel)
+		if isBannedGrabBagFilename(rel) {
+			violations = append(violations, rel+": filename uses banned horizontal split or grab-bag name; name files after their domain concern or move into an internal/* subpackage")
+		}
+		fullPath := filepath.Join(absRoot, rel)
+		if r.checkOrdering {
+			orderViolations, err := checkOrFixFileOrdering(fullPath, rel, fix)
+			if err != nil {
+				return nil, err
+			}
+			violations = append(violations, orderViolations...)
+		}
+		fa, err := analyzeFile(fullPath, rel)
 		if err != nil {
 			return nil, err
 		}
@@ -327,11 +394,14 @@ func checkTargets(absRoot string, targets, testTargets []string, base Baseline) 
 		for _, nv := range fa.nolintViolations {
 			violations = append(violations, fmt.Sprintf("%s: %s", rel, nv))
 		}
-		fileLimit := max(maxFileLines, base.Files[rel].Lines)
+		fileLimit := max(r.maxFileLines, base.Files[rel].Lines)
 		if fa.metrics.Lines > fileLimit {
-			violations = append(violations, fmt.Sprintf("%s: file length %d exceeds limit %d (ceiling %d)", rel, fa.metrics.Lines, fileLimit, maxFileLines))
+			violations = append(violations, fmt.Sprintf("%s: file length %d exceeds limit %d (ceiling %d)", rel, fa.metrics.Lines, fileLimit, r.maxFileLines))
 		}
-		violations = append(violations, checkFuncMetrics(rel, fa.funcs, base.Functions)...)
+		if strings.HasSuffix(rel, "_test.go") && r.testRuleEnabled(ruleBlankErrorDiscard) && fa.metrics.BlankAssigns > base.Files[rel].BlankAssigns {
+			violations = append(violations, fmt.Sprintf("%s: test blank-identifier call discard count %d exceeds limit %d (ceiling 0); assert or handle returned errors instead of assigning to '_'", rel, fa.metrics.BlankAssigns, base.Files[rel].BlankAssigns))
+		}
+		violations = append(violations, checkFuncMetrics(rel, fa.funcs, base.Functions, r.maxDepth)...)
 		allFuncSigs = append(allFuncSigs, fa.funcSigs...)
 		allStructSigs = append(allStructSigs, fa.structSigs...)
 	}
@@ -340,7 +410,7 @@ func checkTargets(absRoot string, targets, testTargets []string, base Baseline) 
 	violations = append(violations, checkStructCloneViolations(allStructSigs)...)
 
 	for _, rel := range testTargets {
-		_, testViolations, err := analyzeTestFile(filepath.Join(absRoot, filepath.FromSlash(rel)), rel)
+		_, testViolations, err := analyzeTestFile(filepath.Join(absRoot, filepath.FromSlash(rel)), rel, r)
 		if err != nil {
 			return nil, err
 		}
@@ -355,116 +425,7 @@ func checkTargets(absRoot string, targets, testTargets []string, base Baseline) 
 	return violations, nil
 }
 
-func forEachPackagePair[T any](sigs []T, pkgOf, relOf, nameOf func(T) string, fn func(a, b T)) {
-	pkgSigs := make(map[string][]T)
-	for _, s := range sigs {
-		pkg := pkgOf(s)
-		pkgSigs[pkg] = append(pkgSigs[pkg], s)
-	}
-
-	pkgKeys := make([]string, 0, len(pkgSigs))
-	for k := range pkgSigs {
-		pkgKeys = append(pkgKeys, k)
-	}
-	sort.Strings(pkgKeys)
-
-	for _, pkgKey := range pkgKeys {
-		group := pkgSigs[pkgKey]
-		sort.Slice(group, func(i, j int) bool {
-			relI, relJ := relOf(group[i]), relOf(group[j])
-			if relI != relJ {
-				return relI < relJ
-			}
-			return nameOf(group[i]) < nameOf(group[j])
-		})
-		for i := range group {
-			for j := i + 1; j < len(group); j++ {
-				fn(group[i], group[j])
-			}
-		}
-	}
-}
-
-func checkCloneViolations(sigs []funcCloneSig) []string {
-	var violations []string
-	forEachPackagePair(
-		sigs,
-		func(s funcCloneSig) string { return s.pkgKey },
-		func(s funcCloneSig) string { return s.rel },
-		func(s funcCloneSig) string { return s.name },
-		func(a, b funcCloneSig) {
-			if sim := jaccardSimilarity(a.grams, b.grams); sim >= maxCloneSimilarity {
-				violations = append(violations, fmt.Sprintf("%s (%s) <-> %s (%s): near-miss AST clone similarity %.2f exceeds %.2f ceiling", a.rel, a.name, b.rel, b.name, sim, maxCloneSimilarity))
-			} else if editSim := editSimilarity(a.scopedTokens, b.scopedTokens); editSim >= maxCloneEditSimilarity {
-				violations = append(violations, fmt.Sprintf("%s (%s) <-> %s (%s): near-miss AST edit similarity %.2f exceeds %.2f ceiling", a.rel, a.name, b.rel, b.name, editSim, maxCloneEditSimilarity))
-			}
-		},
-	)
-	return violations
-}
-
-func checkStructCloneViolations(sigs []structCloneSig) []string {
-	var violations []string
-	forEachPackagePair(
-		sigs,
-		func(s structCloneSig) string { return s.pkgKey },
-		func(s structCloneSig) string { return s.rel },
-		func(s structCloneSig) string { return s.name },
-		func(a, b structCloneSig) {
-			sim := jaccardSimilarity(a.fields, b.fields)
-			if sim >= maxStructCloneSimilarity {
-				violations = append(violations, fmt.Sprintf("%s (%s) <-> %s (%s): struct field similarity %.2f exceeds %.2f ceiling", a.rel, a.name, b.rel, b.name, sim, maxStructCloneSimilarity))
-			}
-		},
-	)
-	return violations
-}
-
-func editSimilarity(a, b []string) float64 {
-	if len(a) == 0 || len(b) == 0 {
-		return 0.0
-	}
-	m, n := len(a), len(b)
-	dp := make([]int, n+1)
-	for j := 0; j <= n; j++ {
-		dp[j] = j
-	}
-	for i := 1; i <= m; i++ {
-		prev := dp[0]
-		dp[0] = i
-		for j := 1; j <= n; j++ {
-			temp := dp[j]
-			cost := 1
-			if a[i-1] == b[j-1] {
-				cost = 0
-			}
-			dp[j] = min(prev+cost, min(dp[j]+1, dp[j-1]+1))
-			prev = temp
-		}
-	}
-	dist := dp[n]
-	maxLen := max(m, n)
-	return 1.0 - float64(dist)/float64(maxLen)
-}
-
-func jaccardSimilarity(a, b map[string]struct{}) float64 {
-	if len(a) == 0 || len(b) == 0 {
-		return 0.0
-	}
-	intersection := 0
-	for k := range a {
-		if _, ok := b[k]; ok {
-			intersection++
-		}
-	}
-	union := len(a) + len(b) - intersection
-	if union == 0 {
-		return 0.0
-	}
-	return float64(intersection) / float64(union)
-}
-
-func checkFuncMetrics(rel string, fns map[string]FuncMetrics, baseFns map[string]FuncMetrics) []string {
+func checkFuncMetrics(rel string, fns map[string]FuncMetrics, baseFns map[string]FuncMetrics, depthCeiling int) []string {
 	names := make([]string, 0, len(fns))
 	for k := range fns {
 		names = append(names, k)
@@ -474,8 +435,8 @@ func checkFuncMetrics(rel string, fns map[string]FuncMetrics, baseFns map[string
 	for _, fnName := range names {
 		m := fns[fnName]
 		bm := baseFns[rel+"::"+fnName]
-		if depthLimit := max(maxDepth, bm.Depth); m.Depth > depthLimit {
-			violations = append(violations, fmt.Sprintf("%s (%s): nesting depth %d exceeds limit %d (ceiling %d)", rel, fnName, m.Depth, depthLimit, maxDepth))
+		if depthLimit := max(depthCeiling, bm.Depth); m.Depth > depthLimit {
+			violations = append(violations, fmt.Sprintf("%s (%s): nesting depth %d exceeds limit %d (ceiling %d)", rel, fnName, m.Depth, depthLimit, depthCeiling))
 		}
 	}
 	return violations
@@ -557,8 +518,12 @@ func analyzeFile(fullPath, rel string) (fileAnalysis, error) {
 	if !strings.HasSuffix(rel, "_test.go") {
 		structSigs = collectStructCloneSigs(f, rel, pkgKey)
 	}
+	fm := FileMetrics{Lines: lines}
+	if strings.HasSuffix(rel, "_test.go") {
+		fm.BlankAssigns = countTestBlankCallAssigns(f)
+	}
 	return fileAnalysis{
-		metrics:          FileMetrics{Lines: lines},
+		metrics:          fm,
 		funcs:            fns,
 		funcSigs:         sigs,
 		structSigs:       structSigs,
@@ -566,169 +531,81 @@ func analyzeFile(fullPath, rel string) (fileAnalysis, error) {
 	}, nil
 }
 
-func appendNodeCloneTokens(tokens []string, n ast.Node) []string {
-	switch x := n.(type) {
-	case *ast.IfStmt:
-		tokens = append(tokens, "if")
-		if x.Else != nil {
-			tokens = append(tokens, "else")
-		}
-	case *ast.ForStmt:
-		tokens = append(tokens, "for")
-	case *ast.RangeStmt:
-		tokens = append(tokens, "range")
-	case *ast.SwitchStmt, *ast.TypeSwitchStmt:
-		tokens = append(tokens, "switch")
-	case *ast.CaseClause:
-		tokens = append(tokens, "case")
-	case *ast.SelectStmt:
-		tokens = append(tokens, "select")
-	case *ast.CommClause:
-		tokens = append(tokens, "comm")
-	case *ast.ReturnStmt:
-		tokens = append(tokens, "return")
-	case *ast.DeferStmt:
-		tokens = append(tokens, "defer")
-	case *ast.CallExpr:
-		switch fn := x.Fun.(type) {
-		case *ast.SelectorExpr:
-			tokens = append(tokens, "call:."+fn.Sel.Name)
-		case *ast.Ident:
-			if !isGoBuiltin(fn.Name) {
-				tokens = append(tokens, "call:"+fn.Name)
-			}
-		}
-	}
-	return tokens
+var exemptBlankCallSelectors = map[string]bool{
+	"Close":       true,
+	"Encode":      true,
+	"Write":       true,
+	"WriteHeader": true,
+	"WriteString": true,
+	"Flush":       true,
+	"Remove":      true,
+	"RemoveAll":   true,
+	"Setenv":      true,
+	"Unsetenv":    true,
+	"Chdir":       true,
+	"Unsubscribe": true,
+	"Stop":        true,
+	"Cancel":      true,
 }
 
-func buildCloneTokens(body *ast.BlockStmt) []string {
-	var tokens []string
-	ast.Inspect(body, func(n ast.Node) bool {
-		if n == nil {
-			return true
-		}
-		tokens = appendNodeCloneTokens(tokens, n)
+func isCleanupCall(call *ast.CallExpr) bool {
+	if sel, ok := call.Fun.(*ast.SelectorExpr); ok && sel.Sel.Name == "Cleanup" {
 		return true
-	})
-	return tokens
+	}
+	return false
 }
 
-func buildScopedCloneTokens(body *ast.BlockStmt) []string {
-	if body == nil {
-		return nil
-	}
-	var tokens []string
-	var blockStack []bool
-	ast.Inspect(body, func(n ast.Node) bool {
-		if n == nil {
-			if len(blockStack) > 0 {
-				isBlock := blockStack[len(blockStack)-1]
-				blockStack = blockStack[:len(blockStack)-1]
-				if isBlock {
-					tokens = append(tokens, "}")
-				}
-			}
-			return true
-		}
-		_, isBlock := n.(*ast.BlockStmt)
-		blockStack = append(blockStack, isBlock)
-		if isBlock {
-			tokens = append(tokens, "{")
-		}
-		tokens = appendNodeCloneTokens(tokens, n)
-		return true
-	})
-	return tokens
-}
-
-func collectStructCloneSigs(f *ast.File, rel, pkgKey string) []structCloneSig {
-	var sigs []structCloneSig
-	for _, decl := range f.Decls {
-		gd, ok := decl.(*ast.GenDecl)
-		if !ok || gd.Tok != token.TYPE {
-			continue
-		}
-		for _, spec := range gd.Specs {
-			ts, ok := spec.(*ast.TypeSpec)
-			if !ok {
-				continue
-			}
-			st, ok := ts.Type.(*ast.StructType)
-			if !ok {
-				continue
-			}
-			fields := buildStructFields(st)
-			if len(fields) >= minStructCloneFields {
-				sigs = append(sigs, structCloneSig{
-					rel:    rel,
-					pkgKey: pkgKey,
-					name:   ts.Name.Name,
-					fields: fields,
-				})
-			}
-		}
-	}
-	return sigs
-}
-
-func buildStructFields(st *ast.StructType) map[string]struct{} {
-	fields := make(map[string]struct{})
-	if st == nil || st.Fields == nil {
-		return fields
-	}
-	for _, f := range st.Fields.List {
-		tagVal := ""
-		if f.Tag != nil {
-			tagVal = f.Tag.Value
-		}
-		typeStr := formatFieldType(f.Type)
-		if len(f.Names) == 0 {
-			fields["embed:"+typeStr+":"+tagVal] = struct{}{}
-			continue
-		}
-		for _, name := range f.Names {
-			fields[name.Name+":"+typeStr+":"+tagVal] = struct{}{}
-		}
-	}
-	return fields
-}
-
-func formatFieldType(expr ast.Expr) string {
-	switch x := expr.(type) {
-	case *ast.Ident:
-		return x.Name
-	case *ast.StarExpr:
-		return "*" + formatFieldType(x.X)
-	case *ast.SelectorExpr:
-		return formatFieldType(x.X) + "." + x.Sel.Name
-	case *ast.ArrayType:
-		return "[]" + formatFieldType(x.Elt)
-	case *ast.MapType:
-		return "map[" + formatFieldType(x.Key) + "]" + formatFieldType(x.Value)
-	default:
-		return "other"
-	}
-}
-
-func buildCloneGrams(tokens []string) map[string]struct{} {
-	grams := make(map[string]struct{})
-	if len(tokens) >= minCloneTokens {
-		for i := 0; i <= len(tokens)-cloneShingleSize; i++ {
-			grams[tokens[i]+"|"+tokens[i+1]+"|"+tokens[i+2]] = struct{}{}
-		}
-	}
-	return grams
-}
-
-func isGoBuiltin(name string) bool {
-	switch name {
-	case "len", "cap", "make", "new", "append", "copy", "delete", "close",
-		"min", "max", "panic", "recover", "print", "println", "complex", "real", "imag", "clear":
-		return true
-	default:
+func isNonExemptBlankCall(lhs, rhs ast.Expr) bool {
+	ident, ok := lhs.(*ast.Ident)
+	if !ok || ident.Name != "_" {
 		return false
 	}
+	call, ok := rhs.(*ast.CallExpr)
+	if !ok {
+		return false
+	}
+	if sel, ok := call.Fun.(*ast.SelectorExpr); ok {
+		if exemptBlankCallSelectors[sel.Sel.Name] {
+			return false
+		}
+	}
+	return true
+}
+
+func hasNonExemptBlankCallAssign(assign *ast.AssignStmt) bool {
+	if len(assign.Lhs) > 0 && len(assign.Rhs) == 1 {
+		return isNonExemptBlankCall(assign.Lhs[len(assign.Lhs)-1], assign.Rhs[0])
+	}
+	if len(assign.Rhs) == len(assign.Lhs) {
+		for i := range assign.Lhs {
+			if isNonExemptBlankCall(assign.Lhs[i], assign.Rhs[i]) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func countTestBlankCallAssigns(f *ast.File) int {
+	var count int
+	for _, decl := range f.Decls {
+		ast.Inspect(decl, func(n ast.Node) bool {
+			if n == nil {
+				return true
+			}
+			if _, ok := n.(*ast.DeferStmt); ok {
+				return false
+			}
+			if call, ok := n.(*ast.CallExpr); ok && isCleanupCall(call) {
+				return false
+			}
+			if assign, ok := n.(*ast.AssignStmt); ok && hasNonExemptBlankCallAssign(assign) {
+				count++
+			}
+			return true
+		})
+	}
+	return count
 }
 
 func findBannedNolints(f *ast.File, fset *token.FileSet) []string {
@@ -779,240 +656,6 @@ func checkNolintComment(raw string) string {
 		}
 	}
 	return ""
-}
-
-func analyzeTestFile(fullPath, rel string) (FileMetrics, []string, error) {
-	src, err := os.ReadFile(fullPath)
-	if err != nil {
-		return FileMetrics{}, nil, err
-	}
-	if isGeneratedSource(src) {
-		return FileMetrics{}, nil, nil
-	}
-
-	fset := token.NewFileSet()
-	f, err := parser.ParseFile(fset, fullPath, src, parser.ParseComments)
-	if err != nil {
-		return FileMetrics{}, nil, err
-	}
-
-	var violations []string
-	if isCatchAllTestFilename(rel) {
-		violations = append(violations, rel+": test filename uses banned catch-all suffix; fold cases into the canonical domain-scoped Test* table or name after specific behavior")
-	}
-	for _, nv := range findBannedNolints(f, fset) {
-		violations = append(violations, fmt.Sprintf("%s: %s", rel, nv))
-	}
-
-	for _, decl := range f.Decls {
-		fn, ok := decl.(*ast.FuncDecl)
-		if !ok {
-			continue
-		}
-		if splitTestRegex.MatchString(fn.Name.Name) {
-			line := fset.Position(fn.Pos()).Line
-			violations = append(violations, fmt.Sprintf("%s:%d: test function %s uses banned split/catch-all suffix; fold cases into the canonical Test* table or name after specific behavior", rel, line, fn.Name.Name))
-		}
-	}
-
-	ast.Inspect(f, func(n ast.Node) bool {
-		return inspectTestNode(n, fset, rel, &violations)
-	})
-
-	return FileMetrics{Lines: countLines(src)}, violations, nil
-}
-
-func inspectTestNode(n ast.Node, fset *token.FileSet, rel string, violations *[]string) bool {
-	if sel, ok := n.(*ast.SelectorExpr); ok {
-		if isSelectorNamed(sel.X, "http", "DefaultClient") && sel.Sel.Name == "CloseIdleConnections" {
-			return false
-		}
-		if isSelectorNamed(sel, "http", "DefaultClient") {
-			line := fset.Position(sel.Pos()).Line
-			*violations = append(*violations, fmt.Sprintf("%s:%d: unguarded http.DefaultClient in tests is prohibited; use httptest.Server.Client() or an http.Client with a mock Transport", rel, line))
-		}
-	}
-	if lit, ok := n.(*ast.CompositeLit); ok {
-		if reason := checkHTTPClientLit(lit); reason != "" {
-			line := fset.Position(lit.Pos()).Line
-			*violations = append(*violations, fmt.Sprintf("%s:%d: %s", rel, line, reason))
-		}
-	}
-	if call, ok := n.(*ast.CallExpr); ok {
-		if reason := checkBannedTestCall(call); reason != "" {
-			line := fset.Position(call.Pos()).Line
-			*violations = append(*violations, fmt.Sprintf("%s:%d: %s", rel, line, reason))
-		}
-	}
-	if st, ok := n.(*ast.StructType); ok && st.Fields != nil {
-		checkTestStructFields(st, fset, rel, violations)
-	}
-	return true
-}
-
-func checkTestStructFields(st *ast.StructType, fset *token.FileSet, rel string, violations *[]string) {
-	for _, field := range st.Fields.List {
-		if _, isFunc := field.Type.(*ast.FuncType); !isFunc {
-			continue
-		}
-		for _, ident := range field.Names {
-			if isBannedClosureFieldName(ident.Name) {
-				line := fset.Position(ident.Pos()).Line
-				*violations = append(*violations, fmt.Sprintf("%s:%d: test struct field %q uses a banned closure func type; use declarative expectation fields instead", rel, line, ident.Name))
-			}
-		}
-	}
-}
-
-func isSelectorNamed(expr ast.Expr, pkgName, selName string) bool {
-	sel, ok := expr.(*ast.SelectorExpr)
-	if !ok || sel.Sel.Name != selName {
-		return false
-	}
-	pkg, ok := sel.X.(*ast.Ident)
-	return ok && pkg.Name == pkgName
-}
-
-func checkHTTPClientLit(lit *ast.CompositeLit) string {
-	if !isSelectorNamed(lit.Type, "http", "Client") {
-		return ""
-	}
-	for _, elt := range lit.Elts {
-		if kv, ok := elt.(*ast.KeyValueExpr); ok {
-			if key, ok := kv.Key.(*ast.Ident); ok && key.Name == "Transport" && !isDisallowedTransportExpr(kv.Value) {
-				return ""
-			}
-		}
-	}
-	return "http.Client literal without mock Transport in tests is prohibited; inject a mock RoundTripper or use httptest.Server.Client()"
-}
-
-func isDisallowedTransportExpr(expr ast.Expr) bool {
-	if ident, ok := expr.(*ast.Ident); ok && ident.Name == "nil" {
-		return true
-	}
-	if isSelectorNamed(expr, "http", "DefaultTransport") {
-		return true
-	}
-	if unary, ok := expr.(*ast.UnaryExpr); ok && unary.Op == token.AND {
-		return isDisallowedTransportExpr(unary.X)
-	}
-	if comp, ok := expr.(*ast.CompositeLit); ok && isSelectorNamed(comp.Type, "http", "Transport") {
-		return true
-	}
-	return false
-}
-
-func checkBannedTestCall(call *ast.CallExpr) string {
-	if isSelectorNamed(call.Fun, "time", "Sleep") {
-		return "time.Sleep in tests is prohibited; use event-driven channels, condition variables, or injected delay overrides"
-	}
-	if isSelectorNamed(call.Fun, "syscall", "Kill") {
-		return "raw syscall.Kill in tests is prohibited; use dependency-injected signal or process-kill functions"
-	}
-	if reason := checkReservedPortCall(call); reason != "" {
-		return reason
-	}
-	return ""
-}
-
-func checkReservedPortCall(call *ast.CallExpr) string {
-	callName, urlExpr := getCallTargetURL(call)
-	if callName == "" || urlExpr == nil {
-		return ""
-	}
-	lit, ok := urlExpr.(*ast.BasicLit)
-	if !ok || lit.Kind != token.STRING {
-		return ""
-	}
-	val, err := strconv.Unquote(lit.Value)
-	if err != nil {
-		val = strings.Trim(lit.Value, "`\"")
-	}
-	u, err := url.Parse(val)
-	if err != nil || u.Host == "" {
-		u2, err2 := url.Parse("http://" + val)
-		if err2 != nil {
-			return ""
-		}
-		u = u2
-	}
-	host := u.Hostname()
-	port := u.Port()
-	if !isLoopbackHost(host) || !isReservedDaemonPort(port) {
-		return ""
-	}
-	return fmt.Sprintf("call to %s targeting reserved live daemon port %s in tests is prohibited; use httptest.Server or mock transport instead", callName, port)
-}
-
-func getCallTargetURL(call *ast.CallExpr) (string, ast.Expr) {
-	if isSelectorNamed(call.Fun, "http", "Get") {
-		if len(call.Args) >= 1 {
-			return "http.Get", call.Args[0]
-		}
-	}
-	if isSelectorNamed(call.Fun, "http", "Post") {
-		if len(call.Args) >= 1 {
-			return "http.Post", call.Args[0]
-		}
-	}
-	if isSelectorNamed(call.Fun, "http", "NewRequest") {
-		if len(call.Args) >= 2 {
-			return "http.NewRequest", call.Args[1]
-		}
-	}
-	if isSelectorNamed(call.Fun, "http", "NewRequestWithContext") {
-		if len(call.Args) >= 3 {
-			return "http.NewRequestWithContext", call.Args[2]
-		}
-	}
-	if ident, ok := call.Fun.(*ast.Ident); ok {
-		switch ident.Name {
-		case newHTTPPromptDispatcherFunc:
-			if len(call.Args) >= 1 {
-				return newHTTPPromptDispatcherFunc, call.Args[0]
-			}
-		case "newRequestWithContext":
-			if len(call.Args) >= 3 {
-				return "newRequestWithContext", call.Args[2]
-			}
-		}
-	}
-	if sel, ok := call.Fun.(*ast.SelectorExpr); ok {
-		if sel.Sel.Name == newHTTPPromptDispatcherFunc {
-			if len(call.Args) >= 1 {
-				return newHTTPPromptDispatcherFunc, call.Args[0]
-			}
-		}
-	}
-	return "", nil
-}
-
-func isLoopbackHost(host string) bool {
-	switch strings.ToLower(host) {
-	case "localhost", "127.0.0.1", "::1":
-		return true
-	default:
-		return false
-	}
-}
-
-func isReservedDaemonPort(port string) bool {
-	switch port {
-	case "8080", "8088", "4020", "8081", "8082", "8083", "8090", "8070", "9070":
-		return true
-	default:
-		return false
-	}
-}
-
-func isBannedClosureFieldName(name string) bool {
-	switch name {
-	case "run", "check", "extraCheck", "setup", "validate", "validator", "verify", "lookup":
-		return true
-	default:
-		return false
-	}
 }
 
 func isGeneratedSource(src []byte) bool {

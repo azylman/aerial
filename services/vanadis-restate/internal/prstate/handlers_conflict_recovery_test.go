@@ -1,7 +1,6 @@
 package prstate
 
-// Conflict and CI-recovery verdict tests: the Restate PRObject — never the
-// Postgres projection — decides whether synapse publishes a conflict
+// Conflict and CI-recovery verdict tests: the Restate PRObject decides whether synapse publishes a conflict
 // republish or recovers from CI failure. The conflict verdict records
 // nothing, so a publish failure leaves the next invocation returning
 // should_publish again (at-least-once); only the publish-recorded ack marks
@@ -12,7 +11,7 @@ import (
 )
 
 func conflictState(pr int, terminal TerminalState, published string) *PRState {
-	s := NewPRState("aerial", pr)
+	s := NewPRState("azylman/aerial", pr)
 	if terminal != TerminalNone {
 		s.MarkTerminal(terminal)
 	}
@@ -54,7 +53,7 @@ func TestResolveConflictDispatchDecision(t *testing.T) {
 				s = conflictState(7, tc.terminal, tc.published)
 				s.HeadSHA = tc.stateHead
 			}
-			ev := PREvent{Event: "conflict_detected", Repo: "aerial", PRNumber: 7, HeadSHA: tc.evHead}
+			ev := PREvent{Event: "conflict_detected", Repo: "azylman/aerial", PRNumber: 7, HeadSHA: tc.evHead}
 			got, err := ResolveConflictDispatchDecision(s, ev)
 			if tc.wantErr && err == nil {
 				t.Fatal("ResolveConflictDispatchDecision err = nil, want error")
@@ -120,7 +119,7 @@ func TestRecordConflictPublished(t *testing.T) {
 				s = conflictState(7, tc.terminal, tc.published)
 				s.HeadSHA = tc.stateHead
 			}
-			ev := PREvent{Event: "conflict_detected", Repo: "aerial", PRNumber: 7, HeadSHA: tc.evHead}
+			ev := PREvent{Event: "conflict_detected", Repo: "azylman/aerial", PRNumber: 7, HeadSHA: tc.evHead}
 			got, err := RecordConflictPublished(s, ev)
 			if tc.wantErr {
 				if err == nil {
@@ -157,7 +156,7 @@ func assertConflictPublishedState(t *testing.T, s *PRState, nilState bool, wantP
 }
 
 func recoveryState(pr int, failedSHA, checksHead string, activeChecks []string, roborevActive bool) *PRState {
-	s := NewPRState("aerial", pr)
+	s := NewPRState("azylman/aerial", pr)
 	if failedSHA != "" {
 		s.RecordFailedCISHA(failedSHA)
 	}
@@ -240,7 +239,7 @@ func TestResolveCIRecovery(t *testing.T) {
 					s.MarkTerminal(tc.terminal)
 				}
 			}
-			ev := PREvent{Event: "check_success", Repo: "aerial", PRNumber: 7, HeadSHA: tc.querySHA}
+			ev := PREvent{Event: "check_success", Repo: "azylman/aerial", PRNumber: 7, HeadSHA: tc.querySHA}
 			got, err := ResolveCIRecovery(s, ev)
 			if tc.wantErr && err == nil {
 				t.Fatal("ResolveCIRecovery err = nil, want error")

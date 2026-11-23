@@ -3,7 +3,6 @@ import type {
   BuildsAPIResponse,
   ClusterResponse,
   FactsAPIResponse,
-  GitSyncStatusResponse,
   QuickLaunchLink,
   SchedulesAPIResponse,
   ServiceStatus,
@@ -12,7 +11,6 @@ import {
   buildsBadgeCount,
   dockLinks,
   filterByAgent,
-  gitSyncBadge,
   isDockLinkActive,
   matchAgent,
   memoryBadgeCount,
@@ -154,30 +152,6 @@ describe('permetScore', () => {
     { name: 'rounds the bar width', services: [svc('healthy'), svc('down'), svc('down')], want: { percent: 33, label: '1 / 3 Healthy', tone: 'warning' } },
   ])('$name', ({ services, want }) => {
     expect(permetScore(services)).toEqual(want);
-  });
-});
-
-const gs = (status: string, lag: number): GitSyncStatusResponse => ({
-  status,
-  max_lag_seconds: lag,
-  last_sync_time: '2026-11-08T12:00:00Z',
-});
-const T0 = '2026-11-08T12:00:00Z';
-const ms = (iso: string): number => Date.parse(iso);
-
-describe('gitSyncBadge', () => {
-  it.each([
-    { name: 'no data yet', gitSync: null, systemTime: null, now: 0, want: { tone: 'synced', text: 'GIT SYNC: IN SYNC (Δ 0s)' } },
-    { name: 'synced', gitSync: gs('synced', 0), systemTime: T0, now: ms('2026-11-08T12:00:30Z'), want: { tone: 'synced', text: 'GIT SYNC: IN SYNC (Δ 0s)' } },
-    { name: 'empty status defaults to synced', gitSync: gs('', 0), systemTime: T0, now: ms(T0), want: { tone: 'synced', text: 'GIT SYNC: IN SYNC (Δ 0s)' } },
-    { name: 'error', gitSync: gs('ERROR', 12), systemTime: T0, now: ms(T0), want: { tone: 'error', text: 'GIT SYNC: ERROR' } },
-    { name: 'lagging at sample time', gitSync: gs('lagging', 75), systemTime: T0, now: ms(T0), want: { tone: 'lagging', text: 'GIT SYNC: BEHIND (Δ 1m 15s)' } },
-    { name: 'lagging keeps counting', gitSync: gs('lagging', 75), systemTime: T0, now: ms('2026-11-08T12:00:45Z'), want: { tone: 'lagging', text: 'GIT SYNC: BEHIND (Δ 2m)' } },
-    { name: 'positive lag reads as behind', gitSync: gs('synced', 5), systemTime: T0, now: ms(T0), want: { tone: 'lagging', text: 'GIT SYNC: BEHIND (Δ 5s)' } },
-    { name: 'clock behind the server never subtracts', gitSync: gs('lagging', 5), systemTime: T0, now: ms('2026-11-08T11:59:00Z'), want: { tone: 'lagging', text: 'GIT SYNC: BEHIND (Δ 5s)' } },
-    { name: 'unparseable system_time freezes the lag', gitSync: gs('lagging', 3700), systemTime: 'garbage', now: ms(T0), want: { tone: 'lagging', text: 'GIT SYNC: BEHIND (Δ 1h 1m)' } },
-  ])('$name', ({ gitSync, systemTime, now, want }) => {
-    expect(gitSyncBadge(gitSync, systemTime, now)).toEqual(want);
   });
 });
 

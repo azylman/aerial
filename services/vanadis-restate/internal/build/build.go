@@ -7,13 +7,15 @@ import (
 	"log/slog"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
 	restate "github.com/restatedev/sdk-go"
 
+	"github.com/azylman/aerial/pkg/buildplan"
 	"github.com/azylman/aerial/pkg/pubsub"
-	"github.com/azylman/aerial/services/vanadis-restate/internal/dag"
+	"github.com/azylman/aerial/services/vanadis-restate/internal/ericlient"
 	"github.com/azylman/aerial/services/vanadis-restate/internal/executor"
 	"github.com/azylman/aerial/services/vanadis-restate/internal/model"
 	"github.com/azylman/aerial/services/vanadis-restate/internal/store"
@@ -40,14 +42,13 @@ const (
 	labelReconcileAfterPREvent     = "reconcile-after-pr-event"
 	labelReconcileAfterDispatch    = "reconcile-after-dispatch-outcome"
 	labelReconcileAfterNoPRFail    = "reconcile-after-nopr-fail"
+	labelReconcileAfterFailChunk   = "reconcile-after-fail-chunk"
 	LabelRoutePREvent              = "RoutePREvent"
 	LabelRouteDispatchOutcome      = "RouteDispatchOutcome"
 	LabelRouteAttachPR             = "RouteAttachPR"
 	LabelRouteFailChunk            = "RouteFailChunk"
+	LabelRouteBuildReconcile       = "RouteBuildReconcile"
 )
-
-// legacyBuildServiceName is preserved for the dark-launch default agent.
-const legacyBuildServiceName = "Build"
 
 var reconcileErrorHandlerLabels = []string{
 	labelCreate,
@@ -70,10 +71,12 @@ var reconcileErrorHandlerLabels = []string{
 	labelReconcileAfterPREvent,
 	labelReconcileAfterDispatch,
 	labelReconcileAfterNoPRFail,
+	labelReconcileAfterFailChunk,
 	LabelRoutePREvent,
 	LabelRouteDispatchOutcome,
 	LabelRouteAttachPR,
 	LabelRouteFailChunk,
+	LabelRouteBuildReconcile,
 }
 
 var reconcileErrorsTotal = prometheus.NewCounterVec(
@@ -198,6 +201,9 @@ type reconcileStepOutput struct {
 	LaunchedMap    map[string]bool               `json:"launched_map,omitempty"`
 	Error          string                        `json:"error,omitempty"`
 	State          *model.BuildObjectState       `json:"state,omitempty"`
+	// ReconcileTargets are other builds this step changed; each is reconciled
+	// by its own runner after the step commits.
+	ReconcileTargets []store.SweptChunk `json:"reconcile_targets,omitempty"`
 }
 
 type objectRuntime interface {
@@ -208,6 +214,7 @@ type objectRuntime interface {
 	SetState(state model.BuildObjectState)
 	ClearState()
 	ScheduleReconcile()
+	SendCrossBuildDeploySuccess(service, buildID, chunkID string)
 	RunReconcileStep(name string, fn func(ctx context.Context) (reconcileStepOutput, error)) (reconcileStepOutput, error)
 }
 
@@ -218,7 +225,7 @@ type restateObjectRuntime struct {
 
 func (r restateObjectRuntime) serviceName() string {
 	if strings.TrimSpace(r.buildService) == "" {
-		return legacyBuildServiceName
+		return buildplan.BuildServiceName("")
 	}
 	return r.buildService
 }
@@ -243,7 +250,8 @@ func (r restateObjectRuntime) GetState() (*model.BuildObjectState, error) {
 }
 
 func (r restateObjectRuntime) SetState(state model.BuildObjectState) {
-	restate.Set(r.ctx, "state", &state)
+	compacted := compactStateForStorage(state)
+	restate.Set(r.ctx, "state", &compacted)
 }
 
 func (r restateObjectRuntime) ClearState() {
@@ -264,29 +272,28 @@ func (r restateObjectRuntime) ScheduleReconcile() {
 	_ = restate.ObjectSend(r.ctx, r.serviceName(), restate.Key(r.ctx), "Reconcile").Send(ReconcileBuildRequest{Reason: "active dispatch recovery"}, restate.WithDelay(time.Second))
 }
 
-// BuildObject implements the Restate-authoritative Virtual Object for multi-chunk builds.
-type BuildObject struct {
-	store          store.VanadisStore
-	executor       *executor.Executor
-	vanadisURL     string
-	httpClient     *http.Client
-	runtimeFactory func(restate.ObjectContext) objectRuntime
-	agentName      string
+// SendCrossBuildDeploySuccess sends a one-way Mutate(chunk_deploy_success) to another build's Build object.
+func (r restateObjectRuntime) SendCrossBuildDeploySuccess(service, buildID, chunkID string) {
+	_ = restate.ObjectSend(r.ctx, service, buildID, "Mutate").Send(BuildMutationRequest{Action: mutationChunkDeploySuccess, ChunkID: chunkID})
 }
 
-// NewBuildObject creates a new BuildObject bound to vanadisURL with an optional HTTP client.
-// vanadisURL is retained for signature compatibility and is no longer used for transitions.
-func NewBuildObject(vanadisURL string, httpClient *http.Client, runtimeFactory ...func(restate.ObjectContext) objectRuntime) *BuildObject {
-	if httpClient == nil {
-		httpClient = &http.Client{Timeout: 30 * time.Second}
-	}
+// BuildObject implements the Restate-authoritative Virtual Object for multi-chunk builds.
+type BuildObject struct {
+	store           store.VanadisStore
+	executor        *executor.Executor
+	runtimeFactory  func(restate.ObjectContext) objectRuntime
+	agentName       string
+	activeStepSyncs sync.Map
+}
+
+// NewBuildObject creates a new BuildObject.
+// vanadisURL and httpClient are retained for signature compatibility.
+func NewBuildObject(_ string, _ *http.Client, runtimeFactory ...func(restate.ObjectContext) objectRuntime) *BuildObject {
 	var rf func(restate.ObjectContext) objectRuntime
 	if len(runtimeFactory) > 0 {
 		rf = runtimeFactory[0]
 	}
 	return &BuildObject{
-		vanadisURL:     strings.TrimRight(strings.TrimSpace(vanadisURL), "/"),
-		httpClient:     httpClient,
 		runtimeFactory: rf,
 	}
 }
@@ -311,9 +318,9 @@ func (b *BuildObject) WithAuthority(st store.VanadisStore, exec *executor.Execut
 // ServiceName returns the Restate service name for this Virtual Object.
 func (b *BuildObject) ServiceName() string {
 	if b == nil {
-		return legacyBuildServiceName
+		return buildplan.BuildServiceName("")
 	}
-	return model.BuildServiceName(b.agentName)
+	return buildplan.BuildServiceName(b.agentName)
 }
 
 func (b *BuildObject) notifyTransitionError(ctx context.Context, buildID, stepName string, priorState *model.BuildObjectState, transErr error) error {
@@ -350,7 +357,7 @@ func (b *BuildObject) getRuntime(ctx restate.ObjectContext) objectRuntime {
 	if b != nil {
 		agent = b.agentName
 	}
-	return restateObjectRuntime{ctx: ctx, buildService: model.BuildServiceName(agent)}
+	return restateObjectRuntime{ctx: ctx, buildService: buildplan.BuildServiceName(agent)}
 }
 
 func ToTerminalErr(err error) error {
@@ -439,11 +446,11 @@ func (b *BuildObject) Create(ctx restate.ObjectContext, req CreateBuildRequest) 
 		return model.VanadisBuild{}, ToTerminalErr(err)
 	}
 	chunks := planInputsToChunks(buildID, req.Chunks, now)
-	if verr := dag.ValidateCreateBuildInputs(buildID, threadID, objective, chunks); verr != nil {
+	if verr := buildplan.ValidateCreateBuildInputs(buildID, threadID, objective, chunks); verr != nil {
 		RecordReconcileError(labelCreate, verr)
 		return model.VanadisBuild{}, ToTerminalErr(verr)
 	}
-	validatedChunks, err := dag.NormalizeAndValidateBuildDAG(chunks)
+	validatedChunks, err := buildplan.NormalizeAndValidateBuildDAG(chunks)
 	if err != nil {
 		RecordReconcileError(labelCreate, err)
 		return model.VanadisBuild{}, ToTerminalErr(err)
@@ -454,11 +461,10 @@ func (b *BuildObject) Create(ctx restate.ObjectContext, req CreateBuildRequest) 
 		title = objective
 	}
 	agent := strings.TrimSpace(req.Agent)
-	if agent == "" && b != nil {
-		agent = strings.TrimSpace(b.agentName)
-	}
 	if agent == "" {
 		agent = "aerial"
+	} else {
+		agent = store.NormalizeRunnerAgent(agent)
 	}
 	build := model.VanadisBuild{
 		ID:            buildID,
@@ -547,16 +553,22 @@ func (b *BuildObject) Cancel(ctx restate.ObjectContext, req CancelBuildRequest) 
 		}
 		bld.Status = statusCancelled
 		if b.executor != nil {
+			var cancelCtx context.Context = rc
+			if bld != nil && strings.TrimSpace(bld.Agent) != "" {
+				cancelCtx = ericlient.WithAgent(rc, bld.Agent)
+			}
 			for _, c := range chunks {
-				if cErr := b.executor.CancelChunkDispatch(rc, c.ID); cErr != nil {
-					slog.WarnContext(rc, "[vanadis-restate] cancel chunk dispatch failed", "chunk_id", c.ID, "error", cErr)
+				if cErr := b.executor.CancelChunkDispatch(cancelCtx, c.ID); cErr != nil {
+					slog.WarnContext(cancelCtx, "[vanadis-restate] cancel chunk dispatch failed", "chunk_id", c.ID, "error", cErr)
 				}
 			}
-			if _, sErr := b.executor.SyncBuildWidget(rc, b.store, *bld, chunks, "Build cancelled"); sErr != nil {
-				slog.WarnContext(rc, "[vanadis-restate] sync widget warning", "error", sErr)
+			if _, sErr := b.executor.SyncBuildWidget(cancelCtx, b.store, *bld, chunks, "Build cancelled"); sErr != nil {
+				slog.WarnContext(cancelCtx, "[vanadis-restate] sync widget warning", "error", sErr)
 			}
-			if pErr := b.executor.PublishExternalEvent(rc, "vanadis_build", "cancelled", []string{buildID}, req.Reason); pErr != nil {
-				slog.WarnContext(rc, "[vanadis-restate] publish event warning", "error", pErr)
+			b.executor.ClearActiveSteps(buildID)
+			b.activeStepSyncs.Delete(buildID)
+			if pErr := b.executor.PublishExternalEvent(cancelCtx, "vanadis_build", "cancelled", []string{buildID}, req.Reason); pErr != nil {
+				slog.WarnContext(cancelCtx, "[vanadis-restate] publish event warning", "error", pErr)
 			}
 		}
 		return *bld, nil
@@ -646,7 +658,11 @@ func (b *BuildObject) executeChunkRemoval(ctx restate.ObjectContext, rt objectRu
 			return false, rErr
 		}
 		if b.executor != nil && removedChunk != nil {
-			if cErr := b.executor.CancelChunkDispatch(rc, removedChunk.ID); cErr != nil {
+			var owner *model.VanadisBuild
+			if bld, _, gErr := b.store.GetBuild(rc, buildID); gErr == nil {
+				owner = bld
+			}
+			if cErr := b.executor.CancelChunkDispatch(withBuildOwner(rc, owner), removedChunk.ID); cErr != nil {
 				slog.WarnContext(rc, "[vanadis-restate] cancel chunk dispatch failed", "chunk_id", removedChunk.ID, "error", cErr)
 			}
 		}
@@ -700,19 +716,24 @@ func (b *BuildObject) FailChunk(ctx restate.ObjectContext, req model.FailChunkRe
 			resp.ThreadID = bld.ThreadID
 			resp.Objective = bld.Objective
 			resp.Quiet = bld.Quiet
+			resp.Agent = bld.Agent
 		}
 		return resp, nil
 	})
 	if err != nil {
 		return model.FailChunkResponse{}, ToTerminalErr(err)
 	}
-	if res.Failed && res.BuildID != "" && res.BuildStatus == statusFailed && res.ChunkStatus == statusFailed && b.executor != nil {
+	if !res.Failed || res.BuildID == "" || res.ChunkStatus != statusFailed {
+		return res, nil
+	}
+	if b.executor != nil {
 		_, nErr := RunJournaled(ctx, labelFailChunk, "notify-chunk-failure", func(rc restate.RunContext) (bool, error) {
 			bld := model.VanadisBuild{
 				ID:        res.BuildID,
 				ThreadID:  res.ThreadID,
 				Objective: res.Objective,
 				Quiet:     res.Quiet,
+				Agent:     res.Agent,
 			}
 			if err := b.notifyChunkFailure(rc, bld, chunkID, reason); err != nil {
 				return false, err
@@ -722,6 +743,15 @@ func (b *BuildObject) FailChunk(ctx restate.ObjectContext, req model.FailChunkRe
 		if nErr != nil {
 			return model.FailChunkResponse{}, ToTerminalErr(nErr)
 		}
+	}
+	// Reconcile owns the build status and the failure wake: the failed chunk
+	// blocks only its dependents while every other ready chunk keeps launching.
+	tRes, tErr := b.executeObjectTransition(b.getRuntime(ctx), labelReconcileAfterFailChunk, nil)
+	if tErr != nil {
+		return model.FailChunkResponse{}, ToTerminalErr(tErr)
+	}
+	if tRes.Status != "" {
+		res.BuildStatus = tRes.Status
 	}
 	return res, nil
 }

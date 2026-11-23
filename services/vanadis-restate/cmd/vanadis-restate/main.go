@@ -15,14 +15,22 @@ import (
 )
 
 var (
-	loadConfigFn  = app.LoadConfigFromEnv
+	loadConfigFn  = app.LoadConfig
 	runAppFn      = app.RunApp
 	exitFn        = log.Fatalf
 	initTracingFn = tracing.Init
+	readFileFn    = os.ReadFile
 )
 
 func main() {
-	cfg := loadConfigFn()
+	cfg := loadConfigFn(os.Getenv)
+	cfg.Environ = os.Environ()
+	settings, err := app.ReadServiceSettings(cfg.ServiceConfigPath, readFileFn)
+	if err != nil {
+		exitFn("[vanadis-restate] Error: %v", err)
+		return
+	}
+	cfg = cfg.WithServiceSettings(settings)
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()
 

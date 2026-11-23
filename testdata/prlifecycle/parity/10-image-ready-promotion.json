@@ -1,0 +1,71 @@
+{
+  "name": "10-image-ready-promotion",
+  "description": "Images built for a main commit with no PR are promoted once and the untracked rollout reconciles its Kustomization once, both repo-level.",
+  "synapse": [
+    {
+      "kind": "image_promotion",
+      "promotion": {
+        "repo": "azylman/aerial",
+        "pr_number": 0,
+        "commit_sha": "c110",
+        "images": [
+          "ghcr.io/azylman/aerial-eri:sha-c110"
+        ]
+      }
+    },
+    {
+      "kind": "rollout_requested",
+      "rollout": {
+        "repo": "azylman/aerial",
+        "pr_number": 0,
+        "head_sha": "c110",
+        "branch": "main",
+        "jobs": [
+          "apps"
+        ],
+        "requests": {
+          "apps": {
+            "namespace": "flux-system",
+            "requested_at": "2026-11-20T11:00:00Z"
+          }
+        }
+      }
+    }
+  ],
+  "restate": [
+    {
+      "object": "RepoObject",
+      "handler": "HandleImagePromotion",
+      "event": {
+        "pr_number": 0,
+        "head_sha": "c110",
+        "branch": "main",
+        "images": [
+          "ghcr.io/azylman/aerial-eri:sha-c110"
+        ],
+        "jobs": [
+          "apps"
+        ],
+        "kustomization_requests": {
+          "apps": {
+            "namespace": "flux-system",
+            "requested_at": "2026-11-20T11:00:00Z"
+          }
+        },
+        "repo": "azylman/aerial"
+      }
+    }
+  ],
+  "effects": [
+    {
+      "kind": "image_promote",
+      "key": "azylman/aerial#0@c110:image_promote"
+    },
+    {
+      "kind": "flux_reconcile",
+      "key": "azylman/aerial#0@c110:flux_reconcile"
+    }
+  ],
+  "fact_rollout_states": [],
+  "rows": []
+}

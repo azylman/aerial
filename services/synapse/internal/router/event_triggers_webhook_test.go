@@ -5,11 +5,11 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"slices"
 	"strings"
-	"sync"
 	"testing"
 	"time"
 
@@ -77,32 +77,9 @@ func verifyPublishedEvents(t *testing.T, tracker *eventTracker, wantCount int, w
 	}
 }
 
-type recordingBus struct {
-	pubsub.Bus
-
-	mu        sync.Mutex
-	publishes []string
-	events    []pubsub.ExternalEvent
-}
-
-func (b *recordingBus) Publish(ctx context.Context, subject, msgID string, payload any) error {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	b.publishes = append(b.publishes, subject)
-	if ev, ok := payload.(pubsub.ExternalEvent); ok {
-		b.events = append(b.events, ev)
-	}
-	return nil
-}
-
-func (b *recordingBus) publishCount() int {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	return len(b.publishes)
-}
-
 type evaluateEventTriggersTestCase struct {
 	name          string
+	nilServer     bool
 	useBus        bool
 	useSyncBus    bool
 	closeBusFirst bool
@@ -120,10 +97,10 @@ func assertEvaluateEventTriggersScenario(t *testing.T, tc evaluateEventTriggersT
 	srv := NewRouterServer(fixedConfig(Config{}), nil)
 
 	var tracker *eventTracker
-	var recBus *recordingBus
+	var recBus *mockEventBus
 
 	if tc.useSyncBus {
-		recBus = &recordingBus{}
+		recBus = &mockEventBus{}
 		srv.SetEventBus(recBus)
 	} else if tc.useBus {
 		memBus := pubsub.NewMemoryBus()
@@ -135,13 +112,16 @@ func assertEvaluateEventTriggersScenario(t *testing.T, tc evaluateEventTriggersT
 		srv.SetEventBus(memBus)
 	}
 
+	if tc.nilServer {
+		srv = nil
+	}
 	err := srv.evaluateEventTriggers(context.Background(), tc.source, tc.eventType, tc.targets, tc.contextHeader)
 	if (err != nil) != tc.wantErr {
 		t.Fatalf("evaluateEventTriggers() err = %v, wantErr = %v", err, tc.wantErr)
 	}
 
 	if recBus != nil && recBus.publishCount() != tc.wantPubCount {
-		t.Errorf("recordingBus publish count = %d, want %d", recBus.publishCount(), tc.wantPubCount)
+		t.Errorf("bus publish count = %d, want %d", recBus.publishCount(), tc.wantPubCount)
 	}
 	verifyPublishedEvents(t, tracker, tc.wantPubCount, tc.wantPubTopic, nil, tc.contextHeader)
 }
@@ -194,6 +174,8 @@ func TestEvaluateEventTriggers_Scenarios(t *testing.T) {
 			targets:      []string{"driveway"},
 			wantPubCount: 0,
 		},
+		{name: "nil server returns error", nilServer: true, source: "camera", eventType: "motion", targets: []string{"driveway"}, wantErr: true},
+		{name: "server without a bus returns error", source: "camera", eventType: "motion", targets: []string{"driveway"}, wantErr: true},
 		{
 			name:          "bus error returns error without fallback",
 			useBus:        true,
@@ -215,9 +197,37 @@ func TestEvaluateEventTriggers_Scenarios(t *testing.T) {
 	}
 }
 
+func TestEvaluateGitHubEventTriggers(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name string
+		res  *ResolvedGitHubEvent
+		want []string
+	}{
+		{name: "nil result fires nothing", res: nil, want: []string{}},
+		{name: "merged pull request fires pr_merged", res: &ResolvedGitHubEvent{Event: "pull_request", Action: "closed", Merged: true, Repo: "example/aerial", Branch: "main"}, want: []string{"github:pr_merged"}},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			bus := &mockEventBus{}
+			srv := newTestRouter(Config{}, nil, nil, bus)
+			srv.evaluateGitHubEventTriggers(context.Background(), tc.res, nil)
+			got := make([]string, 0, len(bus.events))
+			for _, ev := range bus.events {
+				got = append(got, ev.Source+":"+ev.EventType)
+			}
+			if !slices.Equal(got, tc.want) {
+				t.Errorf("trigger events = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
 type handleEventsWebhookTestCase struct {
 	name             string
 	payload          string
+	body             io.Reader
 	useBus           bool
 	closeBus         bool
 	wantStatus       int
@@ -244,7 +254,11 @@ func assertHandleEventsWebhookScenario(t *testing.T, tc handleEventsWebhookTestC
 		srv.SetEventBus(memBus)
 	}
 
-	req := httptest.NewRequest(http.MethodPost, "/webhooks/events", strings.NewReader(tc.payload))
+	body := tc.body
+	if body == nil {
+		body = strings.NewReader(tc.payload)
+	}
+	req := httptest.NewRequest(http.MethodPost, "/webhooks/events", body)
 	req.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()
 
@@ -283,6 +297,7 @@ func TestHandleEventsWebhook_Scenarios(t *testing.T) {
 			wantTargets:      []string{"backyard"},
 			wantHeaderSubstr: "External camera event motion on backyard: high confidence",
 		},
+		{name: "unreadable body returns 400", body: errReader{}, wantStatus: http.StatusBadRequest},
 		{
 			name:       "invalid json returns 400",
 			payload:    `{invalid`,
@@ -318,96 +333,6 @@ func TestHandleEventsWebhook_Scenarios(t *testing.T) {
 			t.Parallel()
 			assertHandleEventsWebhookScenario(t, tc)
 		})
-	}
-}
-
-func TestIntegrations_EventTriggers(t *testing.T) {
-	t.Parallel()
-
-	tests := []struct {
-		name          string
-		testScenario  string
-		wantSource    string
-		wantEventType string
-	}{
-		{
-			name:          "ProcessDeployEvent sync_success fires flux triggers",
-			testScenario:  "flux_sync_success",
-			wantSource:    "flux",
-			wantEventType: "sync_success",
-		},
-		{
-			name:          "ProcessGitHubEvent pr closed merged fires github triggers",
-			testScenario:  "github_pr_merged",
-			wantSource:    "github",
-			wantEventType: "pr_merged",
-		},
-	}
-
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			recBus := &recordingBus{}
-			mockReg := &mockPRRegistry{}
-			mockDisp := &mockOutboundDispatcher{}
-			srv := NewRouterServer(fixedConfig(Config{}), nil)
-			srv.SetEventBus(recBus)
-			srv.SetRegistry(mockReg)
-			srv.SetDispatcher(mockDisp)
-
-			ctx := context.Background()
-			switch tc.testScenario {
-			case "flux_sync_success":
-				_, _ = srv.ProcessDeployEvent(ctx, DeployEvent{
-					Event: "sync_success",
-					Repo:  "azylman/aerial",
-				})
-			case "github_pr_merged":
-				body := []byte(`{"action":"closed","number":1,"repository":{"full_name":"azylman/aerial"},"pull_request":{"number":1,"merged":true,"merge_commit_sha":"sha-merge-123","head":{"ref":"feat/test","sha":"sha-head-123"}}}`)
-				_, _ = srv.ProcessGitHubEvent(ctx, "pull_request", "del-pr-merged", body)
-			}
-
-			recBus.mu.Lock()
-			events := append([]pubsub.ExternalEvent(nil), recBus.events...)
-			recBus.mu.Unlock()
-
-			var found bool
-			for _, ev := range events {
-				if ev.Source == tc.wantSource && ev.EventType == tc.wantEventType {
-					found = true
-					break
-				}
-			}
-			if !found {
-				t.Fatalf("expected bus event for source=%s eventType=%s, events = %+v", tc.wantSource, tc.wantEventType, events)
-			}
-		})
-	}
-}
-
-func TestProcessGitHubEvent_TriggersEvaluatedOnlyOnSuccess(t *testing.T) {
-	t.Parallel()
-
-	recBus := &recordingBus{}
-	mockReg := &mockPRRegistry{
-		err: errors.New("database connection lost"),
-	}
-	mockDisp := &mockOutboundDispatcher{}
-	srv := NewRouterServer(fixedConfig(Config{}), nil)
-	srv.SetEventBus(recBus)
-	srv.SetRegistry(mockReg)
-	srv.SetDispatcher(mockDisp)
-
-	ctx := context.Background()
-	body := []byte(`{"action":"closed","number":1,"repository":{"full_name":"azylman/aerial"},"pull_request":{"number":1,"merged":true,"merge_commit_sha":"sha-merge-123","head":{"ref":"feat/test","sha":"sha-head-123"}}}`)
-
-	res, err := srv.ProcessGitHubEvent(ctx, "pull_request", "del-pr-merged-err", body)
-	if err == nil {
-		t.Fatalf("expected error from ProcessGitHubEvent, got res=%v", res)
-	}
-
-	if recBus.publishCount() != 0 {
-		t.Fatalf("expected no bus events on ProcessGitHubEvent error, got %d events: %+v", recBus.publishCount(), recBus.events)
 	}
 }
 
@@ -486,6 +411,8 @@ func TestHandleAlertsWebhook(t *testing.T) {
 		name          string
 		path          string
 		cfgChannel    string
+		noConfig      bool
+		noDispatcher  bool
 		dispatcherErr error
 		steps         []alertWebhookStep
 		wantDMCount   int
@@ -496,6 +423,19 @@ func TestHandleAlertsWebhook(t *testing.T) {
 			path:       "/api/v2/alerts",
 			cfgChannel: sysChannel,
 			steps:      []alertWebhookStep{{payload: "invalid-json", wantStatus: http.StatusBadRequest}},
+		},
+		{
+			name:     "missing config with a dispatcher returns 503",
+			path:     "/api/v2/alerts",
+			noConfig: true,
+			steps:    []alertWebhookStep{{payload: `[{"status":"firing","labels":{"alertname":"DiskFull"}}]`, wantStatus: http.StatusServiceUnavailable}},
+		},
+		{
+			name:         "missing dispatcher returns 503",
+			path:         "/api/v2/alerts",
+			cfgChannel:   sysChannel,
+			noDispatcher: true,
+			steps:        []alertWebhookStep{{payload: `[{"status":"firing","labels":{"alertname":"DiskFull"}}]`, wantStatus: http.StatusServiceUnavailable}},
 		},
 		{
 			name:       "empty array returns 200 with 0 dispatched",
@@ -592,8 +532,14 @@ func TestHandleAlertsWebhook(t *testing.T) {
 			t.Parallel()
 			disp := &mockOutboundDispatcher{directMessageErr: tc.dispatcherErr}
 			cfgSrc := &mutableConfigSource{cfg: Config{SystemChannelID: tc.cfgChannel}}
-			srv := NewRouterServer(cfgSrc, nil)
-			srv.SetDispatcher(disp)
+			var src ConfigSource = cfgSrc
+			if tc.noConfig {
+				src = nil
+			}
+			srv := NewRouterServer(src, nil)
+			if !tc.noDispatcher {
+				srv.SetDispatcher(disp)
+			}
 			handler := srv.Routes()
 
 			for _, step := range tc.steps {

@@ -1,4 +1,4 @@
-import { act, cleanup, render, screen, within } from '@testing-library/react';
+import { act, cleanup, render, screen } from '@testing-library/react';
 import { Profiler, type ProfilerOnRenderCallback } from 'react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import buildsRaw from '../e2e/fixtures/builds.json?raw';
@@ -46,7 +46,6 @@ const BODIES: Readonly<Record<string, unknown>> = {
     active_tasks: [{ id: 't1' }],
     services: [{ name: 'eri', status: 'healthy' }],
     quick_launch_links: [],
-    git_sync: { status: 'synced', max_lag_seconds: 0, last_sync_time: '2026-11-08T12:00:00Z' },
   },
   '/console/api/schedules': { status: 'ok', summary: { total_active: 3 }, crons: [], one_shots: [] },
   '/console/api/facts': { facts: [], total: 9, limit: 0, offset: 0 },
@@ -345,8 +344,8 @@ describe('App with a fully seeded store', () => {
     vi.unstubAllGlobals();
   });
 
-  // Runs before the walk below opens a build, so the drawer body's React.lazy wrapper has never
-  // been rendered (and so has not resolved) in this file yet.
+  // The first test to open a build in this file, so the drawer body's React.lazy wrapper has never
+  // been rendered (and so has not resolved) yet.
   it('opens the build drawer without suspending once the builds chunk has loaded', async () => {
     window.history.replaceState(null, '', '/console/next/#builds');
     initRouteFromLocation();
@@ -369,42 +368,6 @@ describe('App with a fully seeded store', () => {
     await flush();
     expect(screen.getByRole('dialog', { name: 'TASK // #201 KIOSK WIDGET REFRESH STEP 1' })).toBeTruthy();
     expect(screen.getByText('COMMENTS (2)')).toBeTruthy();
-  });
-
-  it('walks all six tabs by hash, mounting exactly one view at a time', async () => {
-    window.history.replaceState(null, '', '/console/next/#telemetry');
-    initRouteFromLocation();
-    render(<App />);
-    const walk = [
-      { hash: '#telemetry', panel: 'telemetry-view', heading: 'Active Agent Turns' },
-      { hash: '#tasks', panel: 'tasks-view', heading: 'LIVE DISPATCH STREAM' },
-      { hash: '#schedules', panel: 'schedules-view', heading: 'ACTIVE SCHEDULED ROUTINES' },
-      { hash: '#memory', panel: 'memory-view', heading: 'TOTAL MEMORY NODES' },
-      { hash: '#builds', panel: 'builds-view', heading: 'RUNNING BUILDS' },
-      { hash: '#docket', panel: 'docket-view', heading: '21 TASKS' },
-    ];
-    for (const step of walk) {
-      await act(async () => {
-        window.location.hash = step.hash;
-        window.dispatchEvent(new HashChangeEvent('hashchange'));
-      });
-      await flush();
-      expect(screen.getAllByRole('tabpanel').map((p) => p.id)).toEqual([step.panel]);
-      expect(screen.getByRole('tab', { selected: true }).id).toBe(`tab-${step.panel.replace('-view', '')}-btn`);
-      expect(screen.getByText(step.heading)).toBeTruthy();
-    }
-    // The task drawer body ships in the docket chunk and opens from a card.
-    await act(async () => screen.getByText('Kiosk widget refresh step 1').click());
-    await flush();
-    expect(screen.getByRole('dialog', { name: 'TASK // #201 KIOSK WIDGET REFRESH STEP 1' })).toBeTruthy();
-    expect(screen.getByText('COMMENTS (2)')).toBeTruthy();
-    // Back on the builds tab, clicking a build card expands its inline DAG and clicking a chunk node opens the drawer.
-    await goTo('#builds');
-    await act(async () => within(document.getElementById('builds-view')!).getByText('Console React rewrite #1').click());
-    await act(async () => within(document.getElementById('builds-view')!).getByText('Scaffold for Console React rewrite').click());
-    await flush();
-    expect(screen.getByRole('dialog', { name: 'BUILD // BUILD-1794100000-C046DE69' })).toBeTruthy();
-    expect(screen.getByText('BUILD CHUNK DAG (3)')).toBeTruthy();
   });
 });
 
@@ -449,9 +412,9 @@ describe('visited views stay mounted', () => {
     },
     {
       name: 'every tab and back to the first',
-      walk: ['#tasks', '#telemetry', '#schedules', '#memory', '#builds', '#tasks'],
-      wantMounts: { tasks: 1, telemetry: 1, schedules: 1, memory: 1, builds: 1 },
-      wantPanels: ['tasks-view', 'telemetry-view', 'schedules-view', 'memory-view', 'builds-view'],
+      walk: ['#tasks', '#telemetry', '#schedules', '#memory', '#builds', '#docket', '#tasks'],
+      wantMounts: { tasks: 1, telemetry: 1, schedules: 1, memory: 1, builds: 1, docket: 1 },
+      wantPanels: ['tasks-view', 'telemetry-view', 'schedules-view', 'memory-view', 'builds-view', 'docket-view'],
       wantVisible: 'tasks-view',
       wantIds: ['#schedules-grid', '#memory-search-input', '#builds-search-input'],
     },

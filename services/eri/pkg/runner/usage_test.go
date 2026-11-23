@@ -53,7 +53,11 @@ func TestStreamingDaemon_Claude_StreamUsageFallback(t *testing.T) {
 				got = sink.result.Usage
 			}
 			if sink.err != nil {
-				got, _ = UsageFromError(sink.err)
+				var ok bool
+				got, ok = UsageFromError(sink.err)
+				if ok != (tc.wantUsage != AgyUsage{}) {
+					t.Errorf("UsageFromError ok = %v, want %v", ok, tc.wantUsage != AgyUsage{})
+				}
 			}
 			if got != tc.wantUsage {
 				t.Errorf("usage = %+v, want %+v", got, tc.wantUsage)

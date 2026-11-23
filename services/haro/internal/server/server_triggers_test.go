@@ -12,9 +12,10 @@ import (
 	"time"
 
 	"github.com/google/uuid"
-	"github.com/nats-io/nats.go"
 
+	"github.com/azylman/aerial/pkg/eriwire"
 	"github.com/azylman/aerial/pkg/pubsub"
+	"github.com/azylman/aerial/pkg/pubsubtest"
 	"github.com/azylman/aerial/services/haro/internal/config"
 	"github.com/azylman/aerial/services/haro/internal/dispatch"
 	"github.com/azylman/aerial/services/haro/internal/metrics"
@@ -57,36 +58,44 @@ func TestServer_Metrics_Table(t *testing.T) {
 	defer ts.Close()
 
 	ctx := context.Background()
-	_ = store.InsertCronSchedule(ctx, server.handler.DB, model.CronSchedule{
+	if err := store.InsertCronSchedule(ctx, server.handler.DB, model.CronSchedule{
 		ID:        "m-cron-1",
 		TargetID:  "chan-1",
 		CronExpr:  "0 0 * * *",
 		Prompt:    "daily",
 		NextRunAt: time.Now().UTC(),
 		Enabled:   true,
-	})
-	_ = store.InsertHeartbeatSchedule(ctx, server.handler.DB, model.HeartbeatSchedule{
+	}); err != nil {
+		t.Fatalf("InsertCronSchedule failed: %v", err)
+	}
+	if err := store.InsertHeartbeatSchedule(ctx, server.handler.DB, model.HeartbeatSchedule{
 		ID:        "m-hb-1",
 		TargetID:  "chan-2",
 		CronExpr:  "0 0 * * *",
 		Prompt:    "heartbeat",
 		NextRunAt: time.Now().UTC(),
 		Enabled:   true,
-	})
-	_ = store.InsertOneShotSchedule(ctx, server.handler.DB, model.OneShotSchedule{
+	}); err != nil {
+		t.Fatalf("InsertHeartbeatSchedule failed: %v", err)
+	}
+	if err := store.InsertOneShotSchedule(ctx, server.handler.DB, model.OneShotSchedule{
 		ID:       "m-once-1",
 		ThreadID: "chan-3",
 		Prompt:   "once",
 		RunAt:    time.Now().UTC(),
-	})
-	_ = store.InsertEventTrigger(ctx, server.handler.DB, model.EventTrigger{
+	}); err != nil {
+		t.Fatalf("InsertOneShotSchedule failed: %v", err)
+	}
+	if err := store.InsertEventTrigger(ctx, server.handler.DB, model.EventTrigger{
 		ID:        "m-trig-1",
 		ChannelID: "chan-4",
 		Source:    "github",
 		Target:    "repo",
 		EventType: "push",
 		Prompt:    "p",
-	})
+	}); err != nil {
+		t.Fatalf("InsertEventTrigger failed: %v", err)
+	}
 
 	metrics.RecordScheduleRun("cron", "completed")
 	metrics.RecordScheduleRun("one_shot", "stale")
@@ -157,31 +166,8 @@ func TestServer_Metrics_Table(t *testing.T) {
 	}
 }
 
-// stubMessage is a minimal pubsub.Message carrying only a payload; the
-// one-shot ingestion path reads Data and nothing else.
-type stubMessage struct {
-	data         []byte
-	numDelivered uint64
-}
-
-func (m *stubMessage) Data() []byte  { return m.data }
-func (*stubMessage) Subject() string { return "" }
-func (*stubMessage) Header() nats.Header {
-	return nil
-}
-func (m *stubMessage) NumDelivered() uint64             { return m.numDelivered }
-func (*stubMessage) Ack() error                         { return nil }
-func (*stubMessage) NakWithDelay(_ time.Duration) error { return nil }
-func (*stubMessage) Term() error                        { return nil }
-func (*stubMessage) Snooze(_ time.Duration) error       { return nil }
-func (*stubMessage) InProgress() error                  { return nil }
-
 func TestHandleOneShotJob_Scenarios(t *testing.T) {
-	db, err := testutil.OpenSQLiteTestDB(":memory:")
-	if err != nil {
-		t.Fatalf("OpenSQLiteTestDB failed: %v", err)
-	}
-	t.Cleanup(func() { _ = db.Close() })
+	db := testutil.NewDB(t)
 	ctx := context.Background()
 	now := time.Date(2026, 11, 14, 12, 0, 0, 0, time.UTC)
 
@@ -193,11 +179,11 @@ func TestHandleOneShotJob_Scenarios(t *testing.T) {
 		wantErr bool
 	}{
 		{"nil message returns error", nil, db, nil, true},
-		{"nil database returns error", nil, nil, &stubMessage{data: []byte(`{"id":"os-valid-1","thread_id":"th-1","prompt":"p1","run_at":"2026-11-14T12:00:00Z"}`)}, true},
-		{"invalid json drops cleanly", nil, db, &stubMessage{data: []byte(`not-json`)}, false},
-		{"missing fields drops cleanly", nil, db, &stubMessage{data: []byte(`{"thread_id":""}`)}, false},
-		{"valid insert succeeds", nil, db, &stubMessage{data: []byte(`{"id":"os-valid-1","thread_id":"th-1","prompt":"p1","run_at":"2026-11-14T12:00:00Z"}`)}, false},
-		{"duplicate insert stays valid", nil, db, &stubMessage{data: []byte(`{"id":"os-valid-1","thread_id":"th-1","prompt":"p1","run_at":"2026-11-14T12:00:00Z"}`)}, false},
+		{"nil database returns error", nil, nil, &pubsubtest.Message{Payload: []byte(`{"id":"os-valid-1","thread_id":"th-1","prompt":"p1","run_at":"2026-11-14T12:00:00Z"}`)}, true},
+		{"invalid json drops cleanly", nil, db, &pubsubtest.Message{Payload: []byte(`not-json`)}, false},
+		{"missing fields drops cleanly", nil, db, &pubsubtest.Message{Payload: []byte(`{"thread_id":""}`)}, false},
+		{"valid insert succeeds", nil, db, &pubsubtest.Message{Payload: []byte(`{"id":"os-valid-1","thread_id":"th-1","prompt":"p1","run_at":"2026-11-14T12:00:00Z"}`)}, false},
+		{"duplicate insert stays valid", nil, db, &pubsubtest.Message{Payload: []byte(`{"id":"os-valid-1","thread_id":"th-1","prompt":"p1","run_at":"2026-11-14T12:00:00Z"}`)}, false},
 	}
 
 	for _, tc := range tests {
@@ -218,7 +204,7 @@ func TestHandleOneShotJob_Scenarios(t *testing.T) {
 
 	toolHandler := tools.NewToolHandler(&config.Config{DatabaseURL: ":memory:"}, db)
 	srv := NewServer(toolHandler)
-	msgWithServer := &stubMessage{data: []byte(fmt.Sprintf(`{"thread_id":"th-2","prompt":"p2","run_at":%q}`, now.Format(time.RFC3339)))}
+	msgWithServer := &pubsubtest.Message{Payload: []byte(fmt.Sprintf(`{"thread_id":"th-2","prompt":"p2","run_at":%q}`, now.Format(time.RFC3339)))}
 	if err := HandleOneShotJob(ctx, srv, nil, msgWithServer); err != nil {
 		t.Fatalf("HandleOneShotJob with server failed: %v", err)
 	}
@@ -226,18 +212,14 @@ func TestHandleOneShotJob_Scenarios(t *testing.T) {
 
 func TestHandleOneShotJob_ClosedDB(t *testing.T) {
 	ctx := context.Background()
-	closedDB, err := testutil.OpenSQLiteTestDB(":memory:")
-	if err != nil {
-		t.Fatalf("OpenSQLiteTestDB failed: %v", err)
-	}
-	_ = closedDB.Close()
+	closedDB := testutil.NewClosedDB(t)
 
 	tests := []struct {
 		name    string
 		msg     pubsub.Message
 		wantErr bool
 	}{
-		{"closed database returns error", &stubMessage{data: []byte(`{"id":"os-closed-1","thread_id":"th-1","prompt":"p1","run_at":"2026-11-14T12:00:00Z"}`)}, true},
+		{"closed database returns error", &pubsubtest.Message{Payload: []byte(`{"id":"os-closed-1","thread_id":"th-1","prompt":"p1","run_at":"2026-11-14T12:00:00Z"}`)}, true},
 	}
 
 	for _, tc := range tests {
@@ -261,12 +243,13 @@ func (m *stubScenarioDispatcher) DispatchPrompt(_ context.Context, req dispatch.
 	return m.response, m.err
 }
 
-func (*stubScenarioDispatcher) Dispatch(_ context.Context, _ dispatch.DispatchRequest) (dispatch.DispatchResponse, error) {
-	return dispatch.DispatchResponse{}, nil
+func (*stubScenarioDispatcher) Dispatch(_ context.Context, _ eriwire.BrainDispatchRequest) (eriwire.DispatchEnqueueResponse, error) {
+	return eriwire.DispatchEnqueueResponse{}, nil
 }
 
-func seedExternalEventTriggers(ctx context.Context, db *sql.DB) {
-	_ = store.InsertEventTrigger(ctx, db, model.EventTrigger{
+func seedExternalEventTriggers(ctx context.Context, t *testing.T, db *sql.DB) {
+	t.Helper()
+	if err := store.InsertEventTrigger(ctx, db, model.EventTrigger{
 		ID:        "trig-ext-1",
 		ChannelID: "100000000000000001",
 		Source:    "camera",
@@ -274,8 +257,10 @@ func seedExternalEventTriggers(ctx context.Context, db *sql.DB) {
 		EventType: "vehicle_detected",
 		Prompt:    "Vehicle in driveway",
 		Effort:    "low",
-	})
-	_ = store.InsertEventTrigger(ctx, db, model.EventTrigger{
+	}); err != nil {
+		t.Fatalf("InsertEventTrigger trig-ext-1 failed: %v", err)
+	}
+	if err := store.InsertEventTrigger(ctx, db, model.EventTrigger{
 		ID:        "trig-ext-fail",
 		ChannelID: "100000000000000001",
 		Source:    "camera",
@@ -283,8 +268,10 @@ func seedExternalEventTriggers(ctx context.Context, db *sql.DB) {
 		EventType: "motion",
 		Prompt:    "Motion in backyard",
 		Effort:    "low",
-	})
-	_ = store.InsertEventTrigger(ctx, db, model.EventTrigger{
+	}); err != nil {
+		t.Fatalf("InsertEventTrigger trig-ext-fail failed: %v", err)
+	}
+	if err := store.InsertEventTrigger(ctx, db, model.EventTrigger{
 		ID:        "trig-ext-healthcheck",
 		ChannelID: "100000000000000001",
 		Source:    "healthcheck",
@@ -292,8 +279,10 @@ func seedExternalEventTriggers(ctx context.Context, db *sql.DB) {
 		EventType: "ping",
 		Prompt:    "Healthcheck ping",
 		Effort:    "low",
-	})
-	_ = store.InsertEventTrigger(ctx, db, model.EventTrigger{
+	}); err != nil {
+		t.Fatalf("InsertEventTrigger trig-ext-healthcheck failed: %v", err)
+	}
+	if err := store.InsertEventTrigger(ctx, db, model.EventTrigger{
 		ID:         "trig-ext-fail-persistent",
 		ChannelID:  "100000000000000001",
 		Source:     "camera",
@@ -302,7 +291,9 @@ func seedExternalEventTriggers(ctx context.Context, db *sql.DB) {
 		Prompt:     "Motion in sideyard",
 		Effort:     "low",
 		Persistent: true,
-	})
+	}); err != nil {
+		t.Fatalf("InsertEventTrigger trig-ext-fail-persistent failed: %v", err)
+	}
 }
 
 func verifyTriggerState(ctx context.Context, t *testing.T, db *sql.DB, ev pubsub.ExternalEvent, wantInDB bool) {
@@ -338,20 +329,12 @@ func verifyDispatchedPrompt(t *testing.T, disp *stubScenarioDispatcher, wantChan
 }
 
 func TestHandleExternalEvent_Scenarios(t *testing.T) {
-	db, err := testutil.OpenSQLiteTestDB(":memory:")
-	if err != nil {
-		t.Fatalf("OpenSQLiteTestDB failed: %v", err)
-	}
-	t.Cleanup(func() { _ = db.Close() })
+	db := testutil.NewDB(t)
 	ctx := context.Background()
 
-	seedExternalEventTriggers(ctx, db)
+	seedExternalEventTriggers(ctx, t, db)
 
-	closedDB, err := testutil.OpenSQLiteTestDB(":memory:")
-	if err != nil {
-		t.Fatalf("OpenSQLiteTestDB failed: %v", err)
-	}
-	_ = closedDB.Close()
+	closedDB := testutil.NewClosedDB(t)
 	serverClosed := NewServer(tools.NewToolHandler(&config.Config{DatabaseURL: ":memory:"}, closedDB))
 
 	mockDispFail := &stubScenarioDispatcher{err: errors.New("eri unavailable")}
@@ -368,6 +351,7 @@ func TestHandleExternalEvent_Scenarios(t *testing.T) {
 		checkDBID            string
 		wantInDB             bool
 		wantImmediateReclaim bool
+		wantDispatchMsgID    string
 	}{
 		{
 			name:      "healthcheck source is no-op and leaves trigger unclaimed",
@@ -421,12 +405,13 @@ func TestHandleExternalEvent_Scenarios(t *testing.T) {
 			wantImmediateReclaim: true,
 		},
 		{
-			name:      "successful dispatch claims and fires trigger",
-			server:    serverOK,
-			ev:        pubsub.ExternalEvent{EventID: "evt-cam-123", Source: "camera", EventType: "vehicle_detected", Targets: []string{"driveway"}, ContextHeader: "Camera Alert"},
-			wantErr:   false,
-			checkDBID: "trig-ext-1",
-			wantInDB:  false,
+			name:              "successful dispatch claims and fires trigger",
+			server:            serverOK,
+			ev:                pubsub.ExternalEvent{EventID: "evt-cam-123", Source: "camera", EventType: "vehicle_detected", Targets: []string{"driveway"}, ContextHeader: "Camera Alert"},
+			wantErr:           false,
+			checkDBID:         "trig-ext-1",
+			wantInDB:          false,
+			wantDispatchMsgID: uuid.NewSHA1(uuid.NameSpaceOID, []byte("event_watch:trig-ext-1:evt-cam-123")).String(),
 		},
 	}
 
@@ -448,9 +433,8 @@ func TestHandleExternalEvent_Scenarios(t *testing.T) {
 					t.Fatalf("expected persistent trigger %s to be immediately reclaimable, got %v", tc.checkDBID, reclaimed)
 				}
 			}
-			if tc.name == "successful dispatch claims and fires trigger" {
-				wantMsgID := uuid.NewSHA1(uuid.NameSpaceOID, []byte("event_watch:trig-ext-1:evt-cam-123")).String()
-				verifyDispatchedPrompt(t, mockDispOK, "100000000000000001", "Camera Alert\n\nVehicle in driveway", wantMsgID)
+			if tc.wantDispatchMsgID != "" {
+				verifyDispatchedPrompt(t, mockDispOK, "100000000000000001", "Camera Alert\n\nVehicle in driveway", tc.wantDispatchMsgID)
 			}
 		})
 	}

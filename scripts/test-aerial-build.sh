@@ -70,8 +70,12 @@ while [ $# -gt 0 ]; do
             METHOD="$2"
             shift 2
             ;;
-        -d)
-            BODY="$2"
+        -d|--data-binary)
+            if [ "$2" = "@-" ]; then
+                BODY="$(cat)"
+            else
+                BODY="$2"
+            fi
             shift 2
             ;;
         -H)
@@ -126,6 +130,8 @@ export PATH="${MOCK_BIN}:${PATH}"
 export MOCK_CAPTURE_REQ="$CAPTURED_REQ"
 export MOCK_CAPTURE_BODY="$CAPTURED_BODY"
 export MOCK_CAPTURE_HEADERS="$CAPTURED_HEADERS"
+export HOME="${TMP_DIR}/home"
+mkdir -p "$HOME"
 unset DISCORD_THREAD_ID DISCORD_CHANNEL_ID AERIAL_TARGET_ID || true
 
 # Test 1: Executable permission and --help
@@ -233,6 +239,25 @@ assert_contains "Authorization: Bearer test-bearer-token-xyz" "$(cat "$CAPTURED_
 : > "$CAPTURED_HEADERS"
 AERIAL_SA_TOKEN_PATH="${TMP_DIR}/nonexistent_token" VANADIS_URL="http://127.0.0.1:4025" "$AERIAL_BUILD" status build-test-101 >/dev/null
 assert_eq "false" "$(grep -q "Authorization: Bearer" "$CAPTURED_HEADERS" && echo true || echo false)" "missing SA token file omits Authorization header"
+
+# Test 13: Large plan payload (>140 KB) streamed over stdin without ARG_MAX failure
+LARGE_PLAN_JSON="${TMP_DIR}/large_plan.json"
+PADDING="$(head -c 145000 /dev/zero | tr '\0' 'x')"
+cat << EOF > "$LARGE_PLAN_JSON"
+{
+  "repo": "aerial",
+  "tier": 2,
+  "objective": "Large payload test",
+  "chunks": [
+    {"title": "Chunk 1", "instructions": "${PADDING}", "depends_on": []}
+  ]
+}
+EOF
+
+LARGE_ENQUEUE_OUT="$(VANADIS_URL="http://127.0.0.1:4025" DISCORD_THREAD_ID="1555888999" "$AERIAL_BUILD" enqueue --file "$LARGE_PLAN_JSON")"
+assert_eq "end_turn" "$(printf '%s' "$LARGE_ENQUEUE_OUT" | jq -r '.turn_action')" "enqueue large payload succeeds with turn_action: end_turn"
+CAPTURED_INSTR_LEN="$(jq -r '.chunks[0].instructions | length' "$CAPTURED_BODY")"
+assert_eq "145000" "$CAPTURED_INSTR_LEN" "mock curl received the full large instructions payload"
 
 echo "--------------------------------------------------------"
 echo "Test results: $PASSED passed, $FAILED failed"

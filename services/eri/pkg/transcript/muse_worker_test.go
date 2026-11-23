@@ -1,16 +1,13 @@
 package transcript
 
 import (
-	"context"
 	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
-	"time"
 
-	"github.com/azylman/aerial/services/eri/pkg/db"
-	"github.com/azylman/aerial/services/eri/pkg/db/dbtest"
+	"github.com/azylman/aerial/services/eri/pkg/enginefmt"
 )
 
 type parseMuseEntryTestCase struct {
@@ -34,7 +31,7 @@ func parseMuseEntryEventCases() []parseMuseEntryTestCase {
 		},
 		{
 			name:        "non-run kind ignored",
-			env:         museLineEnvelope{PayloadType: "runtime.session", Payload: musePayload{Kind: "init"}},
+			env:         museLineEnvelope{PayloadType: "runtime.session", Payload: enginefmt.MusePayload{Kind: "init"}},
 			wantHandled: true,
 		},
 		{
@@ -62,9 +59,9 @@ func parseMuseEntryEventCases() []parseMuseEntryTestCase {
 			env: museLineEnvelope{
 				PayloadType: "runtime.session",
 				RecordedAt:  1762510000000000,
-				Payload: musePayload{
+				Payload: enginefmt.MusePayload{
 					Kind:  "run",
-					Event: museEvent{Kind: "started", Prompt: "Please refactor this service"},
+					Event: enginefmt.MuseEvent{Kind: "started", Prompt: "Please refactor this service"},
 				},
 			},
 			wantHandled: true,
@@ -77,9 +74,9 @@ func parseMuseEntryEventCases() []parseMuseEntryTestCase {
 			env: museLineEnvelope{
 				PayloadType: "runtime.session",
 				RecordedAt:  1762510000000000,
-				Payload: musePayload{
+				Payload: enginefmt.MusePayload{
 					Kind:  "run",
-					Event: museEvent{Kind: "started", Prompt: "[Chat Alex]: hello"},
+					Event: enginefmt.MuseEvent{Kind: "started", Prompt: "[Chat Alice]: hello"},
 				},
 			},
 			wantHandled: true,
@@ -89,9 +86,9 @@ func parseMuseEntryEventCases() []parseMuseEntryTestCase {
 			env: museLineEnvelope{
 				PayloadType: "runtime.session",
 				RecordedAt:  1762510000000000,
-				Payload: musePayload{
+				Payload: enginefmt.MusePayload{
 					Kind:  "run",
-					Event: museEvent{Kind: "started", Prompt: ""},
+					Event: enginefmt.MuseEvent{Kind: "started", Prompt: ""},
 				},
 			},
 			wantHandled: true,
@@ -101,9 +98,9 @@ func parseMuseEntryEventCases() []parseMuseEntryTestCase {
 			env: museLineEnvelope{
 				PayloadType: "runtime.session",
 				RecordedAt:  1762510001000000,
-				Payload: musePayload{
+				Payload: enginefmt.MusePayload{
 					Kind:  "run",
-					Event: museEvent{Kind: "assistant_message_committed", Text: "I will look into that."},
+					Event: enginefmt.MuseEvent{Kind: "assistant_message_committed", Text: "I will look into that."},
 				},
 			},
 			wantHandled: true,
@@ -116,9 +113,9 @@ func parseMuseEntryEventCases() []parseMuseEntryTestCase {
 			env: museLineEnvelope{
 				PayloadType: "runtime.session",
 				RecordedAt:  1762510001000000,
-				Payload: musePayload{
+				Payload: enginefmt.MusePayload{
 					Kind:  "run",
-					Event: museEvent{Kind: "assistant_message_committed", Text: ""},
+					Event: enginefmt.MuseEvent{Kind: "assistant_message_committed", Text: ""},
 				},
 			},
 			wantHandled: true,
@@ -128,9 +125,9 @@ func parseMuseEntryEventCases() []parseMuseEntryTestCase {
 			env: museLineEnvelope{
 				PayloadType: "runtime.session",
 				RecordedAt:  1762510006000000,
-				Payload: musePayload{
+				Payload: enginefmt.MusePayload{
 					Kind:  "run",
-					Event: museEvent{Kind: "terminal", Terminal: "failed", Reason: "Out of memory"},
+					Event: enginefmt.MuseEvent{Kind: "terminal", Terminal: "failed", Reason: "Out of memory"},
 				},
 			},
 			wantHandled: true,
@@ -143,9 +140,9 @@ func parseMuseEntryEventCases() []parseMuseEntryTestCase {
 			env: museLineEnvelope{
 				PayloadType: "runtime.session",
 				RecordedAt:  1762510006000000,
-				Payload: musePayload{
+				Payload: enginefmt.MusePayload{
 					Kind:  "run",
-					Event: museEvent{Kind: "terminal", Terminal: "failed"},
+					Event: enginefmt.MuseEvent{Kind: "terminal", Terminal: "failed"},
 				},
 			},
 			wantHandled: true,
@@ -158,9 +155,9 @@ func parseMuseEntryEventCases() []parseMuseEntryTestCase {
 			env: museLineEnvelope{
 				PayloadType: "runtime.session",
 				RecordedAt:  1762510006000000,
-				Payload: musePayload{
+				Payload: enginefmt.MusePayload{
 					Kind:  "run",
-					Event: museEvent{Kind: "terminal", Terminal: "succeeded"},
+					Event: enginefmt.MuseEvent{Kind: "terminal", Terminal: "succeeded"},
 				},
 			},
 			wantHandled: true,
@@ -175,11 +172,11 @@ func parseMuseEntryToolCallCases() []parseMuseEntryTestCase {
 			env: museLineEnvelope{
 				PayloadType: "runtime.session",
 				RecordedAt:  1762510002000000,
-				Payload: musePayload{
+				Payload: enginefmt.MusePayload{
 					Kind: "run",
-					Event: museEvent{
+					Event: enginefmt.MuseEvent{
 						Kind: "assistant_tool_calls_committed",
-						ToolCalls: []museToolCall{
+						ToolCalls: []enginefmt.MuseToolCall{
 							{Name: "bash", CallID: "call_123", Args: json.RawMessage(`{"command":"ls -la"}`)},
 						},
 					},
@@ -197,9 +194,9 @@ func parseMuseEntryToolCallCases() []parseMuseEntryTestCase {
 			env: museLineEnvelope{
 				PayloadType: "runtime.session",
 				RecordedAt:  1762510002000000,
-				Payload: musePayload{
+				Payload: enginefmt.MusePayload{
 					Kind:  "run",
-					Event: museEvent{Kind: "assistant_tool_calls_committed"},
+					Event: enginefmt.MuseEvent{Kind: "assistant_tool_calls_committed"},
 				},
 			},
 			wantHandled: true,
@@ -209,11 +206,11 @@ func parseMuseEntryToolCallCases() []parseMuseEntryTestCase {
 			env: museLineEnvelope{
 				PayloadType: "runtime.session",
 				RecordedAt:  1762510002000000,
-				Payload: musePayload{
+				Payload: enginefmt.MusePayload{
 					Kind: "run",
-					Event: museEvent{
+					Event: enginefmt.MuseEvent{
 						Kind: "assistant_tool_calls_committed",
-						ToolCalls: []museToolCall{
+						ToolCalls: []enginefmt.MuseToolCall{
 							{Name: "glob", ID: "call_id_only", Args: json.RawMessage(`{"pattern":"*.go"}`)},
 						},
 					},
@@ -236,11 +233,11 @@ func parseMuseEntryToolResultCases() []parseMuseEntryTestCase {
 			env: museLineEnvelope{
 				PayloadType: "runtime.session",
 				RecordedAt:  1762510003000000,
-				Payload: musePayload{
+				Payload: enginefmt.MusePayload{
 					Kind: "run",
-					Event: museEvent{
+					Event: enginefmt.MuseEvent{
 						Kind: "tool_result_batch_committed",
-						Results: []museToolResult{
+						Results: []enginefmt.MuseToolResult{
 							{CallID: "call_123", Output: "total 0"},
 						},
 					},
@@ -257,11 +254,11 @@ func parseMuseEntryToolResultCases() []parseMuseEntryTestCase {
 			env: museLineEnvelope{
 				PayloadType: "runtime.session",
 				RecordedAt:  1762510004000000,
-				Payload: musePayload{
+				Payload: enginefmt.MusePayload{
 					Kind: "run",
-					Event: museEvent{
+					Event: enginefmt.MuseEvent{
 						Kind: "tool_result_batch_committed",
-						Results: []museToolResult{
+						Results: []enginefmt.MuseToolResult{
 							{CallID: "call_123", Output: "exit code 1", IsError: true},
 						},
 					},
@@ -278,11 +275,11 @@ func parseMuseEntryToolResultCases() []parseMuseEntryTestCase {
 			env: museLineEnvelope{
 				PayloadType: "runtime.session",
 				RecordedAt:  1762510004000000,
-				Payload: musePayload{
+				Payload: enginefmt.MusePayload{
 					Kind: "run",
-					Event: museEvent{
+					Event: enginefmt.MuseEvent{
 						Kind: "tool_result_batch_committed",
-						Results: []museToolResult{
+						Results: []enginefmt.MuseToolResult{
 							{CallID: "call_123", Text: "stderr output", IsError: true},
 						},
 					},
@@ -299,11 +296,11 @@ func parseMuseEntryToolResultCases() []parseMuseEntryTestCase {
 			env: museLineEnvelope{
 				PayloadType: "runtime.session",
 				RecordedAt:  1762510004000000,
-				Payload: musePayload{
+				Payload: enginefmt.MusePayload{
 					Kind: "run",
-					Event: museEvent{
+					Event: enginefmt.MuseEvent{
 						Kind: "tool_result_batch_committed",
-						Results: []museToolResult{
+						Results: []enginefmt.MuseToolResult{
 							{CallID: "call_123", IsError: true},
 						},
 					},
@@ -320,11 +317,11 @@ func parseMuseEntryToolResultCases() []parseMuseEntryTestCase {
 			env: museLineEnvelope{
 				PayloadType: "runtime.session",
 				RecordedAt:  1762510003000000,
-				Payload: musePayload{
+				Payload: enginefmt.MusePayload{
 					Kind: "run",
-					Event: museEvent{
+					Event: enginefmt.MuseEvent{
 						Kind: "tool_result_batch_committed",
-						Results: []museToolResult{
+						Results: []enginefmt.MuseToolResult{
 							{ToolCallID: "call_fallback", Output: "content output"},
 						},
 					},
@@ -446,175 +443,6 @@ func TestIsSkippedRuntimeDir(t *testing.T) {
 				t.Errorf("isSkippedRuntimeDir(%q) = %v, want %v", tc.dir, got, tc.want)
 			}
 		})
-	}
-}
-
-func assertSyncSessionTranscriptMuseState(t *testing.T, store db.TranscriptStore, sessionID, wantEngine string, wantSteps, wantSynced int) {
-	t.Helper()
-	states, err := store.GetSessionSyncStates(context.Background())
-	if err != nil {
-		t.Fatalf("GetSessionSyncStates error: %v", err)
-	}
-
-	if wantSynced == 0 {
-		if state, exists := states[sessionID]; exists {
-			t.Fatalf("session should not have sync state, got: %+v", state)
-		}
-		return
-	}
-
-	if state, ok := states[sessionID]; !ok || state.Engine != wantEngine {
-		t.Errorf("session state = %+v, want engine %q", state, wantEngine)
-	}
-
-	steps, err := store.GetTranscriptStepRange(context.Background(), "", sessionID, 0, 100)
-	if err != nil {
-		t.Fatalf("GetTranscriptStepRange error: %v", err)
-	}
-	if len(steps) != wantSteps {
-		t.Fatalf("found %d steps, want %d", len(steps), wantSteps)
-	}
-	if len(steps) > 1 {
-		toolStep := steps[1]
-		if toolStep.ToolName != "bash" || toolStep.ToolKind != ToolKindShell {
-			t.Errorf("toolStep tool=%q, kind=%q, want bash/shell", toolStep.ToolName, toolStep.ToolKind)
-		}
-	}
-}
-
-func TestSyncSessionTranscript_Muse(t *testing.T) {
-	t.Parallel()
-
-	tests := []struct {
-		name              string
-		sessionID         string
-		content           string
-		wantSynced        int
-		wantStepsInserted int
-		wantEngine        string
-	}{
-		{
-			name:      "full transcript with tool calls and output",
-			sessionID: "sess-muse-sync-test",
-			content: strings.Join([]string{
-				`{"payload_type":"runtime.session","recorded_at":1762510000000000,"payload":{"kind":"run","event":{"kind":"started","prompt":"Create a new Go test"}}}`,
-				`{"payload_type":"runtime.session","recorded_at":1762510001000000,"payload":{"kind":"run","event":{"kind":"assistant_tool_calls_committed","tool_calls":[{"name":"bash","call_id":"call_1","args":{"command":"go test ./..."}}]}}}`,
-				`{"payload_type":"runtime.session","recorded_at":1762510002000000,"payload":{"kind":"run","event":{"kind":"tool_result_batch_committed","results":[{"call_id":"call_1","output":"PASS"}]}}}`,
-				`{"payload_type":"runtime.session","recorded_at":1762510003000000,"payload":{"kind":"run","event":{"kind":"assistant_message_committed","text":"Tests pass cleanly."}}}`,
-			}, "\n") + "\n",
-			wantSynced:        1,
-			wantStepsInserted: 4,
-			wantEngine:        EngineMuse,
-		},
-		{
-			name:      "metadata and frame lines only",
-			sessionID: "sess-muse-metadata-only",
-			content: strings.Join([]string{
-				`{"retained_frame":"session_permission_transaction"}`,
-				`{"payload_type":"session.started","recorded_at":1762510000000000}`,
-				`{"payload_type":"runtime.session.metadata","recorded_at":1762510000500000}`,
-				`{"payload_type":"run.model.configured","recorded_at":1762510001000000}`,
-				`{"payload_type":"session.end","recorded_at":1762510002000000}`,
-			}, "\n") + "\n",
-			wantSynced:        0,
-			wantStepsInserted: 0,
-		},
-	}
-
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			tmp := t.TempDir()
-			store := dbtest.NewFakeStore()
-
-			museDir := filepath.Join(tmp, "muse", "sessions")
-			sessDir := filepath.Join(museDir, tc.sessionID)
-			_ = os.MkdirAll(sessDir, 0o755)
-
-			transcriptFile := filepath.Join(sessDir, "session.jsonl")
-			_ = os.WriteFile(transcriptFile, []byte(tc.content), 0o644)
-
-			opts := SyncOptions{
-				BrainDir:        filepath.Join(tmp, "brain"),
-				MuseSessionsDir: museDir,
-				BatchLimit:      10,
-				IdleThreshold:   10 * time.Minute,
-				HeadLimit:       1000,
-				TailLimit:       1000,
-			}
-
-			stats, err := SyncSessionTranscript(context.Background(), store, filepath.Join(tmp, "brain"), tc.sessionID, opts)
-			if err != nil {
-				t.Fatalf("SyncSessionTranscript error: %v", err)
-			}
-			if stats.Synced != tc.wantSynced {
-				t.Fatalf("stats.Synced = %d, want %d", stats.Synced, tc.wantSynced)
-			}
-			if stats.StepsInserted != tc.wantStepsInserted {
-				t.Fatalf("stats.StepsInserted = %d, want %d", stats.StepsInserted, tc.wantStepsInserted)
-			}
-
-			assertSyncSessionTranscriptMuseState(t, store, tc.sessionID, tc.wantEngine, tc.wantStepsInserted, tc.wantSynced)
-		})
-	}
-}
-
-func TestSyncSessionTranscript_Muse_ConfiguredDir(t *testing.T) {
-	t.Parallel()
-	tmp := t.TempDir()
-	store := dbtest.NewFakeStore()
-
-	// Isolated directory completely outside brainDir
-	customDir := filepath.Join(tmp, "custom_isolated_muse_sessions")
-	sessionSingle := "sess-single-configured"
-	sessionBulk := "sess-bulk-configured"
-
-	_ = os.MkdirAll(filepath.Join(customDir, sessionSingle), 0o755)
-	_ = os.MkdirAll(filepath.Join(customDir, sessionBulk), 0o755)
-
-	contentSingle := `{"payload_type":"runtime.session","recorded_at":1762510000000000,"payload":{"kind":"run","event":{"kind":"started","prompt":"Single prompt"}}}` + "\n"
-	contentBulk := `{"payload_type":"runtime.session","recorded_at":1762510000000000,"payload":{"kind":"run","event":{"kind":"started","prompt":"Bulk prompt"}}}` + "\n"
-
-	_ = os.WriteFile(filepath.Join(customDir, sessionSingle, "session.jsonl"), []byte(contentSingle), 0o644)
-	_ = os.WriteFile(filepath.Join(customDir, sessionBulk, "session.jsonl"), []byte(contentBulk), 0o644)
-
-	brainDir := filepath.Join(tmp, "brain")
-	_ = os.MkdirAll(brainDir, 0o755)
-
-	opts := SyncOptions{
-		BrainDir:        brainDir,
-		MuseSessionsDir: customDir,
-		BatchLimit:      10,
-		IdleThreshold:   10 * time.Minute,
-	}
-
-	// 1. Single-session sync
-	statsSingle, err := SyncSessionTranscript(context.Background(), store, brainDir, sessionSingle, opts)
-	if err != nil {
-		t.Fatalf("SyncSessionTranscript error: %v", err)
-	}
-	if statsSingle.Synced != 1 {
-		t.Fatalf("statsSingle.Synced = %d, want 1", statsSingle.Synced)
-	}
-
-	// 2. Bulk sync
-	statsBulk, err := SyncTranscripts(context.Background(), store, brainDir, nil, nil, opts)
-	if err != nil {
-		t.Fatalf("SyncTranscripts error: %v", err)
-	}
-	if statsBulk.Synced < 1 {
-		t.Fatalf("statsBulk.Synced = %d, want >= 1", statsBulk.Synced)
-	}
-
-	states, err := store.GetSessionSyncStates(context.Background())
-	if err != nil {
-		t.Fatalf("GetSessionSyncStates error: %v", err)
-	}
-	if state, ok := states[sessionSingle]; !ok || state.Engine != EngineMuse {
-		t.Errorf("sessionSingle state = %+v, want engine %q", state, EngineMuse)
-	}
-	if state, ok := states[sessionBulk]; !ok || state.Engine != EngineMuse {
-		t.Errorf("sessionBulk state = %+v, want engine %q", state, EngineMuse)
 	}
 }
 

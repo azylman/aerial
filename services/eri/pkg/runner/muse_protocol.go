@@ -11,8 +11,6 @@ import (
 	"github.com/google/uuid"
 )
 
-type museRPCRequest = codexRPCRequest
-
 const museApprovalAllowAll = "allowAll"
 
 func isUUIDv7(s string) bool {

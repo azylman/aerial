@@ -1,0 +1,18 @@
+{
+  "description": "HandleAutoUpdate wire payload carrying the rendered auto-update policy for a gate-success trigger. prwire.RepoEvent (synapse) must marshal to event (key for key) and prstate RepoEvent must decode it to the same trigger and policy.",
+  "event": {
+    "repo": "azylman/mirrormere",
+    "main_sha": "",
+    "generation": 0,
+    "pr_number": 1010,
+    "head_sha": "def5678",
+    "check_name": "CI Gate",
+    "auto_update": {
+      "authors": ["aerial-bot", "dependabot[bot]"],
+      "default_owner": true,
+      "collaborators": [
+        {"author": "octo", "channel_id": "111111111111111111", "mention": "<@42>"}
+      ]
+    }
+  }
+}

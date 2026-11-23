@@ -14,16 +14,26 @@ import (
 	"strings"
 	"time"
 
-	"github.com/azylman/aerial/services/vanadis-restate/internal/prompt"
+	"github.com/azylman/aerial/pkg/githubapi"
+	"github.com/azylman/aerial/pkg/prwire"
+	"github.com/azylman/aerial/pkg/strutil"
 )
 
-const maxRoboRevCommentRunes = 4000
+const (
+	maxRoboRevCommentRunes = 4000
+	// maxRunFailedJobLogs caps how many failed jobs' logs a run-level failure fetches.
+	maxRunFailedJobLogs = 3
+)
 
 var (
 	actionsJobIDRegex = regexp.MustCompile(`/actions/runs/\d+/job/(\d+)`)
-	ghaTimestampRegex = regexp.MustCompile(`^\d{4}-\d{2}-\d{2}T[0-9:.]+Z ?`)
-	ansiEscapeRegex   = regexp.MustCompile(`\x1b\[[0-9;]*[a-zA-Z]`)
-	goCoordinateRegex = regexp.MustCompile(`\.go:\d+`)
+	actionsRunIDRegex = regexp.MustCompile(`/actions/runs/(\d+)`)
+	// workflowConclusionRegex matches synapse's generic workflow_run details,
+	// e.g. `Workflow "CI" concluded with failure`.
+	workflowConclusionRegex = regexp.MustCompile(`^Workflow ".*" concluded with [a-z_]+$`)
+	ghaTimestampRegex       = regexp.MustCompile(`^\d{4}-\d{2}-\d{2}T[0-9:.]+Z ?`)
+	ansiEscapeRegex         = regexp.MustCompile(`\x1b\[[0-9;]*[a-zA-Z]`)
+	goCoordinateRegex       = regexp.MustCompile(`\.go:\d+`)
 
 	ciPlumbingPrefixes = []string{
 		"##[group]",
@@ -46,32 +56,21 @@ type Client struct {
 	GitHubToken  string
 	GitHubAPIURL string
 	HTTPClient   *http.Client
+	gitHubOwner  string
 }
 
 // NewClient builds a CI log client with the default GitHub API URL.
-func NewClient(gitHubToken string, httpClient *http.Client) *Client {
+// gitHubOwner qualifies bare repo names.
+func NewClient(gitHubToken, gitHubOwner string, httpClient *http.Client) *Client {
 	if httpClient == nil {
 		httpClient = &http.Client{Timeout: 30 * time.Second}
 	}
 	return &Client{
 		GitHubToken:  gitHubToken,
-		GitHubAPIURL: "https://api.github.com",
+		GitHubAPIURL: githubapi.DefaultAPIURL,
 		HTTPClient:   httpClient,
+		gitHubOwner:  gitHubOwner,
 	}
-}
-
-// IsRetryableGitHubResponse reports whether a GitHub response warrants a retry.
-func IsRetryableGitHubResponse(resp *http.Response) bool {
-	if resp == nil {
-		return false
-	}
-	if resp.StatusCode >= 500 || resp.StatusCode == http.StatusTooManyRequests {
-		return true
-	}
-	if resp.StatusCode == http.StatusForbidden {
-		return resp.Header.Get("Retry-After") != "" || resp.Header.Get("X-Ratelimit-Remaining") == "0"
-	}
-	return false
 }
 
 // ResolveCIFailureDetailsChecked extracts failing logs or RoboRev findings for a PR check,
@@ -80,7 +79,7 @@ func (c *Client) ResolveCIFailureDetailsChecked(ctx context.Context, repo string
 	if c == nil {
 		return details, nil
 	}
-	if prNumber > 0 && IsRoboRevCheck(checkName) {
+	if prNumber > 0 && prwire.IsRoboRevCheck(checkName) {
 		comment, err := c.fetchLatestRoboRevCommentChecked(ctx, repo, prNumber, headSHA)
 		if err != nil {
 			return details, err
@@ -92,11 +91,15 @@ func (c *Client) ResolveCIFailureDetailsChecked(ctx context.Context, repo string
 	if !NeedsCIJobLogFetch(details) {
 		return details, nil
 	}
-	jobID := ExtractActionsJobID(checkURL)
-	if jobID <= 0 {
+	var logDetails string
+	var err error
+	if jobID := ExtractActionsJobID(checkURL); jobID > 0 {
+		logDetails, err = c.fetchCheckJobFailureLogsChecked(ctx, repo, jobID)
+	} else if runID := ExtractActionsRunID(checkURL); runID > 0 {
+		logDetails, err = c.fetchRunFailureLogsChecked(ctx, repo, runID)
+	} else {
 		return details, nil
 	}
-	logDetails, err := c.fetchCheckJobFailureLogsChecked(ctx, repo, jobID)
 	if err != nil {
 		return details, err
 	}
@@ -106,55 +109,18 @@ func (c *Client) ResolveCIFailureDetailsChecked(ctx context.Context, repo string
 	return details, nil
 }
 
-// ResolveCIFailureDetails extracts failing logs or RoboRev findings for a PR check.
-func (c *Client) ResolveCIFailureDetails(ctx context.Context, repo string, prNumber int, checkName, headSHA, checkURL, details string) string {
-	res, err := c.ResolveCIFailureDetailsChecked(ctx, repo, prNumber, checkName, headSHA, checkURL, details)
-	if err != nil {
-		return details
-	}
-	return res
-}
-
-func (c *Client) newGitHubRequest(ctx context.Context, method, path string, body io.Reader) (*http.Request, error) {
-	apiURL := strings.TrimSpace(c.GitHubAPIURL)
-	if apiURL == "" {
-		apiURL = "https://api.github.com"
-	}
-	req, err := http.NewRequestWithContext(ctx, method, strings.TrimRight(apiURL, "/")+path, body)
-	if err != nil {
-		return nil, err
-	}
-	req.Header.Set("Accept", "application/vnd.github.v3+json")
-	if token := strings.TrimSpace(c.GitHubToken); token != "" {
-		req.Header.Set("Authorization", "token "+token)
-	}
-	return req, nil
-}
-
-// ResolveGitHubRepoPath normalizes a repo slug to an owner/repo path.
-func ResolveGitHubRepoPath(repo string) string {
-	clean := strings.Trim(strings.TrimSpace(repo), "/")
-	if clean == "" {
-		return ""
-	}
-	if strings.Contains(clean, "/") {
-		return clean
-	}
-	return "azylman/" + clean
-}
-
 func (c *Client) fetchCheckJobFailureLogsChecked(ctx context.Context, repo string, jobID int64) (string, error) {
 	if c == nil || c.HTTPClient == nil {
 		return "", nil
 	}
-	repoPath := ResolveGitHubRepoPath(repo)
+	repoPath := githubapi.QualifyRepo(c.gitHubOwner, repo)
 	if repoPath == "" || jobID <= 0 {
 		return "", nil
 	}
 	timeoutCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
 
-	req, err := c.newGitHubRequest(timeoutCtx, http.MethodGet, fmt.Sprintf("/repos/%s/actions/jobs/%d/logs", repoPath, jobID), nil)
+	req, err := githubapi.NewRequest(timeoutCtx, c.GitHubAPIURL, c.GitHubToken, http.MethodGet, fmt.Sprintf("/repos/%s/actions/jobs/%d/logs", repoPath, jobID), nil)
 	if err != nil {
 		return "", err
 	}
@@ -164,7 +130,7 @@ func (c *Client) fetchCheckJobFailureLogsChecked(ctx context.Context, repo strin
 	}
 	defer resp.Body.Close()
 
-	if IsRetryableGitHubResponse(resp) {
+	if githubapi.IsRetryable(resp) {
 		return "", fmt.Errorf("github api error (%d): %s", resp.StatusCode, http.StatusText(resp.StatusCode))
 	}
 	if resp.StatusCode != http.StatusOK {
@@ -180,40 +146,166 @@ func (c *Client) fetchCheckJobFailureLogsChecked(ctx context.Context, repo strin
 	return ExtractCIFailureDetails(string(body)), nil
 }
 
+type gitHubRunJob struct {
+	ID         int64  `json:"id"`
+	Name       string `json:"name"`
+	Conclusion string `json:"conclusion"`
+}
+
+type gitHubRunJobs struct {
+	Jobs []gitHubRunJob `json:"jobs"`
+}
+
+// fetchRunFailureLogsChecked lists a workflow run's latest jobs and joins the
+// extracted logs of up to maxRunFailedJobLogs failed or timed-out jobs, skipping
+// gate aggregators. It returns "" when no failed job yields a log.
+func (c *Client) fetchRunFailureLogsChecked(ctx context.Context, repo string, runID int64) (string, error) {
+	if c == nil || c.HTTPClient == nil {
+		return "", nil
+	}
+	repoPath := githubapi.QualifyRepo(c.gitHubOwner, repo)
+	if repoPath == "" || runID <= 0 {
+		return "", nil
+	}
+	jobs, err := c.listRunJobsChecked(ctx, repoPath, runID)
+	if err != nil {
+		return "", err
+	}
+	var sections []string
+	fetched := 0
+	for _, job := range jobs {
+		if fetched >= maxRunFailedJobLogs {
+			break
+		}
+		if !isFailedJobConclusion(job.Conclusion) || isGateAggregatorJob(job.Name) || job.ID <= 0 {
+			continue
+		}
+		fetched++
+		logDetails, err := c.fetchCheckJobFailureLogsChecked(ctx, repoPath, job.ID)
+		if err != nil {
+			return "", err
+		}
+		if logDetails == "" {
+			continue
+		}
+		sections = append(sections, "### Job: "+job.Name+"\n"+logDetails)
+	}
+	return strings.Join(sections, "\n\n"), nil
+}
+
+func (c *Client) listRunJobsChecked(ctx context.Context, repoPath string, runID int64) ([]gitHubRunJob, error) {
+	timeoutCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	path := fmt.Sprintf("/repos/%s/actions/runs/%d/jobs?filter=latest&per_page=100", repoPath, runID)
+	req, err := githubapi.NewRequest(timeoutCtx, c.GitHubAPIURL, c.GitHubToken, http.MethodGet, path, nil)
+	if err != nil {
+		return nil, err
+	}
+	resp, err := c.HTTPClient.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	if githubapi.IsRetryable(resp) {
+		return nil, fmt.Errorf("github api error (%d): %s", resp.StatusCode, http.StatusText(resp.StatusCode))
+	}
+	if resp.StatusCode != http.StatusOK {
+		return nil, nil
+	}
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 2<<20))
+	if err != nil {
+		return nil, err
+	}
+	var listing gitHubRunJobs
+	if json.Unmarshal(body, &listing) != nil {
+		return nil, nil
+	}
+	return listing.Jobs, nil
+}
+
+func isFailedJobConclusion(conclusion string) bool {
+	return strings.EqualFold(conclusion, "failure") || strings.EqualFold(conclusion, "timed_out")
+}
+
+// isGateAggregatorJob mirrors executor.IsGateAggregatorCheck (executor imports
+// cilog, so it cannot be imported here).
+func isGateAggregatorJob(name string) bool {
+	lower := strings.ToLower(strings.TrimSpace(name))
+	return lower == "ci gate" || strings.HasSuffix(lower, " gate")
+}
+
 type gitHubIssueComment struct {
 	ID   int64  `json:"id"`
 	Body string `json:"body"`
 }
 
-func (c *Client) fetchLatestRoboRevCommentChecked(ctx context.Context, repo string, prNumber int, headSHA string) (string, error) {
-	repoPath := ResolveGitHubRepoPath(repo)
-	if c == nil || repoPath == "" || prNumber <= 0 || c.HTTPClient == nil {
-		return "", nil
+// fetchIssueCommentsChecked reads the first page of PR issue comments. It
+// returns a retryable error for transport failures and retryable statuses, and
+// no comments for any other non-200 response or malformed body.
+func (c *Client) fetchIssueCommentsChecked(ctx context.Context, repo string, prNumber int) ([]gitHubIssueComment, error) {
+	if c == nil || c.HTTPClient == nil {
+		return nil, nil
 	}
-	var comments []gitHubIssueComment
+	repoPath := githubapi.QualifyRepo(c.gitHubOwner, repo)
+	if repoPath == "" || prNumber <= 0 {
+		return nil, nil
+	}
 	path := fmt.Sprintf("/repos/%s/issues/%d/comments?per_page=100", repoPath, prNumber)
-	req, err := c.newGitHubRequest(ctx, http.MethodGet, path, nil)
+	req, err := githubapi.NewRequest(ctx, c.GitHubAPIURL, c.GitHubToken, http.MethodGet, path, nil)
 	if err != nil {
-		return "", err
+		return nil, err
 	}
 	resp, err := c.HTTPClient.Do(req)
 	if err != nil {
-		return "", err
+		return nil, err
 	}
 	defer resp.Body.Close()
 
-	if IsRetryableGitHubResponse(resp) {
-		return "", fmt.Errorf("github api error (%d): %s", resp.StatusCode, http.StatusText(resp.StatusCode))
+	if githubapi.IsRetryable(resp) {
+		return nil, fmt.Errorf("github api error (%d): %s", resp.StatusCode, http.StatusText(resp.StatusCode))
 	}
 	if resp.StatusCode != http.StatusOK {
-		return "", nil
+		return nil, nil
 	}
 	respBody, rErr := io.ReadAll(io.LimitReader(resp.Body, 2<<20))
 	if rErr != nil {
-		return "", rErr
+		return nil, rErr
 	}
+	var comments []gitHubIssueComment
 	if uErr := json.Unmarshal(respBody, &comments); uErr != nil {
-		return "", nil
+		return nil, nil
+	}
+	return comments, nil
+}
+
+// HasRoboRevOverrideChecked reports whether the PR carries the override comment
+// `aerial-pr.sh override-roborev` posts for headSHA: a "## roborev-override"
+// comment naming the head's 7-character short SHA.
+func (c *Client) HasRoboRevOverrideChecked(ctx context.Context, repo string, prNumber int, headSHA string) (bool, error) {
+	shortSHA := strings.ToLower(strings.TrimSpace(headSHA))
+	if len(shortSHA) > 7 {
+		shortSHA = shortSHA[:7]
+	}
+	if shortSHA == "" {
+		return false, nil
+	}
+	comments, err := c.fetchIssueCommentsChecked(ctx, repo, prNumber)
+	if err != nil {
+		return false, err
+	}
+	for _, comment := range comments {
+		if strings.Contains(comment.Body, "## roborev-override") && strings.Contains(comment.Body, shortSHA) {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+func (c *Client) fetchLatestRoboRevCommentChecked(ctx context.Context, repo string, prNumber int, headSHA string) (string, error) {
+	comments, err := c.fetchIssueCommentsChecked(ctx, repo, prNumber)
+	if err != nil {
+		return "", err
 	}
 
 	shortSHA := strings.TrimSpace(headSHA)
@@ -228,7 +320,7 @@ func (c *Client) fetchLatestRoboRevCommentChecked(ctx context.Context, repo stri
 		if shortSHA != "" && !strings.Contains(body, "`"+shortSHA) && !strings.Contains(body, headSHA) {
 			continue
 		}
-		return prompt.TruncatePromptRunes(body, maxRoboRevCommentRunes), nil
+		return strutil.TruncateRunes(body, maxRoboRevCommentRunes), nil
 	}
 	return "", nil
 }
@@ -245,7 +337,7 @@ func ExtractCIFailureDetails(rawLog string) string {
 		if cleaned == "Post job cleanup." {
 			break
 		}
-		if cleaned == "" || hasAnyPrefix(cleaned, ciPlumbingPrefixes) {
+		if cleaned == "" || slices.ContainsFunc(ciPlumbingPrefixes, func(p string) bool { return strings.HasPrefix(cleaned, p) }) {
 			continue
 		}
 		cleanedLines = append(cleanedLines, cleaned)
@@ -287,15 +379,12 @@ func isHighSignalLine(line string) bool {
 	return goCoordinateRegex.MatchString(line)
 }
 
-// IsRoboRevCheck reports whether a check name is a RoboRev review.
-func IsRoboRevCheck(name string) bool {
-	lower := strings.ToLower(strings.TrimSpace(name))
-	return strings.Contains(lower, "roborev")
-}
-
-// NeedsCIJobLogFetch reports whether details require a CI job log fetch.
+// NeedsCIJobLogFetch reports whether details require a CI job log fetch: empty,
+// a bare failure conclusion, or synapse's generic workflow-level summary.
 func NeedsCIJobLogFetch(details string) bool {
-	return strings.TrimSpace(details) == "" || strings.EqualFold(details, "failure") || strings.EqualFold(details, "timed_out")
+	trimmed := strings.TrimSpace(details)
+	return trimmed == "" || strings.EqualFold(details, "failure") || strings.EqualFold(details, "timed_out") ||
+		workflowConclusionRegex.MatchString(trimmed)
 }
 
 // ExtractActionsJobID parses a GitHub Actions job ID from a check URL.
@@ -311,11 +400,15 @@ func ExtractActionsJobID(url string) int64 {
 	return id
 }
 
-func hasAnyPrefix(s string, prefixes []string) bool {
-	for _, p := range prefixes {
-		if strings.HasPrefix(s, p) {
-			return true
-		}
+// ExtractActionsRunID parses a GitHub Actions workflow run ID from a check URL.
+func ExtractActionsRunID(url string) int64 {
+	m := actionsRunIDRegex.FindStringSubmatch(url)
+	if len(m) < 2 {
+		return 0
 	}
-	return false
+	id, err := strconv.ParseInt(m[1], 10, 64)
+	if err != nil {
+		return 0
+	}
+	return id
 }

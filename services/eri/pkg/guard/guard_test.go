@@ -11,12 +11,26 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 )
 
-func runGuard(t *testing.T, mode string, input string) Decision {
+// mapEnv returns a getenv backed by m so tests never read the real process environment.
+func mapEnv(m map[string]string) func(string) string {
+	return func(k string) string { return m[k] }
+}
+
+// testOptions returns hermetic guard Options: a fresh temp batch dir, an empty environment and no
+// SQL describer, so no test touches the live /tmp/aerial-batch-guard directory or Postgres. The
+// allow-all fake egress scanner keeps MCP calls in every mode from failing closed.
+func testOptions(t *testing.T) Options {
+	t.Helper()
+	return Options{BatchDir: t.TempDir(), Getenv: mapEnv(nil), EgressScanner: fakeEgressScanner{}}
+}
+
+func runGuard(t *testing.T, opts Options, mode string, input string) Decision {
 	t.Helper()
 	var out bytes.Buffer
-	err := Process(strings.NewReader(input), &out, mode)
+	err := ProcessWithOptions(strings.NewReader(input), &out, mode, opts)
 	if err != nil {
 		t.Fatalf("unexpected Process error: %v", err)
 	}
@@ -52,8 +66,8 @@ func runGuard(t *testing.T, mode string, input string) Decision {
 }
 
 func TestGuardProcess_EndToEnd(t *testing.T) {
-	t.Setenv("AERIAL_BATCH_GUARD_DIR", t.TempDir())
-	t.Setenv("DATABASE_URL", ":memory:")
+	// Not t.Parallel(): subtests share one batch dir sequentially.
+	opts := testOptions(t)
 
 	tests := []struct {
 		name             string
@@ -105,6 +119,9 @@ func TestGuardProcess_EndToEnd(t *testing.T) {
 		{"manage_subagents kill allowed", "schedule", `{"toolCall": {"name": "manage_subagents", "args": {"Action": "kill"}}}`, false, 0, "", ""},
 		{"view_file task log denied", "schedule", `{"toolCall": {"name": "view_file", "args": {"AbsolutePath": "/data/runtimes/discord/.gemini/antigravity-cli/brain/abc/.system_generated/tasks/task-1.log"}}}`, true, 0, "", ""},
 		{"read_file task log denied", "schedule", `{"toolCall": {"name": "read_file", "args": {"Path": "/data/runtimes/discord/.gemini/antigravity-cli/brain/abc/.system_generated/tasks/task-1.log"}}}`, true, 0, "", ""},
+		{"read tool task log denied", "schedule", `{"toolCall": {"name": "read", "args": {"file": "/data/runtimes/discord/.gemini/antigravity-cli/brain/a/.system_generated/tasks/task-1.log"}}}`, true, 0, "", ""},
+		{"bash tool sleep denied", "schedule", `{"toolCall": {"name": "bash", "args": {"CommandLine": "sleep 5"}}}`, true, 0, "", ""},
+		{"bash tool safe command allowed", "schedule", `{"toolCall": {"name": "bash", "args": {"CommandLine": "ls -la"}}}`, false, 10000, "", ""},
 		{"run_command cat task log denied", "schedule", `{"toolCall": {"name": "run_command", "args": {"CommandLine": "cat /data/brain/abc/.system_generated/tasks/task-1.log | tail -n 20"}}}`, true, 0, "", ""},
 		{"run_command 5000ms overwritten to 10000ms", "schedule", `{"toolCall": {"name": "run_command", "args": {"CommandLine": "ls -la", "WaitMsBeforeAsync": 5000}}}`, false, 10000, "", ""},
 		{"run_command string 5000ms overwritten to 10000ms", "schedule", `{"toolCall": {"name": "run_command", "args": {"CommandLine": "ls -la", "WaitMsBeforeAsync": "5000"}}}`, false, 10000, "", ""},
@@ -124,6 +141,8 @@ func TestGuardProcess_EndToEnd(t *testing.T) {
 		{"live-state mode denies rm of live ssh config", "live-state", `{"toolCall": {"name": "run_command", "args": {"CommandLine": "rm -f /data/ssh/config", "Cwd": "/data"}}}`, true, 0, "", ""},
 		{"all mode denies claude write to live ssh config", "all", `{"session_id": "s1", "hook_event_name": "PreToolUse", "tool_name": "Write", "tool_input": {"file_path": "/data/ssh/config"}}`, true, 0, "", ""},
 		{"all mode denies sleep violation", "all", `{"toolCall": {"name": "run_command", "args": {"CommandLine": "sleep 5"}}}`, true, 0, "", ""},
+		{"all mode denies manage_task status", "all", `{"toolCall": {"name": "manage_task", "args": {"Action": "status", "TaskId": "t1"}}}`, true, 0, "", ""},
+		{"all mode denies manage_subagents list", "all", `{"toolCall": {"name": "manage_subagents", "args": {"Action": "list"}}}`, true, 0, "", ""},
 		{"all mode denies unconstrained search", "all", `{"toolCall": {"name": "run_command", "args": {"CommandLine": "find / -name secret"}}}`, true, 0, "", ""},
 		{"all mode allows safe command and overwrites WaitMsBeforeAsync", "all", `{"toolCall": {"name": "run_command", "args": {"CommandLine": "git status", "Cwd": "/data", "WaitMsBeforeAsync": 5000}}}`, false, 10000, "git status -sb", ""},
 		{"claude bash git status rewritten without waitms overwrite", "all", `{"session_id": "s1", "hook_event_name": "PreToolUse", "tool_name": "Bash", "tool_input": {"command": "git status"}}`, false, 0, "git status -sb", ""},
@@ -146,10 +165,11 @@ func TestGuardProcess_EndToEnd(t *testing.T) {
 		{"empty tokens between semicolons in share", "share", `{"toolCall": {"name": "run_command", "args": {"CommandLine": "echo 1; ; echo 2", "Cwd": "/data"}}}`, false, 0, "", ""},
 		{"safe output redirect in share", "share", `{"toolCall": {"name": "run_command", "args": {"CommandLine": "echo safe > /data/scratch/output.txt", "Cwd": "/data"}}}`, false, 0, "", ""},
 		{"claude read small span expanded", "batch", `{"session_id": "s1", "hook_event_name": "PreToolUse", "tool_name": "Read", "tool_input": {"file_path": "/data/main.go", "offset": 10, "limit": 3}}`, false, 0, "", "/data/main.go"},
-		{"claude short mcp tool allowed", "all", `{"session_id": "s1", "hook_event_name": "PreToolUse", "tool_name": "mcp__short", "tool_input": {}}`, false, 0, "", ""},
+		{"claude short mcp tool denied as unparsed MCP shape", "all", `{"session_id": "s1", "hook_event_name": "PreToolUse", "tool_name": "mcp__short", "tool_input": {}}`, true, 0, "", ""},
+		{"codex payload namespace resolves the MCP server", "commit", `{"session_id": "s1", "hook_event_name": "PreToolUse", "tool_name": "mcp_create", "namespace": "mcp__docket", "tool_input": {}}`, false, 0, "", ""},
 		{"claude victorialogs unbounded query denied", "all", `{"session_id": "s1", "hook_event_name": "PreToolUse", "tool_name": "mcp__victorialogs__query", "tool_input": {"query": "* | limit 10"}}`, true, 0, "", ""},
 		{"claude victorialogs bounded query allowed", "search", `{"session_id": "s1", "hook_event_name": "PreToolUse", "tool_name": "mcp__victorialogs__query", "tool_input": {"query": "kubernetes.container_name:eri | limit 10", "start": "2026-11-12T00:00:00Z", "end": "2026-11-12T01:00:00Z"}}`, false, 0, "", ""},
-		{"claude mcp tool call scanned for outbound secrets", "commit", `{"session_id": "s1", "hook_event_name": "PreToolUse", "tool_name": "mcp__github__add_issue_comment", "tool_input": {"body": "` + testPAT + `"}}`, true, 0, "", ""},
+		{"claude mcp tool call delegated to the egress scanner", "commit", `{"session_id": "s1", "hook_event_name": "PreToolUse", "tool_name": "mcp__github__add_issue_comment", "tool_input": {"body": "` + testPAT + `"}}`, false, 0, "", ""},
 		{"claude bash relative rm in share cwd denied", "share", `{"session_id": "s1", "hook_event_name": "PreToolUse", "tool_name": "Bash", "tool_input": {"command": "rm -rf scripts"}, "cwd": "/share/aerial"}`, true, 0, "", ""},
 		{"claude bash relative rm in tmp cwd allowed", "share", `{"session_id": "s1", "hook_event_name": "PreToolUse", "tool_name": "Bash", "tool_input": {"command": "rm -rf scripts"}, "cwd": "/tmp/work"}`, false, 0, "", ""},
 		{"claude bash relative rm in live-state cwd denied", "live-state", `{"session_id": "s1", "hook_event_name": "PreToolUse", "tool_name": "Bash", "tool_input": {"command": "rm -f config"}, "cwd": "/data/ssh"}`, true, 0, "", ""},
@@ -168,7 +188,7 @@ func TestGuardProcess_EndToEnd(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			d := runGuard(t, tc.mode, tc.input)
+			d := runGuard(t, opts, tc.mode, tc.input)
 			if tc.wantDeny && d.Decision != DecisionDeny {
 				t.Fatalf("mode=%q input=%s: expected deny, got %v", tc.mode, tc.input, d)
 			}
@@ -256,34 +276,6 @@ type errorWriter struct{}
 
 func (errorWriter) Write([]byte) (int, error) {
 	return 0, errors.New("simulated write failure")
-}
-
-func TestDirectCheckSchedule(t *testing.T) {
-	tests := []struct {
-		name     string
-		toolName string
-		args     ToolArgs
-		wantDeny bool
-	}{
-		{"schedule denied", "schedule", ToolArgs{}, true},
-		{"task status denied", "manage_task", ToolArgs{Action: "status"}, true},
-		{"task list denied", "manage_task", ToolArgs{Action: "list"}, true},
-		{"subagent list denied", "manage_subagents", ToolArgs{Action: "list"}, true},
-		{"task log read denied", "read", ToolArgs{File: "/data/runtimes/discord/.gemini/antigravity-cli/brain/a/.system_generated/tasks/task-1.log"}, true},
-		{"sleep denied", "bash", ToolArgs{CommandLine: "sleep 5"}, true},
-		{"safe bash allowed", "bash", ToolArgs{CommandLine: "ls -la"}, false},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			d := CheckSchedule(Payload{ToolCall: ToolCall{Name: tc.toolName}}, tc.args)
-			if tc.wantDeny && d.Decision != DecisionDeny {
-				t.Fatalf("expected deny for %s, got %v", tc.name, d)
-			}
-			if !tc.wantDeny && d.Decision != DecisionAllow {
-				t.Fatalf("expected allow for %s, got %v", tc.name, d)
-			}
-		})
-	}
 }
 
 func TestClaudeHookResponseFormatting(t *testing.T) {
@@ -374,29 +366,43 @@ func TestClaudeHookResponseFormatting(t *testing.T) {
 func TestGuardProcess_IOAndModes(t *testing.T) {
 	t.Parallel()
 
-	ioTests := []struct {
-		name   string
-		r      io.Reader
-		mode   string
-		expect DecisionType
+	tests := []struct {
+		name    string
+		r       io.Reader
+		w       io.Writer // nil captures the decision in a buffer
+		mode    string
+		expect  DecisionType
+		wantErr bool
 	}{
-		{"failing reader fail-open", errorReader{}, "all", DecisionAllow},
-		{"panic reader fail-open", panicReader{}, "all", DecisionAllow},
-		{"empty reader fail-open", strings.NewReader(""), "all", DecisionAllow},
-		{"whitespace reader fail-open", strings.NewReader("   \n\t  "), "all", DecisionAllow},
-		{"invalid json fail-open", strings.NewReader("invalid-json{"), "all", DecisionAllow},
-		{"pre-invocation failing reader fail-open", errorReader{}, "pre-invocation", ""},
-		{"post-batch invalid json fail-open", strings.NewReader("invalid-json{"), "post-batch", ""},
-		{"pre-invocation valid payload", strings.NewReader(`{"conversationId":"c1","invocationNum":2}`), "pre-invocation", ""},
-		{"post-batch valid payload", strings.NewReader(`{"conversationId":"c1","stepIdx":1,"toolCall":{"name":"edit_file","args":{"Path":"/tmp/a.go"}}}`), "post-batch", ""},
+		{name: "failing reader fail-open", r: errorReader{}, mode: "all", expect: DecisionAllow},
+		{name: "panic reader fail-open", r: panicReader{}, mode: "all", expect: DecisionAllow},
+		{name: "panic recovery with failing writer", r: panicReader{}, w: errorWriter{}, mode: "all", wantErr: true},
+		{name: "empty reader fail-open", r: strings.NewReader(""), mode: "all", expect: DecisionAllow},
+		{name: "whitespace reader fail-open", r: strings.NewReader("   \n\t  "), mode: "all", expect: DecisionAllow},
+		{name: "invalid json fail-open", r: strings.NewReader("invalid-json{"), mode: "all", expect: DecisionAllow},
+		{name: "pre-invocation failing reader fail-open", r: errorReader{}, mode: "pre-invocation"},
+		{name: "post-batch invalid json fail-open", r: strings.NewReader("invalid-json{"), mode: "post-batch"},
+		{name: "pre-invocation valid payload", r: strings.NewReader(`{"conversationId":"c1","invocationNum":2}`), mode: "pre-invocation"},
+		{
+			name: "post-batch valid payload",
+			r:    strings.NewReader(`{"conversationId":"c1","stepIdx":1,"toolCall":{"name":"edit_file","args":{"Path":"/tmp/a.go"}}}`),
+			mode: "post-batch",
+		},
 	}
-	for _, tc := range ioTests {
+	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			var out bytes.Buffer
-			err := Process(tc.r, &out, tc.mode)
-			if err != nil {
-				t.Fatalf("expected nil error on fail-open, got: %v", err)
+			w := tc.w
+			if w == nil {
+				w = &out
+			}
+			err := ProcessWithOptions(tc.r, w, tc.mode, testOptions(t))
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("ProcessWithOptions() error = %v, wantErr %v", err, tc.wantErr)
+			}
+			if tc.wantErr {
+				return
 			}
 			var d Decision
 			if err := json.Unmarshal(out.Bytes(), &d); err != nil {
@@ -407,16 +413,12 @@ func TestGuardProcess_IOAndModes(t *testing.T) {
 			}
 		})
 	}
+}
 
-	t.Run("panic recovery with failing writer", func(t *testing.T) {
-		t.Parallel()
-		err := Process(panicReader{}, errorWriter{}, "all")
-		if err == nil {
-			t.Fatalf("expected error from failing writer during panic recovery, got nil")
-		}
-	})
+func TestParseArgs(t *testing.T) {
+	t.Parallel()
 
-	parseTests := []struct {
+	tests := []struct {
 		name          string
 		raw           string
 		wantFile      string
@@ -441,8 +443,8 @@ func TestGuardProcess_IOAndModes(t *testing.T) {
 		{"limit only", `{"limit": 25}`, "", "", 1, 25},
 		{"patch only", `{"patch": "*** Update File: /tmp/patch.go\n"}`, "/tmp/patch.go", "", 0, 0},
 	}
-	for _, tc := range parseTests {
-		t.Run("parse_"+tc.name, func(t *testing.T) {
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			var raw []byte
 			if tc.raw != "" {
@@ -508,19 +510,9 @@ func TestPayloadAndToolArgsAccessors(t *testing.T) {
 	t.Parallel()
 
 	tests := []payloadArgsCase{
-		{
-			name: "nil instances",
-		},
-		{
-			name:    "empty instances",
-			payload: &Payload{},
-			args:    &ToolArgs{},
-		},
-		{
-			name:       "claude session id",
-			payload:    &Payload{SessionID: "s1"},
-			wantClaude: true,
-		},
+		{name: "nil instances"},
+		{name: "empty instances", payload: &Payload{}, args: &ToolArgs{}},
+		{name: "claude session id", payload: &Payload{SessionID: "s1"}, wantClaude: true},
 		{
 			name: "tool args populated",
 			args: &ToolArgs{
@@ -603,6 +595,73 @@ func TestPayloadAndToolArgsAccessors(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			assertToolArgs(t, tc)
+		})
+	}
+}
+
+func TestOptionsFromEnv(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name         string
+		env          map[string]string
+		wantBatchDir string
+		wantSQL      bool
+		wantScratch  string
+	}{
+		{"empty env uses defaults", nil, "/tmp/aerial-batch-guard", false, ""},
+		{"overrides carried through", map[string]string{"AERIAL_BATCH_GUARD_DIR": "/tmp/guard-test", "DATABASE_URL": "postgres://127.0.0.1:1/x", "SCRATCH_DIR": "/tmp/s"}, "/tmp/guard-test", true, "/tmp/s"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			opts := OptionsFromEnv(mapEnv(tc.env))
+			if opts.BatchDir != tc.wantBatchDir || (opts.SQL != nil) != tc.wantSQL || opts.Getenv("SCRATCH_DIR") != tc.wantScratch {
+				t.Fatalf("OptionsFromEnv = {BatchDir:%q SQL:%v SCRATCH_DIR:%q}, want {%q %v %q}", opts.BatchDir, opts.SQL != nil, opts.Getenv("SCRATCH_DIR"), tc.wantBatchDir, tc.wantSQL, tc.wantScratch)
+			}
+			scanner, ok := opts.EgressScanner.(*HTTPEgressScanner)
+			if !ok || scanner.URL != "http://127.0.0.1:4028/internal/guard/egress-scan" || scanner.Client == nil || scanner.Client.Timeout != 2*time.Second {
+				t.Fatalf("OptionsFromEnv EgressScanner = %#v, want HTTP scanner on loopback 4028 with 2s timeout", opts.EgressScanner)
+			}
+		})
+	}
+}
+
+func TestCheckSchedule(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name     string
+		payload  Payload
+		args     ToolArgs
+		wantDeny bool
+	}{
+		{
+			name:     "task log file read denied",
+			payload:  Payload{ToolCall: ToolCall{Name: "read_file"}},
+			args:     ToolArgs{Path: "/data/brain/conv/.system_generated/tasks/task-1.log"},
+			wantDeny: true,
+		},
+		{
+			name:     "safe run_command allowed",
+			payload:  Payload{ToolCall: ToolCall{Name: "run_command"}},
+			args:     ToolArgs{CommandLine: "echo hello"},
+			wantDeny: false,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			d := CheckSchedule(tc.payload, tc.args)
+			if tc.wantDeny && d.Decision != DecisionDeny {
+				t.Fatalf("expected DecisionDeny, got %v", d.Decision)
+			}
+			if !tc.wantDeny && d.Decision != DecisionAllow {
+				t.Fatalf("expected DecisionAllow, got %v", d.Decision)
+			}
+			if tc.wantDeny && d.Reason == "" {
+				t.Fatalf("expected non-empty denial reason")
+			}
 		})
 	}
 }

@@ -97,7 +97,7 @@ func runMusePipeMockPump(inR io.Reader, outW io.WriteCloser, sessID string, idx 
 	}
 	scanner := bufio.NewScanner(inR)
 	for scanner.Scan() {
-		var req museRPCRequest
+		var req codexRPCRequest
 		if err := json.Unmarshal([]byte(scanner.Text()), &req); err != nil {
 			continue
 		}
@@ -855,6 +855,8 @@ type geminiHomeDirCase struct {
 	createBlocker    bool
 	wantErrSub       string
 	wantEnvSanitized bool
+	saTokenSrc       string
+	wantSATokenEnv   bool
 }
 
 func prepareGeminiHomeTarget(t *testing.T, tc geminiHomeDirCase) string {
@@ -916,19 +918,26 @@ func runGeminiHomeDirCase(t *testing.T, tc geminiHomeDirCase) {
 	if tc.wantEnvSanitized {
 		assertGeminiHomeEnvSanitized(t, targetHome, capturedEnv, daemon)
 	}
+	wantTokenPath := ""
+	if tc.wantSATokenEnv {
+		wantTokenPath = filepath.Join(targetHome, ".gemini", "turn_env", "sa-token")
+	}
+	if got := envValue(capturedEnv, "AERIAL_SA_TOKEN_PATH"); got != wantTokenPath {
+		t.Errorf("AERIAL_SA_TOKEN_PATH = %q, want %q", got, wantTokenPath)
+	}
 }
 
 func TestUnifiedProcessPool_GeminiHomeDirInjection(t *testing.T) {
-	t.Parallel()
 	tests := []geminiHomeDirCase{
-		{name: "CreateDirFailure", createBlocker: true, wantErrSub: "failed to create runtime home directory"},
-		{name: "HomeDirInjectedSuccessfully", wantEnvSanitized: true},
-		{name: "EmptyHomeDirIgnored"},
+		{name: "CreateDirFailure", saTokenSrc: "token", createBlocker: true, wantErrSub: "failed to create runtime home directory"},
+		{name: "HomeDirInjectedSuccessfully", saTokenSrc: "token", wantEnvSanitized: true, wantSATokenEnv: true},
+		{name: "UnreadableSATokenSourceOmitsExport", saTokenSrc: "token-dir", wantEnvSanitized: true},
+		{name: "EmptyHomeDirIgnored", saTokenSrc: "token"},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
+			setTurnSATokenSrc(t, tc.saTokenSrc)
 			runGeminiHomeDirCase(t, tc)
 		})
 	}

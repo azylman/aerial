@@ -55,7 +55,7 @@ func TestFlow_RecordPRHeadRevision(t *testing.T) {
 				fmt.Fprint(w, tc.body)
 			}))
 			defer api.Close()
-			exec := executor.NewExecutor("", nil, nil, "", api.Client())
+			exec := executor.NewExecutor("", nil, nil, "", "azylman", api.Client())
 			exec.GitHubAPIURL = api.URL
 			spy := &checkStatusSpyStore{}
 			if tc.cold {
@@ -97,35 +97,5 @@ func TestFlow_CanFallbackThreadRepoLookup(t *testing.T) {
 			t.Parallel()
 			assert.Equal(t, tc.want, CanFallbackThreadRepoLookup(tc.event))
 		})
-	}
-}
-
-func TestFlow_SynchronizeValidatesHeadAgainstGitHub(t *testing.T) {
-	t.Parallel()
-	ctx := context.Background()
-	api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		fmt.Fprint(w, `{"state":"open","merged":false,"head":{"sha":"sha-2"}}`)
-	}))
-	defer api.Close()
-	exec := executor.NewExecutor("", nil, nil, "", api.Client())
-	exec.GitHubAPIURL = api.URL
-	spy := &checkStatusSpyStore{}
-	f := NewFlow(spy, exec)
-
-	// synchronize validates head against GitHub API and resets check state in store
-	if err := f.HandlePREventType(ctx, "b1", "c1", "synchronize", pubsub.PRLifecycleEvent{Repo: "owner/repo", PRNumber: 12, HeadSHA: "sha-2"}); err != nil {
-		t.Fatalf("synchronize err=%v", err)
-	}
-	if len(spy.resets) != 1 || spy.resets[0] != "c1:sha-2:" {
-		t.Fatalf("resets=%v", spy.resets)
-	}
-
-	// synchronize for superseded sha-1 rejected by GitHub API head validation without calling store reset
-	spy.resets = nil
-	if err := f.HandlePREventType(ctx, "b1", "c1", "synchronize", pubsub.PRLifecycleEvent{Repo: "owner/repo", PRNumber: 12, HeadSHA: "sha-1"}); !errors.Is(err, ErrPRTransitionSkipped) {
-		t.Fatalf("superseded err=%v", err)
-	}
-	if len(spy.resets) != 0 {
-		t.Fatalf("rejected head mutated storage: %v", spy.resets)
 	}
 }

@@ -8,57 +8,52 @@ import (
 
 	restate "github.com/restatedev/sdk-go"
 
+	"github.com/azylman/aerial/pkg/buildplan"
 	"github.com/azylman/aerial/pkg/pubsub"
 	"github.com/azylman/aerial/services/vanadis-restate/internal/build"
 	"github.com/azylman/aerial/services/vanadis-restate/internal/model"
 	"github.com/azylman/aerial/services/vanadis-restate/internal/store"
 )
 
-// Legacy Restate service names preserved for the dark-launch default agent.
-const (
-	legacyBuildServiceName       = "Build"
-	legacyBuildRouterServiceName = "BuildRouter"
-)
-
+// BuildObjectInvoker delivers routed requests to one build's Build object.
 type BuildObjectInvoker interface {
 	RoutePREvent(ctx context.Context, buildID string, ev pubsub.PRLifecycleEvent) error
 	RouteDispatchOutcome(ctx context.Context, buildID string, ev pubsub.DispatchOutcomeEvent) error
 	RouteAttachPR(ctx context.Context, buildID string, req store.AttachChunkPRRequest) (model.AttachChunkPRResponse, error)
 	RouteFailChunk(ctx context.Context, buildID string, req model.FailChunkRequest) (model.FailChunkResponse, error)
+	RouteReconcile(ctx context.Context, buildID string, req build.ReconcileBuildRequest) error
 }
 
 type restateBuildObjectInvoker struct {
-	ctx          restate.Context
-	buildService string
-}
-
-func (r restateBuildObjectInvoker) serviceName() string {
-	if strings.TrimSpace(r.buildService) == "" {
-		return legacyBuildServiceName
-	}
-	return r.buildService
+	ctx restate.Context
 }
 
 func (r restateBuildObjectInvoker) RoutePREvent(ctx context.Context, buildID string, ev pubsub.PRLifecycleEvent) error {
 	_ = ctx
-	_ = restate.ObjectSend(r.ctx, r.serviceName(), buildID, "OnPREvent").Send(ev)
+	_ = restate.ObjectSend(r.ctx, buildplan.BuildServiceName(""), buildID, "OnPREvent").Send(ev)
 	return nil
 }
 
 func (r restateBuildObjectInvoker) RouteDispatchOutcome(ctx context.Context, buildID string, ev pubsub.DispatchOutcomeEvent) error {
 	_ = ctx
-	_ = restate.ObjectSend(r.ctx, r.serviceName(), buildID, "OnDispatchOutcome").Send(ev)
+	_ = restate.ObjectSend(r.ctx, buildplan.BuildServiceName(""), buildID, "OnDispatchOutcome").Send(ev)
 	return nil
 }
 
 func (r restateBuildObjectInvoker) RouteAttachPR(ctx context.Context, buildID string, req store.AttachChunkPRRequest) (model.AttachChunkPRResponse, error) {
 	_ = ctx
-	return restate.Object[model.AttachChunkPRResponse](r.ctx, r.serviceName(), buildID, "AttachPR").Request(req)
+	return restate.Object[model.AttachChunkPRResponse](r.ctx, buildplan.BuildServiceName(""), buildID, "AttachPR").Request(req)
 }
 
 func (r restateBuildObjectInvoker) RouteFailChunk(ctx context.Context, buildID string, req model.FailChunkRequest) (model.FailChunkResponse, error) {
 	_ = ctx
-	return restate.Object[model.FailChunkResponse](r.ctx, r.serviceName(), buildID, "FailChunk").Request(req)
+	return restate.Object[model.FailChunkResponse](r.ctx, buildplan.BuildServiceName(""), buildID, "FailChunk").Request(req)
+}
+
+func (r restateBuildObjectInvoker) RouteReconcile(ctx context.Context, buildID string, req build.ReconcileBuildRequest) error {
+	_ = ctx
+	_ = restate.ObjectSend(r.ctx, buildplan.BuildServiceName(""), buildID, "Reconcile").Send(req)
+	return nil
 }
 
 // BuildRouterService resolves non-build-keyed requests and delegates them to the authoritative Build object.
@@ -93,63 +88,56 @@ func NewBuildRouterServiceWithAgent(st store.VanadisStore, agentName string, inv
 // ServiceName returns the Restate service name.
 func (s *BuildRouterService) ServiceName() string {
 	if s == nil {
-		return legacyBuildRouterServiceName
+		return buildplan.BuildRouterServiceName("")
 	}
-	return model.BuildRouterServiceName(s.agentName)
-}
-
-func (s *BuildRouterService) buildServiceName() string {
-	if s == nil {
-		return legacyBuildServiceName
-	}
-	return model.BuildServiceName(s.agentName)
+	return buildplan.BuildRouterServiceName(s.agentName)
 }
 
 func (s *BuildRouterService) getInvoker(ctx restate.Context) BuildObjectInvoker {
 	if s != nil && s.invokerFactory != nil {
 		return s.invokerFactory(ctx)
 	}
-	return restateBuildObjectInvoker{ctx: ctx, buildService: s.buildServiceName()}
+	return restateBuildObjectInvoker{ctx: ctx}
 }
 
 func isLookupNotFound(err error) bool {
 	return errors.Is(err, build.ErrChunkNotFound) || errors.Is(err, store.ErrBuildNotFound)
 }
 
-func (s *BuildRouterService) resolvePRBuildID(rc restate.RunContext, repo string, ev pubsub.PRLifecycleEvent) (string, error) {
+func (s *BuildRouterService) resolvePRBuildID(rc restate.RunContext, repo string, ev pubsub.PRLifecycleEvent) (store.BuildRoute, error) {
 	if s.store == nil {
-		return "", nil
+		return store.BuildRoute{}, nil
 	}
-	bID, _, err := s.store.LookupPRChunk(rc, repo, ev.PRNumber)
-	if err == nil && bID != "" {
-		return bID, nil
+	route, _, err := s.store.LookupPRChunk(rc, repo, ev.PRNumber)
+	if err == nil && route.BuildID != "" {
+		return route, nil
 	}
 	if err != nil && !isLookupNotFound(err) {
-		return "", err
+		return store.BuildRoute{}, err
 	}
 
 	if chunkID := build.ExtractChunkIDFromBranch(repo, ev.Branch); chunkID != "" {
-		bID, err := s.store.LookupChunkBuildID(rc, chunkID)
-		if err == nil && bID != "" {
-			return bID, nil
+		route, err := s.store.LookupChunkBuildID(rc, chunkID)
+		if err == nil && route.BuildID != "" {
+			return route, nil
 		}
 		if err != nil && !isLookupNotFound(err) {
-			return "", err
+			return store.BuildRoute{}, err
 		}
-		return "", nil
+		return store.BuildRoute{}, nil
 	}
 
 	if build.CanFallbackThreadRepoLookup(ev) {
-		bID, _, err := s.store.LookupUnattachedChunkByThreadAndRepo(rc, ev.TargetID, repo)
-		if err == nil && bID != "" {
-			return bID, nil
+		route, _, err := s.store.LookupUnattachedChunkByThreadAndRepo(rc, ev.TargetID, repo)
+		if err == nil && route.BuildID != "" {
+			return route, nil
 		}
 		if err != nil && !isLookupNotFound(err) {
-			return "", err
+			return store.BuildRoute{}, err
 		}
 	}
 
-	return "", nil
+	return store.BuildRoute{}, nil
 }
 
 // RoutePREvent routes inbound PR lifecycle events to the owning Build Virtual Object.
@@ -161,19 +149,19 @@ func (s *BuildRouterService) RoutePREvent(ctx restate.Context, ev pubsub.PRLifec
 		return restate.ToTerminalError(err, restate.WithErrorCode(400))
 	}
 
-	buildID, err := build.RunJournaled(ctx, build.LabelRoutePREvent, "lookup-pr-chunk", func(rc restate.RunContext) (string, error) {
+	route, err := build.RunJournaled(ctx, build.LabelRoutePREvent, "lookup-pr-chunk", func(rc restate.RunContext) (store.BuildRoute, error) {
 		return s.resolvePRBuildID(rc, repo, ev)
 	})
 	if err != nil {
 		return err
 	}
 
-	if buildID == "" {
+	if route.BuildID == "" {
 		return nil
 	}
 
 	inv := s.getInvoker(ctx)
-	return inv.RoutePREvent(ctx, buildID, ev)
+	return inv.RoutePREvent(ctx, route.BuildID, ev)
 }
 
 // RouteDispatchOutcome routes dispatch outcomes to the target Build Virtual Object.
@@ -183,29 +171,29 @@ func (s *BuildRouterService) RouteDispatchOutcome(ctx restate.Context, ev pubsub
 		return nil
 	}
 
-	buildID, err := build.RunJournaled(ctx, build.LabelRouteDispatchOutcome, "lookup-dispatch-chunk", func(rc restate.RunContext) (string, error) {
+	route, err := build.RunJournaled(ctx, build.LabelRouteDispatchOutcome, "lookup-dispatch-chunk", func(rc restate.RunContext) (store.BuildRoute, error) {
 		if s.store == nil {
-			return "", nil
+			return store.BuildRoute{}, nil
 		}
-		bID, err := s.store.LookupChunkBuildID(rc, chunkID)
+		route, err := s.store.LookupChunkBuildID(rc, chunkID)
 		if err != nil {
-			if errors.Is(err, build.ErrChunkNotFound) || errors.Is(err, store.ErrBuildNotFound) {
-				return "", nil
+			if isLookupNotFound(err) {
+				return store.BuildRoute{}, nil
 			}
-			return "", err
+			return store.BuildRoute{}, err
 		}
-		return bID, nil
+		return route, nil
 	})
 	if err != nil {
 		return err
 	}
 
-	if buildID == "" {
+	if route.BuildID == "" {
 		return nil
 	}
 
 	inv := s.getInvoker(ctx)
-	return inv.RouteDispatchOutcome(ctx, buildID, ev)
+	return inv.RouteDispatchOutcome(ctx, route.BuildID, ev)
 }
 
 // RouteAttachPR resolves the build and delegates PR attachment to the target Build.
@@ -218,36 +206,41 @@ func (s *BuildRouterService) RouteAttachPR(ctx restate.Context, req store.Attach
 		return model.AttachChunkPRResponse{}, restate.ToTerminalError(err, restate.WithErrorCode(400))
 	}
 
-	buildID, err := build.RunJournaled(ctx, build.LabelRouteAttachPR, "resolve-attach-build-id", func(rc restate.RunContext) (string, error) {
+	// A new standalone build runs on the canonical default Build runner
+	// while retaining req.Agent as the build owner.
+	newBuild := func() store.BuildRoute {
+		return store.BuildRoute{BuildID: buildplan.GenerateBuildID()}
+	}
+	route, err := build.RunJournaled(ctx, build.LabelRouteAttachPR, "resolve-attach-build-id", func(rc restate.RunContext) (store.BuildRoute, error) {
 		if s.store == nil {
-			return build.GenerateBuildID(), nil
+			return newBuild(), nil
 		}
 		if req.ChunkID != "" {
-			bID, err := s.store.LookupChunkBuildID(rc, req.ChunkID)
-			if err == nil && bID != "" {
-				return bID, nil
+			route, err := s.store.LookupChunkBuildID(rc, req.ChunkID)
+			if err == nil && route.BuildID != "" {
+				return route, nil
 			}
 			if err != nil && !isLookupNotFound(err) {
-				return "", err
+				return store.BuildRoute{}, err
 			}
 		}
 		if req.Repo != "" {
-			bID, _, err := s.store.LookupPRChunk(rc, req.Repo, req.PRNumber)
-			if err == nil && bID != "" {
-				return bID, nil
+			route, _, err := s.store.LookupPRChunk(rc, req.Repo, req.PRNumber)
+			if err == nil && route.BuildID != "" {
+				return route, nil
 			}
 			if err != nil && !isLookupNotFound(err) {
-				return "", err
+				return store.BuildRoute{}, err
 			}
 		}
-		return build.GenerateBuildID(), nil
+		return newBuild(), nil
 	})
 	if err != nil {
 		return model.AttachChunkPRResponse{}, err
 	}
 
 	inv := s.getInvoker(ctx)
-	return inv.RouteAttachPR(ctx, buildID, req)
+	return inv.RouteAttachPR(ctx, route.BuildID, req)
 }
 
 // RouteFailChunk resolves the build for a chunk and delegates failure to the Build object.
@@ -260,9 +253,9 @@ func (s *BuildRouterService) RouteFailChunk(ctx restate.Context, req model.FailC
 		return model.FailChunkResponse{}, restate.ToTerminalError(err, restate.WithErrorCode(400))
 	}
 
-	buildID, err := build.RunJournaled(ctx, build.LabelRouteFailChunk, "lookup-fail-chunk-build", func(rc restate.RunContext) (string, error) {
+	route, err := build.RunJournaled(ctx, build.LabelRouteFailChunk, "lookup-fail-chunk-build", func(rc restate.RunContext) (store.BuildRoute, error) {
 		if s.store == nil {
-			return "", build.ErrChunkNotFound
+			return store.BuildRoute{}, build.ErrChunkNotFound
 		}
 		return s.store.LookupChunkBuildID(rc, chunkID)
 	})
@@ -273,10 +266,45 @@ func (s *BuildRouterService) RouteFailChunk(ctx restate.Context, req model.FailC
 		return model.FailChunkResponse{}, err
 	}
 
-	if req.BuildID != "" && req.BuildID != buildID {
+	if req.BuildID != "" && req.BuildID != route.BuildID {
 		build.RecordReconcileError(build.LabelRouteFailChunk, build.ErrChunkNotFound)
 		return model.FailChunkResponse{}, build.ToTerminalErr(build.ErrChunkNotFound)
 	}
 	inv := s.getInvoker(ctx)
-	return inv.RouteFailChunk(ctx, buildID, req)
+	return inv.RouteFailChunk(ctx, route.BuildID, req)
+}
+
+// RouteBuildReconcile resolves a build and sends it a one-way
+// widget_sync Reconcile. Unknown builds are dropped.
+func (s *BuildRouterService) RouteBuildReconcile(ctx restate.Context, buildID string) error {
+	buildID = strings.TrimSpace(buildID)
+	if buildID == "" {
+		err := fmt.Errorf("%w: build_id required", store.ErrInvalidBuildInput)
+		build.RecordReconcileError(build.LabelRouteBuildReconcile, err)
+		return restate.ToTerminalError(err, restate.WithErrorCode(400))
+	}
+	route, err := build.RunJournaled(ctx, build.LabelRouteBuildReconcile, "lookup-reconcile-build", func(rc restate.RunContext) (store.BuildRoute, error) {
+		if s.store == nil {
+			return store.BuildRoute{}, nil
+		}
+		bld, _, err := s.store.GetBuild(rc, buildID)
+		if err != nil {
+			if isLookupNotFound(err) {
+				return store.BuildRoute{}, nil
+			}
+			return store.BuildRoute{}, err
+		}
+		if bld == nil {
+			return store.BuildRoute{}, nil
+		}
+		return store.BuildRoute{BuildID: bld.ID}, nil
+	})
+	if err != nil {
+		return err
+	}
+	if route.BuildID == "" {
+		return nil
+	}
+	inv := s.getInvoker(ctx)
+	return inv.RouteReconcile(ctx, route.BuildID, build.ReconcileBuildRequest{Reason: build.ReconcileReasonWidgetSync})
 }

@@ -1,11 +1,16 @@
 package guard
 
 import (
-	"fmt"
+	"bytes"
+	"cmp"
+	"context"
+	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -21,226 +26,9 @@ const (
 	testJWT     = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9." + "eyJzdWIiOiIxMjM0NTY3ODkwIiwibmFtZSI6IkpvaG4gRG9lIiwiaWF0IjoxNTE2MjM5MDIyfQ." + "SflKxwRJSMeKKF2QT4fwpMeJf36POk6yJV_adQssw5c"
 )
 
-func testDiff(file string, line int, added string) string {
-	return fmt.Sprintf("diff --git a/%s b/%s\n--- a/%s\n+++ b/%s\n@@ -1,1 +%d,1 @@\n+%s\n", file, file, file, file, line, added)
-}
-
-func checkScanDiffPatterns(t *testing.T) {
-	t.Helper()
-	patternTests := []struct {
-		name         string
-		diff         string
-		wantCategory string
-		wantFile     string
-		wantLine     int
-		wantSample   string
-	}{
-		{"cluster domain", testDiff("pkg/net/client.go", 11, `var watcherURL = "http://mirrormere-cast-watcher.aerial/action"`), "InternalClusterDomain", "pkg/net/client.go", 11, "mirrormere-cast-watcher.aerial"},
-		{"lan domain", testDiff("pkg/net/client.go", 11, `var edgeURL = "http://ollama.lan:11434"`), "InternalClusterDomain", "pkg/net/client.go", 11, "ollama.lan"},
-		{"RFC1918 IP", testDiff("pkg/net/client.go", 11, `var gateway = "192.168.1.150"`), "RFC1918_192_168", "pkg/net/client.go", 11, "192.168.1.150"},
-		{"GitHub PAT", testDiff("pkg/auth/token.go", 2, `const token = "`+testPAT+`"`), "GitHubPAT", "pkg/auth/token.go", 2, testPAT},
-		{"Private Key", "diff --git a/pkg/crypto/key.pem b/pkg/crypto/key.pem\n--- a/pkg/crypto/key.pem\n+++ b/pkg/crypto/key.pem\n@@ -0,0 +1,3 @@\n+" + testPrivKey + "\nMIIEowIBAAKCAQEA0\n-----END RSA PRIVATE KEY-----\n", "PrivateKey", "pkg/crypto/key.pem", 1, testPrivKey},
-		{"Discord Webhook", testDiff("pkg/notify/discord.go", 5, `webhookURL := "`+testDiscord+`"`), "DiscordWebhook", "pkg/notify/discord.go", 5, testDiscord},
-		{"Slack Webhook", testDiff("pkg/notify/slack.go", 20, `slackURL := "`+testSlack+`"`), "SlackWebhook", "pkg/notify/slack.go", 20, testSlack},
-		{"Generic API Key", testDiff("pkg/ai/client.go", 10, `apiKey := "`+testAPIKey+`"`), "GenericAPIKey", "pkg/ai/client.go", 10, testAPIKey},
-		{"JWT Token", testDiff("pkg/auth/jwt.go", 1, `rawJWT := "`+testJWT+`"`), "JWTToken", "pkg/auth/jwt.go", 1, testJWT},
-	}
-
-	for _, tt := range patternTests {
-		t.Run("pattern_"+tt.name, func(t *testing.T) {
-			t.Parallel()
-			violations := ScanDiffWithPatterns(tt.diff, false, GetActivePatterns())
-			if len(violations) == 0 {
-				t.Fatalf("expected violation for %s, got none", tt.name)
-			}
-			found := false
-			for _, v := range violations {
-				if v.Category == tt.wantCategory {
-					found = true
-					if v.File != tt.wantFile || v.LineNum != tt.wantLine || v.Sample != tt.wantSample {
-						t.Errorf("violation mismatch: got %+v", v)
-					}
-				}
-			}
-			if !found {
-				t.Errorf("expected category %q in violations: %+v", tt.wantCategory, violations)
-			}
-		})
-	}
-}
-
-func checkScanDiffIgnored(t *testing.T) {
-	t.Helper()
-	ignoredDiffs := []struct {
-		name       string
-		diff       string
-		checkTests bool
-		wantCount  int
-	}{
-		{"deleted lines", "diff --git a/pkg/auth/token.go b/pkg/auth/token.go\n--- a/pkg/auth/token.go\n+++ b/pkg/auth/token.go\n@@ -1,4 +1,3 @@\n-const oldToken = \"" + testPAT + "\"\n+const oldToken = \"\"\n", false, 0},
-		{"diff header path", "diff --git a/pkg/" + testPAT + ".go b/pkg/" + testPAT + ".go\n--- a/pkg/" + testPAT + ".go\n+++ b/pkg/" + testPAT + ".go\n@@ -1,2 +1,2 @@\n+// safe comment\n", false, 0},
-		{"binary diff", "diff --git a/assets/image.png b/assets/image.png\nBinary files a/assets/image.png and b/assets/image.png differ\n", false, 0},
-		{"Go test file", testDiff("pkg/guard/commit_test.go", 1, `const dummy = "`+testPAT+`"`), false, 0},
-		{"Python test file", testDiff("tests/test_auth_test.py", 1, `TOKEN = "`+testPAT+`"`), false, 0},
-		{"TypeScript test file", testDiff("src/client.test.ts", 1, `const token = "`+testPAT+`";`), false, 0},
-		{"JavaScript test file", testDiff("src/api.test.js", 1, `const key = "`+testAPIKey+`";`), false, 0},
-		{"Fixtures path", testDiff("test/fixtures/payload.json", 1, `{"ip": "192.168.1.1"}`), false, 0},
-		{"Testdata skipped", testDiff("pkg/testdata/tokens.txt", 1, testPAT), false, 0},
-		{"Test checked when enabled", testDiff("pkg/testdata/tokens.txt", 1, testPAT), true, 1},
-		{"empty context lines", "diff --git a/pkg/example.go b/pkg/example.go\n--- a/pkg/example.go\n+++ b/pkg/example.go\n@@ -1,5 +1,5 @@\n package example\n\n-var old = 1\n+var old = 2\n\n", false, 0},
-	}
-
-	for _, tc := range ignoredDiffs {
-		t.Run("ignored_"+tc.name, func(t *testing.T) {
-			t.Parallel()
-			v := ScanDiffWithPatterns(tc.diff, tc.checkTests, GetActivePatterns())
-			if len(v) != tc.wantCount {
-				t.Fatalf("ScanDiffWithPatterns(%s) got %d violations, want %d: %+v", tc.name, len(v), tc.wantCount, v)
-			}
-		})
-	}
-}
-
-func checkScanDiffSecrets(t *testing.T) {
-	t.Helper()
-	secretDiffTests := []struct {
-		name       string
-		secret     string
-		diff       string
-		checkTests bool
-		wantCount  int
-	}{
-		{"secret in diff detected", "my-super-secret-token", testDiff("pkg/foo.go", 10, `const token = "my-super-secret-token"`), false, 1},
-		{"secret in test file ignored when checkTests=false", "my-super-secret-token", testDiff("pkg/foo_test.go", 10, `const token = "my-super-secret-token"`), false, 0},
-		{"secret in test file detected when checkTests=true", "my-super-secret-token", testDiff("pkg/foo_test.go", 10, `const token = "my-super-secret-token"`), true, 1},
-		{"clean diff no secret", "my-super-secret-token", testDiff("pkg/foo.go", 10, `const x = 42`), false, 0},
-	}
-	for _, tc := range secretDiffTests {
-		t.Run("secret_diff_"+tc.name, func(t *testing.T) {
-			sanitizer.ResetSensitiveTokensForTest()
-			sanitizer.RegisterSensitiveTokens(tc.secret)
-			defer sanitizer.ResetSensitiveTokensForTest()
-
-			v := ScanDiffForSecrets(tc.diff, tc.checkTests, GetActivePatterns())
-			if len(v) != tc.wantCount {
-				t.Fatalf("ScanDiffForSecrets(%s) got %d violations, want %d: %+v", tc.name, len(v), tc.wantCount, v)
-			}
-		})
-	}
-
-	textSecretTests := []struct {
-		name      string
-		secret    string
-		text      string
-		wantCount int
-	}{
-		{"registered secret in text", "vault-secret-value-123", "curl -H 'Authorization: Bearer vault-secret-value-123' http://127.0.0.1:8080", 1},
-		{"builtin pattern in text", "", "export GITHUB_TOKEN=" + testPAT, 1},
-		{"internal domain in text allowed", "", "curl http://eri.aerial:8088/health", 0},
-		{"rfc1918 ip in text allowed", "", "ssh 192.168.1.50", 0},
-		{"empty text", "vault-secret-value-123", "", 0},
-	}
-	for _, tc := range textSecretTests {
-		t.Run("text_secret_"+tc.name, func(t *testing.T) {
-			if tc.secret != "" {
-				sanitizer.ResetSensitiveTokensForTest()
-				sanitizer.RegisterSensitiveTokens(tc.secret)
-				defer sanitizer.ResetSensitiveTokensForTest()
-			}
-
-			v := ScanTextForSecrets(tc.text, "test-label", GetActivePatterns())
-			if len(v) != tc.wantCount {
-				t.Fatalf("ScanTextForSecrets(%s) got %d violations, want %d: %+v", tc.name, len(v), tc.wantCount, v)
-			}
-		})
-	}
-}
-
-func checkScanDiffLoopback(t *testing.T) {
-	t.Helper()
-	loopbackTests := []struct {
-		name       string
-		status     int
-		body       string
-		badURL     bool
-		wantCount  int
-		wantSample string
-	}{
-		{"loopback server 200 with violation", http.StatusOK, `{"decision":"deny","violations":[{"category":"GitHubPAT","pattern":"pat","sample":"sample-tok","file":"commit","lineNum":1}]}`, false, 1, "sample-tok"},
-		{"loopback server 500 falls back to local", http.StatusInternalServerError, `error`, false, 0, ""},
-		{"loopback server bad json falls back to local", http.StatusOK, `not-json`, false, 0, ""},
-		{"loopback bad url falls back to local", 0, "", true, 0, ""},
-	}
-	for _, tc := range loopbackTests {
-		t.Run("loopback_"+tc.name, func(t *testing.T) {
-			if tc.badURL {
-				oldURL := GuardScanURL
-				GuardScanURL = "http://127.0.0.1:0/invalid"
-				defer func() { GuardScanURL = oldURL }()
-				v := scanViaLoopbackOrLocal("", "safe text", "label", false, false)
-				if len(v) != tc.wantCount {
-					t.Fatalf("expected %d violations, got %d", tc.wantCount, len(v))
-				}
-				return
-			}
-
-			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				w.WriteHeader(tc.status)
-				_, _ = w.Write([]byte(tc.body))
-			}))
-			defer srv.Close()
-
-			oldURL := GuardScanURL
-			GuardScanURL = srv.URL
-			defer func() { GuardScanURL = oldURL }()
-
-			v := scanViaLoopbackOrLocal("", "safe text", "label", false, false)
-			if len(v) != tc.wantCount {
-				t.Fatalf("expected %d violations, got %d", tc.wantCount, len(v))
-			}
-			if tc.wantSample != "" && (len(v) == 0 || v[0].Sample != tc.wantSample) {
-				t.Fatalf("expected sample %q, got %+v", tc.wantSample, v)
-			}
-		})
-	}
-}
-
-func checkScanDiffHunks(t *testing.T) {
-	t.Helper()
-	hunkTests := []struct {
-		name string
-		hunk string
-		want int
-	}{
-		{"valid hunk", "@@ -1,4 +10,5 @@", 10},
-		{"missing plus", "@@ -1,5 @@", 1},
-		{"invalid number", "@@ -1,5 +notanumber @@", 1},
-		{"empty line", "", 1},
-	}
-	for _, tc := range hunkTests {
-		t.Run("hunk_"+tc.name, func(t *testing.T) {
-			t.Parallel()
-			got := parseHunkLineNum(tc.hunk)
-			if got != tc.want {
-				t.Fatalf("parseHunkLineNum(%q) = %d, want %d", tc.hunk, got, tc.want)
-			}
-		})
-	}
-}
-
-func TestScanDiff(t *testing.T) {
+func TestParsePatternPayload(t *testing.T) {
 	t.Parallel()
-
-	checkScanDiffPatterns(t)
-	checkScanDiffIgnored(t)
-	checkScanDiffSecrets(t)
-	checkScanDiffLoopback(t)
-	checkScanDiffHunks(t)
-}
-
-func TestCustomPatterns(t *testing.T) {
-	// Not t.Parallel() because it exercises t.Setenv
-	payloadTests := []struct {
+	tests := []struct {
 		name     string
 		input    string
 		wantLen  int
@@ -256,384 +44,276 @@ func TestCustomPatterns(t *testing.T) {
 		{"format 4 comma delimited", "patA, patB", 2, "CustomRule_1"},
 		{"invalid regex skipped", `[{"pattern": "["}]`, 0, ""},
 	}
-
-	for _, tc := range payloadTests {
-		t.Run("payload_"+tc.name, func(t *testing.T) {
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
 			rules := parsePatternPayload([]byte(tc.input))
 			if len(rules) != tc.wantLen {
 				t.Fatalf("parsePatternPayload(%s) len = %d, want %d", tc.name, len(rules), tc.wantLen)
 			}
-			if tc.wantCat0 != "" && len(rules) > 0 && rules[0].Category != tc.wantCat0 {
+			if tc.wantCat0 != "" && rules[0].Category != tc.wantCat0 {
 				t.Fatalf("rules[0].Category = %q, want %q", rules[0].Category, tc.wantCat0)
 			}
 		})
 	}
-
-	// ScanDiffWithPatterns with custom rules
-	customRules := parsePatternPayload([]byte(`[{"category": "APISecret", "pattern": "secret-[a-z0-9]+"}]`))
-	diff := "diff --git a/file.go b/file.go\n--- a/file.go\n+++ b/file.go\n@@ -1,1 +1,2 @@\n+const token = \"secret-12345abc\"\n"
-	violations := ScanDiffWithPatterns(diff, false, customRules)
-	if len(violations) != 1 || violations[0].Category != "APISecret" {
-		t.Fatalf("expected 1 custom violation APISecret, got: %+v", violations)
-	}
-
-	// FormatCommitDenyReason check
-	reason := FormatCommitDenyReason(violations)
-	if !strings.Contains(reason, "APISecret") || !strings.Contains(reason, "secret-12345abc") {
-		t.Fatalf("FormatCommitDenyReason missing details: %s", reason)
-	}
-
-	// LoadCustomPatterns file loading checks
-	tmpHome := t.TempDir()
-	geminiConfig := filepath.Join(tmpHome, ".gemini", "config")
-	if err := os.MkdirAll(geminiConfig, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(geminiConfig, "commit-guard.json"), []byte(`[{"pattern": "cg_pat_\\d+"}]`), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	rulesCG := LoadCustomPatterns(tmpHome)
-	if len(rulesCG) != 1 {
-		t.Fatalf("expected 1 rule from commit-guard.json, got %d", len(rulesCG))
-	}
-
-	// LoadCustomPatterns guard.json fallback
-	tmpHome2 := t.TempDir()
-	geminiConfig2 := filepath.Join(tmpHome2, ".gemini", "config")
-	if err := os.MkdirAll(geminiConfig2, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(geminiConfig2, "guard.json"), []byte(`[{"pattern": "g_pat_\\d+"}]`), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	rulesG := LoadCustomPatterns(tmpHome2)
-	if len(rulesG) != 1 {
-		t.Fatalf("expected 1 rule from guard.json, got %d", len(rulesG))
-	}
-
-	// Empty homeDir fallback
-	_ = LoadCustomPatterns("")
-
-	// GetActivePatterns with environment variable
-	t.Setenv("AERIAL_COMMIT_GUARD_PATTERNS", `env_pat_\d+`)
-	activeWithEnv := GetActivePatterns()
-	if len(activeWithEnv) <= len(BuiltinPatterns) {
-		t.Fatalf("expected GetActivePatterns with env to be augmented, got %d", len(activeWithEnv))
-	}
-	os.Unsetenv("AERIAL_COMMIT_GUARD_PATTERNS")
 }
 
-func checkCommitCommandDetection(t *testing.T) {
-	t.Helper()
-	commitTests := []struct {
-		name       string
-		cmd        string
-		wantCommit bool
-		wantDir    string
-		wantSubmit bool
+func TestLoadCustomPatterns(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name        string
+		file        string // written under <home>/.gemini/config
+		content     string
+		homeFromEnv bool // pass "" as homeDir and the temp home as HOME
+		want        int
 	}{
-		{"simple git commit", `git commit -m "feat: new feature"`, true, "", false},
-		{"git commit -am", `git commit -am "fix: test"`, true, "", false},
-		{"./scripts/aerial-pr.sh submit", `./scripts/aerial-pr.sh submit /tmp/scratch "feat: test"`, true, "/tmp/scratch", true},
-		{"scripts/aerial-pr.sh submit", `scripts/aerial-pr.sh submit /data/scratch/dir`, true, "/data/scratch/dir", true},
-		{"bash aerial-pr.sh submit", `bash -c "./scripts/aerial-pr.sh submit /tmp/scratch 'commit'"`, true, "/tmp/scratch", true},
-		{"git -C with dir", `git -C /tmp/repo commit -m "test"`, true, "/tmp/repo", false},
-		{"git -C without space", `git -C/tmp/repo commit -m "test"`, true, "/tmp/repo", false},
-		{"semicolon chained commit", `cd /tmp/repo; git commit -m "msg"`, true, "", false},
-		{"chained git add and commit", `git add . && git commit -m "msg"`, true, "", false},
-		{"echo commit allowed", `echo "git commit"`, false, "", false},
-		{"git diff allowed", `git diff`, false, "", false},
-		{"git status allowed", `git status`, false, "", false},
-		{"aerial-pr.sh init allowed", `./scripts/aerial-pr.sh init azylman/aerial`, false, "", false},
-		{"submit without dir", `aerial-pr.sh submit --dry-run`, true, "", true},
-		{"bash -c echo", `bash -c "echo safe"`, false, "", false},
+		{name: "commit-guard.json", file: "commit-guard.json", content: `[{"pattern": "cg_pat_\\d+"}]`, want: 1},
+		{name: "guard.json fallback", file: "guard.json", content: `[{"pattern": "g_pat_\\d+"}]`, want: 1},
+		{name: "empty homeDir falls back to HOME", file: "guard.json", content: `[{"pattern": "g_pat_\\d+"}]`, homeFromEnv: true, want: 1},
 	}
-
-	for _, tc := range commitTests {
-		t.Run("commit_"+tc.name, func(t *testing.T) {
-			isCommit, targetDir, isSubmit := IsCommitCommand(tc.cmd)
-			if isCommit != tc.wantCommit || targetDir != tc.wantDir || isSubmit != tc.wantSubmit {
-				t.Fatalf("IsCommitCommand(%q) = (%v, %q, %v); want (%v, %q, %v)", tc.cmd, isCommit, targetDir, isSubmit, tc.wantCommit, tc.wantDir, tc.wantSubmit)
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			home := t.TempDir()
+			dir := filepath.Join(home, ".gemini", "config")
+			if err := os.MkdirAll(dir, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(dir, tc.file), []byte(tc.content), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			homeDir, env := home, map[string]string{}
+			if tc.homeFromEnv {
+				homeDir, env = "", map[string]string{"HOME": home}
+			}
+			if got := LoadCustomPatterns(homeDir, mapEnv(env)); len(got) != tc.want {
+				t.Fatalf("LoadCustomPatterns() = %d rules, want %d", len(got), tc.want)
 			}
 		})
 	}
 }
 
-func checkAllCommitDetection(t *testing.T) {
-	t.Helper()
-	allCommitTests := []struct {
-		name string
-		cmd  string
-		want bool
+func TestScanTextForSecrets(t *testing.T) {
+	// Not t.Parallel(): rows reset the global sanitizer registry.
+	tests := []struct {
+		name         string
+		secret       string
+		patterns     string            // custom rule payload; "" scans with GetActivePatterns(env)
+		env          map[string]string // environment for GetActivePatterns
+		text         string
+		wantCount    int
+		wantCategory string // category of the first violation, also expected in the deny reason
+		wantReason   string // substring of FormatCommitDenyReason
+		notInReason  string
 	}{
-		{"git commit -a", "git commit -a -m 'msg'", true},
-		{"git commit -am", "git commit -am 'msg'", true},
-		{"git commit --all", "git commit --all -m 'msg'", true},
-		{"bash -c git commit -a", " ; bash -c 'git commit -a -m msg'", true},
-		{"bash -c git commit -m", "bash -c 'git commit -m msg'", false},
-		{"git commit -m only", "git commit -m 'msg'", false},
-		{"non-git command", "echo 'git commit -a'", false},
-		{"bash -c echo not all", `bash -c "echo safe"`, false},
-		{"empty command", "", false},
+		{name: "registered secret in text", secret: "vault-secret-value-123", text: "curl -H 'Authorization: Bearer vault-secret-value-123' http://127.0.0.1:8080", wantCount: 1},
+		{name: "builtin pattern in text", text: "export GITHUB_TOKEN=" + testPAT, wantCount: 1},
+		{name: "private key in text", text: "echo '" + testPrivKey + "'", wantCount: 1},
+		{name: "discord webhook in text", text: "curl " + testDiscord, wantCount: 1},
+		{name: "slack webhook in text", text: "curl " + testSlack, wantCount: 1},
+		{name: "api key in text", text: "export KEY=" + testAPIKey, wantCount: 1},
+		{name: "jwt in text", text: "curl -H 'Authorization: Bearer " + testJWT + "'", wantCount: 1},
+		{name: "internal domain in text allowed", text: "curl http://eri.aerial:8088/health", wantCount: 0},
+		{name: "rfc1918 ip in text allowed", text: "ssh 192.168.1.50", wantCount: 0},
+		{name: "empty text", secret: "vault-secret-value-123", text: "", wantCount: 0},
+		{name: "env pattern added to builtins", env: map[string]string{"AERIAL_COMMIT_GUARD_PATTERNS": `env_pat_\d+`}, text: "id=env_pat_42", wantCount: 1},
+		{
+			name:         "custom rule category with masked reason",
+			patterns:     `[{"category": "APISecret", "pattern": "secret-[a-z0-9]+"}]`,
+			text:         `const token = "secret-12345abc"`,
+			wantCount:    1,
+			wantCategory: "APISecret",
+			wantReason:   "se***bc",
+			notInReason:  "secret-12345abc",
+		},
 	}
-	for _, tc := range allCommitTests {
-		t.Run("allcommit_"+tc.name, func(t *testing.T) {
-			got := isAllCommit(tc.cmd)
-			if got != tc.want {
-				t.Fatalf("isAllCommit(%q) = %v, want %v", tc.cmd, got, tc.want)
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			sanitizer.ResetSensitiveTokensForTest()
+			defer sanitizer.ResetSensitiveTokensForTest()
+			if tc.secret != "" {
+				sanitizer.RegisterSensitiveTokens(tc.secret)
+			}
+			rules := GetActivePatterns(mapEnv(tc.env))
+			if tc.patterns != "" {
+				rules = parsePatternPayload([]byte(tc.patterns))
+			}
+			v := ScanTextForSecrets(tc.text, "test-label", rules)
+			if len(v) != tc.wantCount {
+				t.Fatalf("ScanTextForSecrets(%s) got %d violations, want %d: %+v", tc.name, len(v), tc.wantCount, v)
+			}
+			if tc.wantCategory != "" && v[0].Category != tc.wantCategory {
+				t.Fatalf("violation category = %q, want %q", v[0].Category, tc.wantCategory)
+			}
+			reason := FormatCommitDenyReason(v)
+			if !strings.Contains(reason, tc.wantCategory) || !strings.Contains(reason, tc.wantReason) || (tc.notInReason != "" && strings.Contains(reason, tc.notInReason)) {
+				t.Fatalf("FormatCommitDenyReason() = %q, want %q and %q without %q", reason, tc.wantCategory, tc.wantReason, tc.notInReason)
 			}
 		})
 	}
 }
 
-func checkAerialConfigDetection(t *testing.T) {
-	t.Helper()
-	tmpDir := t.TempDir()
-	aerialConfigDir := filepath.Join(tmpDir, "worktrees", "wt-config")
-	if err := os.MkdirAll(aerialConfigDir, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(aerialConfigDir, "config"), []byte("[remote \"origin\"]\nurl = https://github.com/azylman/aerial-config.git\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	worktreeRoot := filepath.Join(tmpDir, "wt-root")
-	if err := os.MkdirAll(worktreeRoot, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(worktreeRoot, ".git"), []byte("gitdir: "+aerialConfigDir+"\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
+// fakeEgressScanner blocks calls to blockServer (and blockTool when set) whose arguments contain
+// needle, and fails every scan with err when set. The zero value allows everything.
+type fakeEgressScanner struct {
+	blockServer string
+	blockTool   string
+	needle      string
+	err         error
+}
 
-	wtCommonRoot := filepath.Join(tmpDir, "wt-common-root")
-	wtCommonGit := filepath.Join(tmpDir, "wt-common-git")
-	if err := os.MkdirAll(wtCommonRoot, 0o755); err != nil {
-		t.Fatal(err)
+func (f fakeEgressScanner) Scan(_ context.Context, req EgressScanRequest) (EgressScanResult, error) {
+	if f.err != nil {
+		return EgressScanResult{}, f.err
 	}
-	if err := os.MkdirAll(wtCommonGit, 0o755); err != nil {
-		t.Fatal(err)
+	if f.blockServer != "" && strings.EqualFold(req.Server, f.blockServer) &&
+		(f.blockTool == "" || req.Tool == f.blockTool) && bytes.Contains(req.Arguments, []byte(f.needle)) {
+		return EgressScanResult{Blocked: true, Violations: []EgressViolation{{Category: "InfisicalSecret", Sample: "ne***ue"}}}, nil
 	}
-	if err := os.WriteFile(filepath.Join(wtCommonRoot, ".git"), []byte("gitdir: "+wtCommonGit+"\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(wtCommonGit, "commondir"), []byte(aerialConfigDir+"\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
+	return EgressScanResult{Violations: []EgressViolation{}}, nil
+}
 
-	configTests := []struct {
-		name string
-		dir  string
-		cmd  string
-		want bool
+func TestCheckOutboundSecrets(t *testing.T) {
+	blockDocket := &fakeEgressScanner{blockServer: "docket", needle: "needle-value"}
+	blockDocketCreate := &fakeEgressScanner{blockServer: "docket", blockTool: "create", needle: "needle-value"}
+	scanDown := &fakeEgressScanner{err: errors.New("egress scan returned HTTP 503")}
+	tests := []struct {
+		name          string
+		tool          string
+		namespace     string
+		cmd           string
+		raw           string
+		scanner       *fakeEgressScanner
+		secret        string
+		wantDeny      bool
+		wantReason    string
+		wantNotReason string
 	}{
-		{"dir contains aerial-config", "/data/scratch/aerial-config-scratch.abc", "git commit", true},
-		{"cmd contains aerial-config", "/tmp/repo", "scripts/aerial-pr.sh submit /tmp/repo --repo aerial-config", true},
-		{"worktree points to aerial-config", worktreeRoot, "git commit", true},
-		{"worktree commondir points to aerial-config", wtCommonRoot, "git commit", true},
-		{"clean repo", "/data/scratch/aerial-code-scratch.xyz", "git commit", false},
-	}
-	for _, tc := range configTests {
-		t.Run("config_"+tc.name, func(t *testing.T) {
-			got := IsAerialConfig(tc.dir, tc.cmd)
-			if got != tc.want {
-				t.Fatalf("IsAerialConfig(%q, %q) = %v, want %v", tc.dir, tc.cmd, got, tc.want)
-			}
-		})
-	}
-}
-
-func checkCoreAerialDetection(t *testing.T) {
-	t.Helper()
-	tmpDir := t.TempDir()
-	aerialConfigDir := filepath.Join(tmpDir, "worktrees", "wt-config")
-	if err := os.MkdirAll(filepath.Join(aerialConfigDir, ".git"), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(aerialConfigDir, ".git", "config"), []byte("[remote \"origin\"]\nurl = git@github.com:azylman/aerial-config.git\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-
-	tmpAerial := filepath.Join(tmpDir, "aerial-monorepo")
-	if err := os.MkdirAll(filepath.Join(tmpAerial, ".git"), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(tmpAerial, ".git", "config"), []byte("[remote \"origin\"]\nurl = git@github.com:azylman/aerial.git\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-
-	tmpPrimary := filepath.Join(tmpDir, "aerial-primary")
-	if err := os.MkdirAll(filepath.Join(tmpPrimary, "services", "eri"), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.MkdirAll(filepath.Join(tmpPrimary, "scripts"), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(tmpPrimary, "services", "eri", "go.mod"), []byte("module github.com/azylman/aerial/services/eri\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(tmpPrimary, "scripts", "aerial-pr.sh"), []byte("#!/bin/sh\n"), 0o755); err != nil {
-		t.Fatal(err)
-	}
-
-	tmpFallback := filepath.Join(tmpDir, "aerial-fallback")
-	if err := os.MkdirAll(filepath.Join(tmpFallback, "brain"), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.MkdirAll(filepath.Join(tmpFallback, "scripts"), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(tmpFallback, "brain", "go.mod"), []byte("module github.com/azylman/aerial/services/eri\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(tmpFallback, "scripts", "aerial-pr.sh"), []byte("#!/bin/sh\n"), 0o755); err != nil {
-		t.Fatal(err)
-	}
-
-	coreTests := []struct {
-		name string
-		dir  string
-		cmd  string
-		want bool
-	}{
-		{"core aerial repo", tmpAerial, "git commit", true},
-		{"core aerial primary structure", tmpPrimary, "git commit", true},
-		{"core aerial fallback structure", tmpFallback, "git commit", true},
-		{"aerial-config repo", aerialConfigDir, "git commit", false},
-		{"other repo", tmpDir, "git commit", false},
-	}
-	for _, tc := range coreTests {
-		t.Run("core_"+tc.name, func(t *testing.T) {
-			got := IsCoreAerial(tc.dir, tc.cmd)
-			if got != tc.want {
-				t.Fatalf("IsCoreAerial(%q, %q) = %v, want %v", tc.dir, tc.cmd, got, tc.want)
-			}
-		})
-	}
-}
-
-func TestRepoAndCommitDetection(t *testing.T) {
-	// Not t.Parallel() because it touches gitCmdRunner
-	oldRunner := gitCmdRunner
-	defer func() { gitCmdRunner = oldRunner }()
-
-	checkCommitCommandDetection(t)
-	checkAllCommitDetection(t)
-	checkAerialConfigDetection(t)
-	checkCoreAerialDetection(t)
-
-	// Git origin runner check
-	gitCmdRunner = func(dir string, args ...string) (string, error) {
-		return "https://github.com/azylman/aerial.git", nil
-	}
-	if !hasRepoOriginMatch(t.TempDir(), func(s string) bool { return strings.Contains(s, "aerial") }) {
-		t.Fatalf("expected hasRepoOriginMatch to succeed via gitCmdRunner")
-	}
-}
-
-type checkCommitTestCase struct {
-	name       string
-	tool       string
-	cmd        string
-	arguments  string
-	server     string
-	cwd        string
-	mockDiff   string
-	emptyTree  bool
-	untracked  bool
-	useCoreDir bool
-	secret     string
-	wantDeny   bool
-	wantReason string
-}
-
-func runCheckCommitCase(t *testing.T, tc checkCommitTestCase, tmpCore string) {
-	t.Helper()
-	if tc.secret != "" {
-		sanitizer.ResetSensitiveTokensForTest()
-		sanitizer.RegisterSensitiveTokens(tc.secret)
-		defer sanitizer.ResetSensitiveTokensForTest()
-	}
-	cwd := tc.cwd
-	if tc.useCoreDir {
-		cwd = tmpCore
-	}
-	gitCmdRunner = func(dir string, args ...string) (string, error) {
-		if tc.untracked && len(args) > 0 && args[0] == "ls-files" {
-			return "secret.txt\n", nil
-		}
-		if tc.emptyTree && len(args) > 1 && args[0] == "diff" && args[1] == "HEAD" {
-			return "", os.ErrNotExist
-		}
-		return tc.mockDiff, nil
-	}
-
-	args := ToolArgs{CommandLine: tc.cmd, Arguments: []byte(tc.arguments), ServerName: tc.server, Cwd: cwd}
-	args.AdoptClaudeMCPCall(tc.tool, []byte(tc.arguments))
-	dec := CheckCommit(tc.tool, args)
-	if tc.wantDeny && dec.Decision != DecisionDeny {
-		t.Fatalf("expected deny, got %v", dec)
-	}
-	if !tc.wantDeny && dec.Decision != DecisionAllow {
-		t.Fatalf("expected allow, got deny: %v", dec)
-	}
-	if tc.wantReason != "" && !strings.Contains(dec.Reason, tc.wantReason) {
-		t.Fatalf("expected %q in reason, got %q", tc.wantReason, dec.Reason)
-	}
-}
-
-func TestCheckCommit(t *testing.T) {
-	oldRunner := gitCmdRunner
-	defer func() { gitCmdRunner = oldRunner }()
-	oldGuardScanURL := GuardScanURL
-	GuardScanURL = ""
-	defer func() { GuardScanURL = oldGuardScanURL }()
-
-	tmpCore := t.TempDir()
-	if err := os.MkdirAll(filepath.Join(tmpCore, ".git"), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(tmpCore, ".git", "config"), []byte("[remote \"origin\"]\nurl = git@github.com:azylman/aerial.git\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-
-	tmpWorkspace := t.TempDir()
-	untrackedFile := filepath.Join(tmpWorkspace, "secret.txt")
-	if err := os.WriteFile(untrackedFile, []byte("key = "+testAPIKey), 0o600); err != nil {
-		t.Fatal(err)
-	}
-
-	tests := []checkCommitTestCase{
-		{name: "non-commit allowed", tool: "run_command", cmd: "git status"},
-		{name: "aerial-config bypass", tool: "run_command", cmd: "git commit -m 'feat'", cwd: "/share/aerial-config"},
-		{name: "clean diff allowed", tool: "run_command", cmd: "git commit -m 'clean'", cwd: "/workspace", mockDiff: "diff --git a/pkg/file.go b/pkg/file.go\n+var x = 1\n"},
-		{name: "sensitive diff denied", tool: "run_command", cmd: "git commit -m 'leak'", cwd: "/workspace", mockDiff: "diff --git a/token.go b/token.go\n+const token = \"" + testPAT + "\"\n", wantDeny: true, wantReason: "GitHubPAT"},
-		{name: "internal cluster in core", tool: "run_command", cmd: "git commit -m 'mesh'", useCoreDir: true, mockDiff: "diff --git a/main.go b/main.go\n+var s = \"http://db.aerial:5432\"\n"},
-		{name: "unborn branch empty tree", tool: "run_command", cmd: "./scripts/aerial-pr.sh submit /tmp/scratch 'feat'", cwd: "/workspace", emptyTree: true},
-		{name: "colon tool name and all commit", tool: "default_api:run_command", cmd: "git commit -a -m 'all'", cwd: "/workspace"},
-		{name: "relative dir clean", tool: "run_command", cmd: "./scripts/aerial-pr.sh submit relative/scratch 'clean'", cwd: "/data/repo"},
-		{name: "untracked secret denied", tool: "run_command", cmd: "./scripts/aerial-pr.sh submit " + tmpWorkspace + " 'add'", cwd: tmpWorkspace, untracked: true, wantDeny: true, wantReason: "GenericAPIKey"},
-		{name: "empty cwd fallback to dot", tool: "run_command", cmd: "git commit -m 'clean'", cwd: "", mockDiff: "diff --git a/pkg/file.go b/pkg/file.go\n+var x = 1\n"},
-		{name: "bash safe command allowed", tool: "run_command", cmd: "bash -c 'echo test'", cwd: "/workspace"},
-		{name: "commit command with secret in message or chained command denied", tool: "run_command", cmd: "git commit -m 'feat: " + testPAT + "'", cwd: "/workspace", wantDeny: true, wantReason: "GitHubPAT"},
-		{name: "run_command with registered secret denied", tool: "run_command", cmd: "curl -H 'X-Token: my-registered-secret-foo' http://api.com", cwd: "/workspace", secret: "my-registered-secret-foo", wantDeny: true, wantReason: "InfisicalSecret"},
-		{name: "call_mcp_tool with secret denied", tool: "call_mcp_tool", cmd: "", arguments: `{"token": "` + testPAT + `"}`, cwd: "/workspace", wantDeny: true, wantReason: "GitHubPAT"},
-		{name: "call_mcp_tool with lowercase arguments parsed and denied", tool: "call_mcp_tool", cmd: "", arguments: `{"arguments":{"token":"` + testPAT + `"}}`, cwd: "/workspace", wantDeny: true, wantReason: "GitHubPAT"},
-		{name: "mcp prefix tool allowed", tool: "mcp_safe_tool", cmd: "", cwd: "/workspace"},
-		{name: "mcp colon tool with extra args denied", tool: "mcp:safe:tool", cmd: "", arguments: `{"key": "` + testPAT + `"}`, cwd: "/workspace", wantDeny: true, wantReason: "GitHubPAT"},
-		{name: "mcp tool with lowercase tool_name and server_name denied", tool: "call_mcp_tool", cmd: "", arguments: `{"server_name":"github","tool_name":"get_file","arguments":{"token":"` + testPAT + `"}}`, cwd: "/workspace", wantDeny: true, wantReason: "GitHubPAT"},
-		{name: "mcp tool with uppercase ToolName and ServerName denied", tool: "call_mcp_tool", cmd: "", arguments: `{"ServerName":"github","ToolName":"get_file","Arguments":{"token":"` + testPAT + `"}}`, cwd: "/workspace", wantDeny: true, wantReason: "GitHubPAT"},
-		{name: "unrelated tool allowed", tool: "read_file", cmd: "", cwd: "/workspace"},
-		{name: "claude infisical delete-secret with registered secret allowed", tool: "mcp__infisical__delete-secret", arguments: `{"projectId":"proj-registered-secret-1"}`, secret: "proj-registered-secret-1"},
-		{name: "claude infisical mixed case allowed", tool: "MCP__Infisical__get-secret", arguments: `{"projectId":"proj-registered-secret-1"}`, secret: "proj-registered-secret-1"},
-		{name: "agy call_mcp_tool infisical server allowed", tool: "call_mcp_tool", server: " Infisical ", arguments: `{"projectId":"proj-registered-secret-1"}`, secret: "proj-registered-secret-1"},
-		{name: "claude docket call with registered secret denied", tool: "mcp__docket__create", arguments: `{"body":"proj-registered-secret-1"}`, secret: "proj-registered-secret-1", wantDeny: true, wantReason: "InfisicalSecret"},
-		{name: "claude infisical lookalike server denied", tool: "mcp__infisical-proxy__get-secret", arguments: `{"projectId":"proj-registered-secret-1"}`, secret: "proj-registered-secret-1", wantDeny: true, wantReason: "InfisicalSecret"},
-		{name: "agy infisical lookalike server denied", tool: "call_mcp_tool", server: "my-infisical", arguments: `{"projectId":"proj-registered-secret-1"}`, secret: "proj-registered-secret-1", wantDeny: true, wantReason: "InfisicalSecret"},
-		{name: "bash with registered secret still denied", tool: "Bash", cmd: "echo proj-registered-secret-1", secret: "proj-registered-secret-1", wantDeny: true, wantReason: "InfisicalSecret"},
+		{name: "run_command safe allowed", tool: "run_command", cmd: "git status", scanner: scanDown},
+		{name: "run_command PAT denied with masked sample", tool: "run_command", cmd: "git commit -m 'feat: " + testPAT + "'", wantDeny: true, wantReason: "[GitHubPAT] matches", wantNotReason: testPAT},
+		{name: "run_command PAT sample masked", tool: "run_command", cmd: "export T=" + testPAT, wantDeny: true, wantReason: "sample: gh***44", wantNotReason: testPAT},
+		{name: "run_command registered secret denied", tool: "run_command", cmd: "curl -H 'X-Token: my-registered-secret-foo' http://api.com", secret: "my-registered-secret-foo", wantDeny: true, wantReason: "InfisicalSecret", wantNotReason: "my-registered-secret-foo"},
+		{name: "bash registered secret denied without scanner", tool: "Bash", cmd: "echo proj-registered-secret-1", secret: "proj-registered-secret-1", wantDeny: true, wantReason: "InfisicalSecret"},
+		{name: "unrelated tool allowed", tool: "read_file", scanner: scanDown},
+		{name: "claude infisical allowed unscanned", tool: "mcp__infisical__delete-secret", raw: `{"projectId":"needle-value"}`, scanner: scanDown},
+		{name: "claude infisical mixed case allowed", tool: "MCP__Infisical__get-secret", raw: `{"projectId":"needle-value"}`, scanner: scanDown},
+		{name: "agy infisical server allowed unscanned", tool: "call_mcp_tool", raw: `{"ServerName":" Infisical ","ToolName":"get-secret","Arguments":{"projectId":"needle-value"}}`, scanner: scanDown},
+		{name: "claude blocklisted call denied", tool: "mcp__docket__create", raw: `{"body":"needle-value"}`, scanner: blockDocketCreate, wantDeny: true, wantReason: "docket/create blocked", wantNotReason: "needle-value"},
+		{name: "claude blocked reason lists category and masked sample", tool: "mcp__docket__create", raw: `{"body":"needle-value"}`, scanner: blockDocket, wantDeny: true, wantReason: "[InfisicalSecret] sample: ne***ue"},
+		{name: "claude clean args to blocklisted server allowed", tool: "mcp__docket__create", raw: `{"body":"hello"}`, scanner: blockDocket},
+		{name: "claude non-blocklisted server allowed", tool: "mcp__kernel__browser_type", raw: `{"text":"needle-value"}`, scanner: blockDocket},
+		{name: "claude multi-segment server derived", tool: "mcp__docket__extra__create", raw: `{"body":"needle-value"}`, scanner: &fakeEgressScanner{blockServer: "docket__extra", blockTool: "create", needle: "needle-value"}, wantDeny: true, wantReason: "docket__extra/create"},
+		{name: "claude infisical lookalike server scanned", tool: "mcp__infisical-proxy__get-secret", raw: `{"projectId":"needle-value"}`, scanner: &fakeEgressScanner{blockServer: "infisical-proxy", needle: "needle-value"}, wantDeny: true, wantReason: "infisical-proxy/get-secret"},
+		{name: "claude scanner error denied", tool: "mcp__docket__create", raw: `{"body":"hello"}`, scanner: scanDown, wantDeny: true, wantReason: "egress scan is unavailable (egress scan returned HTTP 503), so the MCP call to docket/create was blocked"},
+		{name: "claude nil scanner denied", tool: "mcp__docket__create", raw: `{"body":"hello"}`, wantDeny: true, wantReason: "egress scan is unavailable"},
+		{name: "muse claude-shape call allowed", tool: "mcp__victoriametrics__metrics", raw: `{"match":"up"}`, scanner: blockDocket},
+		{name: "agy object arguments denied", tool: "call_mcp_tool", raw: `{"ServerName":"docket","ToolName":"create","Arguments":{"body":"needle-value"}}`, scanner: blockDocketCreate, wantDeny: true, wantReason: "docket/create"},
+		{name: "agy JSON-string arguments denied", tool: "call_mcp_tool", raw: `{"ServerName":"docket","ToolName":"create","Arguments":"{\"body\":\"needle-value\"}"}`, scanner: blockDocketCreate, wantDeny: true, wantReason: "docket/create"},
+		{name: "agy lowercase field fallback denied", tool: "call_mcp_tool", raw: `{"server_name":"docket","tool_name":"create","arguments":{"body":"needle-value"}}`, scanner: blockDocketCreate, wantDeny: true, wantReason: "docket/create"},
+		{name: "agy prefixed call_mcp_tool denied", tool: "default_api:call_mcp_tool", raw: `{"ServerName":"docket","ToolName":"create","Arguments":{"body":"needle-value"}}`, scanner: blockDocketCreate, wantDeny: true, wantReason: "docket/create"},
+		{name: "agy non-blocklisted server allowed", tool: "call_mcp_tool", raw: `{"ServerName":"google","ToolName":"search_gmail_messages","Arguments":{"query":"needle-value"}}`, scanner: blockDocket},
+		{name: "agy missing server denied", tool: "call_mcp_tool", raw: `{"ToolName":"create","Arguments":{"body":"x"}}`, scanner: blockDocket, wantDeny: true, wantReason: `tool name "call_mcp_tool"`},
+		{name: "mcp colon shape denied", tool: "mcp:docket:create", raw: `{"body":"needle-value"}`, scanner: blockDocketCreate, wantDeny: true, wantReason: "docket/create"},
+		{name: "mcp colon shape allowed", tool: "mcp:kernel:browser_type", raw: `{"text":"needle-value"}`, scanner: blockDocket},
+		{name: "mcp colon two segments denied unparsed", tool: "mcp:create", raw: `{}`, scanner: blockDocket, wantDeny: true, wantReason: `tool name "mcp:create"`},
+		{name: "single underscore mcp shape denied unparsed", tool: "mcp_safe_tool", scanner: blockDocket, wantDeny: true, wantReason: `tool name "mcp_safe_tool"`},
+		{name: "codex namespace call denied", tool: "create", namespace: "mcp__docket", raw: `{"body":"needle-value"}`, scanner: blockDocketCreate, wantDeny: true, wantReason: "docket/create"},
+		{name: "codex namespace infisical allowed", tool: "get-secret", namespace: "mcp__infisical", raw: `{"projectId":"x"}`, scanner: scanDown},
+		{name: "codex exec blocklisted call site denied", tool: "exec", raw: `"const r = await tools.mcp__docket__create({body: \"needle-value\"});"`, scanner: blockDocketCreate, wantDeny: true, wantReason: "docket/create"},
+		{name: "codex exec object input denied", tool: "exec", raw: `{"input":"await tools[\"mcp__docket__create\"]({body: \"needle-value\"})"}`, scanner: blockDocketCreate, wantDeny: true, wantReason: "docket/create"},
+		{name: "codex exec aliased reference denied", tool: "exec", raw: `"const {mcp__docket__create: mk} = tools; await mk({body: \"needle-value\"});"`, scanner: blockDocketCreate, wantDeny: true, wantReason: "docket/create"},
+		{name: "codex exec non-blocklisted call site allowed", tool: "exec", raw: `"await tools.mcp__kubernetes__pods_list({note: \"needle-value\"});"`, scanner: blockDocket},
+		{name: "codex exec mixed call sites denied", tool: "exec", raw: `"await tools.mcp__kubernetes__pods_list({}); await tools.mcp__docket__create({body: \"needle-value\"});"`, scanner: blockDocketCreate, wantDeny: true, wantReason: "docket/create"},
+		{name: "codex exec no MCP call sites unchanged", tool: "exec", raw: `"console.log(1 + 1)"`, scanner: scanDown},
+		{name: "codex exec infisical call site allowed unscanned", tool: "exec", raw: `"await tools.mcp__infisical__get_secret({})"`, scanner: scanDown},
+		{name: "codex exec scanner error denied", tool: "exec", raw: `"await tools.mcp__kubernetes__pods_list({})"`, scanner: scanDown, wantDeny: true, wantReason: "MCP call to kubernetes/pods_list was blocked"},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			runCheckCommitCase(t, tc, tmpCore)
+			sanitizer.ResetSensitiveTokensForTest()
+			defer sanitizer.ResetSensitiveTokensForTest()
+			if tc.secret != "" {
+				sanitizer.RegisterSensitiveTokens(tc.secret)
+			}
+			raw := json.RawMessage(tc.raw)
+			args := ParseArgs(raw)
+			if tc.cmd != "" {
+				args.CommandLine = tc.cmd
+			}
+			args.AdoptClaudeMCPCall(tc.tool, raw)
+			args.Namespace = tc.namespace
+			var scanner EgressScanner
+			if tc.scanner != nil {
+				scanner = *tc.scanner
+			}
+			dec := CheckOutboundSecrets(tc.tool, raw, args, mapEnv(nil), scanner)
+			if (dec.Decision == DecisionDeny) != tc.wantDeny {
+				t.Fatalf("decision = %v (reason %q), wantDeny %v", dec.Decision, dec.Reason, tc.wantDeny)
+			}
+			if tc.wantReason != "" && !strings.Contains(dec.Reason, tc.wantReason) {
+				t.Fatalf("expected %q in reason, got %q", tc.wantReason, dec.Reason)
+			}
+			if tc.wantNotReason != "" && strings.Contains(dec.Reason, tc.wantNotReason) {
+				t.Fatalf("reason leaks %q: %q", tc.wantNotReason, dec.Reason)
+			}
 		})
+	}
+}
+
+func TestHTTPEgressScannerScan(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name    string
+		status  int
+		body    string
+		url     string
+		want    EgressScanResult
+		wantErr string
+	}{
+		{name: "blocked result decoded", status: http.StatusOK, body: `{"blocked":true,"violations":[{"category":"InfisicalSecret","sample":"ab***yz"}]}`, want: EgressScanResult{Blocked: true, Violations: []EgressViolation{{Category: "InfisicalSecret", Sample: "ab***yz"}}}},
+		{name: "clean result decoded", status: http.StatusOK, body: `{"blocked":false,"violations":[]}`, want: EgressScanResult{Violations: []EgressViolation{}}},
+		{name: "503 is an error", status: http.StatusServiceUnavailable, body: `{"blocked":false}`, wantErr: "HTTP 503"},
+		{name: "400 is an error", status: http.StatusBadRequest, body: `bad`, wantErr: "HTTP 400"},
+		{name: "malformed body is an error", status: http.StatusOK, body: `{"blocked":`, wantErr: "decode egress scan response"},
+		{name: "transport failure is an error", url: "http://127.0.0.1:1/internal/guard/egress-scan", wantErr: "egress scan request failed"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			srv := httptest.NewServer(egressEndpointStub(tc.status, tc.body))
+			t.Cleanup(srv.Close)
+			url := cmp.Or(tc.url, srv.URL+"/internal/guard/egress-scan")
+			scanner := &HTTPEgressScanner{URL: url, Client: srv.Client()}
+			got, err := scanner.Scan(context.Background(), EgressScanRequest{Server: "docket", Tool: "create", Arguments: json.RawMessage(`{"body":"x"}`)})
+			if tc.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+					t.Fatalf("Scan error = %v, want containing %q", err, tc.wantErr)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("Scan error = %v", err)
+			}
+			if !reflect.DeepEqual(got, tc.want) {
+				t.Fatalf("Scan = %+v, want %+v", got, tc.want)
+			}
+		})
+	}
+}
+
+// egressEndpointStub answers status/body for a well-formed POST naming docket/create and 418 otherwise.
+func egressEndpointStub(status int, body string) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		var req EgressScanRequest
+		if r.Method != http.MethodPost || r.URL.Path != "/internal/guard/egress-scan" ||
+			r.Header.Get("Content-Type") != "application/json" ||
+			json.NewDecoder(r.Body).Decode(&req) != nil || req.Server != "docket" || req.Tool != "create" ||
+			string(req.Arguments) != `{"body":"x"}` {
+			w.WriteHeader(http.StatusTeapot)
+			return
+		}
+		w.WriteHeader(status)
+		_, _ = w.Write([]byte(body))
 	}
 }

@@ -1,0 +1,84 @@
+package transcript
+
+import (
+	"context"
+	"time"
+
+	"github.com/azylman/aerial/services/eri/pkg/db"
+)
+
+// EmbedderFunc generates a vector embedding for the provided text.
+type EmbedderFunc func(ctx context.Context, text string) ([]float32, error)
+
+// LLMClientFunc generates an LLM completion for the provided prompt.
+type LLMClientFunc func(ctx context.Context, prompt string) (string, error)
+
+// SyncOptions configures the transcript sync sweep.
+type SyncOptions struct {
+	BatchLimit        int           `json:"batch_limit"`
+	IdleThreshold     time.Duration `json:"idle_threshold"`
+	BrainDir          string        `json:"brain_dir"`
+	HeadLimit         int           `json:"head_limit"`
+	TailLimit         int           `json:"tail_limit"`
+	ClaudeProjectsDir string        `json:"claude_projects_dir,omitempty"`
+	CodexSessionsDir  string        `json:"codex_sessions_dir,omitempty"`
+	MuseSessionsDir   string        `json:"muse_sessions_dir,omitempty"`
+	// MCPServers lists configured MCP server names used to normalize agy mcp_<server>_<tool> names.
+	MCPServers []string      `json:"mcp_servers,omitempty"`
+	Embedder   EmbedderFunc  `json:"-"`
+	LLMFunc    LLMClientFunc `json:"-"`
+}
+
+// SyncStats records metrics from a transcript synchronization execution.
+type SyncStats struct {
+	Scanned            int           `json:"scanned"`
+	Synced             int           `json:"synced"`
+	StepsInserted      int           `json:"steps_inserted"`
+	SummariesGenerated int           `json:"summaries_generated"`
+	SkippedUnchanged   int           `json:"skipped_unchanged"`
+	Errors             int           `json:"errors"`
+	Duration           time.Duration `json:"duration"`
+}
+
+// SearchOptions configures parameters for transcript search.
+type SearchOptions struct {
+	// Stack restricts results to one stack's rows; empty searches every stack.
+	Stack         string    `json:"stack,omitempty"`
+	Query         string    `json:"query"`
+	Mode          string    `json:"mode"`
+	SessionFilter string    `json:"session_filter,omitempty"`
+	SessionID     string    `json:"session_id,omitempty"`
+	ToolFilter    string    `json:"tool_filter,omitempty"`
+	Limit         int       `json:"limit,omitempty"`
+	Since         time.Time `json:"since,omitempty"`
+}
+
+// SearchResult aggregates hits from macro session summaries and micro transcript steps.
+type SearchResult struct {
+	Query    string              `json:"query"`
+	Mode     string              `json:"mode"`
+	Sessions []db.SessionSummary `json:"sessions,omitempty"`
+	Steps    []db.TranscriptStep `json:"steps,omitempty"`
+	Total    int                 `json:"total"`
+}
+
+// StepWindowResult contains the centered step and surrounding context window.
+type StepWindowResult struct {
+	SessionID  string              `json:"session_id"`
+	CenterStep int                 `json:"step"`
+	Context    int                 `json:"context"`
+	Steps      []db.TranscriptStep `json:"steps"`
+}
+
+const (
+	// DefaultBatchLimit is the default maximum number of sessions processed per sync sweep.
+	DefaultBatchLimit = 1000
+)
+
+// Engine values recorded per session.
+const (
+	EngineAgy    = "agy"
+	EngineClaude = "claude"
+	EngineCodex  = "codex"
+	EngineMuse   = "muse"
+)

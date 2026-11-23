@@ -10,6 +10,7 @@ import (
 
 	"github.com/azylman/aerial/pkg/httpkit"
 	"github.com/azylman/aerial/pkg/k8sauth"
+	"github.com/azylman/aerial/pkg/strutil"
 )
 
 // FallbackConfigPath is the default YAML config path when CONFIG_PATH is unset.
@@ -48,15 +49,6 @@ type RestateConfig struct {
 	AgentName         string `yaml:"agent_name"`
 }
 
-func firstNonEmpty(vals ...string) string {
-	for _, v := range vals {
-		if trimmed := strings.TrimSpace(v); trimmed != "" {
-			return trimmed
-		}
-	}
-	return ""
-}
-
 // LoadConfig loads configuration from an optional YAML file (CONFIG_PATH) with environment variable overrides.
 func LoadConfig(configPath string) Config {
 	var fileCfg VanadisYAMLConfig
@@ -74,19 +66,19 @@ func LoadConfig(configPath string) Config {
 			}
 		}
 	}
-	pgURL := firstNonEmpty(httpkit.BuildPostgresDSN(os.Getenv, "aerial"), strings.TrimSpace(fileCfg.PostgresURL))
-	eriURL := strings.TrimRight(strings.TrimSpace(firstNonEmpty(os.Getenv("ERI_URL"), fileCfg.EriURL)), "/")
+	pgURL := strutil.FirstNonEmpty(httpkit.BuildPostgresDSN(os.Getenv, "aerial"), strings.TrimSpace(fileCfg.PostgresURL))
+	eriURL := strings.TrimRight(strings.TrimSpace(strutil.FirstNonEmpty(os.Getenv("ERI_URL"), fileCfg.EriURL)), "/")
 	authEnabled := fileCfg.Auth.Enabled || strings.EqualFold(os.Getenv("K8S_AUTH_ENABLED"), "true") || strings.EqualFold(os.Getenv("AUTH_ENABLED"), "true")
 	authCfg := fileCfg.Auth
 	authCfg.Enabled = authEnabled
 	return Config{
-		Port:         firstNonEmpty(os.Getenv("PORT"), fileCfg.Port, "4025"),
+		Port:         strutil.FirstNonEmpty(os.Getenv("PORT"), fileCfg.Port, "4025"),
 		PostgresURL:  pgURL,
 		BrainURL:     eriURL,
 		EriURL:       eriURL,
-		NATSURL:      firstNonEmpty(os.Getenv("NATS_URL"), strings.TrimSpace(fileCfg.NATSURL)),
-		GitHubAPIURL: strings.TrimRight(strings.TrimSpace(firstNonEmpty(os.Getenv("GITHUB_API_URL"), fileCfg.GitHubAPIURL, "https://api.github.com")), "/"),
-		GitHubToken:  firstNonEmpty(os.Getenv("GITHUB_TOKEN"), os.Getenv("GITHUB_PAT"), fileCfg.GitHubToken),
+		NATSURL:      strutil.FirstNonEmpty(os.Getenv("NATS_URL"), strings.TrimSpace(fileCfg.NATSURL)),
+		GitHubAPIURL: strings.TrimRight(strings.TrimSpace(strutil.FirstNonEmpty(os.Getenv("GITHUB_API_URL"), fileCfg.GitHubAPIURL, "https://api.github.com")), "/"),
+		GitHubToken:  strutil.FirstNonEmpty(os.Getenv("GITHUB_TOKEN"), os.Getenv("GITHUB_PAT"), fileCfg.GitHubToken),
 		ConfigPath:   strings.TrimSpace(configPath),
 		DeployUIURL:  strings.TrimRight(strings.TrimSpace(fileCfg.DeployUIURL), "/"),
 		Auth:         authCfg,
@@ -95,31 +87,6 @@ func LoadConfig(configPath string) Config {
 
 // LoadConfigFromEnv initializes configuration from environment variables with optional CONFIG_PATH fallback.
 func LoadConfigFromEnv() Config { return LoadConfig(os.Getenv("CONFIG_PATH")) }
-
-// NormalizeAgentName trims whitespace for per-agent scoped Restate names.
-func NormalizeAgentName(agent string) string {
-	return strings.ToLower(strings.TrimSpace(agent))
-}
-
-// BuildServiceName derives the Restate Build Virtual Object name for an agent.
-// Empty and aerial resolve to the legacy Build name so Phase 1 stays dark.
-func BuildServiceName(agent string) string {
-	name := NormalizeAgentName(agent)
-	if name == "" || name == "aerial" {
-		return "Build"
-	}
-	return "Build-" + name
-}
-
-// BuildRouterServiceName derives the Restate BuildRouter service name for an agent.
-// Empty and aerial resolve to the legacy BuildRouter name so Phase 1 stays dark.
-func BuildRouterServiceName(agent string) string {
-	name := NormalizeAgentName(agent)
-	if name == "" || name == "aerial" {
-		return "BuildRouter"
-	}
-	return "BuildRouter-" + name
-}
 
 // LoadRestateConfig loads Restate configuration from an optional YAML file with environment variable overrides.
 func LoadRestateConfig(configPath string) RestateConfig {
@@ -139,13 +106,13 @@ func LoadRestateConfig(configPath string) RestateConfig {
 		}
 	}
 	enabled := fileCfg.Enabled || strings.EqualFold(os.Getenv("VANADIS_RESTATE_ENABLED"), "true") || strings.EqualFold(os.Getenv("RESTATE_ENABLED"), "true")
-	ingressURL := strings.TrimRight(strings.TrimSpace(firstNonEmpty(os.Getenv("RESTATE_INGRESS_URL"), fileCfg.RestateIngressURL)), "/")
+	ingressURL := strings.TrimRight(strings.TrimSpace(strutil.FirstNonEmpty(os.Getenv("RESTATE_INGRESS_URL"), fileCfg.RestateIngressURL)), "/")
 	if ingressURL != "" && !strings.EqualFold(os.Getenv("VANADIS_RESTATE_ENABLED"), "false") && !strings.EqualFold(os.Getenv("RESTATE_ENABLED"), "false") {
 		enabled = true
 	}
 	return RestateConfig{
 		Enabled:           enabled,
 		RestateIngressURL: ingressURL,
-		AgentName:         strings.TrimSpace(firstNonEmpty(os.Getenv("AGENT_NAME"), fileCfg.AgentName, "aerial")),
+		AgentName:         strings.TrimSpace(strutil.FirstNonEmpty(os.Getenv("AGENT_NAME"), fileCfg.AgentName, "aerial")),
 	}
 }

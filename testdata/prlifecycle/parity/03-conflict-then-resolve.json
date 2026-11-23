@@ -1,0 +1,161 @@
+{
+  "name": "03-conflict-then-resolve",
+  "description": "auto_merge_disabled on a dirty PR publishes conflict once; a synchronize to a new head reopens the row, publishes synchronize and PRObject, which alone knows the row was in conflict, resolves it inside HandleSynchronized.",
+  "synapse": [
+    {
+      "kind": "register",
+      "register": {
+        "repo": "azylman/aerial",
+        "pr_number": 103,
+        "branch": "feat/conflict",
+        "head_sha": "h103",
+        "target_id": "100000000000000001",
+        "title": "Conflict PR",
+        "agent": "aerial"
+      }
+    },
+    {
+      "kind": "github",
+      "event": "pull_request",
+      "payload": {
+        "action": "auto_merge_disabled",
+        "number": 103,
+        "repository": {
+          "full_name": "azylman/aerial"
+        },
+        "pull_request": {
+          "number": 103,
+          "title": "Conflict PR",
+          "state": "open",
+          "merged": false,
+          "head": {
+            "ref": "feat/conflict",
+            "sha": "h103"
+          },
+          "base": {
+            "ref": "main"
+          },
+          "mergeable_state": "dirty"
+        }
+      }
+    },
+    {
+      "kind": "github",
+      "event": "pull_request",
+      "payload": {
+        "action": "synchronize",
+        "number": 103,
+        "repository": {
+          "full_name": "azylman/aerial"
+        },
+        "pull_request": {
+          "number": 103,
+          "title": "Conflict PR",
+          "state": "open",
+          "merged": false,
+          "head": {
+            "ref": "feat/conflict",
+            "sha": "h103b"
+          },
+          "base": {
+            "ref": "main"
+          }
+        },
+        "before": "h103"
+      }
+    }
+  ],
+  "restate": [
+    {
+      "object": "PRObject",
+      "handler": "Register",
+      "event": {
+        "repo": "azylman/aerial",
+        "pr_number": 103,
+        "branch": "feat/conflict",
+        "head_sha": "h103",
+        "target_id": "100000000000000001",
+        "title": "Conflict PR",
+        "agent": "aerial",
+        "bot_id": "aerial",
+        "metadata": {
+          "agent": "aerial",
+          "bot_id": "aerial"
+        }
+      }
+    },
+    {
+      "object": "PRObject",
+      "handler": "HandleConflict",
+      "event": {
+        "pr_number": 103,
+        "head_sha": "h103",
+        "branch": "feat/conflict",
+        "facts": [
+          {
+            "event": "conflict",
+            "repo": "azylman/aerial",
+            "pr_number": 103,
+            "head_sha": "h103"
+          }
+        ],
+        "repo": "azylman/aerial"
+      }
+    },
+    {
+      "object": "PRObject",
+      "handler": "HandleSynchronized",
+      "event": {
+        "pr_number": 103,
+        "head_sha": "h103b",
+        "before_sha": "h103",
+        "branch": "feat/conflict",
+        "title": "Conflict PR",
+        "facts": [
+          {
+            "event": "synchronize",
+            "repo": "azylman/aerial",
+            "pr_number": 103,
+            "head_sha": "h103b"
+          }
+        ],
+        "repo": "azylman/aerial"
+      }
+    }
+  ],
+  "effects": [
+    {
+      "kind": "pr_fact_conflict",
+      "key": "azylman/aerial#103@h103:pr_fact_conflict"
+    },
+    {
+      "kind": "pr_fact_synchronize",
+      "key": "azylman/aerial#103@h103b:pr_fact_synchronize"
+    }
+  ],
+  "fact_rollout_states": [
+    {
+      "key": "azylman/aerial#103@h103:pr_fact_conflict",
+      "rollout_state": null
+    },
+    {
+      "key": "azylman/aerial#103@h103b:pr_fact_synchronize",
+      "rollout_state": null
+    }
+  ],
+  "rows": [
+    {
+      "repo": "azylman/aerial",
+      "pr_number": 103,
+      "branch": "feat/conflict",
+      "head_sha": "h103b",
+      "merge_sha": "",
+      "target_id": "100000000000000001",
+      "status": "open",
+      "title": "Conflict PR",
+      "metadata": {
+        "agent": "aerial"
+      }
+    }
+  ]
+}

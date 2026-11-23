@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"path"
@@ -14,6 +15,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/azylman/aerial/pkg/githubapi"
+	"github.com/azylman/aerial/pkg/prwire"
 	"github.com/azylman/aerial/services/synapse/internal/kube"
 	"github.com/azylman/aerial/services/synapse/internal/model"
 )
@@ -88,7 +91,7 @@ func TestKustomizationReady(t *testing.T) {
 
 func TestKustomizationRequestAction(t *testing.T) {
 	t.Parallel()
-	recorded := model.KustomizationRequest{Namespace: "flux-system", RequestedAt: reqT1}
+	recorded := prwire.KustomizationRequest{Namespace: "flux-system", RequestedAt: reqT1}
 	tests := []struct {
 		name string
 		obs  model.KustomizationObservation
@@ -111,41 +114,6 @@ func TestKustomizationRequestAction(t *testing.T) {
 			t.Parallel()
 			if got := KustomizationRequestAction(recorded, tc.obs); got != tc.want {
 				t.Errorf("KustomizationRequestAction() = %+v, want %+v", got, tc.want)
-			}
-		})
-	}
-}
-
-func TestRecordedKustomizationRequests(t *testing.T) {
-	t.Parallel()
-	tests := []struct {
-		name string
-		meta string
-		want map[string]model.KustomizationRequest
-	}{
-		{name: "decodes requests", meta: `{"kustomization_requests":{"marida-core":{"namespace":"apps","requested_at":"t1"}}}`, want: map[string]model.KustomizationRequest{"marida-core": {Namespace: "apps", RequestedAt: "t1"}}},
-		{name: "legacy started_jobs only", meta: `{"started_jobs":["aerial-synapse"]}`},
-		{name: "malformed requests list", meta: `{"kustomization_requests":["aerial-core"]}`},
-		{name: "malformed request entry", meta: `{"kustomization_requests":{"aerial-core":"t1"}}`},
-		{name: "nil metadata"},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			var meta map[string]any
-			if tc.meta != "" {
-				if err := json.Unmarshal([]byte(tc.meta), &meta); err != nil {
-					t.Fatalf("unmarshal meta: %v", err)
-				}
-			}
-			got := RecordedKustomizationRequests(meta)
-			if len(got) != len(tc.want) {
-				t.Fatalf("RecordedKustomizationRequests() = %v, want %v", got, tc.want)
-			}
-			for name, req := range tc.want {
-				if got[name] != req {
-					t.Errorf("request %s = %+v, want %+v", name, got[name], req)
-				}
 			}
 		})
 	}
@@ -181,7 +149,7 @@ func TestNewKustomizationRequests(t *testing.T) {
 	now := time.Date(2026, 11, 8, 10, 0, 0, 0, time.UTC)
 	refs := []model.FluxKustomizationRef{
 		{Namespace: "flux-system", Name: "aerial-core"},
-		{Namespace: "flux-system", Name: "marida-core"},
+		{Namespace: "flux-system", Name: "agent-gamma-core"},
 	}
 	reqs := NewKustomizationRequests(refs, now)
 	if len(reqs) != 2 {
@@ -196,55 +164,33 @@ func TestNewKustomizationRequests(t *testing.T) {
 func TestTrackedRollout(t *testing.T) {
 	t.Parallel()
 	ref := model.FluxKustomizationRef{Namespace: "flux-system", Name: "aerial-core"}
-	tr := TrackedRollout{
-		PR: model.DeployingPR{
-			Repo:     "azylman/aerial",
-			PRNumber: 42,
-		},
-		Requests: map[string]model.KustomizationRequest{
-			"aerial-core": {Namespace: "flux-system", RequestedAt: reqT1},
-		},
+	recorded := map[string]prwire.KustomizationRequest{"aerial-core": {Namespace: "flux-system", RequestedAt: reqT1}}
+	pr := model.DeployingPR{Repo: "example/aerial", PRNumber: 42}
+	successPending := model.DeployingPR{Repo: "example/aerial", PRNumber: 42, Metadata: map[string]any{"deploy_success_pending": true}}
+	tests := []struct {
+		name           string
+		tr             TrackedRollout
+		ref            model.FluxKustomizationRef
+		wantRequest    string
+		wantHasPending bool
+	}{
+		{name: "recorded request pending", tr: TrackedRollout{PR: pr, Requests: recorded}, ref: ref, wantRequest: reqT1, wantHasPending: true},
+		{name: "deployed request settled", tr: TrackedRollout{PR: pr, Requests: recorded, Deployed: []string{"aerial-core"}}, ref: ref},
+		{name: "deploy success pending keeps deployed request pending", tr: TrackedRollout{PR: successPending, Requests: recorded, Deployed: []string{"aerial-core"}}, ref: ref, wantRequest: reqT1, wantHasPending: true},
+		{name: "wrong namespace", tr: TrackedRollout{PR: pr, Requests: recorded}, ref: model.FluxKustomizationRef{Namespace: "other", Name: "aerial-core"}, wantHasPending: true},
+		{name: "empty requestedAt", tr: TrackedRollout{Requests: map[string]prwire.KustomizationRequest{"aerial-core": {Namespace: "flux-system"}}}, ref: ref},
 	}
-
-	req, ok := tr.PendingRequest(ref)
-	if !ok || req.RequestedAt != reqT1 {
-		t.Errorf("PendingRequest() = (%+v, %v), want ok=true", req, ok)
-	}
-	if !tr.HasPending() {
-		t.Errorf("HasPending() = false, want true")
-	}
-
-	// Deployed
-	tr.Deployed = []string{"aerial-core"}
-	_, ok = tr.PendingRequest(ref)
-	if ok {
-		t.Errorf("expected PendingRequest = false when already deployed")
-	}
-	if tr.HasPending() {
-		t.Errorf("expected HasPending = false when deployed")
-	}
-
-	// Deploy success pending flag keeps it pending
-	tr.PR.Metadata = map[string]any{"deploy_success_pending": true}
-	_, ok = tr.PendingRequest(ref)
-	if !ok {
-		t.Errorf("expected PendingRequest = true when deploy_success_pending is set")
-	}
-
-	// Wrong namespace
-	wrongRef := model.FluxKustomizationRef{Namespace: "other", Name: "aerial-core"}
-	if _, pending := tr.PendingRequest(wrongRef); pending {
-		t.Errorf("expected PendingRequest = false for wrong namespace")
-	}
-
-	// Empty requestedAt
-	emptyReq := TrackedRollout{
-		Requests: map[string]model.KustomizationRequest{
-			"aerial-core": {Namespace: "flux-system", RequestedAt: ""},
-		},
-	}
-	if _, pending := emptyReq.PendingRequest(ref); pending {
-		t.Errorf("expected PendingRequest = false for empty requestedAt")
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			req, ok := tc.tr.PendingRequest(tc.ref)
+			if req.RequestedAt != tc.wantRequest || ok != (tc.wantRequest != "") {
+				t.Errorf("PendingRequest() = (%+v, %v), want requestedAt %q", req, ok, tc.wantRequest)
+			}
+			if got := tc.tr.HasPending(); got != tc.wantHasPending {
+				t.Errorf("HasPending() = %v, want %v", got, tc.wantHasPending)
+			}
+		})
 	}
 }
 
@@ -363,8 +309,10 @@ type kubeWatcherTestCase struct {
 	source       KubeWatchSource
 	lists        []kubeRoute
 	watches      []kubeRoute
+	failList     bool
 	failStatus   bool
 	pending      bool
+	pendingErr   error
 	wantRequests []string
 	wantEvents   []string
 }
@@ -375,13 +323,13 @@ func kubeWatcherKustomizationCases(list func(rv string, names ...string) kubeRou
 			source:       KustomizationSource{Namespace: "flux-system"},
 			name:         "list then chunked watch stream applies events and re-lists when stream ends",
 			lists:        []kubeRoute{list("10", "aerial-core"), list("20")},
-			watches:      []kubeRoute{{body: event("ADDED", "marida-core", reqT1, "") + `{"type":"BOOKMARK","object":{"metadata":{"resourceVersion":"15"}}}` + "\n" + event("MODIFIED", "aerial-core", reqT1, reqT1) + event("DELETED", "marida-core", reqT1, "")}},
+			watches:      []kubeRoute{{body: event("ADDED", "agent-gamma-core", reqT1, "") + `{"type":"BOOKMARK","object":{"metadata":{"resourceVersion":"15"}}}` + "\n" + event("MODIFIED", "aerial-core", reqT1, reqT1) + event("DELETED", "agent-gamma-core", reqT1, "")}},
 			wantRequests: []string{"LIST kustomizations", "WATCH kustomizations rv=10", "LIST kustomizations", "WATCH kustomizations rv=20"},
 			wantEvents: []string{
 				"list flux-system [aerial-core]",
-				"status flux-system/marida-core requested=" + reqT1 + " handled=",
+				"status flux-system/agent-gamma-core requested=" + reqT1 + " handled=",
 				"status flux-system/aerial-core requested=" + reqT1 + " handled=" + reqT1,
-				"deleted flux-system/marida-core",
+				"deleted flux-system/agent-gamma-core",
 				"list flux-system []",
 			},
 		},
@@ -442,6 +390,13 @@ func kubeWatcherKustomizationCases(list func(rv string, names ...string) kubeRou
 		},
 		{
 			source:       KustomizationSource{Namespace: "flux-system"},
+			name:         "sink failure applying the list backs off and re-lists",
+			lists:        []kubeRoute{list("10", "aerial-core")},
+			failList:     true,
+			wantRequests: []string{"LIST kustomizations", "LIST kustomizations"},
+		},
+		{
+			source:       KustomizationSource{Namespace: "flux-system"},
 			name:         "sink failure on an event re-lists to re-derive state",
 			lists:        []kubeRoute{list("10"), list("90")},
 			watches:      []kubeRoute{{body: event("MODIFIED", "aerial-core", reqT1, reqT1)}},
@@ -482,6 +437,14 @@ func kubeWatcherWorkloadCases(list func(rv string, names ...string) kubeRoute, w
 			lists:        []kubeRoute{workloads("5"), {status: http.StatusInternalServerError, body: `boom`}, workloads("9"), list("10")},
 			wantRequests: []string{deploymentsList, "LIST kustomizations", deploymentsList, "LIST kustomizations", deploymentsWatch + "9"},
 			wantEvents:   []string{"pending? true", "pending? true", "list flux-system []"},
+		},
+		{
+			name:         "pending rollout lookup failure backs off and re-lists workloads",
+			source:       deployments,
+			pendingErr:   errors.New("db error"),
+			lists:        []kubeRoute{workloads("5")},
+			wantRequests: []string{deploymentsList, deploymentsList},
+			wantEvents:   []string{"pending? false"},
 		},
 		{
 			name:         "workload list failure backs off and retries",
@@ -532,7 +495,7 @@ func TestKubeWatcherRun(t *testing.T) {
 			client := kube.NewClient(ts.Client())
 			client.SetKubeConfig(ts.URL, "test-token")
 			client.SetRetryConfig(time.Millisecond, 6)
-			sink := &recordingSink{failStatus: tc.failStatus, pending: tc.pending}
+			sink := &recordingSink{failList: tc.failList, failStatus: tc.failStatus, pending: tc.pending, pendingErr: tc.pendingErr}
 
 			NewKubeWatcher(client, sink, tc.source, time.Millisecond).Run(ctx)
 
@@ -546,75 +509,138 @@ func TestKubeWatcherRun(t *testing.T) {
 	}
 }
 
-func TestKubeWatchSourcesEdgeCases(t *testing.T) {
+func TestKubeWatchSourceString(t *testing.T) {
 	t.Parallel()
-	ks := KustomizationSource{Namespace: "flux-system"}
-	if got := ks.String(); got != "flux-system kustomizations" {
-		t.Errorf("KustomizationSource.String() = %q", got)
+	tests := []struct {
+		name   string
+		source KubeWatchSource
+		want   string
+	}{
+		{"kustomizations", KustomizationSource{Namespace: "flux-system"}, "flux-system kustomizations"},
+		{"workloads", WorkloadSource{Path: "/apis/apps/v1/deployments"}, "/apis/apps/v1/deployments"},
 	}
-
-	ws := WorkloadSource{Path: "/test"}
-	if got := ws.String(); got != "/test" {
-		t.Errorf("WorkloadSource.String() = %q", got)
-	}
-
-	// Apply deleted on WorkloadSource is no-op
-	if err := ws.Apply(context.Background(), nil, &recordingSink{}, "DELETED", nil); err != nil {
-		t.Errorf("unexpected error on WorkloadSource DELETED apply: %v", err)
-	}
-
-	// Apply malformed JSON on KustomizationSource
-	if err := ks.Apply(context.Background(), nil, &recordingSink{}, "ADDED", []byte("invalid")); err == nil {
-		t.Errorf("expected error decoding malformed JSON in KustomizationSource.Apply")
-	}
-
-	// List error in KustomizationSource when sink fails
-	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"metadata":{"resourceVersion":"1"},"items":[]}`))
-	}))
-	defer ts.Close()
-	client := kube.NewClient(ts.Client())
-	client.SetKubeConfig(ts.URL, "token")
-	sinkFail := &recordingSink{failList: true}
-	if _, err := ks.List(context.Background(), client, sinkFail); err == nil {
-		t.Errorf("expected error when ApplyKustomizationList fails")
-	}
-
-	// RecheckPendingRollouts error from sink
-	sinkErr := &recordingSink{pendingErr: errors.New("db error")}
-	if err := RecheckPendingRollouts(context.Background(), client, sinkErr); err == nil {
-		t.Errorf("expected error when HasPendingRollouts returns error")
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got := tc.source.String(); got != tc.want {
+				t.Errorf("String() = %q, want %q", got, tc.want)
+			}
+		})
 	}
 }
 
 func TestRunRolloutRechecks(t *testing.T) {
 	t.Parallel()
 	list := kubeRoute{body: `{"metadata":{"resourceVersion":"3"},"items":[{"metadata":{"name":"aerial-core","namespace":"flux-system"}}]}`}
-	fixture := &watchFixture{lists: []kubeRoute{list, list}, cancel: func() {}}
-	ts := httptest.NewServer(fixture)
-	defer ts.Close()
+	tests := []struct {
+		name         string
+		pending      bool
+		ticks        int
+		lists        []kubeRoute
+		wantRequests []string
+		wantEvents   []string
+	}{
+		{name: "every tick re-lists kustomizations while a rollout is pending", pending: true, ticks: 2, lists: []kubeRoute{list, list}, wantRequests: []string{"LIST kustomizations", "LIST kustomizations"}, wantEvents: []string{"pending? true", "list flux-system [aerial-core]", "pending? true", "list flux-system [aerial-core]"}},
+		{name: "ticks without pending rollouts list nothing", ticks: 2, wantEvents: []string{"pending? false", "pending? false"}},
+		{name: "a failed re-list is logged and the next tick retries", pending: true, ticks: 2, lists: []kubeRoute{{status: http.StatusInternalServerError, body: `boom`}, list}, wantRequests: []string{"LIST kustomizations", "LIST kustomizations"}, wantEvents: []string{"pending? true", "pending? true", "list flux-system [aerial-core]"}},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			fixture := &watchFixture{lists: tc.lists, cancel: func() {}}
+			ts := httptest.NewServer(fixture)
+			defer ts.Close()
+			client := kube.NewClient(ts.Client())
+			client.SetKubeConfig(ts.URL, "test-token")
+			sink := &recordingSink{pending: tc.pending}
+			ticks := make(chan time.Time, tc.ticks)
+			for range tc.ticks {
+				ticks <- time.Time{}
+			}
+			close(ticks)
 
-	client := kube.NewClient(ts.Client())
-	client.SetKubeConfig(ts.URL, "test-token")
-	sink := &recordingSink{pending: true}
-	ticks := make(chan time.Time, 2)
-	ticks <- time.Time{}
-	ticks <- time.Time{}
+			RunRolloutRechecks(t.Context(), client, sink, ticks)
+
+			if got := fixture.requests; !slices.Equal(got, tc.wantRequests) {
+				t.Errorf("requests = %v, want %v", got, tc.wantRequests)
+			}
+			if !slices.Equal(sink.events, tc.wantEvents) {
+				t.Errorf("events = %q, want %q", sink.events, tc.wantEvents)
+			}
+		})
+	}
+}
+
+func TestRunRolloutRechecksRateLimit(t *testing.T) {
+	t.Parallel()
+	client := kube.NewClient(nil)
+	sink := &recordingSink{
+		pending:    true,
+		pendingErr: &githubapi.StatusError{StatusCode: 429, RateLimited: true, RetryAfter: time.Hour},
+	}
+	ticks := make(chan time.Time, 3)
+	ticks <- time.Now()
+	ticks <- time.Now()
+	ticks <- time.Now()
 	close(ticks)
 
 	RunRolloutRechecks(context.Background(), client, sink, ticks)
 
-	if len(sink.events) == 0 {
-		t.Errorf("expected recheck events to be recorded")
+	// Since tick 1 encountered a 1-hour rate limit, ticks 2 and 3 must be skipped.
+	// Only 1 pending check should have been attempted.
+	if len(sink.events) != 1 {
+		t.Fatalf("expected exactly 1 event (the initial check), got %d: %v", len(sink.events), sink.events)
 	}
 }
 
-func TestRolloutWatchSources(t *testing.T) {
+type rateLimitSource struct {
+	mu     sync.Mutex
+	times  []time.Time
+	cancel context.CancelFunc
+	err    error
+}
+
+func (*rateLimitSource) String() string { return "rateLimitSource" }
+
+func (s *rateLimitSource) List(context.Context, KubeClient, RolloutSink) (string, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.times = append(s.times, time.Now())
+	if len(s.times) >= 2 {
+		s.cancel()
+	}
+	return "", s.err
+}
+
+func (*rateLimitSource) Watch(context.Context, KubeClient, string) (io.ReadCloser, error) {
+	return nil, nil
+}
+
+func (*rateLimitSource) Apply(context.Context, KubeClient, RolloutSink, string, json.RawMessage) error {
+	return nil
+}
+
+func TestKubeWatcherRunRateLimit(t *testing.T) {
 	t.Parallel()
-	sources := RolloutWatchSources()
-	if len(sources) != 6 {
-		t.Errorf("RolloutWatchSources() returned %d sources, want 6", len(sources))
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	const rlDelay = 50 * time.Millisecond
+	src := &rateLimitSource{
+		cancel: cancel,
+		err:    &githubapi.StatusError{StatusCode: 429, RateLimited: true, RetryAfter: rlDelay},
+	}
+	watcher := NewKubeWatcher(nil, nil, src, time.Millisecond)
+	watcher.Run(ctx)
+
+	src.mu.Lock()
+	defer src.mu.Unlock()
+	if len(src.times) < 2 {
+		t.Fatalf("expected at least 2 list calls, got %d", len(src.times))
+	}
+	gap := src.times[1].Sub(src.times[0])
+	if gap < 35*time.Millisecond {
+		t.Fatalf("gap between calls = %v, want at least %v", gap, 35*time.Millisecond)
 	}
 }
 

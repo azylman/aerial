@@ -1,47 +1,25 @@
 package gemini
 
 import (
-	"bytes"
 	"context"
-	"io"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/gorilla/websocket"
-	"go.opentelemetry.io/otel"
-	"go.opentelemetry.io/otel/propagation"
-	sdktrace "go.opentelemetry.io/otel/sdk/trace"
-	"go.opentelemetry.io/otel/trace"
+	"github.com/modelcontextprotocol/go-sdk/mcp"
+
+	"github.com/azylman/aerial/services/prospera/internal/fakes"
 )
 
 func TestMain(m *testing.M) {
-	otel.SetTracerProvider(sdktrace.NewTracerProvider())
-	otel.SetTextMapPropagator(propagation.TraceContext{})
+	fakes.InstallTestTracing()
 	os.Exit(m.Run())
-}
-
-// traceCaller returns a context carrying a sampled caller span (or a bare context) and the
-// caller's trace id ("" without a span).
-func traceCaller(withParent bool) (context.Context, string) {
-	if !withParent {
-		return context.Background(), ""
-	}
-	ctx, span := otel.Tracer("test").Start(context.Background(), "caller")
-	span.End()
-	return ctx, span.SpanContext().TraceID().String()
-}
-
-// headerTraceID returns the trace id of a W3C traceparent header, or "" when absent or invalid.
-func headerTraceID(h http.Header) string {
-	sc := trace.SpanContextFromContext(propagation.TraceContext{}.Extract(context.Background(), propagation.HeaderCarrier(h)))
-	if !sc.IsValid() {
-		return ""
-	}
-	return sc.TraceID().String()
 }
 
 func TestDialGeminiLive(t *testing.T) {
@@ -168,262 +146,193 @@ func TestBuildGeminiMessages(t *testing.T) {
 	}
 }
 
-type consultTestCase struct {
-	name                  string
-	overrideURL           string
-	sessionID             string
-	startISO              string
-	endISO                string
-	statusCode            int
-	respBody              string
-	failFollowup          bool
-	failNotificationsOnly bool
-	truncateBody          bool
-	wantSubstr            string
-	wantErr               bool
+// newCalendarMCPServer serves google-mcp's get_events tool from an in-process
+// go-sdk streamable server. It replies with parts (isError when fail is set)
+// and records the arguments of the last call.
+func newCalendarMCPServer(t *testing.T, parts []string, fail bool, gotArgs *atomic.Value) string {
+	t.Helper()
+	srv := mcp.NewServer(&mcp.Implementation{Name: "fake-google-mcp", Version: "1.0"}, nil)
+	srv.AddTool(&mcp.Tool{Name: "get_events", InputSchema: map[string]any{"type": "object"}}, func(_ context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		var args map[string]any
+		_ = json.Unmarshal(req.Params.Arguments, &args)
+		gotArgs.Store(args)
+		content := make([]mcp.Content, 0, len(parts))
+		for _, p := range parts {
+			content = append(content, &mcp.TextContent{Text: p})
+		}
+		return &mcp.CallToolResult{IsError: fail, Content: content}, nil
+	})
+	ts := httptest.NewServer(mcp.NewStreamableHTTPHandler(func(*http.Request) *mcp.Server { return srv }, nil))
+	t.Cleanup(ts.Close)
+	return ts.URL
 }
 
-func TestHTTPContextConsultClient_TableDriven(t *testing.T) {
+func TestHTTPContextConsultClient_ConsultCalendar(t *testing.T) {
 	t.Parallel()
-
-	t.Run("ConsultCalendar", func(t *testing.T) {
-		t.Parallel()
-		tests := []consultTestCase{
-			{
-				name:       "calendar multi-line",
-				statusCode: http.StatusOK,
-				respBody:   `{"jsonrpc":"2.0","id":1,"result":{"content":[{"type":"text","text":"Line 1"},{"type":"text","text":"Line 2"}]}}`,
-				wantSubstr: "Line 1\nLine 2",
-			},
-			{
-				name:       "calendar streamable http sse with session id and time range",
-				sessionID:  "mcp-sess-123",
-				startISO:   "2026-11-01T00:00:00Z",
-				endISO:     "2026-11-02T00:00:00Z",
-				statusCode: http.StatusOK,
-				respBody:   "event: message\ndata: {\"jsonrpc\":\"2.0\",\"id\":2,\"result\":{\"content\":[{\"type\":\"text\",\"text\":\"Sunday is free\"}]}}\n\n",
-				wantSubstr: "Sunday is free",
-			},
-			{
-				name:       "calendar 500 error",
-				statusCode: http.StatusInternalServerError,
-				respBody:   "internal server error",
-				wantErr:    true,
-			},
-			{
-				name:       "calendar RPC error payload",
-				statusCode: http.StatusOK,
-				respBody:   `{"jsonrpc":"2.0","id":1,"error":{"message":"tool execution failed"}}`,
-				wantErr:    true,
-			},
-			{
-				name:       "calendar empty results",
-				statusCode: http.StatusOK,
-				respBody:   `{"jsonrpc":"2.0","id":1,"result":{"content":[]}}`,
-				wantSubstr: "No matching",
-			},
-			{
-				name:       "calendar bad json payload",
-				statusCode: http.StatusOK,
-				respBody:   `not-json`,
-				wantErr:    true,
-			},
-			{
-				name:        "calendar network error",
-				overrideURL: "http://127.0.0.1:1",
-				wantErr:     true,
-			},
-			{
-				name:        "calendar request creation error",
-				overrideURL: ":\x7f",
-				wantErr:     true,
-			},
-			{
-				name:        "calendar empty url returns unavailable",
-				overrideURL: "none",
-				wantSubstr:  "unavailable",
-			},
-			{
-				name:         "calendar tools call 500 after init success",
-				statusCode:   http.StatusOK,
-				respBody:     `{"jsonrpc":"2.0","id":1,"result":{}}`,
-				failFollowup: true,
-				wantErr:      true,
-			},
-			{
-				name:                  "calendar notifications init 500 with session",
-				sessionID:             "mcp-sess-9",
-				statusCode:            http.StatusOK,
-				respBody:              `{"jsonrpc":"2.0","id":1,"result":{}}`,
-				failNotificationsOnly: true,
-				wantErr:               true,
-			},
-			{
-				name:         "calendar truncated body read error",
-				statusCode:   http.StatusOK,
-				respBody:     `{"jsonrpc":"2.0","id":1}`,
-				truncateBody: true,
-				wantErr:      true,
-			},
-		}
-
-		for _, tc := range tests {
-			t.Run(tc.name, func(t *testing.T) {
-				t.Parallel()
-				runConsultCalendarCase(t, tc)
-			})
-		}
-	})
-
-	t.Run("ConsultMemory", func(t *testing.T) {
-		t.Parallel()
-		tests := []consultTestCase{
-			{
-				name:       "memory success",
-				statusCode: http.StatusOK,
-				respBody:   "Fact 1: User prefers coffee\nFact 2: Office on 3rd floor",
-				wantSubstr: "User prefers coffee",
-			},
-			{
-				name:       "memory 500 error",
-				statusCode: http.StatusInternalServerError,
-				respBody:   "internal error",
-				wantErr:    true,
-			},
-			{
-				name:       "memory empty body",
-				statusCode: http.StatusOK,
-				respBody:   "   ",
-				wantSubstr: "No relevant",
-			},
-			{
-				name:        "memory network error",
-				overrideURL: "http://127.0.0.1:1",
-				wantErr:     true,
-			},
-			{
-				name:        "memory request creation error",
-				overrideURL: ":\x7f",
-				wantErr:     true,
-			},
-			{
-				name:        "memory empty url returns unavailable",
-				overrideURL: "none",
-				wantSubstr:  "unavailable",
-			},
-			{
-				name:         "memory truncated body read error",
-				statusCode:   http.StatusOK,
-				respBody:     `{"partial`,
-				truncateBody: true,
-				wantErr:      true,
-			},
-		}
-
-		for _, tc := range tests {
-			t.Run(tc.name, func(t *testing.T) {
-				t.Parallel()
-				runConsultMemoryCase(t, tc)
-			})
-		}
-	})
-}
-
-func handleConsultCalendarMock(t *testing.T, w http.ResponseWriter, r *http.Request, tc consultTestCase) {
-	t.Helper()
-	if tc.sessionID != "" {
-		w.Header().Set("Mcp-Session-Id", tc.sessionID)
+	tests := []struct {
+		name        string
+		url         string
+		startISO    string
+		endISO      string
+		parts       []string
+		fail        bool
+		wantText    string
+		wantErr     string
+		wantTimeMin string
+		wantTimeMax string
+		wantSpan    time.Duration
+		wantNoCall  bool
+	}{
+		{name: "explicit range trimmed and forwarded, parts joined", startISO: " 2026-11-01T00:00:00Z ", endISO: "2026-11-02T00:00:00Z", parts: []string{"Line 1", "Line 2"}, wantText: "Line 1Line 2", wantTimeMin: "2026-11-01T00:00:00Z", wantTimeMax: "2026-11-02T00:00:00Z", wantSpan: 24 * time.Hour},
+		{name: "default range is the next 30 days", parts: []string{"Sunday is free"}, wantText: "Sunday is free", wantSpan: 720 * time.Hour},
+		{name: "empty result falls back", startISO: "2026-11-01T00:00:00Z", endISO: "2026-11-02T00:00:00Z", wantText: "No matching calendar events found.", wantTimeMin: "2026-11-01T00:00:00Z", wantTimeMax: "2026-11-02T00:00:00Z", wantSpan: 24 * time.Hour},
+		{name: "isError tool result is an error", startISO: "2026-11-01T00:00:00Z", endISO: "2026-11-02T00:00:00Z", parts: []string{"quota exceeded"}, fail: true, wantErr: "tool returned error: quota exceeded", wantTimeMin: "2026-11-01T00:00:00Z", wantTimeMax: "2026-11-02T00:00:00Z", wantSpan: 24 * time.Hour},
+		{name: "closed endpoint fails session init", url: "closed", wantErr: "session init failed", wantNoCall: true},
+		{name: "empty url returns unavailable", url: "none", wantText: "Calendar consultation unavailable (no Google MCP configured)", wantNoCall: true},
 	}
-	w.Header().Set("Content-Type", "application/json")
-	if tc.truncateBody {
-		w.Header().Set("Content-Length", "100")
-	}
-	if tc.failNotificationsOnly {
-		body, _ := io.ReadAll(r.Body)
-		if bytes.Contains(body, []byte("notifications/initialized")) {
-			http.Error(w, "notifications failed", http.StatusInternalServerError)
-			return
-		}
-		if bytes.Contains(body, []byte(`"id":2`)) {
-			_, _ = w.Write([]byte(`{"jsonrpc":"2.0","id":2,"result":{"content":[{"type":"text","text":"Sunday is free"}]}}`))
-			return
-		}
-	}
-	if tc.failFollowup {
-		body, _ := io.ReadAll(r.Body)
-		if bytes.Contains(body, []byte("notifications/initialized")) || bytes.Contains(body, []byte(`"id":2`)) {
-			http.Error(w, "followup failed", http.StatusInternalServerError)
-			return
-		}
-	}
-	if tc.statusCode != 0 {
-		w.WriteHeader(tc.statusCode)
-	}
-	_, _ = w.Write([]byte(tc.respBody))
-}
-
-func runConsultCalendarCase(t *testing.T, tc consultTestCase) {
-	t.Helper()
-	calURL := tc.overrideURL
-	if tc.overrideURL == "none" {
-		calURL = ""
-	} else if calURL == "" {
-		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			handleConsultCalendarMock(t, w, r, tc)
-		}))
-		t.Cleanup(server.Close)
-		calURL = server.URL
-	}
-
-	client := NewHTTPContextConsultClient(calURL, "")
-	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
-	defer cancel()
-
-	res, err := client.ConsultCalendar(ctx, "q", tc.startISO, tc.endISO)
-	assertConsultOutcome(t, res, err, tc.wantErr, tc.wantSubstr)
-}
-
-func runConsultMemoryCase(t *testing.T, tc consultTestCase) {
-	t.Helper()
-	memURL := tc.overrideURL
-	if tc.overrideURL == "none" {
-		memURL = ""
-	} else if memURL == "" {
-		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			w.Header().Set("Content-Type", "text/plain")
-			if tc.truncateBody {
-				w.Header().Set("Content-Length", "100")
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			var gotArgs atomic.Value
+			calURL := newCalendarMCPServer(t, tc.parts, tc.fail, &gotArgs)
+			switch tc.url {
+			case "none":
+				calURL = ""
+			case "closed":
+				dead := httptest.NewServer(http.NotFoundHandler())
+				dead.Close()
+				calURL = dead.URL
 			}
-			if tc.statusCode != 0 {
-				w.WriteHeader(tc.statusCode)
-			}
-			_, _ = w.Write([]byte(tc.respBody))
-		}))
-		t.Cleanup(server.Close)
-		memURL = server.URL
+			client := NewHTTPContextConsultClient(calURL, "")
+			t.Cleanup(func() {
+				if err := client.Close(); err != nil {
+					t.Errorf("Close() err = %v", err)
+				}
+			})
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+
+			res, err := client.ConsultCalendar(ctx, "q", tc.startISO, tc.endISO)
+			assertCalendarResult(t, res, err, tc.wantText, tc.wantErr)
+			args, _ := gotArgs.Load().(map[string]any)
+			assertGetEventsArgs(t, args, tc.wantNoCall, tc.wantTimeMin, tc.wantTimeMax, tc.wantSpan)
+		})
 	}
-
-	client := NewHTTPContextConsultClient("", memURL)
-	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
-	defer cancel()
-
-	res, err := client.ConsultMemory(ctx, "q")
-	assertConsultOutcome(t, res, err, tc.wantErr, tc.wantSubstr)
 }
 
-func assertConsultOutcome(t *testing.T, res string, err error, wantErr bool, wantSubstr string) {
+func assertCalendarResult(t *testing.T, res string, err error, wantText, wantErr string) {
 	t.Helper()
-	if wantErr {
-		if err == nil {
-			t.Fatal("expected error, got nil")
+	if wantErr != "" {
+		if err == nil || !strings.Contains(err.Error(), wantErr) {
+			t.Fatalf("ConsultCalendar() err = %v, want containing %q", err, wantErr)
 		}
 		return
 	}
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
+	if err != nil || res != wantText {
+		t.Fatalf("ConsultCalendar() = (%q, %v), want %q", res, err, wantText)
 	}
-	if wantSubstr != "" && !strings.Contains(res, wantSubstr) {
-		t.Fatalf("result %q does not contain %q", res, wantSubstr)
+}
+
+// assertGetEventsArgs checks the recorded get_events arguments: exact bounds
+// when given, max_results 25, and an RFC3339 range spanning wantSpan.
+func assertGetEventsArgs(t *testing.T, args map[string]any, wantNoCall bool, wantTimeMin, wantTimeMax string, wantSpan time.Duration) {
+	t.Helper()
+	if wantNoCall {
+		if args != nil {
+			t.Fatalf("get_events called with %v, want no call", args)
+		}
+		return
+	}
+	tMin, _ := args["time_min"].(string)
+	tMax, _ := args["time_max"].(string)
+	if (wantTimeMin != "" && tMin != wantTimeMin) || (wantTimeMax != "" && tMax != wantTimeMax) || args["max_results"] != float64(25) {
+		t.Fatalf("get_events args = %v, want time_min %q time_max %q max_results 25", args, wantTimeMin, wantTimeMax)
+	}
+	start, errMin := time.Parse(time.RFC3339, tMin)
+	end, errMax := time.Parse(time.RFC3339, tMax)
+	if errMin != nil || errMax != nil || end.Sub(start) != wantSpan {
+		t.Fatalf("get_events range %q..%q, want RFC3339 span %v", tMin, tMax, wantSpan)
+	}
+}
+
+func TestHTTPContextConsultClient_Close(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name   string
+		client *HTTPContextConsultClient
+	}{
+		{name: "nil client", client: nil},
+		{name: "zero value without mcp client", client: &HTTPContextConsultClient{}},
+		{name: "constructed without a session", client: NewHTTPContextConsultClient("http://127.0.0.1:1", "")},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if err := tc.client.Close(); err != nil {
+				t.Fatalf("Close() err = %v", err)
+			}
+		})
+	}
+}
+
+func TestHTTPContextConsultClient_ConsultMemory(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name         string
+		overrideURL  string
+		statusCode   int
+		respBody     string
+		truncateBody bool
+		wantSubstr   string
+		wantErr      bool
+	}{
+		{name: "memory success", statusCode: http.StatusOK, respBody: "Fact 1: User prefers coffee\nFact 2: Office on 3rd floor", wantSubstr: "User prefers coffee"},
+		{name: "memory 500 error", statusCode: http.StatusInternalServerError, respBody: "internal error", wantErr: true},
+		{name: "memory empty body", statusCode: http.StatusOK, respBody: "   ", wantSubstr: "No relevant"},
+		{name: "memory network error", overrideURL: "http://127.0.0.1:1", wantErr: true},
+		{name: "memory request creation error", overrideURL: ":\x7f", wantErr: true},
+		{name: "memory empty url returns unavailable", overrideURL: "none", wantSubstr: "unavailable"},
+		{name: "memory truncated body read error", statusCode: http.StatusOK, respBody: `{"partial`, truncateBody: true, wantErr: true},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			memURL := tc.overrideURL
+			if tc.overrideURL == "none" {
+				memURL = ""
+			} else if memURL == "" {
+				server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					w.Header().Set("Content-Type", "text/plain")
+					if tc.truncateBody {
+						w.Header().Set("Content-Length", "100")
+					}
+					if tc.statusCode != 0 {
+						w.WriteHeader(tc.statusCode)
+					}
+					_, _ = w.Write([]byte(tc.respBody))
+				}))
+				t.Cleanup(server.Close)
+				memURL = server.URL
+			}
+
+			client := NewHTTPContextConsultClient("", memURL)
+			ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+			defer cancel()
+
+			res, err := client.ConsultMemory(ctx, "q")
+			if tc.wantErr {
+				if err == nil {
+					t.Fatal("expected error, got nil")
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if tc.wantSubstr != "" && !strings.Contains(res, tc.wantSubstr) {
+				t.Fatalf("result %q does not contain %q", res, tc.wantSubstr)
+			}
+		})
 	}
 }
 
@@ -449,12 +358,12 @@ func TestNewHTTPContextConsultClient_TraceHeaders(t *testing.T) {
 				_, _ = w.Write([]byte("remembered"))
 			}))
 			t.Cleanup(srv.Close)
-			ctx, parentTraceID := traceCaller(tc.withParent)
+			ctx, parentTraceID := fakes.TraceCaller(tc.withParent)
 			client := NewHTTPContextConsultClient("", "", withTestCovenURL(srv.URL))
 			if _, err := client.ConsultMemory(ctx, "dentist"); err != nil {
 				t.Fatalf("ConsultMemory: %v", err)
 			}
-			id := headerTraceID(got)
+			id := fakes.HeaderTraceID(got)
 			if id == "" || (id == parentTraceID) != tc.withParent {
 				t.Errorf("traceparent %q, caller trace %q, want continues=%v", got.Get("Traceparent"), parentTraceID, tc.withParent)
 			}

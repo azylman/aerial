@@ -3,10 +3,16 @@ package store
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"reflect"
+	"slices"
+	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -35,84 +41,161 @@ func handleMockEntityStatus(w http.ResponseWriter, key, id string, mockMap map[s
 	http.Error(w, "not found", http.StatusNotFound)
 }
 
-func testValidateLiveEventTarget(ctx context.Context, t *testing.T, db *sql.DB) {
+// vanadisStatusServer serves /builds/<id> and /chunks/<id> status lookups and records the last
+// Authorization header. Ids ending in -500 or -badjson return an error status or a broken body.
+type vanadisStatusServer struct {
+	URL      string
+	mu       sync.Mutex
+	lastAuth string
+}
+
+func (s *vanadisStatusServer) LastAuth() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.lastAuth
+}
+
+// newVanadisStatusServer starts the fake and points the package's Vanadis URL at it until cleanup.
+func newVanadisStatusServer(t *testing.T) *vanadisStatusServer {
 	t.Helper()
-	validateTests := []struct {
+	builds := map[string]string{"b-running": "running", "b-completed": "completed", "b-failed": "failed", "b-cancelled": "cancelled", "b-canceled": "canceled"}
+	chunks := map[string]string{"c-pending": "pending", "c-merged": "merged", "c-completed": "completed", "c-failed": "failed"}
+	s := &vanadisStatusServer{}
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		s.mu.Lock()
+		s.lastAuth = r.Header.Get("Authorization")
+		s.mu.Unlock()
+		if after, ok := strings.CutPrefix(r.URL.Path, "/builds/"); ok {
+			handleMockEntityStatus(w, "build", after, builds)
+			return
+		}
+		if after, ok := strings.CutPrefix(r.URL.Path, "/chunks/"); ok {
+			handleMockEntityStatus(w, "chunk", after, chunks)
+			return
+		}
+		http.NotFound(w, r)
+	}))
+	t.Cleanup(ts.Close)
+	s.URL = ts.URL
+	setVanadisTestURL(t, ts.URL)
+	return s
+}
+
+// closedVanadisURL in a row's vanadisURL expands to the URL of a server that was started and closed,
+// so the lookup gets connection refused without a fixed port.
+const closedVanadisURL = "{closed}"
+
+func newClosedVanadisURL(t *testing.T) string {
+	t.Helper()
+	ts := httptest.NewServer(http.NotFoundHandler())
+	ts.Close()
+	return ts.URL
+}
+
+func setVanadisTestURL(t *testing.T, u string) {
+	t.Helper()
+	old := GetVanadisURL()
+	SetVanadisURL(u)
+	t.Cleanup(func() { SetVanadisURL(old) })
+}
+
+func setVanadisTestToken(t *testing.T, token string) {
+	t.Helper()
+	tokenPath := filepath.Join(t.TempDir(), "token")
+	if err := os.WriteFile(tokenPath, []byte(token), 0o600); err != nil {
+		t.Fatalf("failed to write mock token file: %v", err)
+	}
+	oldTS := GetVanadisTokenSource()
+	SetVanadisTokenPath(tokenPath)
+	t.Cleanup(func() { SetVanadisTokenSource(oldTS) })
+}
+
+func TestValidateLiveEventTarget(t *testing.T) {
+	db := openStoreTestDB(t)
+	ctx := context.Background()
+	tests := []struct {
 		name            string
 		source          string
 		target          string
+		token           string
+		vanadisURL      string
+		noVanadis       bool
+		wantAuth        string
 		wantErr         bool
 		wantErrContains string
 	}{
-		{"vanadis_build running", "vanadis_build", "b-running", false, ""},
-		{"vanadis_build completed", "vanadis_build", "b-completed", true, ""},
-		{"vanadis_build failed", "vanadis_build", "b-failed", true, ""},
-		{"vanadis_build cancelled", "vanadis_build", "b-cancelled", true, ""},
-		{"vanadis_build canceled", "vanadis_build", "b-canceled", true, ""},
-		{"vanadis_build not found", "vanadis_build", "b-missing", true, ""},
-		{"vanadis_build 500 error", "vanadis_build", "b-500", true, ""},
-		{"vanadis_build bad json", "vanadis_build", "b-badjson", true, ""},
-		{"vanadis_chunk pending", "vanadis_chunk", "c-pending", false, ""},
-		{"vanadis_chunk merged", "vanadis_chunk", "c-merged", true, ""},
-		{"vanadis_chunk completed", "vanadis_chunk", "c-completed", true, ""},
-		{"vanadis_chunk failed", "vanadis_chunk", "c-failed", true, ""},
-		{"vanadis_chunk not found", "vanadis_chunk", "c-missing", true, ""},
-		{"vanadis_chunk 500 error", "vanadis_chunk", "c-500", true, ""},
-		{"vanadis_chunk bad json", "vanadis_chunk", "c-badjson", true, ""},
-		{"empty target", "vanadis_build", "   ", true, ""},
-		{"other source flux", "flux", "azylman/aerial", false, ""},
-		{"other source github", "github", "azylman/aerial:main", false, ""},
-		{"other source nomad", "nomad", "aerial-brain", false, ""},
-		{"vanadis URL not configured build", "vanadis_build", "b-running", true, "vanadis URL is not configured"},
-		{"vanadis URL not configured chunk", "vanadis_chunk", "c-pending", true, "vanadis URL is not configured"},
-		{"vanadis unreachable build", "vanadis_build", "b-running", true, "failed to query"},
-		{"vanadis malformed URL build", "vanadis_build", "b-running", true, "create vanadis build request"},
+		{name: "vanadis_build running", source: "vanadis_build", target: "b-running"},
+		{name: "vanadis_build bearer auth", source: "vanadis_build", target: "b-running", token: "mock-token-build", wantAuth: "Bearer mock-token-build"},
+		{name: "vanadis_build completed", source: "vanadis_build", target: "b-completed", wantErr: true},
+		{name: "vanadis_build failed", source: "vanadis_build", target: "b-failed", wantErr: true},
+		{name: "vanadis_build cancelled", source: "vanadis_build", target: "b-cancelled", wantErr: true},
+		{name: "vanadis_build canceled", source: "vanadis_build", target: "b-canceled", wantErr: true},
+		{name: "vanadis_build not found", source: "vanadis_build", target: "b-missing", wantErr: true},
+		{name: "vanadis_build 500 error", source: "vanadis_build", target: "b-500", wantErr: true},
+		{name: "vanadis_build bad json", source: "vanadis_build", target: "b-badjson", wantErr: true},
+		{name: "vanadis_chunk pending", source: "vanadis_chunk", target: "c-pending"},
+		{name: "vanadis_chunk bearer auth", source: "vanadis_chunk", target: "c-pending", token: "mock-token-chunk", wantAuth: "Bearer mock-token-chunk"},
+		{name: "vanadis_chunk merged", source: "vanadis_chunk", target: "c-merged", wantErr: true},
+		{name: "vanadis_chunk completed", source: "vanadis_chunk", target: "c-completed", wantErr: true},
+		{name: "vanadis_chunk failed", source: "vanadis_chunk", target: "c-failed", wantErr: true},
+		{name: "vanadis_chunk not found", source: "vanadis_chunk", target: "c-missing", wantErr: true},
+		{name: "vanadis_chunk 500 error", source: "vanadis_chunk", target: "c-500", wantErr: true},
+		{name: "vanadis_chunk bad json", source: "vanadis_chunk", target: "c-badjson", wantErr: true},
+		{name: "empty target", source: "vanadis_build", target: "   ", wantErr: true},
+		{name: "other source flux", source: "flux", target: "example-org/repo"},
+		{name: "other source github", source: "github", target: "example-org/repo:main"},
+		{name: "other source nomad", source: "nomad", target: "app-alpha"},
+		{name: "vanadis URL not configured build", source: "vanadis_build", target: "b-running", noVanadis: true, wantErr: true, wantErrContains: "vanadis URL is not configured"},
+		{name: "vanadis URL not configured chunk", source: "vanadis_chunk", target: "c-pending", noVanadis: true, wantErr: true, wantErrContains: "vanadis URL is not configured"},
+		{name: "vanadis unreachable build", source: "vanadis_build", target: "b-running", vanadisURL: closedVanadisURL, wantErr: true, wantErrContains: "failed to query"},
+		{name: "vanadis malformed URL build", source: "vanadis_build", target: "b-running", vanadisURL: "://bad-url", wantErr: true, wantErrContains: "create vanadis build request"},
 	}
-	for _, tc := range validateTests {
-		t.Run("validate_"+tc.name, func(t *testing.T) {
-			switch {
-			case strings.HasPrefix(tc.name, "vanadis URL not configured"):
-				old := GetVanadisURL()
-				SetVanadisURL("")
-				defer SetVanadisURL(old)
-			case strings.HasPrefix(tc.name, "vanadis unreachable"):
-				old := GetVanadisURL()
-				SetVanadisURL("http://127.0.0.1:1")
-				defer SetVanadisURL(old)
-			case strings.HasPrefix(tc.name, "vanadis malformed URL"):
-				old := GetVanadisURL()
-				SetVanadisURL("://bad-url")
-				defer SetVanadisURL(old)
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			srv := newVanadisStatusServer(t)
+			if tc.token != "" {
+				setVanadisTestToken(t, tc.token)
+			}
+			if tc.vanadisURL != "" || tc.noVanadis {
+				setVanadisTestURL(t, strings.ReplaceAll(tc.vanadisURL, closedVanadisURL, newClosedVanadisURL(t)))
 			}
 			err := ValidateLiveEventTarget(ctx, db, tc.source, tc.target)
 			if (err != nil) != tc.wantErr {
 				t.Fatalf("ValidateLiveEventTarget(%q, %q) err = %v, wantErr = %v", tc.source, tc.target, err, tc.wantErr)
 			}
-			if tc.wantErrContains != "" && (err == nil || !strings.Contains(err.Error(), tc.wantErrContains)) {
+			if tc.wantErrContains != "" && !strings.Contains(err.Error(), tc.wantErrContains) {
 				t.Fatalf("ValidateLiveEventTarget(%q, %q) err = %v, want error containing %q", tc.source, tc.target, err, tc.wantErrContains)
+			}
+			if got := srv.LastAuth(); tc.wantAuth != "" && got != tc.wantAuth {
+				t.Fatalf("ValidateLiveEventTarget(%q, %q) auth header = %q, want %q", tc.source, tc.target, got, tc.wantAuth)
 			}
 		})
 	}
 }
 
-func testEventTriggersCRUD(ctx context.Context, t *testing.T, db *sql.DB) {
+func seedEventTriggers(ctx context.Context, t *testing.T, db *sql.DB) {
 	t.Helper()
 	now := time.Now().UTC()
 	triggers := []model.EventTrigger{
-		{ID: "et-1", ChannelID: "111111111111111111", Source: "flux", Target: "azylman/aerial", EventType: "sync_success", Prompt: "Flux sync finished", Effort: "low", CreatedAt: now},
+		{ID: "et-1", ChannelID: "111111111111111111", Source: "flux", Target: "example-org/repo", EventType: "sync_success", Prompt: "Flux sync finished", Effort: "low", CreatedAt: now},
 		{ID: "et-2", ChannelID: "222222222222222222", Source: "vanadis_build", Target: "b-running", EventType: "completed", Prompt: "Build completed", CreatedAt: now},
-		{ID: "et-3", ChannelID: "111111111111111111", Source: "nomad", Target: "aerial-brain", EventType: "deploy_success", Prompt: "Brain deployed", CreatedAt: now},
-		{ID: "et-4", ChannelID: "111111111111111111", Source: "nomad", Target: "aerial-brain", EventType: "deploy_success", Prompt: "Brain deployed with defaults", Effort: "invalid-effort"},
+		{ID: "et-3", ChannelID: "111111111111111111", Source: "nomad", Target: "app-alpha", EventType: "deploy_success", Prompt: "App deployed", CreatedAt: now},
+		{ID: "et-4", ChannelID: "111111111111111111", Source: "nomad", Target: "app-alpha", EventType: "deploy_success", Prompt: "App deployed with defaults", Effort: "invalid-effort"},
 		{ID: "et-5", ChannelID: "111111111111111111", Source: "camera", Target: "garage", EventType: "person_arrived", Prompt: "Standing camera watch garage", Effort: "medium", CreatedAt: now, Persistent: true},
-		{ID: "et-6", ChannelID: "111111111111111111", Source: "camera", Target: "garage", EventType: "person_arrived", Prompt: "One-shot camera watch", Effort: "low", CreatedAt: now, Persistent: false},
+		{ID: "et-6", ChannelID: "111111111111111111", Source: "camera", Target: "garage", EventType: "person_arrived", Prompt: "One-shot camera watch", Effort: "low", CreatedAt: now.Add(time.Second)},
 	}
 	for i, trig := range triggers {
 		if err := InsertEventTrigger(ctx, db, trig); err != nil {
 			t.Fatalf("InsertEventTrigger %d failed: %v", i+1, err)
 		}
 	}
+}
 
-	listTests := []struct {
+func TestListEventTriggersByChannel(t *testing.T) {
+	db := openStoreTestDB(t)
+	ctx := context.Background()
+	seedEventTriggers(ctx, t, db)
+	tests := []struct {
 		name      string
 		channelID string
 		wantCount int
@@ -122,16 +205,22 @@ func testEventTriggersCRUD(ctx context.Context, t *testing.T, db *sql.DB) {
 		{"list channel 2", "222222222222222222", 1},
 		{"list non-existent channel", "999999999999999999", 0},
 	}
-	for _, tc := range listTests {
-		t.Run("list_"+tc.name, func(t *testing.T) {
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
 			res, err := ListEventTriggers(ctx, db, tc.channelID)
 			if err != nil || len(res) != tc.wantCount {
 				t.Fatalf("ListEventTriggers failed: err=%v, count=%d, want=%d", err, len(res), tc.wantCount)
 			}
 		})
 	}
+}
 
-	delTests := []struct {
+// TestDeleteEventTrigger rows run in order against one database ("already deleted" follows "existing").
+func TestDeleteEventTrigger(t *testing.T) {
+	db := openStoreTestDB(t)
+	ctx := context.Background()
+	seedEventTriggers(ctx, t, db)
+	tests := []struct {
 		name       string
 		id         string
 		wantDelete bool
@@ -142,16 +231,21 @@ func testEventTriggersCRUD(ctx context.Context, t *testing.T, db *sql.DB) {
 		{"delete non-existent", "et-missing", false, false},
 		{"delete empty id", "", false, true},
 	}
-	for _, tc := range delTests {
-		t.Run("delete_"+tc.name, func(t *testing.T) {
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
 			deleted, err := DeleteEventTrigger(ctx, db, tc.id)
 			if (err != nil) != tc.wantErr || deleted != tc.wantDelete {
 				t.Fatalf("DeleteEventTrigger(%q) err=%v, wantErr=%v, deleted=%v, want=%v", tc.id, err, tc.wantErr, deleted, tc.wantDelete)
 			}
 		})
 	}
+}
 
-	delSchedTests := []struct {
+func TestDeleteScheduleEventTrigger(t *testing.T) {
+	db := openStoreTestDB(t)
+	ctx := context.Background()
+	seedEventTriggers(ctx, t, db)
+	tests := []struct {
 		name       string
 		id         string
 		wantDelete bool
@@ -159,8 +253,8 @@ func testEventTriggersCRUD(ctx context.Context, t *testing.T, db *sql.DB) {
 		{"delete trigger via DeleteSchedule", "et-2", true},
 		{"delete non-existent via DeleteSchedule", "et-missing-2", false},
 	}
-	for _, tc := range delSchedTests {
-		t.Run("delete_sched_"+tc.name, func(t *testing.T) {
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
 			deleted, err := DeleteSchedule(ctx, db, tc.id)
 			if err != nil || deleted != tc.wantDelete {
 				t.Fatalf("DeleteSchedule failed: err=%v, deleted=%v, want=%v", err, deleted, tc.wantDelete)
@@ -169,84 +263,124 @@ func testEventTriggersCRUD(ctx context.Context, t *testing.T, db *sql.DB) {
 	}
 }
 
-func testClaimEventTriggers(ctx context.Context, t *testing.T, db *sql.DB) {
-	t.Helper()
-	claimTests := []struct {
-		name      string
-		source    string
-		targets   []string
-		eventType string
-		wantCount int
-		wantIDs   []string
+// TestClaimEventTriggers rows run in order against one database: the debounce window depends on the
+// previous claim, and ageSQL moves a trigger's updated_at out of the window before claiming.
+func TestClaimEventTriggers(t *testing.T) {
+	db := openStoreTestDB(t)
+	ctx := context.Background()
+	seedEventTriggers(ctx, t, db)
+	tests := []struct {
+		name    string
+		ageSQL  string
+		wantIDs []string
 	}{
-		{"first claim returns both persistent and non-persistent", "camera", []string{"garage"}, "person_arrived", 2, []string{"et-5", "et-6"}},
-		{"second claim within debounce window suppresses duplicate persistent trigger", "camera", []string{"garage"}, "person_arrived", 0, nil},
+		{name: "first claim returns both persistent and non-persistent", wantIDs: []string{"et-5", "et-6"}},
+		{name: "second claim within debounce window suppresses duplicate persistent trigger"},
+		{
+			name:    "claim after debounce window returns persistent trigger again",
+			ageSQL:  "UPDATE event_triggers SET updated_at = CURRENT_TIMESTAMP - INTERVAL '10 seconds' WHERE id = 'et-5'",
+			wantIDs: []string{"et-5"},
+		},
 	}
-	for _, tc := range claimTests {
-		t.Run("claim_"+tc.name, func(t *testing.T) {
-			claimed, err := ClaimEventTriggers(ctx, db, tc.source, tc.targets, tc.eventType)
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if tc.ageSQL != "" {
+				if _, err := db.ExecContext(ctx, tc.ageSQL); err != nil {
+					t.Fatalf("failed to age updated_at: %v", err)
+				}
+			}
+			claimed, err := ClaimEventTriggers(ctx, db, "camera", []string{"garage"}, "person_arrived")
 			if err != nil {
 				t.Fatalf("ClaimEventTriggers failed: %v", err)
 			}
-			if len(claimed) != tc.wantCount {
-				t.Fatalf("ClaimEventTriggers count = %d, want %d", len(claimed), tc.wantCount)
+			ids := make([]string, 0, len(claimed))
+			for _, c := range claimed {
+				ids = append(ids, c.ID)
 			}
-			for i, id := range tc.wantIDs {
-				if claimed[i].ID != id {
-					t.Errorf("claimed[%d].ID = %s, want %s", i, claimed[i].ID, id)
-				}
+			if strings.Join(ids, ",") != strings.Join(tc.wantIDs, ",") {
+				t.Fatalf("ClaimEventTriggers IDs = %v, want %v", ids, tc.wantIDs)
 			}
 		})
 	}
+}
 
-	if _, err := db.ExecContext(ctx, "UPDATE event_triggers SET updated_at = datetime('now', '-10 seconds') WHERE id = 'et-5'"); err != nil {
-		t.Fatalf("failed to age updated_at: %v", err)
-	}
-	claimed, err := ClaimEventTriggers(ctx, db, "camera", []string{"garage"}, "person_arrived")
-	if err != nil {
-		t.Fatalf("ClaimEventTriggers after debounce failed: %v", err)
-	}
-	if len(claimed) != 1 || claimed[0].ID != "et-5" {
-		t.Fatalf("ClaimEventTriggers after debounce count = %d, want 1 with et-5", len(claimed))
+// seedClaimTriggers inserts n camera/garage/person_arrived triggers with ids prefix0..prefixN-1.
+func seedClaimTriggers(ctx context.Context, t *testing.T, db *sql.DB, prefix string, n int, persistent bool) {
+	t.Helper()
+	base := time.Date(2026, 3, 4, 5, 6, 7, 0, time.UTC)
+	for i := range n {
+		trig := model.EventTrigger{ID: prefix + strconv.Itoa(i), ChannelID: "ch", Source: "camera", Target: "garage", EventType: "person_arrived", Prompt: "p", CreatedAt: base.Add(time.Duration(i) * time.Second), Persistent: persistent}
+		if err := InsertEventTrigger(ctx, db, trig); err != nil {
+			t.Fatalf("InsertEventTrigger %s err = %v", trig.ID, err)
+		}
 	}
 }
 
-func TestDB_EventTriggers(t *testing.T) {
-	db := openStoreTestDB(t)
-	ctx := context.Background()
-
-	mockBuilds := map[string]string{
-		"b-running":   "running",
-		"b-completed": "completed",
-		"b-failed":    "failed",
-		"b-cancelled": "cancelled",
-		"b-canceled":  "canceled",
+// raceClaims releases claimers goroutines at once against db and returns every
+// claimed id (sorted) plus how often each id was handed out.
+func raceClaims(ctx context.Context, t *testing.T, db *sql.DB, claimers int) ([]string, map[string]int) {
+	t.Helper()
+	start := make(chan struct{})
+	results := make([][]model.EventTrigger, claimers)
+	errs := make([]error, claimers)
+	var wg sync.WaitGroup
+	for i := range claimers {
+		wg.Go(func() {
+			<-start
+			results[i], errs[i] = ClaimEventTriggers(ctx, db, "camera", []string{"garage"}, "person_arrived")
+		})
 	}
-	mockChunks := map[string]string{
-		"c-pending":   "pending",
-		"c-merged":    "merged",
-		"c-completed": "completed",
-		"c-failed":    "failed",
+	close(start)
+	wg.Wait()
+	if err := errors.Join(errs...); err != nil {
+		t.Fatalf("ClaimEventTriggers err = %v", err)
 	}
-	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if after, ok := strings.CutPrefix(r.URL.Path, "/builds/"); ok {
-			handleMockEntityStatus(w, "build", after, mockBuilds)
-			return
+	var ids []string
+	counts := map[string]int{}
+	for _, claimed := range results {
+		for _, trig := range claimed {
+			counts[trig.ID]++
+			ids = append(ids, trig.ID)
 		}
-		if after, ok := strings.CutPrefix(r.URL.Path, "/chunks/"); ok {
-			handleMockEntityStatus(w, "chunk", after, mockChunks)
-			return
-		}
-		http.NotFound(w, r)
-	}))
-	defer ts.Close()
-	oldVanadis := GetVanadisURL()
-	SetVanadisURL(ts.URL)
-	defer SetVanadisURL(oldVanadis)
+	}
+	slices.Sort(ids)
+	return ids, counts
+}
 
-	testValidateLiveEventTarget(ctx, t, db)
-	testEventTriggersCRUD(ctx, t, db)
-	testClaimEventTriggers(ctx, t, db)
+// TestClaimEventTriggersConcurrent races several claimers on one database: every matching
+// trigger must be handed out exactly once (non-persistent rows are deleted by one claimer,
+// a persistent row's debounce update is won by one claimer), and the claimers' results
+// must be disjoint.
+func TestClaimEventTriggersConcurrent(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name          string
+		nonPersistent int
+		persistent    int
+		claimers      int
+		wantIDs       []string
+	}{
+		{name: "two claimers split one-shot rows", nonPersistent: 12, claimers: 2, wantIDs: []string{"np-0", "np-1", "np-10", "np-11", "np-2", "np-3", "np-4", "np-5", "np-6", "np-7", "np-8", "np-9"}},
+		{name: "persistent row fires once inside debounce window", nonPersistent: 3, persistent: 1, claimers: 4, wantIDs: []string{"np-0", "np-1", "np-2", "p-0"}},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			db := openStoreTestDB(t)
+			ctx := context.Background()
+			seedClaimTriggers(ctx, t, db, "np-", tc.nonPersistent, false)
+			seedClaimTriggers(ctx, t, db, "p-", tc.persistent, true)
+			ids, counts := raceClaims(ctx, t, db, tc.claimers)
+			for id, n := range counts {
+				if n != 1 {
+					t.Errorf("trigger %s claimed %d times, want 1", id, n)
+				}
+			}
+			if !slices.Equal(ids, tc.wantIDs) {
+				t.Errorf("claimed IDs = %v, want %v", ids, tc.wantIDs)
+			}
+		})
+	}
 }
 
 func TestInsertEventTriggerErrors(t *testing.T) {
@@ -282,7 +416,7 @@ func TestListEventTriggersErrors(t *testing.T) {
 		wantErr   string
 	}{
 		{"nil db errors", "", true, false, "database is nil"},
-		{"missing table fails query", "", false, true, "no such table"},
+		{"missing table fails query", "", false, true, `relation "event_triggers" does not exist`},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -307,28 +441,89 @@ func TestListEventTriggersErrors(t *testing.T) {
 
 func TestClaimEventTriggersErrors(t *testing.T) {
 	tests := []struct {
-		name      string
-		source    string
-		targets   []string
-		eventType string
-		nilDB     bool
-		wantErr   string
+		name    string
+		seedSQL string
+		nilDB   bool
+		wantErr string
 	}{
-		{"nil db errors", "camera", []string{"garage"}, "person_arrived", true, "database is nil"},
+		{name: "nil db errors", nilDB: true, wantErr: "database is nil"},
+		{name: "missing table fails select", seedSQL: `DROP TABLE event_triggers`, wantErr: `relation "event_triggers" does not exist`},
+		{
+			name:    "bad row fails scan",
+			seedSQL: `ALTER TABLE event_triggers ALTER COLUMN created_at TYPE TEXT; INSERT INTO event_triggers (id, channel_id, source, target, event_type, prompt, effort, created_at, persistent) VALUES ('bad-1', 'c', 'camera', 'garage', 'person_arrived', 'p', 'low', 'not-a-date', FALSE)`,
+			wantErr: "Scan error",
+		},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			db := openStoreTestDB(t)
 			ctx := context.Background()
-			database := db
-			if tc.nilDB {
-				database = nil
+			if tc.seedSQL != "" {
+				if _, err := db.ExecContext(ctx, tc.seedSQL); err != nil {
+					t.Fatalf("seed SQL err = %v", err)
+				}
 			}
-			_, err := ClaimEventTriggers(ctx, database, tc.source, tc.targets, tc.eventType)
+			_, err := ClaimEventTriggers(ctx, scheduleCaseDB(db, tc.nilDB, false), "camera", []string{"garage"}, "person_arrived")
 			if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
 				t.Errorf("ClaimEventTriggers err = %v, want %q", err, tc.wantErr)
 			}
 		})
+	}
+}
+
+func TestGetEventTrigger_Errors(t *testing.T) {
+	t.Parallel()
+	db := openStoreTestDB(t)
+	_ = db.Close()
+	if _, err := GetEventTrigger(context.Background(), db, "et-1"); err == nil {
+		t.Error("expected error on closed db")
+	}
+	if _, err := GetEventTrigger(context.Background(), nil, "et-1"); err == nil {
+		t.Error("expected error on nil db")
+	}
+	db2 := openStoreTestDB(t)
+	if _, err := GetEventTrigger(context.Background(), db2, ""); err == nil {
+		t.Error("expected error on empty id")
+	}
+}
+
+func TestQueryMatchingEventTriggers_Errors(t *testing.T) {
+	t.Parallel()
+	db := openStoreTestDB(t)
+	_ = db.Close()
+	if _, err := QueryMatchingEventTriggers(context.Background(), db, "source", []string{"target"}, "type"); err == nil {
+		t.Error("expected error on closed db")
+	}
+	if _, err := QueryMatchingEventTriggers(context.Background(), nil, "source", []string{"target"}, "type"); err == nil {
+		t.Error("expected error on nil db")
+	}
+	db2 := openStoreTestDB(t)
+	res, err := QueryMatchingEventTriggers(context.Background(), db2, "", nil, "")
+	if err != nil || res != nil {
+		t.Errorf("expected nil result and nil err on empty filter, got %v, %v", res, err)
+	}
+}
+
+func TestConsumeEventTrigger_Errors(t *testing.T) {
+	t.Parallel()
+	db := openStoreTestDB(t)
+	_ = db.Close()
+	if _, err := ConsumeEventTrigger(context.Background(), db, "et-1"); err == nil {
+		t.Error("expected error on closed db")
+	}
+	if _, err := ConsumeEventTrigger(context.Background(), nil, "et-1"); err == nil {
+		t.Error("expected error on nil db")
+	}
+	db2 := openStoreTestDB(t)
+	if _, err := ConsumeEventTrigger(context.Background(), db2, ""); err == nil {
+		t.Error("expected error on empty id")
+	}
+}
+
+func TestValidateLiveEventTarget_NilDB(t *testing.T) {
+	t.Parallel()
+	if err := ValidateLiveEventTarget(context.Background(), nil, "flux", "target"); err == nil {
+		t.Error("expected error on nil db")
 	}
 }
 
@@ -361,37 +556,6 @@ func TestBuildEventTriggerFilterArgs(t *testing.T) {
 	}
 }
 
-func TestClaimEventTriggersStorageErrors(t *testing.T) {
-	tests := []struct {
-		name      string
-		dropTable bool
-		wantErr   string
-	}{
-		{"missing table fails select", true, "no such table"},
-		{"bad row fails scan", false, "Scan error"},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			db := openStoreTestDB(t)
-			ctx := context.Background()
-			if tc.dropTable {
-				if _, err := db.ExecContext(ctx, `DROP TABLE event_triggers`); err != nil {
-					t.Fatalf("drop table err = %v", err)
-				}
-			} else {
-				_, err := db.ExecContext(ctx, `INSERT INTO event_triggers (id, channel_id, source, target, event_type, prompt, effort, created_at, persistent) VALUES ('bad-1', 'c', 'camera', 'garage', 'person_arrived', 'p', 'low', 'not-a-date', FALSE)`)
-				if err != nil {
-					t.Fatalf("insert bad row err = %v", err)
-				}
-			}
-			_, err := ClaimEventTriggers(ctx, db, "camera", []string{"garage"}, "person_arrived")
-			if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
-				t.Errorf("ClaimEventTriggers err = %v, want %q", err, tc.wantErr)
-			}
-		})
-	}
-}
-
 func TestVanadisURL_Precedence(t *testing.T) {
 	oldVanadis := GetVanadisURL()
 	defer SetVanadisURL(oldVanadis)
@@ -415,18 +579,43 @@ func TestVanadisURL_Precedence(t *testing.T) {
 	}
 }
 
+func seedGetEventTriggerTest(ctx context.Context, t *testing.T, db *sql.DB, id, agent string, updated bool, now time.Time) {
+	t.Helper()
+	if err := InsertEventTrigger(ctx, db, model.EventTrigger{ID: id, ChannelID: "ch", Source: "flux", Target: "t", EventType: "ev", Prompt: "p", CreatedAt: now, Agent: agent}); err != nil {
+		t.Fatalf("InsertEventTrigger err = %v", err)
+	}
+	if updated {
+		if _, err := db.ExecContext(ctx, "UPDATE event_triggers SET updated_at = CURRENT_TIMESTAMP WHERE id = $1", id); err != nil {
+			t.Fatalf("set updated_at err = %v", err)
+		}
+	}
+}
+
+func checkGetEventTriggerResult(t *testing.T, trig *model.EventTrigger, wantAgent string, wantUpdated bool) {
+	t.Helper()
+	if trig.Agent != wantAgent {
+		t.Errorf("trig.Agent = %q, want %q", trig.Agent, wantAgent)
+	}
+	if wantUpdated && (trig.UpdatedAt == nil || trig.UpdatedAt.IsZero()) {
+		t.Errorf("trig.UpdatedAt = %v, want valid timestamp", trig.UpdatedAt)
+	}
+}
+
 func TestGetEventTrigger(t *testing.T) {
 	now := time.Now().UTC()
 	tests := []struct {
-		name      string
-		id        string
-		seed      bool
-		seedAgent string
-		nilDB     bool
-		wantAgent string
-		wantErr   string
+		name        string
+		id          string
+		seed        bool
+		seedUpdated bool
+		seedAgent   string
+		nilDB       bool
+		wantAgent   string
+		wantUpdated bool
+		wantErr     string
 	}{
 		{name: "found trigger", id: "et-found", seed: true, seedAgent: "agent-alpha", wantAgent: "agent-alpha"},
+		{name: "trigger with db updated_at read back", id: "et-updated", seed: true, seedUpdated: true, seedAgent: "aerial", wantAgent: "aerial", wantUpdated: true},
 		{name: "empty id errors", id: "   ", wantErr: "id cannot be empty"},
 		{name: "nil db errors", id: "et-1", nilDB: true, wantErr: "database is nil"},
 		{name: "not found trigger", id: "et-missing", wantErr: `event watch "et-missing" not found`},
@@ -436,9 +625,7 @@ func TestGetEventTrigger(t *testing.T) {
 			db := openStoreTestDB(t)
 			ctx := context.Background()
 			if tc.seed {
-				if err := InsertEventTrigger(ctx, db, model.EventTrigger{ID: tc.id, ChannelID: "ch", Source: "flux", Target: "t", EventType: "ev", Prompt: "p", CreatedAt: now, Agent: tc.seedAgent}); err != nil {
-					t.Fatalf("InsertEventTrigger err = %v", err)
-				}
+				seedGetEventTriggerTest(ctx, t, db, tc.id, tc.seedAgent, tc.seedUpdated, now)
 			}
 			database := db
 			if tc.nilDB {
@@ -454,9 +641,7 @@ func TestGetEventTrigger(t *testing.T) {
 			if err != nil {
 				t.Fatalf("GetEventTrigger err = %v", err)
 			}
-			if trig.Agent != tc.wantAgent {
-				t.Errorf("trig.Agent = %q, want %q", trig.Agent, tc.wantAgent)
-			}
+			checkGetEventTriggerResult(t, trig, tc.wantAgent, tc.wantUpdated)
 		})
 	}
 }
@@ -466,8 +651,12 @@ func TestListEventTriggers_MultiAgent(t *testing.T) {
 	db := openStoreTestDB(t)
 	ctx := context.Background()
 
-	_ = InsertEventTrigger(ctx, db, model.EventTrigger{ID: "et-a", ChannelID: "ch", Source: "flux", Target: "t1", EventType: "ev", Prompt: "p1", CreatedAt: now, Agent: "agent-alpha"})
-	_ = InsertEventTrigger(ctx, db, model.EventTrigger{ID: "et-b", ChannelID: "ch", Source: "flux", Target: "t2", EventType: "ev", Prompt: "p2", CreatedAt: now, Agent: "agent-beta"})
+	if err := InsertEventTrigger(ctx, db, model.EventTrigger{ID: "et-a", ChannelID: "ch", Source: "flux", Target: "t1", EventType: "ev", Prompt: "p1", CreatedAt: now, Agent: "agent-alpha"}); err != nil {
+		t.Fatalf("InsertEventTrigger et-a failed: %v", err)
+	}
+	if err := InsertEventTrigger(ctx, db, model.EventTrigger{ID: "et-b", ChannelID: "ch", Source: "flux", Target: "t2", EventType: "ev", Prompt: "p2", CreatedAt: now, Agent: "agent-beta"}); err != nil {
+		t.Fatalf("InsertEventTrigger et-b failed: %v", err)
+	}
 
 	tests := []struct {
 		name        string
@@ -488,6 +677,95 @@ func TestListEventTriggers_MultiAgent(t *testing.T) {
 			}
 			if len(got) != tc.wantCount {
 				t.Errorf("ListEventTriggers count = %d, want %d", len(got), tc.wantCount)
+			}
+		})
+	}
+}
+
+func TestQueryMatchingEventTriggers(t *testing.T) {
+	now := time.Now().UTC()
+	db := openStoreTestDB(t)
+	ctx := context.Background()
+
+	if err := InsertEventTrigger(ctx, db, model.EventTrigger{ID: "et-q1", ChannelID: "ch", Source: "flux", Target: "t1", EventType: "sync_success", Prompt: "p1", CreatedAt: now}); err != nil {
+		t.Fatalf("InsertEventTrigger et-q1 failed: %v", err)
+	}
+	if err := InsertEventTrigger(ctx, db, model.EventTrigger{ID: "et-q2", ChannelID: "ch", Source: "flux", Target: "t2", EventType: "sync_success", Prompt: "p2", CreatedAt: now, Persistent: true}); err != nil {
+		t.Fatalf("InsertEventTrigger et-q2 failed: %v", err)
+	}
+
+	tests := []struct {
+		name      string
+		nilDB     bool
+		source    string
+		targets   []string
+		eventType string
+		wantCount int
+		wantErr   bool
+	}{
+		{name: "matching single target", source: "flux", targets: []string{"t1"}, eventType: "sync_success", wantCount: 1},
+		{name: "matching multiple targets", source: "flux", targets: []string{"t1", "t2"}, eventType: "sync_success", wantCount: 2},
+		{name: "no match", source: "flux", targets: []string{"other"}, eventType: "sync_success", wantCount: 0},
+		{name: "empty targets", source: "flux", targets: nil, eventType: "sync_success", wantCount: 0},
+		{name: "nil db errors", nilDB: true, source: "flux", targets: []string{"t1"}, eventType: "sync_success", wantErr: true},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			database := db
+			if tc.nilDB {
+				database = nil
+			}
+			got, err := QueryMatchingEventTriggers(ctx, database, tc.source, tc.targets, tc.eventType)
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("QueryMatchingEventTriggers() err = %v, wantErr = %v", err, tc.wantErr)
+			}
+			if !tc.wantErr && len(got) != tc.wantCount {
+				t.Errorf("got %d triggers, want %d", len(got), tc.wantCount)
+			}
+		})
+	}
+}
+
+func TestConsumeEventTrigger(t *testing.T) {
+	now := time.Now().UTC()
+	db := openStoreTestDB(t)
+	ctx := context.Background()
+
+	if err := InsertEventTrigger(ctx, db, model.EventTrigger{ID: "et-c1", ChannelID: "ch", Source: "flux", Target: "t1", EventType: "sync_success", Prompt: "p1", CreatedAt: now}); err != nil {
+		t.Fatalf("InsertEventTrigger et-c1 failed: %v", err)
+	}
+	if err := InsertEventTrigger(ctx, db, model.EventTrigger{ID: "et-c2", ChannelID: "ch", Source: "flux", Target: "t2", EventType: "sync_success", Prompt: "p2", CreatedAt: now, Persistent: true}); err != nil {
+		t.Fatalf("InsertEventTrigger et-c2 failed: %v", err)
+	}
+
+	tests := []struct {
+		name        string
+		nilDB       bool
+		id          string
+		wantSuccess bool
+		wantErr     bool
+	}{
+		{name: "consume non-persistent deletes trigger", id: "et-c1", wantSuccess: true},
+		{name: "consuming already consumed returns false", id: "et-c1", wantSuccess: false},
+		{name: "consume persistent updates trigger", id: "et-c2", wantSuccess: true},
+		{name: "non-existent trigger returns false", id: "non-existent", wantSuccess: false},
+		{name: "empty id returns error", id: "   ", wantErr: true},
+		{name: "nil db returns error", nilDB: true, id: "et-c2", wantErr: true},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			database := db
+			if tc.nilDB {
+				database = nil
+			}
+			ok, err := ConsumeEventTrigger(ctx, database, tc.id)
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("ConsumeEventTrigger() err = %v, wantErr = %v", err, tc.wantErr)
+			}
+			if !tc.wantErr && ok != tc.wantSuccess {
+				t.Errorf("ConsumeEventTrigger() = %v, want %v", ok, tc.wantSuccess)
 			}
 		})
 	}
