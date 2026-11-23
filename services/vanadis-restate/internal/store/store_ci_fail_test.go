@@ -50,6 +50,7 @@ func TestUpdatePRLifecycleStatus(t *testing.T) {
 	mergeBase := time.Date(2026, 5, 1, 12, 0, 0, 0, time.UTC)
 	tests := []struct {
 		name, id, status, chunkStatus, sabotage string
+		initialBanner, wantBanner               string
 		nilDB                                   bool
 		initial, wantStamp                      time.Time
 		wantStampNow                            bool
@@ -62,6 +63,7 @@ func TestUpdatePRLifecycleStatus(t *testing.T) {
 		{name: "deploying keeps merge stamp", id: "c1", status: "deploying", chunkStatus: "merged", initial: mergeBase, wantStamp: mergeBase},
 		{name: "deploying never fabricates stamp", id: "c1", status: "deploying", chunkStatus: "merged"},
 		{name: "other status clears stamp", id: "c1", status: "conflict", chunkStatus: "merged", initial: mergeBase},
+		{name: "conflict with banner clears on merge", id: "c1", status: "merged", chunkStatus: "conflict", initialBanner: "Merge conflict detected", wantStampNow: true},
 		{name: "terminal chunk", id: "c1", status: "merged", chunkStatus: "completed", wantErr: true, wantSkipped: true},
 		{name: "persistence failure", id: "c1", status: "merged", chunkStatus: "pr_opened", sabotage: cfFailChunkWrite, wantErr: true},
 	}
@@ -70,6 +72,7 @@ func TestUpdatePRLifecycleStatus(t *testing.T) {
 			t.Parallel()
 			chunk := cfChunk(tc.chunkStatus)
 			chunk.CompletedAt = tc.initial
+			chunk.Banner = tc.initialBanner
 			st, pool := cfOpen(t, tc.nilDB, chunk, tc.sabotage)
 			before := cfDBNow(t, pool)
 			err := st.UpdatePRLifecycleStatus(context.Background(), tc.id, tc.status)
@@ -80,6 +83,7 @@ func TestUpdatePRLifecycleStatus(t *testing.T) {
 			}
 			got := loadChunk(t, pool, "c1")
 			assert.Equal(t, tc.status, got.Status)
+			assert.Equal(t, tc.wantBanner, got.Banner)
 			if tc.wantStampNow {
 				// The stamp is the write transaction's database clock, so it
 				// falls between database now() read before and after the call.
@@ -294,6 +298,17 @@ func TestPostgresVanadisStore_RecordPRCheckStatus(t *testing.T) {
 			chunkStatus: "failed", buildStatus: "failed", initialBanner: "ci failed", initialFailCount: 2,
 			hasSibling: true, siblingChunk: model.VanadisChunk{ID: "c2", BuildID: "b1", ChunkIndex: 1, Mode: "pr", Repo: "aerial", Status: "failed"},
 			wantStatus: "pr_opened", wantBuildStatus: "failed", wantFailCount: 0, wantChecks: map[string]string{"test": "passed"},
+		},
+		{
+			name:          "conflict pr chunk recovered to pr_opened on passed check",
+			chunkID:       "c1",
+			headSHA:       "sha-1",
+			checkName:     "test",
+			checkState:    "passed",
+			chunkStatus:   "conflict",
+			initialBanner: "Merge conflict detected",
+			wantStatus:    "pr_opened",
+			wantChecks:    map[string]string{"test": "passed"},
 		},
 		{
 			name:    "failed action chunk rejected",
