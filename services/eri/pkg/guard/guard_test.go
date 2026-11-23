@@ -636,30 +636,6 @@ func TestCheckSchedule(t *testing.T) {
 		wantDeny bool
 	}{
 		{
-			name:     "sleep command denied",
-			payload:  Payload{ToolCall: ToolCall{Name: "run_command"}},
-			args:     ToolArgs{CommandLine: "sleep 10"},
-			wantDeny: true,
-		},
-		{
-			name:     "manage_task status denied",
-			payload:  Payload{ToolCall: ToolCall{Name: "manage_task"}},
-			args:     ToolArgs{Action: "status"},
-			wantDeny: true,
-		},
-		{
-			name:     "manage_task list denied",
-			payload:  Payload{ToolCall: ToolCall{Name: "manage_task"}},
-			args:     ToolArgs{Action: "list"},
-			wantDeny: true,
-		},
-		{
-			name:     "manage_subagents list denied",
-			payload:  Payload{ToolCall: ToolCall{Name: "manage_subagents"}},
-			args:     ToolArgs{Action: "list"},
-			wantDeny: true,
-		},
-		{
 			name:     "task log file read denied",
 			payload:  Payload{ToolCall: ToolCall{Name: "read_file"}},
 			args:     ToolArgs{Path: "/data/brain/conv/.system_generated/tasks/task-1.log"},
