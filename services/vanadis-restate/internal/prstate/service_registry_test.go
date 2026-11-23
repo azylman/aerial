@@ -432,3 +432,140 @@ func TestPRObjectService_DeploySuccessMergedStaleHead(t *testing.T) {
 		})
 	}
 }
+
+// TestPRObjectService_CheckFailedHeadRecovery pins check-driven head
+// recovery: a stale check_failed event whose head GitHub confirms as the
+// PR live open head adopts it with the synchronize sequence before the
+// check mutation applies; anything GitHub does not confirm still drops
+// stale without persisting, fetching, or erroring to Restate.
+func TestPRObjectService_CheckFailedHeadRecovery(t *testing.T) {
+	t.Parallel()
+	activeH2 := []sentCall{prIndexSend(PRIndexEvent{Repo: "azylman/aerial", PRNumber: 101, HeadSHA: "h2", Lifecycle: IndexActive})}
+	tests := []struct {
+		name         string
+		storedHead   string
+		storedStatus string
+		storedMerge  string
+		storedTerm   TerminalState
+		prior        []string
+		conflictPub  string
+		evHead       string
+		noGitHub     bool
+		fetchNumber  int
+		fetchState   string
+		fetchHead    string
+		fetchStatus  int
+		wantSet      bool
+		wantHead     string
+		wantStatus   string
+		wantFailedCI string
+		wantConflict string
+		wantCalls    []string
+		wantSends    []sentCall
+	}{
+		{name: "empty stored head applies without fetch", evHead: "h2", noGitHub: true, wantSet: true, wantHead: "h2", wantStatus: RegistryStatusCIFailed, wantFailedCI: "h2", wantSends: activeH2},
+		{name: "adopts github-confirmed head and records ci_failed", storedHead: "h1", storedStatus: RegistryStatusOpen, evHead: "h2", fetchState: "open", fetchHead: "h2", wantSet: true, wantHead: "h2", wantStatus: RegistryStatusCIFailed, wantFailedCI: "h2", wantCalls: []string{"fetch 101"}, wantSends: activeH2},
+		{name: "resolves stored conflict on adopt", storedHead: "h1", storedStatus: RegistryStatusConflict, conflictPub: "h1", evHead: "h2", fetchState: "open", fetchHead: "h2", wantSet: true, wantHead: "h2", wantStatus: RegistryStatusCIFailed, wantFailedCI: "h2", wantCalls: []string{"fetch 101"}, wantSends: activeH2},
+		{name: "fetch error drops stale", storedHead: "h1", storedStatus: RegistryStatusOpen, evHead: "h2", fetchStatus: 502, wantCalls: []string{"fetch 101"}},
+		{name: "closed pr on github drops", storedHead: "h1", storedStatus: RegistryStatusOpen, evHead: "h2", fetchState: "closed", fetchHead: "h2", wantCalls: []string{"fetch 101"}},
+		{name: "wrong pr number drops", storedHead: "h1", storedStatus: RegistryStatusOpen, evHead: "h2", fetchNumber: 102, fetchState: "open", fetchHead: "h2", wantCalls: []string{"fetch 101"}},
+		{name: "head mismatch drops", storedHead: "h1", storedStatus: RegistryStatusOpen, evHead: "h2", fetchState: "open", fetchHead: "h9", wantCalls: []string{"fetch 101"}},
+		{name: "prior head redelivers without fetch", storedHead: "h1", storedStatus: RegistryStatusOpen, prior: []string{"h2"}, evHead: "h2", fetchState: "open", fetchHead: "h2"},
+		{name: "nil github drops silently", storedHead: "h1", storedStatus: RegistryStatusOpen, evHead: "h2", noGitHub: true},
+		{name: "terminal absorbs without fetch", storedHead: "h1", storedStatus: RegistryStatusMerged, storedMerge: "m1", storedTerm: TerminalMerged, evHead: "h2", fetchState: "open", fetchHead: "h2"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			seed := NewPRState("azylman/aerial", 101)
+			seed.HeadSHA, seed.MergeSHA, seed.Status, seed.Terminal = tc.storedHead, tc.storedMerge, tc.storedStatus, tc.storedTerm
+			seed.PriorHeads = append([]string(nil), tc.prior...)
+			if tc.conflictPub != "" {
+				seed.MarkConflictPublished(tc.conflictPub)
+			}
+			mc, rec := newStateMock(t, seed)
+			stubRun(mc, false)
+			var gh *fakeGitHub
+			if !tc.noGitHub {
+				gh = &fakeGitHub{}
+				if tc.fetchStatus != 0 {
+					gh.fetches = map[int]fetchResult{101: {err: &GitHubError{Status: tc.fetchStatus, Message: "fetch boom"}}}
+				} else {
+					n := tc.fetchNumber
+					if n == 0 {
+						n = 101
+					}
+					gh.fetches = map[int]fetchResult{101: {pr: GitHubPR{Number: n, State: tc.fetchState, Head: GitHubPRRef{SHA: tc.fetchHead}}}}
+				}
+			}
+			svc := NewPRObjectService()
+			if gh != nil {
+				svc = svc.WithGitHub(gh)
+			}
+			err := svc.HandleCheckFailed(restate.WithMockContext(mc), PREvent{Repo: "azylman/aerial", PRNumber: 101, HeadSHA: tc.evHead, CheckName: "ci"})
+			require.NoError(t, err)
+			require.Equal(t, tc.wantSet, rec.setCalled)
+			if gh != nil {
+				require.Equal(t, tc.wantCalls, gh.Calls())
+			}
+			if !tc.wantSet {
+				return
+			}
+			require.NotNil(t, rec.saved)
+			require.Equal(t, tc.wantHead, rec.saved.HeadSHA)
+			require.Equal(t, tc.wantStatus, rec.saved.Status)
+			require.Equal(t, tc.wantFailedCI, rec.saved.FailedCISHA)
+			require.Equal(t, tc.wantConflict, rec.saved.ConflictPublished)
+			assertSends(t, rec.sends.snapshot(), tc.wantSends)
+		})
+	}
+}
+
+// TestPRObjectService_CheckPassedHeadRecovery pins the pass side of
+// check-driven head recovery: a stale check_passed event whose head GitHub
+// confirms adopts it and clears the stale failure slots; a head GitHub
+// does not confirm keeps the stored head.
+func TestPRObjectService_CheckPassedHeadRecovery(t *testing.T) {
+	t.Parallel()
+	activeH2 := []sentCall{prIndexSend(PRIndexEvent{Repo: "azylman/aerial", PRNumber: 101, HeadSHA: "h2", Lifecycle: IndexActive})}
+	tests := []struct {
+		name         string
+		evHead       string
+		fetchState   string
+		fetchHead    string
+		wantSet      bool
+		wantHead     string
+		wantStatus   string
+		wantFailedCI string
+		wantCalls    []string
+		wantSends    []sentCall
+	}{
+		{name: "adopts confirmed head and clears stale failure", evHead: "h2", fetchState: "open", fetchHead: "h2", wantSet: true, wantHead: "h2", wantStatus: RegistryStatusOpen, wantCalls: []string{"fetch 101"}, wantSends: activeH2},
+		{name: "github disagreement keeps stored head", evHead: "h2", fetchState: "open", fetchHead: "h9", wantCalls: []string{"fetch 101"}},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			seed := NewPRState("azylman/aerial", 101)
+			seed.HeadSHA, seed.Status = "h1", RegistryStatusCIFailed
+			seed.RecordFailedCheckRunDetailed("h1", "ci")
+			seed.RecordFailedCISHA("h1")
+			mc, rec := newStateMock(t, seed)
+			stubRun(mc, false)
+			gh := &fakeGitHub{fetches: map[int]fetchResult{101: {pr: GitHubPR{Number: 101, State: tc.fetchState, Head: GitHubPRRef{SHA: tc.fetchHead}}}}}
+			svc := NewPRObjectService().WithGitHub(gh)
+			err := svc.HandleCheckPassed(restate.WithMockContext(mc), PREvent{Repo: "azylman/aerial", PRNumber: 101, HeadSHA: tc.evHead, CheckName: "ci"})
+			require.NoError(t, err)
+			require.Equal(t, tc.wantSet, rec.setCalled)
+			require.Equal(t, tc.wantCalls, gh.Calls())
+			if !tc.wantSet {
+				return
+			}
+			require.NotNil(t, rec.saved)
+			require.Equal(t, tc.wantHead, rec.saved.HeadSHA)
+			require.Equal(t, tc.wantStatus, rec.saved.Status)
+			require.Equal(t, tc.wantFailedCI, rec.saved.FailedCISHA)
+			assertSends(t, rec.sends.snapshot(), tc.wantSends)
+		})
+	}
+}

@@ -272,6 +272,157 @@ func dispositionFor(st *PRState, ev PREvent, phase eventPhase) EventDisposition 
 	return st.ApplyEvent(ev)
 }
 
+// mutateCheckEvent is mutatePREvent for the lifecycle check handlers
+// (HandleCheckFailed, HandleCheckPassed): when ApplyEvent drops the event
+// stale, the head may still be a missed synchronize the ingress never
+// delivered (SHA-only events held by RepoObject for an unindexed head stay
+// unrecoverable here; only payload-carried check events take this path). A
+// stale event with a real, new, never-seen head on a PR with a stored head
+// is verified against GitHub: a confirmed live open head is adopted with
+// the HandleSynchronized sequence before the check mutation applies, and
+// anything GitHub does not confirm still drops stale, counted and logged
+// inside a journaled step. A nil GitHub client drops silently, exactly like
+// the stale drop before this recovery existed.
+func (s *PRObjectService) mutateCheckEvent(ctx restate.ObjectContext, ev PREvent, mutate func(*PRState)) error {
+	if strings.TrimSpace(ev.Repo) == "" || ev.PRNumber <= 0 {
+		return nil
+	}
+	st, _, err := s.loadPRState(ctx, ev)
+	if err != nil {
+		return err
+	}
+	disp := st.ApplyEvent(ev)
+	if disp == DispositionApply {
+		return s.commitCheckEvent(ctx, st, ev, snapshotIndexView(st), mutate)
+	}
+	if disp != DispositionDropStale {
+		return nil
+	}
+	if !eligibleForCheckHeadRecovery(st, ev) || s.github == nil {
+		return nil
+	}
+	confirmed, reason := verifyCheckHead(ctx, s.github, ev)
+	if !confirmed {
+		noteCheckHeadStaleDropped(ctx, st, ev, reason)
+		return nil
+	}
+	before := adoptCheckHead(st, ev)
+	noteCheckHeadRecovered(ctx, st, before.head, strings.TrimSpace(ev.HeadSHA))
+	return s.commitCheckEvent(ctx, st, ev, before, mutate)
+}
+
+// commitCheckEvent commits one lifecycle check event: the registry-row
+// fields, the check mutation, one single restate.Set, then the index
+// update, effects, facts, and rollout sync the mutation may have armed.
+// before is the index snapshot taken before the head adoption (or before
+// the mutation when no adoption ran), so a recovered head still indexes
+// active for RepoObject SHA routing.
+func (s *PRObjectService) commitCheckEvent(ctx restate.ObjectContext, st *PRState, ev PREvent, before prIndexView, mutate func(*PRState)) error {
+	applyEventRow(st, ev)
+	if mutate != nil {
+		mutate(st)
+	}
+	restate.Set(ctx, s.stateKey, st)
+	if lifecycle := indexLifecycle(before, snapshotIndexView(st)); lifecycle != "" {
+		sendPRIndex(ctx, st, ev, lifecycle)
+	}
+	s.runEriEffects(ctx, st, ev)
+	s.runFacts(ctx, st, ev.Facts)
+	s.afterCommit(ctx, st)
+	return nil
+}
+
+// eligibleForCheckHeadRecovery reports whether a stale-dropped lifecycle
+// check event may still carry a missed synchronize: a real, new, never-seen
+// head on a PR with a stored head. Late redeliveries of a prior head,
+// merge-only refs, and empty or zero heads stay ineligible and drop as
+// before.
+func eligibleForCheckHeadRecovery(st *PRState, ev PREvent) bool {
+	if st == nil {
+		return false
+	}
+	if st.Terminal.Absorbing() && ev.ReopenEpoch <= st.ReopenEpoch {
+		return false
+	}
+	head := strings.TrimSpace(ev.HeadSHA)
+	if head == "" || prwire.IsZeroSHA(head) || IsMergeOnlyRef(head, ev.MergeSHA) {
+		return false
+	}
+	stored := strings.TrimSpace(st.HeadSHA)
+	if stored == "" || strings.EqualFold(stored, head) {
+		return false
+	}
+	return !st.HasPriorHead(head)
+}
+
+// verifyCheckHead fetches the PR from GitHub through the journaled
+// boundary and reports whether its live head confirms the event head: the
+// fetched number matches, the state is exactly open, and the fetched head
+// equals the event head. Any fetch failure or doubt returns false with a
+// bounded reason; the caller drops the event. It never returns an error to
+// Restate.
+func verifyCheckHead(ctx restate.ObjectContext, gh GitHubEffector, ev PREvent) (bool, string) {
+	head := strings.TrimSpace(ev.HeadSHA)
+	fetched, gerr := journaled(ctx, gh).FetchPR(ctx, strings.TrimSpace(ev.Repo), ev.PRNumber)
+	if gerr != nil {
+		return false, checkStaleReasonFetchError
+	}
+	if fetched.Number != ev.PRNumber || strings.TrimSpace(fetched.State) != stateOpenGitHub {
+		return false, checkStaleReasonIdentityMismatch
+	}
+	live := strings.TrimSpace(fetched.Head.SHA)
+	if live == "" || prwire.IsZeroSHA(live) || !strings.EqualFold(live, head) {
+		return false, checkStaleReasonIdentityMismatch
+	}
+	return true, ""
+}
+
+// stateOpenGitHub is the exact GitHub pull-request state a recovered head
+// must carry: only an open PR may move the stored head.
+const stateOpenGitHub = "open"
+
+// adoptCheckHead moves the stored head to a GitHub-verified event head with
+// the HandleSynchronized sequence: snapshot the index view, SetHead,
+// ApplyRegistrySync, resolve the stored conflict, DisarmDeployFailure, and
+// fill the identity. The caller commits once; the returned snapshot orders
+// the index update that follows.
+func adoptCheckHead(st *PRState, ev PREvent) prIndexView {
+	before := snapshotIndexView(st)
+	prevHead := st.HeadSHA
+	wasConflict := st.Status == RegistryStatusConflict
+	st.SetHead(ev.HeadSHA)
+	st.ApplyRegistrySync(prevHead, st.HeadSHA)
+	if wasConflict {
+		resolveConflict(st)
+	}
+	st.DisarmDeployFailure()
+	st.ApplyIdentity(ev.Branch, ev.Title)
+	return before
+}
+
+// noteCheckHeadRecovered counts and logs one adopted head inside a
+// journaled step so replays never duplicate them.
+func noteCheckHeadRecovered(ctx restate.Context, st *PRState, prev, head string) {
+	_, _ = restate.Run(ctx, func(rc restate.RunContext) (restate.Void, error) {
+		checkHeadRecoveredTotal.Inc()
+		slog.WarnContext(rc, "[prstate] check event recovered stale head", "pr", prwire.PRObjectKey(st.Repo, st.PRNumber),
+			"stored", prev, "head", head)
+		return restate.Void{}, nil
+	}, restate.WithName("check-recover-head"))
+}
+
+// noteCheckHeadStaleDropped counts and logs one stale drop GitHub did not
+// confirm inside a journaled step so replays never duplicate them. reason
+// is one of the bounded checkStaleReason values.
+func noteCheckHeadStaleDropped(ctx restate.Context, st *PRState, ev PREvent, reason string) {
+	_, _ = restate.Run(ctx, func(rc restate.RunContext) (restate.Void, error) {
+		checkHeadStaleDroppedTotal.Inc()
+		slog.InfoContext(rc, "[prstate] check event dropped stale", "pr", prwire.PRObjectKey(st.Repo, st.PRNumber),
+			"stored", strings.TrimSpace(st.HeadSHA), "head", strings.TrimSpace(ev.HeadSHA), "reason", reason)
+		return restate.Void{}, nil
+	}, restate.WithName("check-stale-drop"))
+}
+
 // applyEventRow applies the registry-row fields every applied event may
 // carry: the first-seen head SHA (never moved once merged, so a deploy
 // event carrying the merge commit cannot rewrite the PR head; later head
@@ -365,9 +516,11 @@ func (s *PRObjectService) applyPREvent(ctx restate.ObjectContext, ev PREvent) er
 }
 
 // HandleCheckFailed applies one check-failure event. Eri wakes the event
-// carries (EriEffects) fire to the stored owner after the commit.
+// carries (EriEffects) fire to the stored owner after the commit. A stale
+// event whose head GitHub confirms as the live open head adopts it first
+// (mutateCheckEvent), so a lost synchronize never wedges ci_failed.
 func (s *PRObjectService) HandleCheckFailed(ctx restate.ObjectContext, ev PREvent) error {
-	return s.mutatePREvent(ctx, ev, func(st *PRState) {
+	return s.mutateCheckEvent(ctx, ev, func(st *PRState) {
 		if strings.TrimSpace(ev.CheckName) != "" {
 			st.RecordFailedCheckRunDetailed(ev.HeadSHA, ev.CheckName)
 		}
@@ -376,9 +529,11 @@ func (s *PRObjectService) HandleCheckFailed(ctx restate.ObjectContext, ev PREven
 	})
 }
 
-// HandleCheckPassed applies one check-pass event dark.
+// HandleCheckPassed applies one check-pass event dark. A stale event whose
+// head GitHub confirms as the live open head adopts it first
+// (mutateCheckEvent), so a lost synchronize never wedges ci_failed.
 func (s *PRObjectService) HandleCheckPassed(ctx restate.ObjectContext, ev PREvent) error {
-	return s.mutatePREvent(ctx, ev, func(st *PRState) {
+	return s.mutateCheckEvent(ctx, ev, func(st *PRState) {
 		if strings.TrimSpace(ev.CheckName) != "" {
 			st.ClearFailedCheckRun(ev.HeadSHA, ev.CheckName)
 		}
@@ -696,6 +851,32 @@ var synchronizeRecoveredTotal = prometheus.NewCounter(prometheus.CounterOpts{
 func init() {
 	registerCollector(synchronizeRecoveredTotal)
 }
+
+// checkHeadRecoveredTotal counts lifecycle check events that adopted a
+// GitHub-verified new head after a missed synchronize.
+var checkHeadRecoveredTotal = prometheus.NewCounter(prometheus.CounterOpts{
+	Name: "prstate_check_head_recovered_total",
+	Help: "Lifecycle check events PRObject applied after GitHub confirmed their head as the PR live open head (a missed synchronize), adopting the head before the check mutation.",
+})
+
+// checkHeadStaleDroppedTotal counts lifecycle check events that stayed
+// dropped after GitHub did not confirm their head.
+var checkHeadStaleDroppedTotal = prometheus.NewCounter(prometheus.CounterOpts{
+	Name: "prstate_check_head_stale_dropped_total",
+	Help: "Lifecycle check events PRObject dropped stale after GitHub did not confirm their head.",
+})
+
+func init() {
+	registerCollector(checkHeadRecoveredTotal)
+	registerCollector(checkHeadStaleDroppedTotal)
+}
+
+// Check-driven head-recovery drop reasons. Bounded values only: they ride
+// the journaled stale-drop log line.
+const (
+	checkStaleReasonFetchError       = "fetch_error"
+	checkStaleReasonIdentityMismatch = "identity_mismatch"
+)
 
 // HandleSynchronized advances the PR head on a synchronize under the
 // BeforeSHA compare-and-set guard (recovering a stale stored head, see

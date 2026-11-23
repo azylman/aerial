@@ -8,6 +8,9 @@ package prstate
 
 import (
 	"testing"
+
+	restate "github.com/restatedev/sdk-go"
+	"github.com/stretchr/testify/require"
 )
 
 func conflictState(pr int, terminal TerminalState, published string) *PRState {
@@ -253,6 +256,41 @@ func TestResolveCIRecovery(t *testing.T) {
 			if !tc.wantErr && got.Disposition != tc.wantDisposition {
 				t.Fatalf("Disposition = %q, want %q", got.Disposition, tc.wantDisposition)
 			}
+		})
+	}
+}
+
+// TestHandleCIRecoveredNeedsNoGitHub pins that the CI-recovery verdict
+// stays a pure read: it never stale-drops on a head mismatch and never
+// consults GitHub, even when a client is wired. Head recovery lives in the
+// check_failed and check_passed handlers; the verdict only reads the
+// Restate-owned failure slots.
+func TestHandleCIRecoveredNeedsNoGitHub(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name       string
+		failedSHA  string
+		evHead     string
+		wantFailed bool
+		wantSet    bool
+	}{
+		{name: "fires for the recorded head without fetching", failedSHA: "aaa111", evHead: "aaa111", wantFailed: true, wantSet: true},
+		{name: "unknown head records nothing without fetching", failedSHA: "aaa111", evHead: "bbb222"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			st := recoveryState(7, tc.failedSHA, "", nil, false)
+			mc, rec := newStateMock(t, st)
+			stubRun(mc, false)
+			gh := &fakeGitHub{fetches: map[int]fetchResult{7: {err: &GitHubError{Status: 500, Message: "must not fetch"}}}}
+			pub := &fakeFactPublisher{}
+			svc := NewPRObjectService().WithGitHub(gh).WithFactPublisher(pub)
+			got, err := svc.HandleCIRecovered(restate.WithMockContext(mc), PREvent{Event: "check_success", Repo: "azylman/aerial", PRNumber: 7, HeadSHA: tc.evHead})
+			require.NoError(t, err)
+			require.Equal(t, tc.wantFailed, got.CIFailed)
+			require.Equal(t, tc.wantSet, rec.setCalled)
+			require.Empty(t, gh.Calls())
 		})
 	}
 }
