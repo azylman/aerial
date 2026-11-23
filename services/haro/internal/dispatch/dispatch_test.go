@@ -210,9 +210,9 @@ func TestHTTPPromptDispatcherDispatchPrompt(t *testing.T) {
 			wantPath: "/ThreadSession-agent-beta/ch-789/Enqueue", wantIdempotency: "prompt:ch-789:msg-789", wantStatus: "accepted", wantChannelID: "ch-789",
 		},
 		{
-			name: "restate auto-generated message id", target: restate(""), status: http.StatusOK, body: `{"status":"accepted"}`,
-			req:      PromptDispatchRequest{ChannelID: "ch-auto", Prompt: "auto msg id"},
-			wantPath: "/ThreadSession/ch-auto/Enqueue", wantStatus: "accepted", wantChannelID: "ch-auto",
+			name: "restate missing message_id fails", target: restate(""),
+			req:     PromptDispatchRequest{ChannelID: "ch-auto", Prompt: "missing msg id"},
+			wantErr: "message_id cannot be empty for restate prompt dispatch",
 		},
 		{
 			name: "restate missing channel_id fails", target: restate("aerial"),
@@ -221,22 +221,22 @@ func TestHTTPPromptDispatcherDispatchPrompt(t *testing.T) {
 		{
 			name: "restate error response message", target: restate("aerial"), status: http.StatusInternalServerError,
 			body: `{"message":"something went wrong in restate"}`,
-			req:  PromptDispatchRequest{ChannelID: "ch-err", Prompt: "trigger err"}, wantPath: "/ThreadSession/ch-err/Enqueue",
+			req:  PromptDispatchRequest{ChannelID: "ch-err", MessageID: "msg-err", Prompt: "trigger err"}, wantPath: "/ThreadSession/ch-err/Enqueue",
 			wantErr: "restate prompt dispatch error (500): something went wrong in restate",
 		},
 		{
 			name: "restate error response fallback field", target: restate("aerial"), status: http.StatusBadRequest, body: `{"error":"invalid prompt"}`,
-			req: PromptDispatchRequest{ChannelID: "ch-err-2", Prompt: "trigger err 2"}, wantPath: "/ThreadSession/ch-err-2/Enqueue",
+			req: PromptDispatchRequest{ChannelID: "ch-err-2", MessageID: "msg-err-2", Prompt: "trigger err 2"}, wantPath: "/ThreadSession/ch-err-2/Enqueue",
 			wantErr: "restate prompt dispatch error (400): invalid prompt",
 		},
 		{
 			name: "restate raw status error", target: restate("aerial"), status: http.StatusBadGateway, body: `bad gateway upstream`,
-			req: PromptDispatchRequest{ChannelID: "ch-err-3", Prompt: "trigger err 3"}, wantPath: "/ThreadSession/ch-err-3/Enqueue",
+			req: PromptDispatchRequest{ChannelID: "ch-err-3", MessageID: "msg-err-3", Prompt: "trigger err 3"}, wantPath: "/ThreadSession/ch-err-3/Enqueue",
 			wantErr: "restate prompt dispatch returned HTTP 502: bad gateway upstream",
 		},
 		{
 			name: "restate invalid json on 200", target: restate("aerial"), status: http.StatusOK, body: `invalid-json`,
-			req: PromptDispatchRequest{ChannelID: "ch-inv", Prompt: "inv"}, wantPath: "/ThreadSession/ch-inv/Enqueue",
+			req: PromptDispatchRequest{ChannelID: "ch-inv", MessageID: "msg-inv", Prompt: "inv"}, wantPath: "/ThreadSession/ch-inv/Enqueue",
 			wantErr: "failed to parse prompt dispatch restate response",
 		},
 	}
@@ -322,8 +322,18 @@ func TestHTTPPromptDispatcherDispatch(t *testing.T) {
 			wantPath: "/DispatchSession-agent-beta/dispatch-disp-3/Enqueue", wantIdempotency: "disp-3", wantStatus: "accepted", wantDispatchID: "disp-3",
 		},
 		{
-			name: "restate auto id generated when empty", target: restate("aerial"), status: http.StatusOK, body: `{"status":"accepted"}`,
-			req: eriwire.BrainDispatchRequest{Source: "heartbeat", Prompt: "auto id dispatch"}, wantStatus: "accepted",
+			name:    "restate missing id fails",
+			target:  restate("aerial"),
+			req:     eriwire.BrainDispatchRequest{Source: "heartbeat", Prompt: "missing id"},
+			wantErr: "id cannot be empty for restate dispatch",
+		},
+		{
+			name: "restate forwards full typed brain dispatch request", target: restate("aerial"), status: http.StatusOK, body: `{"status":"accepted","dispatch_id":"disp-vanadis"}`,
+			req: eriwire.BrainDispatchRequest{
+				ID: "disp-vanadis", Source: "vanadis", SessionID: "sess-v",
+				Prompt: "build chunk 1", VanadisBuildID: "build-1", VanadisChunkID: "chunk-1",
+			},
+			wantPath: "/DispatchSession/sess-v/Enqueue", wantIdempotency: "disp-vanadis", wantStatus: "accepted", wantDispatchID: "disp-vanadis",
 		},
 		{
 			name: "restate conflict error", target: restate("aerial"), status: http.StatusConflict, body: `{"message":"active turn running"}`,
@@ -352,6 +362,15 @@ func TestHTTPPromptDispatcherDispatch(t *testing.T) {
 			}
 			if tc.wantDispatchID != "" && resp.DispatchID != tc.wantDispatchID {
 				t.Errorf("resp.DispatchID = %q, want %q", resp.DispatchID, tc.wantDispatchID)
+			}
+			if tc.req.VanadisBuildID != "" {
+				var sentReq eriwire.BrainDispatchRequest
+				if err := json.Unmarshal(rec.snapshot().body, &sentReq); err != nil {
+					t.Fatalf("decode sent body: %v", err)
+				}
+				if sentReq.VanadisBuildID != tc.req.VanadisBuildID || sentReq.VanadisChunkID != tc.req.VanadisChunkID {
+					t.Errorf("sent vanadis fields = %q/%q, want %q/%q", sentReq.VanadisBuildID, sentReq.VanadisChunkID, tc.req.VanadisBuildID, tc.req.VanadisChunkID)
+				}
 			}
 		})
 	}

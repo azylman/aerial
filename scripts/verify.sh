@@ -495,7 +495,7 @@ check_no_imperative_ddl() {
     violations=$(echo "$files" | while read -r f; do
         [ -f "$f" ] || continue
         # Ignore comments and check for raw DDL
-        grep -H -n -i -E '\b(CREATE|ALTER|DROP)[[:space:]]+TABLE\b' "$f" 2>/dev/null | grep -v -E '^[[:space:]]*(//|#|\*)' || true
+        grep -H -n -i -E '\b(CREATE|ALTER|DROP)[[:space:]]+TABLE\b' "$f" 2>/dev/null | grep -v -E '^[^:]+:[0-9]+:[[:space:]]*(//|#|\*)' || true
     done)
 
     if [ -n "$violations" ]; then
