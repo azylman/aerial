@@ -592,8 +592,12 @@ func TestMediaStream_BargeInAndVoicemail(t *testing.T) {
 	sess.handleAMDAction(audio.AMDActionSpeakVoicemailAndHangup)
 	sess.HandleAMD("human")
 
-	_ = sess.Steer("guidance instruction", "guidance")
-	_ = sess.Steer("say instruction", "say")
+	if err := sess.Steer("guidance instruction", "guidance"); err != nil {
+		t.Fatalf("Steer failed: %v", err)
+	}
+	if err := sess.Steer("say instruction", "say"); err != nil {
+		t.Fatalf("Steer failed: %v", err)
+	}
 
 	sess.handleInboundTwilioMedia("")
 	sess.handleInboundTwilioMedia("invalid-base64!!!")

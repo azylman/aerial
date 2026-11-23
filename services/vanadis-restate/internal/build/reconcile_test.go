@@ -423,11 +423,11 @@ func TestBuildObject_AuthorityHandlerOperations(t *testing.T) {
 
 	// Smoke-cover each authority handler once; routes are reusable stubs.
 	_, _ = bo.FailChunk(ctx, model.FailChunkRequest{ChunkID: "c1", Reason: "chunk fail"})
-	_ = bo.RemoveChunk(ctx, RemoveChunkRequest{ChunkRef: "c1"})
+	assert.Error(t, bo.RemoveChunk(ctx, RemoveChunkRequest{ChunkRef: "c1"}))
 	_, _ = bo.AttachPR(ctx, store.AttachChunkPRRequest{ChunkID: "c1", PRNumber: 101, Repo: "aerial"})
 	_, _ = bo.Cancel(ctx, CancelBuildRequest{Reason: "user cancel"})
-	_ = bo.OnDispatchOutcome(ctx, pubsub.DispatchOutcomeEvent{VanadisChunkID: "c1", Status: "failed", Error: "boom"})
-	_ = bo.OnPREvent(ctx, pubsub.PRLifecycleEvent{Repo: "aerial", PRNumber: 101, Event: "closed", Status: "closed"})
+	assert.NoError(t, bo.OnDispatchOutcome(ctx, pubsub.DispatchOutcomeEvent{VanadisChunkID: "c1", Status: "failed", Error: "boom"}))
+	assert.NoError(t, bo.OnPREvent(ctx, pubsub.PRLifecycleEvent{Repo: "aerial", PRNumber: 101, Event: "closed", Status: "closed"}))
 
 	mutations := []struct {
 		name    string

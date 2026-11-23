@@ -91,7 +91,7 @@ func TestBuildObject_ChunkRemovalCancelsOnOwnerSessions(t *testing.T) {
 			rt := newFakeObjectRuntime("b1")
 			rt.runStepErr = errors.New("stop after removal")
 			bo := NewBuildObject("", nil, func(restate.ObjectContext) objectRuntime { return rt }).WithAuthority(&fakeStore{builds: []model.VanadisBuild{{ID: "b1", Agent: tc.owner}}, chunks: []model.VanadisChunk{{ID: "c1", BuildID: "b1"}}}, exec)
-			_ = bo.executeChunkRemoval(makeObjectMockContext(t, "b1"), rt, "b1", "c1")
+			assert.Error(t, bo.executeChunkRemoval(makeObjectMockContext(t, "b1"), rt, "b1", "c1"))
 			assert.Equal(t, "c1", eri.LastCancel)
 			assert.Equal(t, tc.wantAgent, eri.CancelAgent)
 		})
