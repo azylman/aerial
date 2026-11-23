@@ -81,7 +81,7 @@ func TestSyncCredentialSnapshot(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			p, _, _ := newTestProvisioner(t, map[string]string{"common/01_base.md": "test rule"}, nil)
+			p := newTestProvisioner(t, map[string]string{"common/01_base.md": "test rule"}, nil)
 			p.SetCustomSkillsDir(t.TempDir())
 			p.SetSuperpowersDir(t.TempDir())
 			p.SetAgentsSkillsDir(t.TempDir())

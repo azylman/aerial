@@ -21,7 +21,9 @@ func announceServer(t *testing.T, status int, hang bool, got chan<- string) *htt
 	t.Helper()
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		var buf bytes.Buffer
-		_, _ = buf.ReadFrom(r.Body)
+		if _, err := buf.ReadFrom(r.Body); err != nil {
+			return
+		}
 		got <- r.Method + " " + r.URL.Path + " " + buf.String()
 		if hang {
 			<-r.Context().Done()
