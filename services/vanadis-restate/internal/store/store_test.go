@@ -308,6 +308,14 @@ func xbuildChunk(id, buildID string, idx int, mode, repo, status string, pr int,
 	return model.VanadisChunk{ID: id, BuildID: buildID, ChunkIndex: idx, Mode: mode, Repo: repo, Status: status, PRNumber: pr, CompletedAt: completedAt, RolloutState: rs, CIChecks: checks}
 }
 
+func xchunkDeployed(c model.VanadisChunk, deployed ...string) model.VanadisChunk {
+	if c.RolloutState == nil {
+		c.RolloutState = &pubsub.PRRolloutState{}
+	}
+	c.RolloutState.DeployedJobs = deployed
+	return c
+}
+
 func TestCrossBuildDeploymentSweepIDs(t *testing.T) {
 	t.Parallel()
 	base := time.Date(2026, 5, 1, 12, 0, 0, 0, time.UTC)
@@ -359,6 +367,24 @@ func TestCrossBuildDeploymentSweepIDs(t *testing.T) {
 			mutateChunks(xbuildChunk("act", "b2", 0, "action", "aerial", "merged", 5, base, eri, nil), xbuildChunk("nopr", "b2", 1, "pr", "aerial", "merged", 0, base, eri, nil)), nil,
 		},
 		{"owner qualified repo spelling matches", deploying, mutateChunks(xbuildChunk("f1", "b2", 0, "pr", "example-org/aerial", "merged", 5, base, eri, nil)), f1},
+		{
+			"earlier deploy_failed foreign build with service jobs swept by later kustomization rollout",
+			xbuildChunk("deploying", "b1", 2, "pr", "aerial", "deploying", 7, later, []string{"aerial-core"}, nil),
+			mutateChunks(cand("b2", "deploy_failed", base, []string{"eri", "vanadis"}, nil)),
+			f1,
+		},
+		{
+			"earlier candidate with emptied expected jobs and deployed jobs matches deploying service",
+			deploying,
+			mutateChunks(xchunkDeployed(cand("b2", "merged", base, nil, nil), "eri", "aerial-core")),
+			f1,
+		},
+		{
+			"disjoint service chunks sharing kustomization deployed job stay untouched",
+			xchunkDeployed(xbuildChunk("deploying", "b1", 2, "pr", "aerial", "deploying", 7, later, []string{"eri"}, nil), "aerial-core"),
+			mutateChunks(xchunkDeployed(cand("b2", "merged", base, []string{"worker"}, nil), "aerial-core")),
+			nil,
+		},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
