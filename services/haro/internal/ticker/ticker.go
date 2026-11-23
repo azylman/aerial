@@ -71,6 +71,8 @@ type ScheduleRow struct {
 	Effort       string    `json:"effort"`
 	Agent        string    `json:"agent"`
 	DelayMs      int64     `json:"delay_ms"`
+	// LastCompletedAt is the heartbeat watermark (start of the latest completed run); nil before the first completed run.
+	LastCompletedAt *time.Time `json:"last_completed_at,omitempty"`
 }
 
 // DispatchStepResult carries the outcome of dispatch-turn.
@@ -138,18 +140,19 @@ func mapCronToRow(c *model.CronSchedule) ScheduleRow {
 
 func mapHeartbeatToRow(hb *model.HeartbeatSchedule) ScheduleRow {
 	return ScheduleRow{
-		Found:        true,
-		Enabled:      hb.Enabled,
-		ScheduleType: model.ScheduleTypeHeartbeat,
-		ID:           hb.ID,
-		TargetID:     hb.TargetID,
-		Prompt:       hb.Prompt,
-		TitlePrefix:  hb.TitlePrefix,
-		CronExpr:     hb.CronExpr,
-		Timezone:     hb.Timezone,
-		NextRunAt:    hb.NextRunAt,
-		Effort:       hb.Effort,
-		Agent:        hb.Agent,
+		Found:           true,
+		Enabled:         hb.Enabled,
+		ScheduleType:    model.ScheduleTypeHeartbeat,
+		ID:              hb.ID,
+		TargetID:        hb.TargetID,
+		Prompt:          hb.Prompt,
+		TitlePrefix:     hb.TitlePrefix,
+		CronExpr:        hb.CronExpr,
+		Timezone:        hb.Timezone,
+		NextRunAt:       hb.NextRunAt,
+		Effort:          hb.Effort,
+		Agent:           hb.Agent,
+		LastCompletedAt: hb.LastCompletedAt,
 	}
 }
 
@@ -370,14 +373,15 @@ func (s *HaroSchedule) dispatchHeartbeatStep(rc restate.RunContext, loaded Sched
 	}
 
 	hb := model.HeartbeatSchedule{
-		ID:          scheduleID,
-		TargetID:    loaded.TargetID,
-		TitlePrefix: loaded.TitlePrefix,
-		CronExpr:    loaded.CronExpr,
-		Prompt:      loaded.Prompt,
-		Timezone:    loaded.Timezone,
-		Effort:      loaded.Effort,
-		Agent:       loaded.Agent,
+		ID:              scheduleID,
+		TargetID:        loaded.TargetID,
+		TitlePrefix:     loaded.TitlePrefix,
+		CronExpr:        loaded.CronExpr,
+		Prompt:          loaded.Prompt,
+		Timezone:        loaded.Timezone,
+		Effort:          loaded.Effort,
+		Agent:           loaded.Agent,
+		LastCompletedAt: loaded.LastCompletedAt,
 	}
 	wrappedPrompt := model.BuildHeartbeatPrompt(hb, now)
 	dispReq := eriwire.BrainDispatchRequest{
@@ -1228,7 +1232,9 @@ func HandleDispatchOutcome(ctx context.Context, database *sql.DB, msg pubsub.Mes
 		return nil
 	}
 
-	run, err := store.GetScheduleRun(ctx, database, dispatchID)
+	// The run row is keyed by a deterministic UUID; the ID eri echoes back is the
+	// dispatch ID haro sent, which finalize stores as the run's message_id.
+	run, err := store.GetScheduleRunByDispatchID(ctx, database, dispatchID)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) || strings.Contains(err.Error(), "not found") {
 			if msg.NumDelivered() < 5 {
@@ -1248,8 +1254,8 @@ func HandleDispatchOutcome(ctx context.Context, database *sql.DB, msg pubsub.Mes
 	status := strings.ToLower(strings.TrimSpace(ev.Status))
 	completedAt, durationMs, startedAt := calculateOutcomeTiming(ev, run.StartedAt)
 
-	if err := store.UpdateScheduleRunOutcome(ctx, database, dispatchID, status, ev.Error, completedAt, durationMs); err != nil {
-		log.Printf("[Haro] failed to update schedule run outcome for %s: %v", dispatchID, err)
+	if err := store.UpdateScheduleRunOutcome(ctx, database, run.ID, status, ev.Error, completedAt, durationMs); err != nil {
+		log.Printf("[Haro] failed to update schedule run outcome for %s (run %s): %v", dispatchID, run.ID, err)
 		return err
 	}
 

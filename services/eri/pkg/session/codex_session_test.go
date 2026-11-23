@@ -34,7 +34,10 @@ func TestCodexInternal_ErrorLineExtraction(t *testing.T) {
 	}
 	for _, tc := range errorLineTests {
 		t.Run(tc.name, func(t *testing.T) {
-			got, _ := extractCodexErrorFromLine(tc.line, time.Time{})
+			got, beforeCutoff := extractCodexErrorFromLine(tc.line, time.Time{})
+			if beforeCutoff {
+				t.Fatalf("expected beforeCutoff to be false with zero time cutoff")
+			}
 			if got != tc.wantError {
 				t.Fatalf("extractCodexErrorFromLine = %q, want %q", got, tc.wantError)
 			}
@@ -149,12 +152,16 @@ func TestCodexInternal_StepLineClassification(t *testing.T) {
 func TestCodexInternal_ExtractResponseFromCodexTranscriptFile(t *testing.T) {
 	tmpDir := t.TempDir()
 	emptyPath := filepath.Join(tmpDir, "empty.jsonl")
-	_ = os.WriteFile(emptyPath, nil, 0o644)
+	if err := os.WriteFile(emptyPath, nil, 0o644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
 
 	validPath := filepath.Join(tmpDir, "valid.jsonl")
 	validContent := `{"type":"response_item","timestamp":"2026-11-07T10:00:00Z","payload":{"type":"message","role":"user","text":"hello"}}` + "\n" +
 		`{"type":"response_item","timestamp":"2026-11-07T10:00:02Z","payload":{"type":"message","role":"assistant","text":"hello from assistant"}}` + "\n"
-	_ = os.WriteFile(validPath, []byte(validContent), 0o644)
+	if err := os.WriteFile(validPath, []byte(validContent), 0o644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
 
 	tests := []struct {
 		name     string
@@ -182,13 +189,17 @@ func TestManager_Codex_ExtractLastTurnError(t *testing.T) {
 	mgr := New(homeDir, dataDir)
 
 	sessDir := filepath.Join(dataDir, "codex", "sessions")
-	_ = os.MkdirAll(sessDir, 0o755)
+	if err := os.MkdirAll(sessDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll: %v", err)
+	}
 	sessPath := filepath.Join(sessDir, "rollout-codex-err.jsonl")
 	content := strings.Join([]string{
 		`{"type":"response_item","timestamp":"2026-11-07T10:00:00Z","payload":{"type":"message","role":"user","text":"run command"}}`,
 		`{"type":"event_msg","timestamp":"2026-11-07T10:00:05Z","payload":{"type":"error","text":"tool execution failed"}}`,
 	}, "\n") + "\n"
-	_ = os.WriteFile(sessPath, []byte(content), 0o644)
+	if err := os.WriteFile(sessPath, []byte(content), 0o644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
 
 	tests := []struct {
 		name      string

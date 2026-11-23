@@ -186,7 +186,9 @@ func newLifecycleExecutor(t *testing.T, eri *eritest.Client, notifyErr error, ap
 	if apiStatus != 0 {
 		api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 			w.WriteHeader(apiStatus)
-			_, _ = w.Write([]byte(apiBody))
+			if _, err := w.Write([]byte(apiBody)); err != nil {
+				t.Errorf("write response: %v", err)
+			}
 		}))
 		t.Cleanup(api.Close)
 		exec.GitHubAPIURL = api.URL
@@ -293,6 +295,7 @@ func TestFlow_HandlePREventType(t *testing.T) {
 
 	tests := []prEventCase{
 		{name: "opened resets check state", event: "opened", ev: pubsub.PRLifecycleEvent{Event: "opened"}, execNil: true, wantResets: []string{"c1::"}},
+		{name: "opened with executor and chunk resets check state for head sha", event: "opened", ev: pubsub.PRLifecycleEvent{Repo: "owner/repo", PRNumber: 12, HeadSHA: "sha-2"}, chunk: &model.VanadisChunk{Repo: "owner/repo"}, apiStatus: http.StatusOK, apiBody: headAPI, wantResets: []string{"c1:sha-2:"}},
 		{name: "opened with nil store and executor is a no-op", event: "opened", ev: pubsub.PRLifecycleEvent{Event: "opened"}, execNil: true, storeNil: true},
 		{name: "synchronize validates head against GitHub and resets check state", event: "synchronize", ev: pubsub.PRLifecycleEvent{Repo: "owner/repo", PRNumber: 12, HeadSHA: "sha-2"}, apiStatus: http.StatusOK, apiBody: headAPI, wantResets: []string{"c1:sha-2:"}},
 		{name: "synchronize superseded head rejected without reset", event: "synchronize", ev: pubsub.PRLifecycleEvent{Repo: "owner/repo", PRNumber: 12, HeadSHA: "sha-1"}, apiStatus: http.StatusOK, apiBody: headAPI, wantErr: lifecycleSkipped},
@@ -791,13 +794,17 @@ func TestFlow_HandleCIRemediationTurnEnded(t *testing.T) {
 				switch r.URL.Path {
 				case "/repos/example-owner/aerial/pulls/42":
 					w.WriteHeader(tc.prStatus)
-					_, _ = w.Write([]byte(tc.prBody))
+					if _, err := w.Write([]byte(tc.prBody)); err != nil {
+						t.Errorf("write response: %v", err)
+					}
 				case "/repos/example-owner/aerial/issues/42/comments":
 					if tc.commentsBody == "" {
 						w.WriteHeader(http.StatusBadGateway)
 						return
 					}
-					_, _ = w.Write([]byte(tc.commentsBody))
+					if _, err := w.Write([]byte(tc.commentsBody)); err != nil {
+						t.Errorf("write response: %v", err)
+					}
 				default:
 					t.Errorf("unexpected GitHub request %s", r.URL.Path)
 					w.WriteHeader(http.StatusTeapot)
@@ -975,7 +982,9 @@ func TestFlow_ResolveOrAttachPRChunk(t *testing.T) {
 			t.Parallel()
 			api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 				w.WriteHeader(tc.apiStatus)
-				_, _ = w.Write([]byte(tc.apiBody))
+				if _, err := w.Write([]byte(tc.apiBody)); err != nil {
+					t.Errorf("write response: %v", err)
+				}
 			}))
 			defer api.Close()
 			eri := &eritest.Client{}
@@ -1152,11 +1161,148 @@ func TestFlow_IsEligibleUnattachedChunk(t *testing.T) {
 		{name: "failed status rejected", build: build, chunk: &model.VanadisChunk{ID: "c1", BuildID: "b1", Mode: "pr", Status: "failed", StartedAt: now}, event: ev},
 		{name: "thread mismatch rejected", build: build, chunk: &eligible, event: pubsub.PRLifecycleEvent{TargetID: "other", Repo: "owner/repo", PRNumber: 12}},
 		{name: "eligible chunk accepted", build: build, chunk: &eligible, event: ev, want: true},
+		{
+			name:  "branch match running action chunk accepted",
+			build: build,
+			chunk: &model.VanadisChunk{ID: "c1", BuildID: "b1", Mode: "action", Status: "running", Repo: "owner/repo"},
+			event: pubsub.PRLifecycleEvent{TargetID: "th-1", Repo: "owner/repo", Branch: "feat/repo-pr-vanadis-c1-123456", PRNumber: 12},
+			want:  true,
+		},
+		{
+			name:  "branch match non-running action chunk rejected",
+			build: build,
+			chunk: &model.VanadisChunk{ID: "c1", BuildID: "b1", Mode: "action", Status: "failed", Repo: "owner/repo"},
+			event: pubsub.PRLifecycleEvent{TargetID: "th-1", Repo: "owner/repo", Branch: "feat/repo-pr-vanadis-c1-123456", PRNumber: 12},
+			want:  false,
+		},
+		{
+			name:  "branch match first worker failure pr chunk accepted",
+			build: build,
+			chunk: &model.VanadisChunk{ID: "c1", BuildID: "b1", Mode: "pr", Status: "failed", CIFailCount: 0, StartedAt: now, Repo: "owner/repo"},
+			event: pubsub.PRLifecycleEvent{TargetID: "th-1", Repo: "owner/repo", Branch: "feat/repo-pr-vanadis-c1-123456", PRNumber: 12},
+			want:  true,
+		},
+		{
+			name:  "branch match ci failure chunk rejected",
+			build: build,
+			chunk: &model.VanadisChunk{ID: "c1", BuildID: "b1", Mode: "pr", Status: "failed", CIFailCount: 1, StartedAt: now, Repo: "owner/repo"},
+			event: pubsub.PRLifecycleEvent{TargetID: "th-1", Repo: "owner/repo", Branch: "feat/repo-pr-vanadis-c1-123456", PRNumber: 12},
+			want:  false,
+		},
+		{
+			name:  "branch match unstarted pr chunk rejected",
+			build: build,
+			chunk: &model.VanadisChunk{ID: "c1", BuildID: "b1", Mode: "pr", Status: "running", Repo: "owner/repo"},
+			event: pubsub.PRLifecycleEvent{TargetID: "th-1", Repo: "owner/repo", Branch: "feat/repo-pr-vanadis-c1-123456", PRNumber: 12},
+			want:  false,
+		},
+		{
+			name:  "branch match non-pr mode rejected",
+			build: build,
+			chunk: &model.VanadisChunk{ID: "c1", BuildID: "b1", Mode: "other", Status: "running", StartedAt: now, Repo: "owner/repo"},
+			event: pubsub.PRLifecycleEvent{TargetID: "th-1", Repo: "owner/repo", Branch: "feat/repo-pr-vanadis-c1-123456", PRNumber: 12},
+			want:  false,
+		},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			assert.Equal(t, tc.want, IsEligibleUnattachedChunk("example-owner", tc.build, tc.chunk, tc.event))
+		})
+	}
+}
+
+func TestFlow_TryAttachOpenPRForChunk(t *testing.T) {
+	t.Parallel()
+	bld := &model.VanadisBuild{ID: "b1", ThreadID: "th-1", Status: "running"}
+	chunk := model.VanadisChunk{ID: "c1", BuildID: "b1", Repo: "aerial", Status: "running"}
+	chunks := []model.VanadisChunk{chunk}
+
+	matchingPRList := `[{"number":42,"title":"PR Title","head":{"ref":"feat/aerial-pr-vanadis-c1-123456"}}]`
+	otherPRList := `[{"number":43,"title":"PR Other","head":{"ref":"feat/aerial-pr-vanadis-c2-123456"}}]`
+	validPRDetail := `{"state":"open","merged":false,"body":"desc","node_id":"n1","author_association":"MEMBER","user":{"login":"example-owner"},"head":{"sha":"abc","ref":"feat/aerial-pr-vanadis-c1-123456","repo":{"fork":false,"full_name":"example-owner/aerial"}},"base":{"repo":{"full_name":"example-owner/aerial"}}}`
+	untrustedPRDetail := `{"state":"open","merged":false,"body":"desc","node_id":"n1","author_association":"NONE","user":{"login":"stranger"},"head":{"sha":"abc","ref":"feat/aerial-pr-vanadis-c1-123456","repo":{"fork":true,"full_name":"stranger/aerial"}},"base":{"repo":{"full_name":"example-owner/aerial"}}}`
+
+	tests := []struct {
+		name         string
+		nilFlow      bool
+		nilExec      bool
+		nilStore     bool
+		nilBuild     bool
+		apiStatus    int
+		apiBody      string
+		detailStatus int
+		detailBody   string
+		attachErr    error
+		wantAttached []string
+		wantOK       bool
+		wantErr      bool
+	}{
+		{name: "nil flow returns false", nilFlow: true},
+		{name: "nil executor returns false", nilExec: true},
+		{name: "nil store returns false", nilStore: true},
+		{name: "nil build returns false", nilBuild: true},
+		{name: "api error propagates", apiStatus: http.StatusInternalServerError, apiBody: "{}", wantErr: true},
+		{name: "no pr matches branch returns false", apiStatus: http.StatusOK, apiBody: otherPRList, wantOK: false},
+		{name: "matching pr attaches and syncs widget", apiStatus: http.StatusOK, apiBody: matchingPRList, detailStatus: http.StatusOK, detailBody: validPRDetail, wantAttached: []string{"c1"}, wantOK: true},
+		{name: "matching branch but untrusted author skips attachment", apiStatus: http.StatusOK, apiBody: matchingPRList, detailStatus: http.StatusOK, detailBody: untrustedPRDetail, wantOK: false},
+		{name: "matching branch detail error propagates", apiStatus: http.StatusOK, apiBody: matchingPRList, detailStatus: http.StatusInternalServerError, detailBody: `{}`, wantErr: true},
+		{name: "attach conflict returns false without error", apiStatus: http.StatusOK, apiBody: matchingPRList, detailStatus: http.StatusOK, detailBody: validPRDetail, attachErr: store.ErrBuildConflict, wantOK: false},
+		{name: "attach chunk not found returns false without error", apiStatus: http.StatusOK, apiBody: matchingPRList, detailStatus: http.StatusOK, detailBody: validPRDetail, attachErr: store.ErrChunkNotFound, wantOK: false},
+		{name: "attach error propagates", apiStatus: http.StatusOK, apiBody: matchingPRList, detailStatus: http.StatusOK, detailBody: validPRDetail, attachErr: errors.New("attach failed"), wantErr: true},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				switch r.URL.Path {
+				case "/repos/example-owner/aerial/pulls":
+					w.WriteHeader(tc.apiStatus)
+					_, err := w.Write([]byte(tc.apiBody))
+					assert.NoError(t, err)
+				case "/repos/example-owner/aerial/pulls/42":
+					status := tc.detailStatus
+					if status == 0 {
+						status = http.StatusOK
+					}
+					body := tc.detailBody
+					if body == "" {
+						body = validPRDetail
+					}
+					w.WriteHeader(status)
+					_, err := w.Write([]byte(body))
+					assert.NoError(t, err)
+				default:
+					w.WriteHeader(http.StatusOK)
+					_, err := w.Write([]byte(`{}`))
+					assert.NoError(t, err)
+				}
+			}))
+			t.Cleanup(api.Close)
+
+			eri := &eritest.Client{}
+			var exec *executor.Executor
+			if !tc.nilExec {
+				exec = executor.NewExecutor(t.TempDir(), eri, nil, "token", "example-owner", api.Client())
+				exec.GitHubAPIURL = api.URL
+			}
+			spy := &checkStatusSpyStore{chunks: chunks, attachErr: tc.attachErr}
+			var st store.VanadisStore = spy
+			if tc.nilStore {
+				st = nil
+			}
+			f := NewFlow(st, exec)
+			if tc.nilFlow {
+				f = nil
+			}
+			b := bld
+			if tc.nilBuild {
+				b = nil
+			}
+			ok, err := f.TryAttachOpenPRForChunk(context.Background(), b, chunks, chunk)
+			assert.Equal(t, tc.wantErr, err != nil)
+			assert.Equal(t, tc.wantOK, ok)
+			assert.Equal(t, tc.wantAttached, spy.attached)
 		})
 	}
 }
@@ -1174,6 +1320,97 @@ func TestChunkFailureNotice(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			assert.Equal(t, tc.want, chunkFailureNotice(chunks, tc.chunkID, "boom"))
+		})
+	}
+}
+
+func TestFlow_EnsureOpenedPRAutoMerge(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name          string
+		buildID       string
+		nilBuild      bool
+		chunkID       string
+		prNumber      int
+		apiError      bool
+		wantPatched   bool
+		wantAutomerge bool
+	}{
+		{
+			name:          "missing build returns early",
+			buildID:       "b1",
+			nilBuild:      true,
+			chunkID:       "c1",
+			prNumber:      10,
+			wantPatched:   false,
+			wantAutomerge: false,
+		},
+		{
+			name:          "missing chunk returns early",
+			buildID:       "b1",
+			chunkID:       "missing",
+			prNumber:      10,
+			wantPatched:   false,
+			wantAutomerge: false,
+		},
+		{
+			name:          "matching build and chunk triggers patch and automerge",
+			buildID:       "b1",
+			chunkID:       "c1",
+			prNumber:      10,
+			wantPatched:   true,
+			wantAutomerge: true,
+		},
+		{
+			name:          "api error swallowed with warning",
+			buildID:       "b1",
+			chunkID:       "c1",
+			prNumber:      10,
+			apiError:      true,
+			wantPatched:   false,
+			wantAutomerge: false,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			var patched bool
+			var automerged bool
+			api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if tc.apiError {
+					w.WriteHeader(http.StatusInternalServerError)
+					_, _ = w.Write([]byte(`{}`))
+					return
+				}
+				switch {
+				case r.Method == http.MethodGet:
+					w.WriteHeader(http.StatusOK)
+					_, err := w.Write([]byte(`{"state":"open","merged":false,"body":"desc","node_id":"n1","head":{"sha":"abc","ref":"feat/branch","repo":{"fork":false,"full_name":"owner/repo"}},"base":{"repo":{"full_name":"owner/repo"}}}`))
+					assert.NoError(t, err)
+				case r.Method == http.MethodPatch:
+					patched = true
+					w.WriteHeader(http.StatusOK)
+				case r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/graphql"):
+					automerged = true
+					w.WriteHeader(http.StatusOK)
+					_, err := w.Write([]byte(`{"data":{"enablePullRequestAutoMerge":{}}}`))
+					assert.NoError(t, err)
+				default:
+					w.WriteHeader(http.StatusOK)
+				}
+			}))
+			defer api.Close()
+
+			chunks := []model.VanadisChunk{{ID: "c1", Repo: "owner/repo"}}
+			spy := &checkStatusSpyStore{chunks: chunks, nilBuild: tc.nilBuild}
+			eri := &eritest.Client{}
+			exec := executor.NewExecutor(t.TempDir(), eri, nil, "token", "example-owner", api.Client())
+			exec.GitHubAPIURL = api.URL
+
+			f := NewFlow(spy, exec)
+			f.ensureOpenedPRAutoMerge(context.Background(), tc.buildID, tc.chunkID, tc.prNumber)
+			assert.Equal(t, tc.wantPatched, patched)
+			assert.Equal(t, tc.wantAutomerge, automerged)
 		})
 	}
 }

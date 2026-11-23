@@ -47,9 +47,9 @@ When an investigation involves non-core features, external clients, or user-spac
 - **Coordinate & Snowflake Extraction (Discord Context)**:
   - If a Discord message link is provided (`https://discord.com/channels/<guild_id>/<channel_id>/<message_id>`), derive the timestamp via snowflake math:
     - `timestamp_ms = (int(message_id) >> 22) + 1420070400000` (unix milliseconds; convert to RFC3339 UTC for VictoriaLogs `start`/`end`, pass as-is to VictoriaTraces `start`/`end`)
-  - For Discord turns, check the CloudNativePG `postgres` messages table using vertical output via `kubectl exec` or `kubernetes-mcp:pods_exec`:
+  - For Discord turns, query the `messages` table directly with `psql` (which connects automatically via the local `/var/run/postgresql` proxy without needing `POSTGRES_URL` or `/secrets/POSTGRES_PASSWORD`):
     ```bash
-    kubectl exec -i -c postgres $(kubectl get pods -l cnpg.io/cluster=postgres,role=primary -o jsonpath='{.items[0].metadata.name}') -- psql -U aerial -d aerial -x -c "
+    psql -x -c "
     SELECT id, thread_id, author_id, author_name, status, retry_count, restart_count,
            error_message, LEFT(response_text, 160) as resp_snippet,
            created_at, updated_at

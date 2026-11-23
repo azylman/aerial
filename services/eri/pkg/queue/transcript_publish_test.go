@@ -82,12 +82,16 @@ func newTranscriptFixture(t *testing.T, delay time.Duration, watermark int) *tra
 
 func writeTestTranscript(brainDir, sessionID string, steps ...int) {
 	p := filepath.Join(brainDir, sessionID, "transcript.jsonl")
-	_ = os.MkdirAll(filepath.Dir(p), 0o755)
+	if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+		panic(err)
+	}
 	var b []byte
 	for _, s := range steps {
 		b = fmt.Appendf(b, `{"step_index":%d,"type":"PLANNER_RESPONSE","content":"x"}`+"\n", s)
 	}
-	_ = os.WriteFile(p, b, 0o644)
+	if err := os.WriteFile(p, b, 0o644); err != nil {
+		panic(err)
+	}
 }
 
 func TestWorkerPool_TranscriptPublish(t *testing.T) {
@@ -185,7 +189,9 @@ func TestWorkerPool_TranscriptPublishAuxiliary(t *testing.T) {
 	}
 	f.store.setKnown("s-park", false)
 	writeTestTranscript(f.brainDir, "s-park", 0)
-	_ = f.pool.processTranscriptPublishJobWithContext(context.Background(), TranscriptPublishJob{SessionID: "s-park", BrainDir: f.brainDir})
+	if err := f.pool.processTranscriptPublishJobWithContext(context.Background(), TranscriptPublishJob{SessionID: "s-park", BrainDir: f.brainDir}); err != nil {
+		t.Fatalf("processTranscriptPublishJobWithContext: %v", err)
+	}
 	if !f.pool.EnqueueTranscriptPublish(TranscriptPublishJob{SessionID: "s-park", BrainDir: f.brainDir}) || len(f.pool.transcriptPublishCh) != 0 {
 		t.Fatalf("expected parked session to coalesce duplicate enqueue into 0 channel entries, got %d", len(f.pool.transcriptPublishCh))
 	}
@@ -198,7 +204,10 @@ func TestWorkerPool_TranscriptPublishAuxiliary(t *testing.T) {
 	<-f.pool.transcriptPublishSem
 	f.store.setKnown("s-rc", true)
 	writeTestTranscript(f.brainDir, "s-rc", 0)
-	fi, _ := os.Stat(filepath.Join(f.brainDir, "s-rc", "transcript.jsonl"))
+	fi, err := os.Stat(filepath.Join(f.brainDir, "s-rc", "transcript.jsonl"))
+	if err != nil {
+		t.Fatalf("os.Stat: %v", err)
+	}
 	if f.pool.processTranscriptPublishJobWithContext(context.Background(), TranscriptPublishJob{SessionID: "s-rc", BrainDir: f.brainDir, LastMtime: fi.ModTime().UTC(), LastSize: fi.Size(), IsRecheck: true}) != nil || len(f.published) != 0 {
 		t.Fatalf("unchanged recheck failed")
 	}
@@ -344,7 +353,10 @@ func TestWorkerPool_ExecuteVoiceTurn_TranscriptPublish(t *testing.T) {
 				}
 			}
 
-			_, _, _ = pool.ExecuteVoiceTurn(context.Background(), tc.prompt, tc.deviceKey, nil)
+			reply, convID, err := pool.ExecuteVoiceTurn(context.Background(), tc.prompt, tc.deviceKey, nil)
+			if err != nil || reply == "" || convID != tc.wantJob {
+				t.Fatalf("ExecuteVoiceTurn() = (%q, %q, %v), want non-empty reply, %q convID, nil err", reply, convID, err, tc.wantJob)
+			}
 
 			if len(pool.transcriptPublishCh) != 1 {
 				t.Fatalf("expected 1 job, got %d", len(pool.transcriptPublishCh))
@@ -475,7 +487,10 @@ func TestWorkerPool_InitTranscriptPublisher_MultiAgent(t *testing.T) {
 			pool := New(nil, WorkerPoolConfig{AgentName: tc.agentName})
 			pool.SetEventBus(bus)
 
-			pub, _ := pool.initTranscriptPublisher()
+			pub, err := pool.initTranscriptPublisher()
+			if err != nil {
+				t.Fatalf("initTranscriptPublisher failed: %v", err)
+			}
 			if pub == nil {
 				t.Fatal("expected non-nil transcript publisher")
 			}

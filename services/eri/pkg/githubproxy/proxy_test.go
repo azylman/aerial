@@ -29,10 +29,16 @@ type upstreamEcho struct {
 func newEchoUpstream(t *testing.T) *httptest.Server {
 	t.Helper()
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		body, _ := io.ReadAll(r.Body)
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
 		w.Header().Set("Content-Type", "application/json")
 		if parts := strings.Split(strings.Trim(r.URL.Path, "/"), "/"); r.Method == http.MethodGet && len(parts) == 3 && parts[0] == "repos" {
-			_, _ = fmt.Fprintf(w, `{"private":%t}`, strings.HasPrefix(parts[2], "private"))
+			if _, err := fmt.Fprintf(w, `{"private":%t}`, strings.HasPrefix(parts[2], "private")); err != nil {
+				return
+			}
 			return
 		}
 		w.Header().Set("X-Upstream", "echo")
@@ -292,9 +298,14 @@ func receivePackRefBody(ref, caps string, blobs ...string) []byte {
 }
 
 func jsonLossy(s string) string {
-	b, _ := json.Marshal(s)
+	b, err := json.Marshal(s)
+	if err != nil {
+		panic(err)
+	}
 	var out string
-	_ = json.Unmarshal(b, &out)
+	if err := json.Unmarshal(b, &out); err != nil {
+		panic(err)
+	}
 	return out
 }
 

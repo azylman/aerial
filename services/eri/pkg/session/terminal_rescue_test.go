@@ -29,22 +29,34 @@ func runExtractTerminalResponseCase(t *testing.T, tc extractTerminalResponseCase
 
 	sessDir := filepath.Join(tmp, "data", "brain", tc.convID)
 	logsDir := filepath.Join(sessDir, ".system_generated", "logs")
-	_ = os.MkdirAll(logsDir, 0o755)
+	if err := os.MkdirAll(logsDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll: %v", err)
+	}
 
 	if tc.transcript != "" {
-		_ = os.WriteFile(filepath.Join(logsDir, "transcript.jsonl"), []byte(tc.transcript), 0o644)
+		if err := os.WriteFile(filepath.Join(logsDir, "transcript.jsonl"), []byte(tc.transcript), 0o644); err != nil {
+			t.Fatalf("WriteFile: %v", err)
+		}
 	}
 	if tc.fullTranscript != "" {
-		_ = os.WriteFile(filepath.Join(logsDir, "transcript_full.jsonl"), []byte(tc.fullTranscript), 0o644)
+		if err := os.WriteFile(filepath.Join(logsDir, "transcript_full.jsonl"), []byte(tc.fullTranscript), 0o644); err != nil {
+			t.Fatalf("WriteFile: %v", err)
+		}
 	}
 
 	if tc.recentTaskLog {
 		tasksDir := filepath.Join(sessDir, ".system_generated", "tasks")
-		_ = os.MkdirAll(tasksDir, 0o755)
+		if err := os.MkdirAll(tasksDir, 0o755); err != nil {
+			t.Fatalf("MkdirAll: %v", err)
+		}
 		taskLog := filepath.Join(tasksDir, "task-1.log")
-		_ = os.WriteFile(taskLog, []byte("running"), 0o644)
+		if err := os.WriteFile(taskLog, []byte("running"), 0o644); err != nil {
+			t.Fatalf("WriteFile: %v", err)
+		}
 		modTime := time.Now().Add(-tc.taskLogAge)
-		_ = os.Chtimes(taskLog, modTime, modTime)
+		if err := os.Chtimes(taskLog, modTime, modTime); err != nil {
+			t.Fatalf("Chtimes: %v", err)
+		}
 	}
 
 	var got string
