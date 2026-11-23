@@ -1,6 +1,7 @@
 package queue
 
 import (
+	"context"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -32,16 +33,17 @@ func dispatchSend(method string, input any) sentCall {
 func TestDispatchCoordinator_Enqueue(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
-		name       string
-		key        string
-		state      coordinatorState
-		rows       []db.Dispatch
-		req        eriwire.BrainDispatchRequest
-		failInsert error
-		wantResp   eriwire.DispatchEnqueueResponse
-		wantSends  []sentCall
-		wantRows   map[string]rowWant
-		wantCode   int
+		name            string
+		key             string
+		state           coordinatorState
+		rows            []db.Dispatch
+		req             eriwire.BrainDispatchRequest
+		failInsert      error
+		wantResp        eriwire.DispatchEnqueueResponse
+		wantSends       []sentCall
+		wantRows        map[string]rowWant
+		wantTraceparent string
+		wantCode        int
 	}{
 		{
 			name:      "EmptyKeyResolvesSessionFromID",
@@ -52,12 +54,13 @@ func TestDispatchCoordinator_Enqueue(t *testing.T) {
 			wantRows:  map[string]rowWant{"d9": {status: db.StatusPending}},
 		},
 		{
-			name:      "Accepted",
-			key:       dcKey,
-			req:       eriwire.BrainDispatchRequest{ID: "d1", Source: "Vanadis", Prompt: "go"},
-			wantResp:  eriwire.DispatchEnqueueResponse{Status: eriwire.StatusAccepted, DispatchID: "d1", SessionID: dcKey},
-			wantSends: []sentCall{dispatchSend(HandlerAppend, AppendRequest{IDs: []string{"d1"}})},
-			wantRows:  map[string]rowWant{"d1": {status: db.StatusPending}},
+			name:            "Accepted",
+			key:             dcKey,
+			req:             eriwire.BrainDispatchRequest{ID: "d1", Source: "Vanadis", Prompt: "go", Traceparent: "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01"},
+			wantResp:        eriwire.DispatchEnqueueResponse{Status: eriwire.StatusAccepted, DispatchID: "d1", SessionID: dcKey},
+			wantSends:       []sentCall{dispatchSend(HandlerAppend, AppendRequest{IDs: []string{"d1"}})},
+			wantRows:        map[string]rowWant{"d1": {status: db.StatusPending}},
+			wantTraceparent: "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01",
 		},
 		{
 			name:      "ExistingIDStillAppendedWithoutSkip",
@@ -98,6 +101,12 @@ func TestDispatchCoordinator_Enqueue(t *testing.T) {
 			assert.Equal(t, tc.wantResp, resp)
 			assert.Equal(t, tc.wantSends, h.sends)
 			assertDispatchRows(t, store, tc.wantRows)
+			if tc.wantResp.DispatchID != "" && tc.wantResp.Status != eriwire.StatusSkippedActive && tc.failInsert == nil && tc.wantCode == 0 {
+				d, getErr := store.GetDispatch(context.Background(), tc.wantResp.DispatchID)
+				require.NoError(t, getErr)
+				require.NotNil(t, d)
+				assert.Equal(t, tc.wantTraceparent, d.Traceparent)
+			}
 		})
 	}
 }
@@ -202,51 +211,6 @@ func TestDispatchCoordinator_Cancel(t *testing.T) {
 			assert.Equal(t, tc.wantSends, h.sends)
 			assert.Empty(t, h.cancels)
 			assertDispatchRows(t, store, tc.wantRows)
-		})
-	}
-}
-
-func TestDispatchCoordinator_RunTurn(t *testing.T) {
-	t.Parallel()
-	tests := []struct {
-		name      string
-		req       eriwire.BrainDispatchRequest
-		wantSends []sentCall
-	}{
-		{name: "LegacyPayloadSendsAdoptPending", req: eriwire.BrainDispatchRequest{ID: "d1"}, wantSends: []sentCall{dispatchSend(HandlerAdoptPending, AdoptPendingRequest{})}},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			h := newCoordHarness(t, dcKey, tcInv, coordinatorState{})
-			res, err := NewDispatchCoordinator(nil, "aerial").RunTurn(h.objectCtx(), tc.req)
-			require.NoError(t, err)
-			assert.Equal(t, DispatchTurnResult{Status: "completed"}, res)
-			assert.Equal(t, tc.wantSends, h.sends)
-		})
-	}
-}
-
-func TestDispatchCoordinator_AdoptPending(t *testing.T) {
-	t.Parallel()
-	tests := []struct {
-		name      string
-		rows      []db.Dispatch
-		wantSends []sentCall
-	}{
-		{
-			name:      "AppendsPendingDispatches",
-			rows:      []db.Dispatch{dispRow("d1", dcKey, db.StatusPending), dispRow("d2", "other", db.StatusPending)},
-			wantSends: []sentCall{dispatchSend(HandlerAppend, AppendRequest{IDs: []string{"d1"}})},
-		},
-		{name: "NothingPending"},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			h := newCoordHarness(t, dcKey, tcInv, coordinatorState{})
-			require.NoError(t, NewDispatchCoordinator(seedStore(t, nil, tc.rows), "aerial").AdoptPending(h.sharedCtx(), AdoptPendingRequest{}))
-			assert.Equal(t, tc.wantSends, h.sends)
 		})
 	}
 }

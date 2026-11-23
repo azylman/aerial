@@ -175,11 +175,10 @@ type QueueConsumer struct {
 }
 
 // QueueConsumers are the durable consumers vanadis-nats binds (bridge.StartConsumers):
-// dispatch outcomes and PR lifecycle events on AERIAL_EVENTS, widget syncs on AERIAL_COALESCED.
+// dispatch outcomes and PR lifecycle events on AERIAL_EVENTS.
 var QueueConsumers = []QueueConsumer{
 	{Stream: pubsub.StreamAerialEvents, Consumer: "vanadis-dispatch"},
 	{Stream: pubsub.StreamAerialEvents, Consumer: "vanadis-pr-events"},
-	{Stream: pubsub.StreamAerialCoalesced, Consumer: "vanadis-widget"},
 }
 
 // CollectQueueMetrics refreshes the queue depth gauges with the summed backlog of

@@ -104,20 +104,32 @@ func MatchSensitiveTokens(input string) []string {
 	return matches
 }
 
+// gitHubTokenPrefixes lists the GitHub token prefixes that can appear in git
+// basic-auth headers as base64("x-access-token:"+token).
+var gitHubTokenPrefixes = []string{"ghp_", "gho_", "ghu_", "ghs_", "ghr_", "github_pat_"}
+
+func hasGitHubTokenPrefix(tok string) bool {
+	for _, p := range gitHubTokenPrefixes {
+		if strings.HasPrefix(tok, p) {
+			return true
+		}
+	}
+	return false
+}
+
+// appendSingleTokenVariants appends tok, its unpadded Base64 forms, its git basic-auth
+// form (GitHub tokens only), and its URL-escaped and URI-userinfo forms. Padded Base64
+// is omitted because the unpadded form is a prefix of it, so padded text stays masked.
 func appendSingleTokenVariants(out []string, tok string) []string {
 	b := []byte(tok)
-	out = append(out,
-		tok,
-		base64.StdEncoding.EncodeToString(b),
-		base64.RawStdEncoding.EncodeToString(b),
-		base64.URLEncoding.EncodeToString(b),
-		base64.RawURLEncoding.EncodeToString(b),
-	)
-	gitBasic := []byte("x-access-token:" + tok)
-	out = append(out,
-		base64.StdEncoding.EncodeToString(gitBasic),
-		base64.RawStdEncoding.EncodeToString(gitBasic),
-	)
+	std := base64.RawStdEncoding.EncodeToString(b)
+	out = append(out, tok, std)
+	if urlSafe := base64.RawURLEncoding.EncodeToString(b); urlSafe != std {
+		out = append(out, urlSafe)
+	}
+	if hasGitHubTokenPrefix(tok) {
+		out = append(out, base64.RawStdEncoding.EncodeToString([]byte("x-access-token:"+tok)))
+	}
 	if escaped := url.QueryEscape(tok); len(escaped) >= 4 && escaped != tok {
 		out = append(out, escaped)
 	}
@@ -127,6 +139,57 @@ func appendSingleTokenVariants(out []string, tok string) []string {
 		}
 	}
 	return out
+}
+
+// minJSONLeafLen is the minimum length of a credential leaf extracted from a JSON-object secret.
+const minJSONLeafLen = 8
+
+// credentialKeySuffixes are the final underscore-separated key segments whose string
+// values are treated as credentials inside JSON-object secrets.
+var credentialKeySuffixes = map[string]bool{"token": true, "secret": true, "password": true, "key": true}
+
+func isCredentialKey(key string) bool {
+	segs := strings.Split(key, "_")
+	return credentialKeySuffixes[strings.ToLower(segs[len(segs)-1])]
+}
+
+// collectJSONCredentialLeaves walks a decoded JSON value and appends every string leaf
+// whose governing key is a credential key and whose trimmed length is >= minJSONLeafLen.
+// Array elements inherit the key of the array. Object keys are visited in sorted order.
+func collectJSONCredentialLeaves(out []string, key string, v any) []string {
+	switch val := v.(type) {
+	case map[string]any:
+		keys := make([]string, 0, len(val))
+		for k := range val {
+			keys = append(keys, k)
+		}
+		sort.Strings(keys)
+		for _, k := range keys {
+			out = collectJSONCredentialLeaves(out, k, val[k])
+		}
+	case []any:
+		for _, item := range val {
+			out = collectJSONCredentialLeaves(out, key, item)
+		}
+	case string:
+		if leaf := strings.TrimSpace(val); len(leaf) >= minJSONLeafLen && isCredentialKey(key) {
+			out = append(out, leaf)
+		}
+	}
+	return out
+}
+
+// jsonObjectCredentialLeaves reports whether tok is a JSON object and, if so, returns
+// its credential string leaves.
+func jsonObjectCredentialLeaves(tok string) ([]string, bool) {
+	if !strings.HasPrefix(tok, "{") {
+		return nil, false
+	}
+	var obj map[string]any
+	if err := json.Unmarshal([]byte(tok), &obj); err != nil {
+		return nil, false
+	}
+	return collectJSONCredentialLeaves(nil, "", obj), true
 }
 
 func extractEmbeddedURIPassword(tok string) string {
@@ -144,7 +207,16 @@ func extractEmbeddedURIPassword(tok string) string {
 	return strings.TrimSpace(pass)
 }
 
+// expandTokenVariants returns every registered form of tok. A JSON-object secret is not
+// registered whole; its credential leaves are registered with their own variants instead.
 func expandTokenVariants(tok string) []string {
+	if leaves, ok := jsonObjectCredentialLeaves(tok); ok {
+		variants := make([]string, 0, len(leaves)*4)
+		for _, leaf := range leaves {
+			variants = append(variants, expandTokenVariants(leaf)...)
+		}
+		return variants
+	}
 	variants := appendSingleTokenVariants(nil, tok)
 	if pass := extractEmbeddedURIPassword(tok); len(pass) >= 4 {
 		variants = appendSingleTokenVariants(variants, pass)
@@ -378,7 +450,8 @@ func SanitizeAuthor(name string) string {
 const matchNothingPattern = `[^\s\S]`
 
 // ValuePattern returns an RE2 alternation matching every registered-style variant of values
-// (raw, Base64 alignments, URL-encoded, git basic auth) as literal text. Values and variants
+// (raw, unpadded Base64, URL-encoded, git basic auth for GitHub tokens, and credential
+// leaves of JSON-object values) as literal text. Values and variants
 // shorter than the sanitizer's minimum token length are skipped, duplicates are dropped, and
 // alternatives are ordered longest first so the longest variant wins at each position.
 // With no usable values it returns a pattern that matches nothing.

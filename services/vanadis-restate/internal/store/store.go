@@ -268,10 +268,14 @@ func ApplyRawChunkCIChecks(c *model.VanadisChunk, rawCIChecks []byte) {
 	c.HeadSHA = strings.TrimSpace(checks["_head_sha"])
 	c.RemediatedSHA = strings.TrimSpace(checks["_remediated_sha"])
 	c.MergeSHA = strings.TrimSpace(checks["_merge_sha"])
+	mergeQueue := strings.TrimSpace(checks["_merge_queue"])
 	for k := range checks {
 		if strings.HasPrefix(k, "_") {
 			delete(checks, k)
 		}
+	}
+	if mergeQueue != "" {
+		checks["_merge_queue"] = mergeQueue
 	}
 	if len(checks) > 0 {
 		c.CIChecks = checks
@@ -300,12 +304,12 @@ func scanChunkRow(row rowScanner, extra ...any) (model.VanadisChunk, error) {
 	var c model.VanadisChunk
 	var startedAt, completedAt sql.NullTime
 	var rawCIChecks, rawRolloutState []byte
-	dest := make([]any, 0, 25+len(extra))
+	dest := make([]any, 0, 23+len(extra))
 	dest = append(dest,
 		&c.ID, &c.BuildID, &c.ChunkIndex, &c.Mode, &c.Repo, &c.Title, &c.Instructions,
 		&c.TargetFiles, &c.TargetSymbols, &c.Effort, &c.AcceptanceCriteria, &c.Status,
 		&c.PRNumber, &c.StallNudges, &c.DependsOn, &c.CIFailCount, &rawCIChecks,
-		&rawRolloutState, &c.Banner, &c.MergeAwakeableID, &c.DeployAwakeableID,
+		&rawRolloutState, &c.Banner,
 		&startedAt, &completedAt, &c.CreatedAt, &c.UpdatedAt,
 	)
 	if err := row.Scan(append(dest, extra...)...); err != nil {

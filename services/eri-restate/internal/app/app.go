@@ -75,15 +75,14 @@ func LoadConfigFromEnv() Config {
 // eriRestateDefinitions returns the fixed service set every eri-restate revision binds: the
 // thread and dispatch coordinators, the voice session, the dispatch cancel router (under the
 // SessionManager service name), TurnRunner and the LLM service on llmFn (the ephemeral
-// summarizer pool). ThreadSession/DispatchSession take queue.TurnHoldTimeout; voice,
-// session-manager and LLM handlers never hold a turn and keep 1h.
+// summarizer pool). Only TurnRunner holds an invocation open across a turn, so it alone takes
+// queue.TurnHoldTimeout; every other service keeps 1h.
 func eriRestateDefinitions(pool *queue.WorkerPool, agentName string, llmFn runner.LLMFunc) []restate.ServiceDefinition {
 	hour := []restate.ServiceDefinitionOption{restate.WithInactivityTimeout(time.Hour), restate.WithAbortTimeout(time.Hour)}
-	turnHold := []restate.ServiceDefinitionOption{restate.WithInactivityTimeout(queue.TurnHoldTimeout), restate.WithAbortTimeout(queue.TurnHoldTimeout)}
 	store := pool.Store()
 	return []restate.ServiceDefinition{
-		restate.Reflect(queue.NewThreadCoordinator(store, pool, agentName), turnHold...),
-		restate.Reflect(queue.NewDispatchCoordinator(store, agentName), turnHold...),
+		restate.Reflect(queue.NewThreadCoordinator(store, pool, agentName), hour...),
+		restate.Reflect(queue.NewDispatchCoordinator(store, agentName), hour...),
 		restate.Reflect(queue.NewVoiceSessionObject(pool, agentName), hour...),
 		restate.Reflect(queue.NewDispatchCancelRouter(store, agentName), hour...),
 		queue.ReflectTurnRunner(queue.NewTurnRunnerService(pool, agentName)),

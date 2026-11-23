@@ -15,10 +15,6 @@ import (
 	"github.com/azylman/aerial/services/eri/pkg/db"
 )
 
-const (
-	statusCompleted = "completed"
-)
-
 // ThreadSessionServiceName returns the Restate service name for ThreadSession.
 func ThreadSessionServiceName(name string) string {
 	return agent.ScopedServiceName("ThreadSession", name)
@@ -58,6 +54,7 @@ type ThreadEnqueueRequest struct {
 	Model        string      `json:"model,omitempty"`
 	Effort       string      `json:"effort,omitempty"`
 	SkipIfActive bool        `json:"skip_if_active,omitempty"`
+	Traceparent  string      `json:"traceparent,omitempty"`
 }
 
 // ThreadEnqueueResponse defines the response after enqueuing a thread message.
@@ -65,18 +62,6 @@ type ThreadEnqueueResponse struct {
 	Status    string `json:"status"` // "accepted", "skipped_active", "already_exists"
 	ThreadID  string `json:"thread_id,omitempty"`
 	MessageID string `json:"message_id,omitempty"`
-}
-
-// ThreadTurnRequest defines the payload for executing a thread's pending turn burst.
-type ThreadTurnRequest struct {
-	Trigger string `json:"trigger,omitempty"`
-}
-
-// ThreadTurnResult defines the execution outcome of a burst-drain run.
-type ThreadTurnResult struct {
-	Status          string `json:"status"`
-	ProcessedTurns  int    `json:"processed_turns"`
-	MessagesDrained int    `json:"messages_drained"`
 }
 
 // CancelTurnRequest defines the cancellation request for a thread.
@@ -121,12 +106,6 @@ func deriveDeterministicDispatchID(ctx restate.ObjectSharedContext, sessionKey s
 }
 
 const maxCoalescedBurstMessages = 5
-
-// DispatchTurnResult defines the execution outcome of dispatch draining.
-type DispatchTurnResult struct {
-	Status             string `json:"status"`
-	DispatchesExecuted int    `json:"dispatches_executed"`
-}
 
 // CancelDispatchRequest defines the cancellation payload for a dispatch or build.
 type CancelDispatchRequest struct {

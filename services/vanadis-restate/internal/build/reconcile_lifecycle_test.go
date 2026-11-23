@@ -123,7 +123,7 @@ func TestBuildObject_LifecycleTransitionsAndFailures(t *testing.T) {
 		},
 	}
 	execFlaky := executor.NewExecutor(t.TempDir(), flakyEri, pubsub.NewMemoryBus(), "token", "example-owner", nil)
-	spyStore := &terminalRetrySpyStore{}
+	spyStore := &fakeStore{}
 	boRetry := NewBuildObject("", nil).WithAuthority(spyStore, execFlaky)
 
 	bRetry := model.VanadisBuild{ID: "b-retry", Status: "running", StatusMessageID: "msg-123", ThreadID: "th-1"}
@@ -131,13 +131,13 @@ func TestBuildObject_LifecycleTransitionsAndFailures(t *testing.T) {
 	retRetry1, errRetry1 := boRetry.evaluateBuildTerminalStatus(context.Background(), &bRetry, []model.VanadisChunk{cD}, map[string]bool{}, false)
 	assert.Error(t, errRetry1)
 	assert.Empty(t, retRetry1)
-	assert.Empty(t, spyStore.updatedStatus)
+	assert.Empty(t, pickCalls(spyStore.snapshotCalls(), "UpdateBuildStatus", "", 1))
 
 	// Attempt 2: retry succeeds
 	retRetry2, errRetry2 := boRetry.evaluateBuildTerminalStatus(context.Background(), &bRetry, []model.VanadisChunk{cD}, map[string]bool{}, false)
 	assert.NoError(t, errRetry2)
 	assert.Equal(t, statusCompleted, retRetry2)
-	assert.Equal(t, statusCompleted, spyStore.updatedStatus)
+	assert.Equal(t, []string{statusCompleted}, pickCalls(spyStore.snapshotCalls(), "UpdateBuildStatus", "", 1))
 
 	// 9d. evaluateBuildTerminalStatus default branch widget sync warning
 	bRunning := model.VanadisBuild{ID: "b-run", Status: "running", ThreadID: "th-1"}
@@ -179,21 +179,6 @@ func TestBuildObject_LifecycleTransitionsAndFailures(t *testing.T) {
 
 	// 12. AttachPR widget sync error
 	_, _ = boUpdWidgetErr.AttachPR(ctxCancel, store.AttachChunkPRRequest{ChunkID: "c1", Repo: "aerial"})
-}
-
-type terminalRetrySpyStore struct {
-	store.VanadisStore
-
-	updatedStatus string
-}
-
-func (s *terminalRetrySpyStore) UpdateBuildStatus(_ context.Context, _ string, status string) error {
-	s.updatedStatus = status
-	return nil
-}
-
-func (*terminalRetrySpyStore) CompareAndSwapBuildStatusMessageID(context.Context, string, string, string) (bool, error) {
-	return true, nil
 }
 
 func TestDeploymentMutationPersistence(t *testing.T) {
@@ -474,36 +459,6 @@ func TestActionCompletionContinuation(t *testing.T) {
 	}
 }
 
-// noPRFailStore layers stateful chunk failure over another store so the
-// failure transition observes its own write. Shared with pr_lifecycle_test.go.
-type noPRFailStore struct {
-	store.VanadisStore
-
-	failedChunk, failReason string
-	skip                    bool
-}
-
-func (s *noPRFailStore) FailChunk(_ context.Context, chunkID, reason, _ string) (*model.VanadisBuild, *model.VanadisChunk, bool, error) {
-	if s.skip {
-		return &model.VanadisBuild{ID: "b1", Status: statusRunning}, &model.VanadisChunk{ID: chunkID, Mode: "pr", Status: statusRunning}, false, nil
-	}
-	s.failedChunk, s.failReason = chunkID, reason
-	return &model.VanadisBuild{ID: "b1", Status: statusRunning}, &model.VanadisChunk{ID: chunkID, Mode: "pr", Status: statusFailed}, true, nil
-}
-
-func (s *noPRFailStore) GetBuild(ctx context.Context, buildID string) (*model.VanadisBuild, []model.VanadisChunk, error) {
-	bld, chunks, err := s.VanadisStore.GetBuild(ctx, buildID)
-	if err != nil || s.failedChunk == "" {
-		return bld, chunks, err
-	}
-	for i := range chunks {
-		if chunks[i].ID == s.failedChunk {
-			chunks[i].Status = statusFailed
-		}
-	}
-	return bld, chunks, nil
-}
-
 func TestDispatchCompletionContinuation(t *testing.T) {
 	t.Parallel()
 	actionDone := model.VanadisChunk{ID: "c1", BuildID: "b1", Mode: "action", Status: "completed", StallNudges: 1}
@@ -684,7 +639,7 @@ func TestBuildObject_GenerationRecoveryOrdering(t *testing.T) {
 				dispatched = append(dispatched, req.ID)
 				return nil
 			}}
-			bo := NewBuildObject("", nil).WithAuthority(&mockStoreForLaunch{}, executor.NewExecutor(t.TempDir(), eri, nil, "", "example-owner", nil))
+			bo := NewBuildObject("", nil).WithAuthority(&fakeStore{}, executor.NewExecutor(t.TempDir(), eri, nil, "", "example-owner", nil))
 			launched := map[string]bool{"dispatch:vanadis-retry-turn-1": true, "dependency": true}
 			if tc.nudges > 0 {
 				launched["retry"] = true
@@ -862,7 +817,7 @@ func TestExecuteLaunchChunk_HTTPGenerationAcceptance(t *testing.T) {
 			}))
 			defer srv.Close()
 			st := lifecycleStore(t, model.VanadisBuild{ID: "b", Status: "running"}, "", model.VanadisChunk{ID: "c", Mode: tc.mode, Status: "running", StallNudges: tc.nudges})
-			bo := NewBuildObject("", nil).WithAuthority(st, executor.NewExecutor(t.TempDir(), executor.NewHTTPEriClient(srv.URL, srv.Client()), nil, "", "example-owner", nil))
+			bo := NewBuildObject("", nil).WithAuthority(st, executor.NewExecutor(t.TempDir(), executor.NewRestateEriClient(srv.URL, "", "aerial", srv.Client()), nil, "", "example-owner", nil))
 			out, err := bo.executeAuthoritativeTransition(context.Background(), "b", nil, nil, nil, false)
 			assert.Equal(t, tc.wantError, err != nil)
 			assert.Equal(t, tc.wantAcknowledged, out.LaunchedMap[tc.key])
@@ -874,7 +829,7 @@ func TestBuildObject_HTTPRecoverySiblingProgress(t *testing.T) {
 	t.Parallel()
 	accepted := make(chan string, 4)
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/dispatch" {
+		if !strings.HasSuffix(r.URL.Path, "/Enqueue") {
 			w.WriteHeader(http.StatusOK)
 			return
 		}
@@ -901,7 +856,7 @@ func TestBuildObject_HTTPRecoverySiblingProgress(t *testing.T) {
 		{ID: "sibling", Mode: "action", Status: "pending"},
 		{ID: "dependent", Mode: "action", Status: "pending", DependsOn: []string{"retry"}},
 	}
-	bo := NewBuildObject("", nil).WithAuthority(&mockStoreForLaunch{}, executor.NewExecutor(t.TempDir(), executor.NewHTTPEriClient(srv.URL, srv.Client()), nil, "", "example-owner", nil))
+	bo := NewBuildObject("", nil).WithAuthority(&fakeStore{}, executor.NewExecutor(t.TempDir(), executor.NewRestateEriClient(srv.URL, "", "aerial", srv.Client()), nil, "", "example-owner", nil))
 	launched := map[string]bool{}
 	_, err := bo.launchEligibleChunks(context.Background(), build, chunks, launched)
 	assert.ErrorIs(t, err, eriwire.ErrDispatchActive)

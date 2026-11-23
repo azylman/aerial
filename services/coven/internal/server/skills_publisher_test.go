@@ -832,7 +832,6 @@ func (m *mockSkillPublisher) NotifyShortFriction(ctx context.Context, content st
 
 type consolidateProceduralSkillsCase struct {
 	name            string
-	lockExtraction  bool
 	nilStore        bool
 	nilPublisher    bool
 	nilLLM          bool
@@ -873,7 +872,6 @@ func consolidateProceduralSkillsCases(validSkillMD, validNewSkillMD string) []co
 	fiveSkipped := []string{"1:skipped:-", "2:skipped:-", "3:skipped:-", "4:skipped:-", "5:skipped:-"}
 	fivePending := []string{"1:pending:-", "2:pending:-", "3:pending:-", "4:pending:-", "5:pending:-"}
 	return []consolidateProceduralSkillsCase{
-		{name: "ExtractionMutexLockedReturnsZero", lockExtraction: true, cands: haOpsCands(1), wantRows: onePending},
 		{name: "NilStoreFails", nilStore: true, wantErr: true},
 		{name: "NilPublisherFails", nilPublisher: true, wantErr: true},
 		{name: "NilLLMFails", nilLLM: true, wantErr: true},
@@ -988,10 +986,6 @@ func runConsolidateProceduralSkillsCase(t *testing.T, validSkillMD string, tc co
 
 	ollama := &MockOllamaClient{embedding: testEmbeddingAt(0, 1.0)}
 
-	if tc.lockExtraction {
-		extractionMutex.Lock()
-		defer extractionMutex.Unlock()
-	}
 	prNum, err := ConsolidateProceduralSkills(context.Background(), s, ollama, llm, publisher, targetSkillsDir)
 	if (err != nil) != tc.wantErr {
 		t.Fatalf("ConsolidateProceduralSkills() err = %v, wantErr = %v", err, tc.wantErr)

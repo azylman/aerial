@@ -21,6 +21,18 @@ const DefaultConfigPath = "/config/coven.yaml"
 // DefaultPort is the fallback port when unspecified.
 const DefaultPort = "4008"
 
+// DefaultRestatePort is the fallback port for Restate HTTP/2 service.
+const DefaultRestatePort = "9080"
+
+// DefaultRestateIngressURL is the default ingress URL for Restate cluster.
+const DefaultRestateIngressURL = "http://restate.aerial:8080"
+
+// DefaultRestateAdminURL is the default admin URL for Restate cluster.
+const DefaultRestateAdminURL = "http://restate.aerial:9070"
+
+// DefaultRestateAdvertiseURL is the default advertisement URL for Coven to Restate.
+const DefaultRestateAdvertiseURL = "http://coven.default.svc.cluster.local:9080"
+
 // DefaultOllamaModel is the default embedding model.
 const DefaultOllamaModel = "all-minilm"
 
@@ -72,6 +84,10 @@ const DefaultExtractMaxSteps = 50
 // Config represents runtime configuration for the memory MCP server.
 type Config struct {
 	Port                  string         `yaml:"port"`
+	RestatePort           string         `yaml:"restate_port"`
+	RestateIngressURL     string         `yaml:"restate_ingress_url"`
+	RestateAdminURL       string         `yaml:"restate_admin_url"`
+	RestateAdvertiseURL   string         `yaml:"restate_advertise_url"`
 	DatabaseURL           string         `yaml:"database_url"`
 	EriURL                string         `yaml:"eri_url"`
 	EriLLMURL             string         `yaml:"eri_llm_url"`
@@ -104,6 +120,16 @@ func NormalizeStack(s string) string {
 // ScopedThreadKey namespaces a thread under its stack for watermark reads.
 func ScopedThreadKey(stack, threadID string) string {
 	return NormalizeStack(stack) + "/" + strings.TrimSpace(threadID)
+}
+
+// ParseScopedThreadKey splits a scoped thread key into (stack, threadID).
+func ParseScopedThreadKey(key string) (string, string) {
+	key = strings.TrimSpace(key)
+	parts := strings.SplitN(key, "/", 2)
+	if len(parts) == 2 {
+		return NormalizeStack(parts[0]), strings.TrimSpace(parts[1])
+	}
+	return DefaultStack, key
 }
 
 // EffectiveStack returns the configured stack, defaulting to DefaultStack.
@@ -157,28 +183,32 @@ func LoadConfigFile(path string, dbURL string, getenv func(string) string) (*Con
 	}
 
 	var ycfg struct {
-		Port             string         `yaml:"port"`
-		DatabaseURL      string         `yaml:"database_url"`
-		EriURL           string         `yaml:"eri_url"`
-		EriLLMURL        string         `yaml:"eri_llm_url"`
-		Ollama           OllamaConfig   `yaml:"ollama"`
-		CustomSkillsDir  string         `yaml:"custom_skills_dir"`
-		RulesDir         string         `yaml:"rules_dir"`
-		GitHubPAT        string         `yaml:"github_pat"`
-		ConfigRepoOwner  string         `yaml:"config_repo_owner"`
-		ConfigRepoName   string         `yaml:"config_repo_name"`
-		PRRegisterURL    string         `yaml:"pr_register_url"`
-		EriPRRegisterURL string         `yaml:"eri_pr_register_url"`
-		SystemChannelID  string         `yaml:"system_channel_id"`
-		NATSURL          string         `yaml:"nats_url"`
-		Stack            string         `yaml:"stack"`
-		Role             string         `yaml:"role"`
-		TranscriptsURL   string         `yaml:"transcripts_url"`
-		IndexerURL       string         `yaml:"indexer_url"`
-		LLMEffort        string         `yaml:"llm_effort"`
-		ExtractTimeout   int            `yaml:"extract_timeout_seconds"`
-		ExtractMaxSteps  int            `yaml:"extract_max_steps"`
-		Auth             k8sauth.Config `yaml:"auth"`
+		Port                string         `yaml:"port"`
+		RestatePort         string         `yaml:"restate_port"`
+		RestateIngressURL   string         `yaml:"restate_ingress_url"`
+		RestateAdminURL     string         `yaml:"restate_admin_url"`
+		RestateAdvertiseURL string         `yaml:"restate_advertise_url"`
+		DatabaseURL         string         `yaml:"database_url"`
+		EriURL              string         `yaml:"eri_url"`
+		EriLLMURL           string         `yaml:"eri_llm_url"`
+		Ollama              OllamaConfig   `yaml:"ollama"`
+		CustomSkillsDir     string         `yaml:"custom_skills_dir"`
+		RulesDir            string         `yaml:"rules_dir"`
+		GitHubPAT           string         `yaml:"github_pat"`
+		ConfigRepoOwner     string         `yaml:"config_repo_owner"`
+		ConfigRepoName      string         `yaml:"config_repo_name"`
+		PRRegisterURL       string         `yaml:"pr_register_url"`
+		EriPRRegisterURL    string         `yaml:"eri_pr_register_url"`
+		SystemChannelID     string         `yaml:"system_channel_id"`
+		NATSURL             string         `yaml:"nats_url"`
+		Stack               string         `yaml:"stack"`
+		Role                string         `yaml:"role"`
+		TranscriptsURL      string         `yaml:"transcripts_url"`
+		IndexerURL          string         `yaml:"indexer_url"`
+		LLMEffort           string         `yaml:"llm_effort"`
+		ExtractTimeout      int            `yaml:"extract_timeout_seconds"`
+		ExtractMaxSteps     int            `yaml:"extract_max_steps"`
+		Auth                k8sauth.Config `yaml:"auth"`
 	}
 	if err := yaml.Unmarshal(data, &ycfg); err != nil {
 		return nil, fmt.Errorf("config: failed to parse YAML from %s: %w", cleanPath, err)
@@ -242,8 +272,17 @@ func LoadConfigFile(path string, dbURL string, getenv func(string) string) (*Con
 		return nil, fmt.Errorf("config: %w", err)
 	}
 
+	restatePort := strutil.FirstNonEmpty(getenv("RESTATE_PORT"), ycfg.RestatePort, DefaultRestatePort)
+	restateIngressURL := strutil.FirstNonEmpty(getenv("RESTATE_INGRESS_URL"), ycfg.RestateIngressURL, DefaultRestateIngressURL)
+	restateAdminURL := strutil.FirstNonEmpty(getenv("RESTATE_ADMIN_URL"), ycfg.RestateAdminURL, DefaultRestateAdminURL)
+	restateAdvertiseURL := strutil.FirstNonEmpty(getenv("RESTATE_ADVERTISE_URL"), ycfg.RestateAdvertiseURL, DefaultRestateAdvertiseURL)
+
 	return &Config{
 		Port:                  port,
+		RestatePort:           strings.TrimSpace(restatePort),
+		RestateIngressURL:     strings.TrimSpace(restateIngressURL),
+		RestateAdminURL:       strings.TrimSpace(restateAdminURL),
+		RestateAdvertiseURL:   strings.TrimSpace(restateAdvertiseURL),
 		DatabaseURL:           databaseURL,
 		EriURL:                eriURL,
 		EriLLMURL:             eriLLMURL,

@@ -118,7 +118,7 @@ func TestRunInSpan_EriClientPropagatesTrace(t *testing.T) {
 			}))
 			defer srv.Close()
 
-			client := executor.NewHTTPEriClient(srv.URL, tracing.Client(srv.Client()))
+			client := executor.NewRestateEriClient(srv.URL, "", "aerial", tracing.Client(srv.Client()))
 			var logBuf bytes.Buffer
 			logger := slog.New(tracing.SlogHandler(slog.NewJSONHandler(&logBuf, &slog.HandlerOptions{
 				ReplaceAttr: func(_ []string, a slog.Attr) slog.Attr {

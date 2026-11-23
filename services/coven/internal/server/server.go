@@ -3,7 +3,6 @@ package server
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"log"
 	"net/http"
@@ -301,10 +300,6 @@ func (s *Server) handleAdminExtract(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if err := s.extractFn(r.Context(), threadID); err != nil {
-		if errors.Is(err, store.ErrAdvisoryLockBusy) {
-			http.Error(w, `{"error":"advisory lock busy"}`, http.StatusConflict)
-			return
-		}
 		log.Printf("[coven] admin extract error: %v", err)
 		http.Error(w, fmt.Sprintf(`{"error":%q}`, err.Error()), http.StatusInternalServerError)
 		return

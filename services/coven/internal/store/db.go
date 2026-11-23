@@ -199,6 +199,17 @@ func (s *SQLStore) WithDB(conn DBTX) *SQLStore {
 	return &clone
 }
 
+// WithPinnedConn returns a shallow copy of s whose queries and mutations execute on conn.
+func (s *SQLStore) WithPinnedConn(conn *sql.Conn) Store {
+	if s == nil {
+		return nil
+	}
+	if conn == nil {
+		return s
+	}
+	return s.WithDB(conn)
+}
+
 // DB returns the underlying DBTX.
 func (s *SQLStore) DB() DBTX {
 	if s != nil {

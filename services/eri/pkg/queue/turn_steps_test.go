@@ -1,9 +1,12 @@
 package queue
 
 import (
+	"bufio"
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"io"
 	"strings"
 	"sync"
 	"testing"
@@ -12,11 +15,18 @@ import (
 	"github.com/bwmarrin/discordgo"
 	"github.com/jackc/pgx/v5/pgconn"
 	restate "github.com/restatedev/sdk-go"
+	"go.opentelemetry.io/otel/attribute"
+	sdktrace "go.opentelemetry.io/otel/sdk/trace"
+	"go.opentelemetry.io/otel/sdk/trace/tracetest"
+	"go.opentelemetry.io/otel/trace"
 
 	"github.com/azylman/aerial/pkg/pubsub"
+	"github.com/azylman/aerial/pkg/tracing"
 	"github.com/azylman/aerial/services/eri/pkg/config"
 	"github.com/azylman/aerial/services/eri/pkg/db"
 	"github.com/azylman/aerial/services/eri/pkg/db/dbtest"
+	"github.com/azylman/aerial/services/eri/pkg/runner"
+	"github.com/azylman/aerial/services/eri/pkg/session"
 )
 
 func stepMsg(id, status string, retry, restart int) db.Message {
@@ -1005,4 +1015,280 @@ func runLiveBurst(ctx context.Context, pool *WorkerPool, threadID, turnID string
 // runLiveDispatch drives one dispatch turn through the TurnRunner steps.
 func runLiveDispatch(ctx context.Context, pool *WorkerPool, sessionKey, turnID, dispatchID string) liveTurn {
 	return runLiveTurn(ctx, dispatchRunner{steps: pool, sessionKey: sessionKey, dispatchID: dispatchID, ids: []string{dispatchID}}, pool.maxAttempts(), turnID)
+}
+
+func TestTurnRunner_QuotaPause_PreservesEffort(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name           string
+		effort         string
+		expectedEffort string
+	}{
+		{name: "LowEffort", effort: "low", expectedEffort: "low"},
+		{name: "MediumEffort", effort: "medium", expectedEffort: "medium"},
+		{name: "HighEffort", effort: "high", expectedEffort: "high"},
+		{name: "DefaultEffort", effort: "", expectedEffort: "high"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			store, tmpHome, tempData := setupTestStore(t), t.TempDir(), t.TempDir()
+			quotaErrSpawner := newScriptedDaemonSpawner("11111111-2222-3333-4444-555555555555",
+				`{"event":"result","result":{"status":"ERROR","exit_code":1,"error":"RESOURCE_EXHAUSTED (code 429): Google Gemini API quota reached. Resets in 30m.","stderr":"RESOURCE_EXHAUSTED (code 429): Google Gemini API quota reached. Resets in 30m."}}`+"\n",
+			)
+			primaryPool := runner.NewUnifiedProcessPool(runner.PoolConfig{Model: "gemini-3.7-pro"}, quotaErrSpawner)
+			defer primaryPool.Close()
+			lowPool := runner.NewUnifiedProcessPool(runner.PoolConfig{Model: "gemini-3.8-flash-low"}, quotaErrSpawner)
+			defer lowPool.Close()
+
+			cfg := newTestConfig(func(d *config.ConfigData) { d.DataDir, d.LowEffortModel = tempData, "gemini-3.8-flash-low" })
+			haroBus, getOneShots := newMockHaroOneShotBus(t)
+			pool := New(cfg, WorkerPoolConfig{
+				ProcessPool:          primaryPool,
+				LowEffortProcessPool: lowPool,
+				SessionManager:       session.New(tmpHome, tempData),
+				Store:                store,
+				MaxAttempts:          1,
+				EventBus:             haroBus,
+			})
+			defer pool.Stop()
+
+			threadID := "thread-runner-quota-" + tc.name
+			msg := db.Message{ID: "msg-runner-quota-" + tc.name, ThreadID: threadID, Content: "run task", Effort: tc.effort, Status: db.StatusPending, CreatedAt: time.Now()}
+			if err := store.InsertMessage(context.Background(), msg); err != nil {
+				t.Fatalf("InsertMessage: %v", err)
+			}
+
+			lt := runLiveBurst(context.Background(), pool, threadID, "turn-1", msg.ID)
+			if lt.outcome != OutcomeFailed {
+				t.Fatalf("turn outcome = %s (err = %v), want failed", lt.outcome, lt.err)
+			}
+			schedules := getOneShots(threadID)
+			if len(schedules) != 1 || schedules[0].Effort != tc.expectedEffort {
+				t.Fatalf("expected 1 schedule with effort %q, got %v", tc.expectedEffort, schedules)
+			}
+		})
+	}
+}
+
+func newTurnTraceMockSpawner(convID string, onTurn func()) *mockDaemonSpawner {
+	return &mockDaemonSpawner{
+		SpawnFn: func(ctx context.Context, cfg runner.DaemonConfig) (io.WriteCloser, io.ReadCloser, io.ReadCloser, runner.ProcessHandle, error) {
+			inR, inW := io.Pipe()
+			outR, outW := io.Pipe()
+			errR, errW := io.Pipe()
+			defer errW.Close()
+			go func() {
+				_, _ = fmt.Fprintf(outW, `{"event":"init","conversation_id":%q}`+"\n", convID)
+				scanner := bufio.NewScanner(inR)
+				for scanner.Scan() {
+					_, _ = outW.Write([]byte(`{"event":"step_update","step_update":{"step_index":1,"type":"tool_call","tool_name":"run_command"}}` + "\n"))
+					if onTurn != nil {
+						onTurn()
+					}
+					_, _ = outW.Write([]byte(`{"event":"step_update","step_update":{"step_index":1,"type":"tool_call","state":"DONE"}}` + "\n"))
+					_, _ = outW.Write([]byte(`{"event":"result","result":{"status":"SUCCESS","response":"all done","usage":{"input_tokens":7,"output_tokens":3,"total_tokens":10}}}` + "\n"))
+				}
+			}()
+			return inW, outR, errR, newMockProcessHandle(12347), nil
+		},
+	}
+}
+
+type turnTraceCase struct {
+	name        string
+	isDispatch  bool
+	traceparent string
+	wantTraceID string
+	wantParent  string
+}
+
+func runTraceTurn(t *testing.T, pool *WorkerPool, store db.Store, tc turnTraceCase, convID string) {
+	t.Helper()
+	if tc.isDispatch {
+		d := db.Dispatch{
+			ID:          "disp-trace-" + strings.ReplaceAll(tc.name, " ", "-"),
+			SessionID:   convID,
+			Prompt:      "run task",
+			Status:      db.StatusPending,
+			CreatedAt:   time.Now().Add(-500 * time.Millisecond),
+			Source:      "cron",
+			TargetID:    "default",
+			Traceparent: tc.traceparent,
+		}
+		if _, err := store.InsertDispatch(context.Background(), d); err != nil {
+			t.Fatalf("InsertDispatch: %v", err)
+		}
+		lt := runLiveDispatch(context.Background(), pool, convID, "turn-disp-1", d.ID)
+		if lt.outcome != OutcomeCompleted {
+			t.Fatalf("dispatch turn outcome = %s (err = %v), want completed", lt.outcome, lt.err)
+		}
+		return
+	}
+	msg := db.Message{
+		ID:          "msg-trace-" + strings.ReplaceAll(tc.name, " ", "-"),
+		ThreadID:    "thread-trace-" + strings.ReplaceAll(tc.name, " ", "-"),
+		Content:     "run task",
+		Status:      db.StatusPending,
+		CreatedAt:   time.Now().Add(-500 * time.Millisecond),
+		Traceparent: tc.traceparent,
+	}
+	if err := store.InsertMessage(context.Background(), msg); err != nil {
+		t.Fatalf("InsertMessage: %v", err)
+	}
+	lt := runLiveBurst(context.Background(), pool, msg.ThreadID, "turn-burst-1", msg.ID)
+	if lt.outcome != OutcomeCompleted {
+		t.Fatalf("burst turn outcome = %s (err = %v), want completed", lt.outcome, lt.err)
+	}
+}
+
+func assertTraceRootParent(t *testing.T, root sdktrace.ReadOnlySpan, tc turnTraceCase) {
+	t.Helper()
+	if tc.wantTraceID == "" {
+		if root.Parent().IsValid() {
+			t.Errorf("expected root span to have invalid parent for untraced turn, got %v", root.Parent())
+		}
+		return
+	}
+	if !root.Parent().IsValid() {
+		t.Fatalf("root span parent is not valid, want remote parent %s", tc.wantTraceID)
+	}
+	if got := root.SpanContext().TraceID().String(); got != tc.wantTraceID {
+		t.Errorf("root trace ID = %s, want %s", got, tc.wantTraceID)
+	}
+	if got := root.Parent().TraceID().String(); got != tc.wantTraceID {
+		t.Errorf("parent trace ID = %s, want %s", got, tc.wantTraceID)
+	}
+	if got := root.Parent().SpanID().String(); got != tc.wantParent {
+		t.Errorf("parent span ID = %s, want %s", got, tc.wantParent)
+	}
+}
+
+func assertTraceChildren(t *testing.T, byName map[string]sdktrace.ReadOnlySpan, root sdktrace.ReadOnlySpan) {
+	t.Helper()
+	for _, childName := range []string{spanQueueWait, spanLease, runner.OperationChat, "execute_tool run_command"} {
+		s, ok := byName[childName]
+		if !ok {
+			t.Errorf("missing expected child span %q", childName)
+			continue
+		}
+		if s.SpanContext().TraceID() != root.SpanContext().TraceID() {
+			t.Errorf("child span %q trace ID = %v, want root trace ID %v", childName, s.SpanContext().TraceID(), root.SpanContext().TraceID())
+		}
+	}
+}
+
+func assertTraceAttributes(t *testing.T, root sdktrace.ReadOnlySpan) {
+	t.Helper()
+	attrs := make(map[attribute.Key]attribute.Value, len(root.Attributes()))
+	for _, kv := range root.Attributes() {
+		attrs[kv.Key] = kv.Value
+	}
+	if attrs[runner.AttrGenAIUsageInputTokens].AsInt64() != 7 {
+		t.Errorf("input tokens = %v, want 7", attrs[runner.AttrGenAIUsageInputTokens])
+	}
+	if attrs[runner.AttrGenAIUsageOutputTokens].AsInt64() != 3 {
+		t.Errorf("output tokens = %v, want 3", attrs[runner.AttrGenAIUsageOutputTokens])
+	}
+	if inMsgs := attrs[tracing.AttrGenAIInputMessages].AsString(); inMsgs == "" {
+		t.Errorf("gen_ai.input.messages attribute is missing or empty")
+	}
+	if outMsgs := attrs[tracing.AttrGenAIOutputMessages].AsString(); outMsgs == "" {
+		t.Errorf("gen_ai.output.messages attribute is missing or empty")
+	}
+}
+
+func assertActiveTurnStatus(t *testing.T, duringSpan trace.SpanContext, root sdktrace.ReadOnlySpan, daemon string, reg *runner.ActiveTurnRegistry) {
+	t.Helper()
+	if !duringSpan.IsValid() || !duringSpan.Equal(root.SpanContext()) {
+		t.Errorf("during turn registered span = %v, want root %v", duringSpan, root.SpanContext())
+	}
+	if daemon == "" {
+		t.Errorf("no daemon was registered in ActiveTurnRegistry during turn")
+	} else if _, ok := reg.Get(daemon); ok {
+		t.Errorf("daemon %q still registered in ActiveTurnRegistry after completion", daemon)
+	}
+}
+
+func TestTurnRunner_EmitsTurnTraceAndRegistersActiveTurn(t *testing.T) {
+	t.Parallel()
+	tests := []turnTraceCase{
+		{
+			name:        "traced burst",
+			isDispatch:  false,
+			traceparent: "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01",
+			wantTraceID: "4bf92f3577b34da6a3ce929d0e0e4736",
+			wantParent:  "00f067aa0ba902b7",
+		},
+		{
+			name:        "untraced burst",
+			isDispatch:  false,
+			traceparent: "",
+		},
+		{
+			name:        "dispatch",
+			isDispatch:  true,
+			traceparent: "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01",
+			wantTraceID: "4bf92f3577b34da6a3ce929d0e0e4736",
+			wantParent:  "00f067aa0ba902b7",
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			store, tmpHome, tempData := setupTestStore(t), t.TempDir(), t.TempDir()
+			registry := runner.NewActiveTurnRegistry()
+			rec := tracetest.NewSpanRecorder()
+			tp := sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(rec))
+
+			var onTurnMu sync.Mutex
+			var duringTurnSpan trace.SpanContext
+			var capturedDaemon string
+			convID := "c1111111-2222-3333-4444-555555555555"
+
+			spawner := newTurnTraceMockSpawner(convID, func() {
+				onTurnMu.Lock()
+				defer onTurnMu.Unlock()
+				if daemon, _, ok := registry.DaemonByConversation(convID); ok {
+					capturedDaemon = daemon
+					duringTurnSpan, _ = registry.Get(daemon)
+				}
+			})
+
+			procPool := runner.NewUnifiedProcessPool(runner.PoolConfig{
+				DefaultModel: "gemini-2.5-flash",
+			}, spawner)
+			defer procPool.Close()
+
+			pool := New(newTestConfig(func(d *config.ConfigData) { d.DataDir = tempData }), WorkerPoolConfig{
+				ProcessPool:    procPool,
+				SessionManager: session.New(tmpHome, tempData),
+				Store:          store,
+				TracerProvider: tp,
+				ActiveTurns:    registry,
+				TraceContent:   true,
+			})
+			defer pool.Stop()
+
+			runTraceTurn(t, pool, store, tc, convID)
+
+			var root sdktrace.ReadOnlySpan
+			byName := make(map[string]sdktrace.ReadOnlySpan)
+			for _, s := range rec.Ended() {
+				if s.Name() == runner.OperationInvokeAgent && (!s.Parent().IsValid() || s.Parent().IsRemote()) {
+					root = s
+				} else {
+					byName[s.Name()] = s
+				}
+			}
+			if root == nil {
+				t.Fatalf("ended invoke_agent root span not found in %d spans: %v", len(rec.Ended()), rec.Ended())
+			}
+
+			assertTraceRootParent(t, root, tc)
+			assertTraceChildren(t, byName, root)
+			assertTraceAttributes(t, root)
+			assertActiveTurnStatus(t, duringTurnSpan, root, capturedDaemon, registry)
+		})
+	}
 }

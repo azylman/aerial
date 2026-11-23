@@ -65,17 +65,18 @@ func threadSend(key, method string, input any, delay time.Duration) sentCall {
 func TestThreadCoordinator_Enqueue(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
-		name       string
-		key        string
-		state      coordinatorState
-		resolver   fakeThreadResolver
-		req        ThreadEnqueueRequest
-		failInsert error
-		wantResp   ThreadEnqueueResponse
-		wantSends  []sentCall
-		wantRows   map[string]rowWant
-		wantNoRow  string
-		wantCode   int
+		name            string
+		key             string
+		state           coordinatorState
+		resolver        fakeThreadResolver
+		req             ThreadEnqueueRequest
+		failInsert      error
+		wantResp        ThreadEnqueueResponse
+		wantSends       []sentCall
+		wantRows        map[string]rowWant
+		wantNoRow       string
+		wantTraceparent string
+		wantCode        int
 	}{
 		{
 			name:      "PromptAccepted",
@@ -86,12 +87,39 @@ func TestThreadCoordinator_Enqueue(t *testing.T) {
 			wantRows:  map[string]rowWant{"m1": {status: db.StatusPending}},
 		},
 		{
+			name:            "PromptWithTraceparent",
+			key:             tcKey,
+			req:             ThreadEnqueueRequest{Prompt: "traced prompt", MessageID: "m-tp", Traceparent: "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01"},
+			wantResp:        ThreadEnqueueResponse{Status: eriwire.StatusAccepted, ThreadID: tcKey, MessageID: "m-tp"},
+			wantSends:       []sentCall{threadSend(tcKey, HandlerAppend, AppendRequest{IDs: []string{"m-tp"}}, 0)},
+			wantRows:        map[string]rowWant{"m-tp": {status: db.StatusPending}},
+			wantTraceparent: "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01",
+		},
+		{
 			name:      "DiscordMessageAccepted",
 			key:       tcKey,
 			req:       ThreadEnqueueRequest{Message: &db.Message{ID: "m2", ThreadID: tcKey, Content: "hi"}},
 			wantResp:  ThreadEnqueueResponse{Status: eriwire.StatusAccepted, ThreadID: tcKey, MessageID: "m2"},
 			wantSends: []sentCall{threadSend(tcKey, HandlerAppend, AppendRequest{IDs: []string{"m2"}}, 0)},
 			wantRows:  map[string]rowWant{"m2": {status: db.StatusPending}},
+		},
+		{
+			name:            "DiscordMessageInheritsEnvelopeTraceparent",
+			key:             tcKey,
+			req:             ThreadEnqueueRequest{Message: &db.Message{ID: "m-env-tp", ThreadID: tcKey, Content: "hi"}, Traceparent: "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-02"},
+			wantResp:        ThreadEnqueueResponse{Status: eriwire.StatusAccepted, ThreadID: tcKey, MessageID: "m-env-tp"},
+			wantSends:       []sentCall{threadSend(tcKey, HandlerAppend, AppendRequest{IDs: []string{"m-env-tp"}}, 0)},
+			wantRows:        map[string]rowWant{"m-env-tp": {status: db.StatusPending}},
+			wantTraceparent: "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-02",
+		},
+		{
+			name:            "DiscordMessagePreservesExistingTraceparent",
+			key:             tcKey,
+			req:             ThreadEnqueueRequest{Message: &db.Message{ID: "m-keep-tp", ThreadID: tcKey, Content: "hi", Traceparent: "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-03"}, Traceparent: "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-04"},
+			wantResp:        ThreadEnqueueResponse{Status: eriwire.StatusAccepted, ThreadID: tcKey, MessageID: "m-keep-tp"},
+			wantSends:       []sentCall{threadSend(tcKey, HandlerAppend, AppendRequest{IDs: []string{"m-keep-tp"}}, 0)},
+			wantRows:        map[string]rowWant{"m-keep-tp": {status: db.StatusPending}},
+			wantTraceparent: "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-03",
 		},
 		{
 			name:      "MessageWithoutIDsDerivesIDOnKey",
@@ -168,6 +196,12 @@ func TestThreadCoordinator_Enqueue(t *testing.T) {
 			if tc.wantNoRow != "" {
 				m, _ := store.GetMessage(context.Background(), tc.wantNoRow)
 				assert.Nil(t, m)
+			}
+			if tc.wantResp.MessageID != "" && tc.wantResp.Status != eriwire.StatusSkippedActive && tc.failInsert == nil && tc.wantCode == 0 {
+				m, getErr := store.GetMessage(context.Background(), tc.wantResp.MessageID)
+				require.NoError(t, getErr)
+				require.NotNil(t, m)
+				assert.Equal(t, tc.wantTraceparent, m.Traceparent)
 			}
 		})
 	}
@@ -485,62 +519,6 @@ func TestThreadCoordinator_ClearPending(t *testing.T) {
 			assert.Equal(t, tc.wantSends, h.sends)
 			assert.Equal(t, tc.wantCancels, h.cancels)
 			assert.Equal(t, tc.wantCleared, h.clearAlls > 0)
-		})
-	}
-}
-
-func TestThreadCoordinator_AdoptPending(t *testing.T) {
-	t.Parallel()
-	tests := []struct {
-		name      string
-		rows      []db.Message
-		failList  error
-		wantSends []sentCall
-		wantCode  int
-	}{
-		{name: "ListStepCancelSurfacesAsConflict", failList: errRestateCancel, wantCode: CodeQueueConflict},
-		{
-			name:      "AppendsPendingRows",
-			rows:      []db.Message{msgRow("a", tcKey, db.StatusPending), msgRow("b", tcKey, db.StatusProcessing), msgRow("c", "th-other", db.StatusPending)},
-			wantSends: []sentCall{threadSend(tcKey, HandlerAppend, AppendRequest{IDs: []string{"a"}}, 0)},
-		},
-		{name: "NothingPendingNoSend"},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			store := seedStore(t, tc.rows, nil)
-			if tc.failList != nil {
-				store.FailNext("ListPendingMessageIDsForThread", tc.failList)
-			}
-			h := newCoordHarness(t, tcKey, tcInv, coordinatorState{})
-			if assertCoordinatorErr(t, NewThreadCoordinator(store, nil, "aerial").AdoptPending(h.sharedCtx(), AdoptPendingRequest{}), tc.wantCode) {
-				return
-			}
-			assert.Equal(t, tc.wantSends, h.sends)
-		})
-	}
-}
-
-func TestThreadCoordinator_RunTurn(t *testing.T) {
-	t.Parallel()
-	tests := []struct {
-		name      string
-		state     coordinatorState
-		wantSends []sentCall
-	}{
-		{name: "IdleShimSendsAdoptPending", wantSends: []sentCall{threadSend(tcKey, HandlerAdoptPending, AdoptPendingRequest{}, 0)}},
-		{name: "BusyShimSendsAdoptPending", state: st([]string{"a"}, &ActiveTurn{TurnID: "t0"}), wantSends: []sentCall{threadSend(tcKey, HandlerAdoptPending, AdoptPendingRequest{}, 0)}},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			h := newCoordHarness(t, tcKey, tcInv, tc.state)
-			res, err := NewThreadCoordinator(nil, nil, "aerial").RunTurn(h.objectCtx(), ThreadTurnRequest{})
-			require.NoError(t, err)
-			assert.Equal(t, ThreadTurnResult{Status: "completed"}, res)
-			assert.Equal(t, tc.wantSends, h.sends)
-			assert.Equal(t, tc.state, h.snapshot(t), "the shim touches no state")
 		})
 	}
 }

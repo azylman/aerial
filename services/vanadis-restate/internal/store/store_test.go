@@ -123,6 +123,10 @@ func TestApplyRawChunkCIChecks(t *testing.T) {
 		{name: "invalid json", raw: "{oops"},
 		{name: "full", raw: `{"_head_sha":"h","_merge_sha":"m","_remediated_sha":"r","lint":"passed"}`, wantHead: "h", wantMerge: "m", wantRemed: "r", wantChecks: map[string]string{"lint": "passed"}},
 		{name: "internal only", raw: `{"_head_sha":"h"}`, wantHead: "h"},
+		{name: "merge queue preserved", raw: `{"_head_sha":"h","_merge_queue":"2/3","lint":"passed"}`, wantHead: "h", wantChecks: map[string]string{"lint": "passed", "_merge_queue": "2/3"}},
+		{name: "merge queue trimmed and preserved", raw: `{"_head_sha":"h","_merge_queue":" 1/2 ","_remediated_sha":"r"}`, wantHead: "h", wantRemed: "r", wantChecks: map[string]string{"_merge_queue": "1/2"}},
+		{name: "empty merge queue stripped", raw: `{"_head_sha":"h","_merge_queue":"   "}`, wantHead: "h"},
+		{name: "merge queue only", raw: `{"_merge_queue":"1/2"}`, wantChecks: map[string]string{"_merge_queue": "1/2"}},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -145,7 +149,7 @@ func TestApplyRawChunkCIChecks(t *testing.T) {
 }
 
 // cgChunkSelect reads every chunk with the production column list.
-const cgChunkSelect = `SELECT id, build_id, chunk_index, mode, repo, title, instructions, target_files, target_symbols, COALESCE(effort, 'medium'), acceptance_criteria, status, COALESCE(pr_number, 0), COALESCE(stall_nudges, 0), depends_on, ci_fail_count, ci_checks, rollout_state, banner, merge_awakeable_id, deploy_awakeable_id, started_at, completed_at, created_at, updated_at FROM vanadis_chunks ORDER BY chunk_index ASC`
+const cgChunkSelect = `SELECT id, build_id, chunk_index, mode, repo, title, instructions, target_files, target_symbols, COALESCE(effort, 'medium'), acceptance_criteria, status, COALESCE(pr_number, 0), COALESCE(stall_nudges, 0), depends_on, ci_fail_count, ci_checks, rollout_state, banner, started_at, completed_at, created_at, updated_at FROM vanadis_chunks ORDER BY chunk_index ASC`
 
 // cgStampChunksSQL pins the row timestamps the database defaults.
 const cgStampChunksSQL = `UPDATE vanadis_chunks SET created_at = '2026-05-01 12:00:00+00', updated_at = '2026-05-01 12:00:00+00'`
