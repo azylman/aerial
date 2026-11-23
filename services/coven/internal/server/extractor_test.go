@@ -359,8 +359,8 @@ func TestHandleEmptyUnextractedTurns(t *testing.T) {
 
 // Every turn the unextracted query returns has a non-empty response
 // (IsExtractableAdminTurn), so an empty transcript only reaches
-// processTurnBatch when called directly.
-func TestProcessTurnBatch_EmptyTranscript(t *testing.T) {
+// prepareTurnBatchPrompt when called directly.
+func TestPrepareTurnBatchPrompt_EmptyTranscript(t *testing.T) {
 	t.Parallel()
 	const threadID = "th-silent-turn"
 
@@ -381,8 +381,7 @@ func TestProcessTurnBatch_EmptyTranscript(t *testing.T) {
 			execSQL(t, db, tc.sabotage)
 			turns := []store.Message{{RowID: 15, ThreadID: threadID, Status: "COMPLETED", IsAdmin: true}}
 
-			// An empty LLM reply fails parsing, so any LLM call would surface as an error.
-			err := processTurnBatch(context.Background(), store.NewSQLStore(db), &MockOllamaClient{embedding: testEmbedding(1.0)}, extractLLM(""), threadID, turns, 15)
+			prompt, skipped, err := prepareTurnBatchPrompt(context.Background(), store.NewSQLStore(db), threadID, turns, 15, config.DefaultStack)
 			if tc.errSubstr != "" {
 				if err == nil || !strings.Contains(err.Error(), tc.errSubstr) {
 					t.Fatalf("err = %v, want substring %q", err, tc.errSubstr)
@@ -390,7 +389,10 @@ func TestProcessTurnBatch_EmptyTranscript(t *testing.T) {
 				return
 			}
 			if err != nil {
-				t.Fatalf("processTurnBatch() err = %v", err)
+				t.Fatalf("prepareTurnBatchPrompt() err = %v", err)
+			}
+			if !skipped || prompt != "" {
+				t.Errorf("prepareTurnBatchPrompt() = (%q, %v), want skipped with no prompt", prompt, skipped)
 			}
 			if wm := readExtractWatermark(t, db, config.DefaultStack, threadID); wm != tc.wantWatermark {
 				t.Errorf("watermark = %d, want %d", wm, tc.wantWatermark)
@@ -439,7 +441,7 @@ func TestReconcileCandidateFact_Postgres(t *testing.T) {
 		errSubstr string
 		wantFacts []extractFactRow
 	}{
-		{name: "CommitsInsertUnderFactWriteLock", wantFacts: []extractFactRow{{1, factText, 1}}},
+		{name: "CommitsInsert", wantFacts: []extractFactRow{{1, factText, 1}}},
 		{name: "FailedWriteRollsBack", sabotage: sabotageInsertFact, wantErr: true, errSubstr: "sabotaged"},
 	}
 
@@ -632,90 +634,52 @@ func TestHash16(t *testing.T) {
 	}
 }
 
-// unpinnedFactStore wraps Store but hides factConnProvider so withFactWriteLock falls back to factWriteMutex.
+// unpinnedFactStore wraps Store but hides factConnProvider so withFactWriteTx runs fn directly.
 type unpinnedFactStore struct {
 	store.Store
 }
 
-func TestWithFactWriteLock(t *testing.T) {
-	db := newTestDB(t)
-	sqlStore := store.NewSQLStore(db)
-	pinnedConn, err := db.Conn(context.Background())
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = pinnedConn.Close() })
-	pinnedStore := sqlStore.WithPinnedConn(pinnedConn)
-
-	unpinnedStore := unpinnedFactStore{Store: sqlStore}
-	nilDBStore := &store.SQLStore{}
+func TestWithFactWriteTx(t *testing.T) {
+	t.Parallel()
+	const factText = "Alex keeps the espresso grinder on setting twelve"
 	testErr := errors.New("write failed")
 
 	tests := []struct {
 		name         string
-		store        store.Store
+		storeKind    string
 		canceledCtx  bool
 		fnErr        error
 		wantCalled   bool
 		wantErr      bool
+		wantFacts    int
 		wantConnOpen bool
 	}{
-		{
-			name:       "nil store executes without error",
-			store:      nil,
-			wantCalled: true,
-			wantErr:    false,
-		},
-		{
-			name:       "unpinned store propagates error via mutex",
-			store:      unpinnedStore,
-			fnErr:      testErr,
-			wantCalled: true,
-			wantErr:    true,
-		},
-		{
-			name:       "unpinned store falls back to mutex without error",
-			store:      unpinnedStore,
-			wantCalled: true,
-			wantErr:    false,
-		},
-		{
-			name:       "uninitialized sql store returns conn error",
-			store:      nilDBStore,
-			wantCalled: false,
-			wantErr:    true,
-		},
-		{
-			name:       "sql store executes with pinned connection lock",
-			store:      sqlStore,
-			wantCalled: true,
-			wantErr:    false,
-		},
-		{
-			name:         "pre-pinned sql store keeps connection open after lock",
-			store:        pinnedStore,
-			wantCalled:   true,
-			wantErr:      false,
-			wantConnOpen: true,
-		},
-		{
-			name:       "sql store rolls back and propagates callback error",
-			store:      sqlStore,
-			fnErr:      testErr,
-			wantCalled: true,
-			wantErr:    true,
-		},
-		{
-			name:        "canceled context fails to acquire lock",
-			store:       sqlStore,
-			canceledCtx: true,
-			wantCalled:  false,
-			wantErr:     true,
-		},
+		{name: "unpinned store runs fn directly", storeKind: "unpinned", wantCalled: true, wantFacts: 1},
+		{name: "unpinned store propagates fn error", storeKind: "unpinned", fnErr: testErr, wantCalled: true, wantErr: true, wantFacts: 1},
+		{name: "uninitialized sql store returns conn error", storeKind: "nil-db", wantErr: true},
+		{name: "sql store commits the transaction", storeKind: "sql", wantCalled: true, wantFacts: 1},
+		{name: "pre-pinned sql store keeps connection open", storeKind: "pinned", wantCalled: true, wantFacts: 1, wantConnOpen: true},
+		{name: "fn error rolls back the transaction", storeKind: "sql", fnErr: testErr, wantCalled: true, wantErr: true, wantFacts: 0},
+		{name: "canceled context fails before fn", storeKind: "sql", canceledCtx: true, wantErr: true},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			db := newTestDB(t)
+			sqlStore := store.NewSQLStore(db)
+			pinnedConn, err := db.Conn(context.Background())
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = pinnedConn.Close() })
+			stores := map[string]store.Store{
+				"unpinned": unpinnedFactStore{Store: sqlStore},
+				"nil-db":   &store.SQLStore{},
+				"sql":      sqlStore,
+				"pinned":   sqlStore.WithPinnedConn(pinnedConn),
+			}
+
 			ctx := context.Background()
 			if tc.canceledCtx {
 				var cancel context.CancelFunc
@@ -723,10 +687,10 @@ func TestWithFactWriteLock(t *testing.T) {
 				cancel()
 			}
 			called := false
-			err := withFactWriteLock(ctx, tc.store, func(ctx context.Context, lockedStore store.Store) error {
+			err = withFactWriteTx(ctx, stores[tc.storeKind], func(ctx context.Context, txStore store.Store) error {
 				called = true
-				if tc.store != nil && lockedStore == nil {
-					t.Error("expected non-nil lockedStore when store is non-nil")
+				if _, insErr := txStore.InsertFact(ctx, factText, testEmbedding(1.0)); insErr != nil {
+					return insErr
 				}
 				return tc.fnErr
 			})
@@ -734,7 +698,11 @@ func TestWithFactWriteLock(t *testing.T) {
 				t.Fatalf("called = %v, want %v (err = %v)", called, tc.wantCalled, err)
 			}
 			if (err != nil) != tc.wantErr {
-				t.Fatalf("withFactWriteLock() err = %v, wantErr = %v", err, tc.wantErr)
+				t.Fatalf("withFactWriteTx() err = %v, wantErr = %v", err, tc.wantErr)
+			}
+			// Read through the pool: only committed rows are visible.
+			if got := len(readExtractFacts(t, db)); got != tc.wantFacts {
+				t.Errorf("committed facts = %d, want %d", got, tc.wantFacts)
 			}
 			if tc.wantConnOpen {
 				if pingErr := pinnedConn.PingContext(context.Background()); pingErr != nil {
@@ -745,155 +713,147 @@ func TestWithFactWriteLock(t *testing.T) {
 	}
 }
 
-func TestReconcileCandidateFact_ConcurrentExtraction(t *testing.T) {
+// TestReconcileCandidateFact_ConcurrentWrites runs reconciliations in parallel with no global
+// fact lock: tier-2 reinforcements of one row serialize on its row lock and none is lost, and
+// unrelated inserts proceed independently.
+func TestReconcileCandidateFact_ConcurrentWrites(t *testing.T) {
 	t.Parallel()
-	db := newTestDB(t)
-	s := store.NewSQLStore(db)
-
-	item := ExtractedFactItem{
-		Action:   "ADD",
-		FactText: "Alex prefers single-origin espresso in the morning",
-	}
-
-	const concurrency = 2
-	errCh := make(chan error, concurrency)
-	var wg sync.WaitGroup
-	wg.Add(concurrency)
-
-	for range concurrency {
-		client := &MockOllamaClient{embedding: testEmbedding(1.0)}
-		go func() {
-			defer wg.Done()
-			errCh <- reconcileCandidateFact(context.Background(), s, client, nil, item, "aerial")
-		}()
-	}
-	wg.Wait()
-	close(errCh)
-
-	for err := range errCh {
-		if err != nil {
-			t.Fatalf("reconcileCandidateFact error: %v", err)
-		}
-	}
-
-	res, err := s.GetFactsPaginated(context.Background(), store.FactsFilter{})
-	if err != nil {
-		t.Fatalf("GetFactsPaginated error: %v", err)
-	}
-	if len(res.Facts) != 1 {
-		t.Fatalf("expected 1 fact stored after concurrent extraction, got %d", len(res.Facts))
-	}
-	if res.Facts[0].ReinforceCount != 2 {
-		t.Fatalf("expected fact to be reinforced once (reinforce_count=2), got %d", res.Facts[0].ReinforceCount)
-	}
-}
-
-func TestDecisionMatchesNeighbors(t *testing.T) {
-	t.Parallel()
-
-	neighbors := []store.ScoredFact{
-		{Fact: store.Fact{ID: 10, FactText: "fact 10"}},
-		{Fact: store.Fact{ID: 20, FactText: "fact 20"}},
-	}
+	const seededText = "Alex prefers single-origin espresso in the morning"
 
 	tests := []struct {
-		name      string
-		dec       ExtractedFactItem
-		neighbors []store.ScoredFact
-		want      bool
+		name          string
+		seed          bool
+		workers       int
+		distinct      bool
+		wantFacts     int
+		wantReinforce int
 	}{
-		{
-			name:      "ADD always matches",
-			dec:       ExtractedFactItem{Action: "ADD"},
-			neighbors: neighbors,
-			want:      true,
-		},
-		{
-			name:      "DELETE matching delete_id",
-			dec:       ExtractedFactItem{Action: "DELETE", DeleteID: 10},
-			neighbors: neighbors,
-			want:      true,
-		},
-		{
-			name:      "DELETE matching supersedes_id fallback",
-			dec:       ExtractedFactItem{Action: "DELETE", SupersedesID: 20},
-			neighbors: neighbors,
-			want:      true,
-		},
-		{
-			name:      "DELETE missing target",
-			dec:       ExtractedFactItem{Action: "DELETE", DeleteID: 99},
-			neighbors: neighbors,
-			want:      false,
-		},
-		{
-			name:      "DELETE non-positive target",
-			dec:       ExtractedFactItem{Action: "DELETE", DeleteID: 0},
-			neighbors: neighbors,
-			want:      false,
-		},
-		{
-			name:      "UPDATE matching supersedes_id",
-			dec:       ExtractedFactItem{Action: "UPDATE", SupersedesID: 20},
-			neighbors: neighbors,
-			want:      true,
-		},
-		{
-			name:      "UPDATE matching delete_id fallback",
-			dec:       ExtractedFactItem{Action: "UPDATE", DeleteID: 10},
-			neighbors: neighbors,
-			want:      true,
-		},
-		{
-			name:      "UPDATE missing target",
-			dec:       ExtractedFactItem{Action: "UPDATE", SupersedesID: 99},
-			neighbors: neighbors,
-			want:      false,
-		},
-		{
-			name:      "UPDATE non-positive target",
-			dec:       ExtractedFactItem{Action: "UPDATE", SupersedesID: 0},
-			neighbors: neighbors,
-			want:      false,
-		},
-		{
-			name:      "NOOP matching supersedes_id",
-			dec:       ExtractedFactItem{Action: "NOOP", SupersedesID: 10},
-			neighbors: neighbors,
-			want:      true,
-		},
-		{
-			name:      "NOOP missing target",
-			dec:       ExtractedFactItem{Action: "NOOP", SupersedesID: 99},
-			neighbors: neighbors,
-			want:      false,
-		},
-		{
-			name:      "NOOP non-positive target with non-empty neighbors",
-			dec:       ExtractedFactItem{Action: "NOOP", SupersedesID: 0},
-			neighbors: neighbors,
-			want:      true,
-		},
-		{
-			name:      "NOOP non-positive target with empty neighbors",
-			dec:       ExtractedFactItem{Action: "NOOP", SupersedesID: 0},
-			neighbors: nil,
-			want:      false,
-		},
-		{
-			name:      "unknown action returns false",
-			dec:       ExtractedFactItem{Action: "UNKNOWN"},
-			neighbors: neighbors,
-			want:      false,
-		},
+		{name: "ReinforcementsOfOneNeighborAllLand", seed: true, workers: 6, wantFacts: 1, wantReinforce: 7},
+		{name: "UnrelatedInsertsAllLand", workers: 6, distinct: true, wantFacts: 6, wantReinforce: 1},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			got := decisionMatchesNeighbors(tc.dec, tc.neighbors)
-			if got != tc.want {
-				t.Fatalf("decisionMatchesNeighbors(%+v) = %v, want %v", tc.dec, got, tc.want)
+			db := newTestDB(t)
+			s := store.NewSQLStore(db)
+			if tc.seed {
+				seedFacts(t, s, []string{seededText}, [][]float32{testEmbeddingAt(0, 1)})
+			}
+
+			errCh := make(chan error, tc.workers)
+			var wg sync.WaitGroup
+			for i := range tc.workers {
+				idx, text := 0, seededText
+				if tc.distinct {
+					idx, text = i, fmt.Sprintf("Alex owns household appliance number %d", i)
+				}
+				client := &MockOllamaClient{embedding: testEmbeddingAt(idx, 1)}
+				item := ExtractedFactItem{Action: actionAdd, FactText: text}
+				wg.Go(func() {
+					errCh <- reconcileCandidateFact(context.Background(), s, client, nil, item, "aerial")
+				})
+			}
+			wg.Wait()
+			close(errCh)
+			for err := range errCh {
+				if err != nil {
+					t.Fatalf("reconcileCandidateFact error: %v", err)
+				}
+			}
+
+			got := readExtractFacts(t, db)
+			if len(got) != tc.wantFacts {
+				t.Fatalf("facts = %+v, want %d rows", got, tc.wantFacts)
+			}
+			if got[0].count != tc.wantReinforce {
+				t.Errorf("first fact reinforce_count = %d, want %d", got[0].count, tc.wantReinforce)
+			}
+		})
+	}
+}
+
+// vanishingStore deletes the target fact right before each fact mutation, standing in for a
+// concurrent writer that removed the neighbor between the read and the write.
+type vanishingStore struct {
+	*store.SQLStore
+}
+
+func (v vanishingStore) ReinforceFact(ctx context.Context, id int64) error {
+	if err := v.SQLStore.DeleteFact(ctx, id); err != nil {
+		return err
+	}
+	return v.SQLStore.ReinforceFact(ctx, id)
+}
+
+func (v vanishingStore) UpdateFact(ctx context.Context, id int64, text string, emb []float32) error {
+	if err := v.SQLStore.DeleteFact(ctx, id); err != nil {
+		return err
+	}
+	return v.SQLStore.UpdateFact(ctx, id, text, emb)
+}
+
+func (v vanishingStore) DeleteFact(ctx context.Context, id int64) error {
+	if err := v.SQLStore.DeleteFact(ctx, id); err != nil {
+		return err
+	}
+	return v.SQLStore.DeleteFact(ctx, id)
+}
+
+func TestWriteCandidateReconcile_TargetVanished(t *testing.T) {
+	t.Parallel()
+	const (
+		seededText = "Alex prefers oat milk in every latte"
+		candText   = "Alex prefers whole milk in cappuccinos"
+	)
+
+	tests := []struct {
+		name      string
+		candDeg   float64
+		decision  *ExtractedFactItem
+		wantFacts []extractFactRow
+	}{
+		{name: "Tier2ReinforceInsertsCandidate", candDeg: 0, wantFacts: []extractFactRow{{2, candText, 1}}},
+		{name: "Tier3UpdateInsertsCandidate", candDeg: 40, decision: &ExtractedFactItem{Action: actionUpdate, SupersedesID: 1, FactText: candText}, wantFacts: []extractFactRow{{2, candText, 1}}},
+		{name: "Tier3NoopInsertsCandidate", candDeg: 40, decision: &ExtractedFactItem{Action: actionNoop, SupersedesID: 1}, wantFacts: []extractFactRow{{2, candText, 1}}},
+		{name: "Tier3DeleteIsAlreadyDone", candDeg: 40, decision: &ExtractedFactItem{Action: actionDelete, DeleteID: 1}},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			db := newTestDB(t)
+			s := store.NewSQLStore(db)
+			seedFacts(t, s, []string{seededText}, [][]float32{angleEmbedding(0)})
+
+			plan := reconcilePlan{Admit: true, Embedding: angleEmbedding(tc.candDeg), Decision: tc.decision}
+			item := ExtractedFactItem{Action: actionAdd, FactText: candText}
+			if err := writeCandidateReconcile(context.Background(), vanishingStore{SQLStore: s}, item, plan, "aerial"); err != nil {
+				t.Fatalf("writeCandidateReconcile() err = %v", err)
+			}
+			if got := readExtractFacts(t, db); !slices.Equal(got, tc.wantFacts) {
+				t.Errorf("facts = %+v, want %+v", got, tc.wantFacts)
+			}
+		})
+	}
+}
+
+func TestExtractLLMKey(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name    string
+		attempt int
+		want    string
+	}{
+		{name: "FirstAttemptKeepsBareKey", attempt: 0, want: "coven:extract:aerial:th-1:42"},
+		{name: "SecondAttemptAppendsOrdinal", attempt: 1, want: "coven:extract:aerial:th-1:42:a1"},
+		{name: "ThirdAttemptAppendsOrdinal", attempt: 2, want: "coven:extract:aerial:th-1:42:a2"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got := extractLLMKey("aerial", "th-1", 42, tc.attempt); got != tc.want {
+				t.Errorf("extractLLMKey() = %q, want %q", got, tc.want)
 			}
 		})
 	}

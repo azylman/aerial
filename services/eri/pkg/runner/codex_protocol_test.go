@@ -484,7 +484,7 @@ func TestCodexProtocol_DispatchStreamEvents(t *testing.T) {
 		claudeToolIDs: make(map[string]int),
 		stderrTail:    newTailBuffer(4096),
 	}
-	daemon.SetSessionID("root-thread-1")
+	daemon.sessionID = "root-thread-1"
 
 	daemon.dispatchCodexJSONRPCLine("")
 	daemon.dispatchCodexJSONRPCLine("not-json")
@@ -673,7 +673,7 @@ func TestCodexProtocol_CommentaryBufferingTurnSink(t *testing.T) {
 				claudeToolIDs: make(map[string]int),
 				stderrTail:    newTailBuffer(4096),
 			}
-			daemon.SetSessionID("root-thread-1")
+			daemon.sessionID = "root-thread-1"
 
 			var hookDeltas int
 			innerBuf := NewBufferingTurnSink(BufferingTurnSinkConfig{
@@ -724,7 +724,7 @@ func TestCodexProtocol_DispatchStreamToolEvents(t *testing.T) {
 		},
 		claudeToolIDs: make(map[string]int),
 	}
-	daemon.SetSessionID("root-thread-1")
+	daemon.sessionID = "root-thread-1"
 
 	sink := newMockTurnSink()
 	enqueueInflightTurn(daemon, "turn-tools", sink)

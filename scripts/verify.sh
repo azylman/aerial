@@ -202,9 +202,8 @@ run_golangci_lint() {
             echo "   [golangci-lint] Linting $svc ($targets)..."
         fi
         if has_cmd golangci-lint; then
-            export GOTOOLCHAIN="${GOTOOLCHAIN:-go1.27.3}"
             # shellcheck disable=SC2086
-            (cd "$svc" && golangci-lint run --concurrency "${AERIAL_LINT_CONCURRENCY:-4}" --allow-parallel-runners --path-prefix="$svc/" --config "$REPO_ROOT/.golangci.yml" $targets)
+            (cd "$svc" && GOTOOLCHAIN="${GOTOOLCHAIN:-go1.27.3}" golangci-lint run --concurrency "${AERIAL_LINT_CONCURRENCY:-4}" --allow-parallel-runners --path-prefix="$svc/" --config "$REPO_ROOT/.golangci.yml" $targets)
         elif has_docker; then
             # shellcheck disable=SC2086
             docker run --rm \
@@ -300,48 +299,6 @@ run_deadcode() {
         if [ -n "$dead_test" ]; then
             echo "🚨 [Aerial Verify] [FAIL] deadcode -test found unreachable functions in $svc:" >&2
             echo "$dead_test" | sed 's/^/   • /' >&2
-            exit 1
-        fi
-    fi
-}
-
-run_go_test() {
-    svc="$1"
-    if [ -d "$svc" ]; then
-        echo "   [go test] Testing $svc (clean-room)..."
-        cgo_val="${CGO_ENABLED:-}"
-        if [ -z "$cgo_val" ]; then
-            if has_cmd gcc || has_cmd clang; then
-                cgo_val=1
-            else
-                cgo_val=0
-            fi
-        fi
-        race_flag=""
-        if [ "$cgo_val" = "1" ]; then
-            race_flag="-race"
-        fi
-        if has_cmd go; then
-            (cd "$svc" && hermetic_go \
-                CGO_ENABLED="$cgo_val" \
-                go test ${race_flag:+"$race_flag"} -trimpath ./...)
-        elif has_docker; then
-            docker run --rm \
-                -v aerial-go-cache:/root/.cache/go-build \
-                -v aerial-go-pkg:/go/pkg/mod \
-                -v "$(pwd)/$svc:/app" -w /app \
-                -e CGO_ENABLED=1 \
-                golang:1.27.3 env -i \
-                PATH="/go/bin:/usr/local/go/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin" \
-                HOME="/root" \
-                GOPATH="/go" \
-                GOCACHE="/root/.cache/go-build" \
-                CGO_ENABLED=1 \
-                LANG="en_US.UTF-8" \
-                LC_ALL="en_US.UTF-8" \
-                go test -race -trimpath ./...
-        else
-            echo "🚨 [Aerial Verify] Error: Neither go nor docker found in PATH." >&2
             exit 1
         fi
     fi
@@ -495,7 +452,7 @@ check_no_imperative_ddl() {
     violations=$(echo "$files" | while read -r f; do
         [ -f "$f" ] || continue
         # Ignore comments and check for raw DDL
-        grep -H -n -i -E '\b(CREATE|ALTER|DROP)[[:space:]]+TABLE\b' "$f" 2>/dev/null | grep -v -E '^[[:space:]]*(//|#|\*)' || true
+        grep -H -n -i -E '\b(CREATE|ALTER|DROP)[[:space:]]+TABLE\b' "$f" 2>/dev/null | grep -v -E '^[^:]+:[0-9]+:[[:space:]]*(//|#|\*)' || true
     done)
 
     if [ -n "$violations" ]; then
@@ -736,16 +693,12 @@ for jf in services/grafana/dashboards/*.json; do
 done
 
 echo "=== 3. Unit Test Suites ==="
-for svc in $GO_SERVICES; do
-    run_go_test "$svc"
-done
-
 if [ -d "services/homepage/test" ]; then
     run_node_test "services/homepage" "test/*.test.js"
 fi
 run_node_test "web/theme" "aerial-theme.test.js"
 
-echo "=== 4. Test Coverage Gating ==="
+echo "=== 4. Go Unit Tests & Coverage Gating ==="
 if [ -f "$SCRIPT_DIR/check-coverage.sh" ]; then
     sh "$SCRIPT_DIR/check-coverage.sh" --check
 fi

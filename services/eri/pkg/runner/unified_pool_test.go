@@ -544,35 +544,6 @@ func TestUnifiedProcessPool_SetSessionManager(t *testing.T) {
 	nilPool.SetSessionManager(sm)
 }
 
-func TestUnifiedProcessPool_SetTerminalTurnRescuer(t *testing.T) {
-	mock := newPipeMockSpawner(pipeMockSpawnerOpts{pid: 260})
-	pool := NewUnifiedProcessPool(PoolConfig{}, mock)
-	defer pool.Close()
-
-	ctx := context.Background()
-	daemon, err := pool.GetOrCreate(ctx, "target:setter", "")
-	if err != nil || daemon == nil {
-		t.Fatalf("GetOrCreate failed: %v", err)
-	}
-
-	var updatedCalled bool
-	updatedRescuer := func(ctx context.Context, convID string, since time.Time) string {
-		updatedCalled = true
-		return "propagated rescue"
-	}
-
-	pool.SetTerminalTurnRescuer(updatedRescuer)
-
-	turn := &TurnContext{Ctx: ctx}
-	got := daemon.rescueTerminalTurn(turn)
-	if got != "propagated rescue" || !updatedCalled {
-		t.Fatalf("expected rescuer to propagate to daemon, got %q (called=%v)", got, updatedCalled)
-	}
-
-	var nilPool *UnifiedProcessPool
-	nilPool.SetTerminalTurnRescuer(updatedRescuer)
-}
-
 func TestUnifiedProcessPool_WatchdogRescue(t *testing.T) {
 	mock := newPipeMockSpawner(pipeMockSpawnerOpts{pid: 250})
 	pool := NewUnifiedProcessPool(PoolConfig{
@@ -717,10 +688,6 @@ func TestUnifiedProcessPool_GetHasDaemonAndMarkDirty(t *testing.T) {
 	}
 	if got, ok := pool.Get("kiosk"); !ok || got != d {
 		t.Errorf("expected pool.Get to return daemon %p, got %p, ok=%v", d, got, ok)
-	}
-	d.SetSessionID("00000000-0000-0000-0000-000000000098")
-	if d.SessionID() != "00000000-0000-0000-0000-000000000098" {
-		t.Errorf("expected session ID update")
 	}
 	pool.MarkDirty()
 	if !d.IsDirty() {

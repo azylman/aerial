@@ -39,6 +39,20 @@ var (
 		[]string{"op"},
 	)
 
+	RestateRegistered = prometheus.NewGauge(
+		prometheus.GaugeOpts{
+			Name: "coven_restate_registered",
+			Help: "1 once coven's Restate deployment registered with the admin API since process start, else 0.",
+		},
+	)
+
+	ExtractBatchesRejectedTotal = prometheus.NewCounter(
+		prometheus.CounterOpts{
+			Name: "coven_extract_batches_rejected_total",
+			Help: "Extraction batches skipped after the LLM returned an invalid answer on every allowed attempt.",
+		},
+	)
+
 	FactsStoredTotal = prometheus.NewCounterVec(
 		prometheus.CounterOpts{
 			Name: "coven_facts_stored_total",
@@ -67,8 +81,11 @@ func init() {
 	registerCovenCollector(OperationsTotal)
 	registerCovenCollector(OperationDurationSeconds)
 	registerCovenCollector(FactsStoredTotal)
+	registerCovenCollector(RestateRegistered)
+	registerCovenCollector(ExtractBatchesRejectedTotal)
 
 	FactsTotal.Set(0)
+	RestateRegistered.Set(0)
 	for _, op := range knownOps {
 		OperationDurationSeconds.WithLabelValues(op)
 		for _, status := range knownStatuses {

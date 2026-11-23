@@ -4,8 +4,6 @@ import (
 	"context"
 	"database/sql"
 	"errors"
-	"math"
-	"slices"
 	"testing"
 	"time"
 
@@ -41,7 +39,6 @@ func assertStoreUnavailable(t *testing.T, s db.Store) {
 	requireErr(t, c1(s.GetRecentThreadMessages(ctx, "t", 10)), "GetRecentThreadMessages")
 	requireErr(t, c1(s.GetActiveTasks(ctx)), "GetActiveTasks")
 	requireErr(t, c1(s.GetSessionID(ctx, "t")), "GetSessionID")
-	requireErr(t, c1(s.ResolveThreadForSession(ctx, "s")), "ResolveThreadForSession")
 	requireErr(t, s.SaveSessionID(ctx, "t", "s"), "SaveSessionID")
 	requireErr(t, c1(s.IncrementSessionTurnCount(ctx, "k")), "IncrementSessionTurnCount")
 	requireErr(t, c1(s.GetSessionTurnCount(ctx, "k")), "GetSessionTurnCount")
@@ -114,10 +111,10 @@ func assertFakeStoreMessageStatusTransitions(ctx context.Context, t *testing.T, 
 		t.Errorf("ClaimPendingMessage non-existent = true, want false")
 	}
 
-	_ = s.UpdateMessageCompleted(ctx, "msg-1", "Done response", "")
+	_ = s.UpdateMessageCompleted(ctx, "msg-1", "Done response", "conv-1", db.TurnTelemetry{DurationMs: 50, TotalTokens: 25})
 	_ = s.UpdateMessageCompleted(ctx, "msg-none", "No-op", "")
-	if msg, _ := s.GetMessage(ctx, "msg-1"); msg.Status != db.StatusCompleted || msg.ResponseText != "Done response" {
-		t.Errorf("expected completed, got %+v", msg)
+	if msg, _ := s.GetMessage(ctx, "msg-1"); msg.Status != db.StatusCompleted || msg.ResponseText != "Done response" || msg.ConversationID != "conv-1" || msg.DurationMs != 50 {
+		t.Errorf("expected completed with conv-1 and telemetry, got %+v", msg)
 	}
 }
 
@@ -150,6 +147,7 @@ func TestFakeStoreMessageOperations(t *testing.T) {
 	m1 := db.Message{ID: "msg-1", ThreadID: "th-1", Content: "Hello", Summary: "Summ"}
 	mustOK(t, s.InsertMessage(ctx, m1), "InsertMessage")
 	mustOK(t, s.InsertMessage(ctx, m1), "Idempotent InsertMessage")
+	mustOK(t, s.InsertMessage(ctx, db.Message{ID: ""}), "Empty ID InsertMessage")
 	mustOK(t, s.InsertMessage(ctx, db.Message{ID: "msg-2", ThreadID: "th-1", Content: "World"}), "InsertMessage msg-2")
 
 	if ok, err := s.MessageExists(ctx, "msg-1"); err != nil || !ok {
@@ -364,6 +362,9 @@ func TestFakeStoreSessionOperations(t *testing.T) {
 	if id, err := s.GetSessionID(ctx, "th-1"); err != nil || id != "" {
 		t.Errorf("expected empty session ID, got %q, %v", id, err)
 	}
+	if prev, err := s.GetPreviousSessionID(ctx, "th-1"); err != nil || prev != "" {
+		t.Errorf("expected empty previous session ID, got %q, %v", prev, err)
+	}
 	mustOK(t, s.SaveSessionID(ctx, "th-1", "sess-1"), "SaveSessionID")
 	if id, _ := s.GetSessionID(ctx, "th-1"); id != "sess-1" {
 		t.Errorf("expected sess-1, got %q", id)
@@ -404,392 +405,12 @@ func TestFakeStoreSessionOperations(t *testing.T) {
 	assertFakeStoreUnrotatedSessions(ctx, t, s, now)
 }
 
-func TestFakeStoreResolveThreadForSession(t *testing.T) {
-	t.Parallel()
-	s := NewFakeStore()
-	ctx := context.Background()
-	mustOK(t, s.SaveSessionID(ctx, "111", "sess-a"), "SaveSessionID")
-	mustOK(t, s.RotateSessionID(ctx, "111", "sess-b"), "RotateSessionID")
-
-	for _, tc := range []struct {
-		name  string
-		query string
-		want  string
-	}{
-		{name: "empty resolves empty", query: "   ", want: ""},
-		{name: "unknown resolves empty", query: "nope", want: ""},
-		{name: "current session resolves thread", query: "sess-b", want: "discord-111"},
-		{name: "previous session resolves thread", query: "sess-a", want: "discord-111"},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			got, err := s.ResolveThreadForSession(ctx, tc.query)
-			if err != nil {
-				t.Fatalf("unexpected error: %v", err)
-			}
-			if got != tc.want {
-				t.Errorf("ResolveThreadForSession(%q) = %q, want %q", tc.query, got, tc.want)
-			}
-		})
-	}
-}
-
-func TestFakeStoreTranscriptsPRAndVanadis(t *testing.T) {
-	s := NewFakeStore()
-	ctx := context.Background()
-
-	mustOK(t, s.UpsertSessionSummary(ctx, db.SessionSummary{SessionID: "sess-1", ThreadID: "th-1", Summary: "Cockpit debug session"}), "UpsertSessionSummary")
-	mustOK(t, s.UpsertSessionSummary(ctx, db.SessionSummary{SessionID: "sess-1", LastMtime: time.Now().UTC()}), "UpsertSessionSummary with LastMtime")
-	if syncStates, err := s.GetSessionSyncStates(ctx); err != nil || len(syncStates) != 1 || syncStates["sess-1"].SessionID != "sess-1" {
-		t.Fatalf("GetSessionSyncStates failed: %v", err)
-	}
-	steps := []db.TranscriptStep{{SessionID: "sess-1", StepIndex: 0, StepType: "user", Content: "launch aerial"}, {SessionID: "sess-1", StepIndex: 1, StepType: "assistant", ToolName: "fly", Content: "flying aerial"}}
-	mustOK(t, s.BatchInsertTranscriptSteps(ctx, steps), "BatchInsertTranscriptSteps")
-	if stepResults, _ := s.SearchTranscriptSteps(ctx, "", "aerial", "sess-1", "", 10); len(stepResults) != 2 {
-		t.Errorf("SearchTranscriptSteps = %d, want 2", len(stepResults))
-	}
-	if summaries, _ := s.SearchSessionSummaries(ctx, "", nil, "debug", 10, 0.0); len(summaries) != 1 {
-		t.Errorf("SearchSessionSummaries = %d, want 1", len(summaries))
-	}
-}
-
 func TestFakeStoreCloneNil(t *testing.T) {
 	if cloneSlice[int](nil) != nil || len(cloneSlice([]int{1, 2, 3})) != 3 {
 		t.Errorf("unexpected cloneSlice results")
 	}
-	if cloneMessage(nil) != nil || clonePtr[db.SessionInfo](nil) != nil ||
-		cloneSessionSummary(nil) != nil {
+	if cloneMessage(nil) != nil || clonePtr[db.SessionInfo](nil) != nil {
 		t.Errorf("expected nil clones for nil inputs")
-	}
-}
-
-func TestCosineSimilarity(t *testing.T) {
-	simTests := []struct {
-		name     string
-		a, b     []float32
-		expected float64
-	}{
-		{name: "both_nil", a: nil, b: nil, expected: 0.0},
-		{name: "one_empty", a: []float32{}, b: []float32{1.0}, expected: 0.0},
-		{name: "mismatched_len", a: []float32{1.0}, b: []float32{1.0, 2.0}, expected: 0.0},
-		{name: "zero_vector", a: []float32{0.0, 0.0}, b: []float32{1.0, 1.0}, expected: 0.0},
-		{name: "identical", a: []float32{1.0, 0.0}, b: []float32{1.0, 0.0}, expected: 1.0},
-	}
-	for _, tc := range simTests {
-		t.Run(tc.name, func(t *testing.T) {
-			got := cosineSimilarity(tc.a, tc.b)
-			if math.Abs(got-tc.expected) > 0.001 {
-				t.Errorf("cosineSimilarity() = %f, want %f", got, tc.expected)
-			}
-		})
-	}
-}
-
-func TestTranscriptStore_FakeStore_CRUD_And_SyncStates(t *testing.T) {
-	store := NewFakeStore()
-	ctx := context.Background()
-	syncStates, err := store.GetSessionSyncStates(ctx)
-	if err != nil || len(syncStates) != 0 {
-		t.Fatalf("expected 0 sync states, got %d, err: %v", len(syncStates), err)
-	}
-	if err = store.UpsertSessionSummary(ctx, db.SessionSummary{SessionID: ""}); err == nil {
-		t.Errorf("expected error for empty session ID")
-	}
-
-	now := time.Now().UTC().Truncate(time.Second)
-	summary := db.SessionSummary{
-		SessionID: "sess-1", ThreadID: "th-1", Summary: "Debugged interface",
-		LastIndexedStep: 10, LastMtime: now, SummaryStepWatermark: 5, IsSettled: false,
-	}
-	if err = store.UpsertSessionSummary(ctx, summary); err != nil {
-		t.Fatalf("UpsertSessionSummary failed: %v", err)
-	}
-	syncStates, err = store.GetSessionSyncStates(ctx)
-	if err != nil || syncStates["sess-1"].LastIndexedStep != 10 || syncStates["sess-1"].IsSettled || syncStates["sess-1"].LastMtime.IsZero() {
-		t.Fatalf("unexpected state1: %+v", syncStates["sess-1"])
-	}
-
-	updateSummary := db.SessionSummary{SessionID: "sess-1", Summary: "Updated", LastIndexedStep: 25, SummaryStepWatermark: 25, IsSettled: true, Embedding: []float32{1.0, 2.0}}
-	if err = store.UpsertSessionSummary(ctx, updateSummary); err != nil {
-		t.Fatalf("UpsertSessionSummary update failed: %v", err)
-	}
-	syncStates, err = store.GetSessionSyncStates(ctx)
-	if err != nil || syncStates["sess-1"].LastIndexedStep != 25 || !syncStates["sess-1"].IsSettled {
-		t.Fatalf("unexpected state after update: %+v, err: %v", syncStates["sess-1"], err)
-	}
-
-	if err = store.UpsertSessionSummary(ctx, db.SessionSummary{SessionID: "sess-1", LastIndexedStep: 30, IsSettled: false}); err != nil {
-		t.Fatalf("UpsertSessionSummary unsettle failed: %v", err)
-	}
-	syncStates, err = store.GetSessionSyncStates(ctx)
-	if err != nil || syncStates["sess-1"].IsSettled {
-		t.Fatalf("expected IsSettled=false after LastIndexedStep > SummaryStepWatermark, got %+v", syncStates["sess-1"])
-	}
-
-	if err = store.UpsertSessionSummary(ctx, db.SessionSummary{SessionID: "sess-1", LastIndexedStep: -2}); err != nil {
-		t.Fatalf("UpsertSessionSummary reset failed: %v", err)
-	}
-	syncStates, err = store.GetSessionSyncStates(ctx)
-	if err != nil || syncStates["sess-1"].LastIndexedStep != -1 {
-		t.Fatalf("expected LastIndexedStep=-1, got %+v", syncStates["sess-1"])
-	}
-}
-
-func TestTranscriptStore_FakeStore_BatchInsertTranscriptSteps(t *testing.T) {
-	store := NewFakeStore()
-	ctx := context.Background()
-	if err := store.UpsertSessionSummary(ctx, db.SessionSummary{SessionID: "sess-steps-1", ThreadID: "th-steps-1", Summary: "Session for steps"}); err != nil {
-		t.Fatalf("UpsertSessionSummary failed: %v", err)
-	}
-
-	now := time.Now().UTC()
-	steps := []db.TranscriptStep{
-		{SessionID: "sess-steps-1", StepIndex: 0, StepType: "user_message", Content: "Deploy app", CreatedAt: now.Add(-2 * time.Minute)},
-		{SessionID: "sess-steps-1", StepIndex: 1, StepType: "tool_call", ToolName: "run_command", Content: "kubectl apply -f deployment.yaml", CreatedAt: now.Add(-1 * time.Minute)},
-		{SessionID: "sess-steps-1", StepIndex: 2, StepType: "tool_result", ToolName: "run_command", Content: "deployment configured", CreatedAt: now},
-	}
-	if err := store.BatchInsertTranscriptSteps(ctx, steps); err != nil {
-		t.Fatalf("BatchInsertTranscriptSteps failed: %v", err)
-	}
-
-	results, err := store.SearchTranscriptSteps(ctx, "", "", "sess-steps-1", "", 10)
-	if err != nil || len(results) != 3 {
-		t.Fatalf("expected 3 steps, got %d (err: %v)", len(results), err)
-	}
-
-	dupSteps := []db.TranscriptStep{
-		{SessionID: "sess-steps-1", StepIndex: 1, StepType: "tool_call", ToolName: "run_command", Content: "DIFFERENT CONTENT IGNORED"},
-		{SessionID: "sess-steps-1", StepIndex: 3, StepType: "model_response", Content: "Deployment completed"},
-	}
-	if err = store.BatchInsertTranscriptSteps(ctx, dupSteps); err != nil {
-		t.Fatalf("BatchInsertTranscriptSteps with duplicates failed: %v", err)
-	}
-
-	resultsAfter, err := store.SearchTranscriptSteps(ctx, "", "", "sess-steps-1", "", 10)
-	if err != nil || len(resultsAfter) != 4 {
-		t.Fatalf("expected 4 steps total, got %d (err: %v)", len(resultsAfter), err)
-	}
-	for _, r := range resultsAfter {
-		if r.StepIndex == 1 && r.Content != "kubectl apply -f deployment.yaml" {
-			t.Errorf("expected original content for step 1 preserved, got %q", r.Content)
-		}
-	}
-
-	if err := store.BatchInsertTranscriptSteps(ctx, nil); err != nil {
-		t.Errorf("expected nil error for nil slice")
-	}
-	if err := store.BatchInsertTranscriptSteps(ctx, []db.TranscriptStep{{SessionID: ""}}); err != nil {
-		t.Errorf("expected nil error for empty sessionID step")
-	}
-}
-
-type fakeStoreSearchSummaryCase struct {
-	name, query, wantID     string
-	emb                     []float32
-	limit, wantMin, wantMax int
-	minScore, wantMinScore  float64
-}
-
-func assertFakeStoreSearchSummaryCase(t *testing.T, results []db.SessionSummary, tc fakeStoreSearchSummaryCase) {
-	t.Helper()
-	if len(results) < tc.wantMin || len(results) > tc.wantMax {
-		t.Fatalf("got %d results, want between %d and %d", len(results), tc.wantMin, tc.wantMax)
-	}
-	if tc.wantID != "" && (len(results) == 0 || results[0].SessionID != tc.wantID) {
-		t.Errorf("got top result %v, want ID %s", results, tc.wantID)
-	}
-	if tc.wantMinScore > 0 && len(results) > 0 && results[0].Score < tc.wantMinScore {
-		t.Errorf("got score %f, want >= %f", results[0].Score, tc.wantMinScore)
-	}
-}
-
-func assertFakeStoreSummaryFailureHandling(ctx context.Context, t *testing.T, store *FakeStore, embVector []float32) {
-	t.Helper()
-	if err := store.UpsertSessionSummary(ctx, db.SessionSummary{SessionID: ""}); err == nil {
-		t.Errorf("expected error for empty sessionID on FakeStore")
-	}
-	if resScored, err := store.SearchSessionSummaries(ctx, "", embVector, "vector", -1, -0.5); err != nil || len(resScored) == 0 {
-		t.Errorf("expected results with default limit, got %d (err: %v)", len(resScored), err)
-	}
-
-	simErr := errors.New("simulated error")
-	for _, m := range []string{"GetSessionSyncStates", "UpsertSessionSummary", "SearchSessionSummaries"} {
-		store.FailNext(m, simErr)
-		var callErr error
-		switch m {
-		case "GetSessionSyncStates":
-			_, callErr = store.GetSessionSyncStates(ctx)
-		case "UpsertSessionSummary":
-			callErr = store.UpsertSessionSummary(ctx, db.SessionSummary{SessionID: "s"})
-		case "SearchSessionSummaries":
-			_, callErr = store.SearchSessionSummaries(ctx, "", nil, "q", 5, 0.1)
-		}
-		if !errors.Is(callErr, simErr) {
-			t.Errorf("expected simulated error for %s, got %v", m, callErr)
-		}
-	}
-
-	_ = store.Close()
-	if _, err := store.GetSessionSyncStates(ctx); !errors.Is(err, sql.ErrConnDone) {
-		t.Errorf("expected sql.ErrConnDone on GetSessionSyncStates")
-	}
-}
-
-func TestTranscriptStore_SearchSessionSummaries(t *testing.T) {
-	store := NewFakeStore()
-	ctx := context.Background()
-
-	embVector, embQueue := make([]float32, db.ExpectedEmbeddingDim), make([]float32, db.ExpectedEmbeddingDim)
-	embVector[0], embQueue[1] = 1.0, 1.0
-
-	for _, s := range []db.SessionSummary{
-		{SessionID: "sess-vector", ThreadID: "th-vector", Summary: "Investigated and fixed vector cosine similarity search in database", Embedding: embVector},
-		{SessionID: "sess-queue", ThreadID: "th-queue", Summary: "Architectural optimization of worker pool event queue processing concurrency", Embedding: embQueue},
-		{SessionID: "sess-discord", ThreadID: "th-discord", Summary: "Implemented Discord bot webhook notification dispatching and formatting"},
-	} {
-		if err := store.UpsertSessionSummary(ctx, s); err != nil {
-			t.Fatalf("UpsertSessionSummary failed: %v", err)
-		}
-	}
-
-	tests := []fakeStoreSearchSummaryCase{
-		{name: "sparse text-only search", query: "vector cosine", limit: 5, minScore: 0.1, wantID: "sess-vector", wantMin: 1, wantMax: 5},
-		{name: "sparse text-only queue search", query: "worker pool concurrency", limit: 5, minScore: 0.1, wantID: "sess-queue", wantMin: 1, wantMax: 5},
-		{name: "dense vector-only search", emb: embVector, limit: 5, minScore: 0.5, wantID: "sess-vector", wantMin: 1, wantMax: 5, wantMinScore: 0.99},
-		{name: "hybrid search", emb: embVector, query: "vector similarity", limit: 5, minScore: 0.3, wantID: "sess-vector", wantMin: 1, wantMax: 5, wantMinScore: 0.01},
-		{name: "impossible minScore", query: "worker", limit: 5, minScore: 2.0},
-		{name: "clamped limit", query: "in", limit: 1, wantMin: 1, wantMax: 1},
-		{name: "empty query and vector", limit: 10},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			results, err := store.SearchSessionSummaries(ctx, "", tc.emb, tc.query, tc.limit, tc.minScore)
-			if err != nil {
-				t.Fatalf("SearchSessionSummaries failed: %v", err)
-			}
-			assertFakeStoreSearchSummaryCase(t, results, tc)
-		})
-	}
-
-	assertFakeStoreSummaryFailureHandling(ctx, t, store, embVector)
-}
-
-func TestTranscriptStore_SearchTranscriptSteps(t *testing.T) {
-	store, ctx, now := NewFakeStore(), context.Background(), time.Now().UTC()
-	_ = store.UpsertSessionSummary(ctx, db.SessionSummary{SessionID: "sess-steps-a"})
-	_ = store.UpsertSessionSummary(ctx, db.SessionSummary{SessionID: "sess-steps-b"})
-
-	steps := []db.TranscriptStep{
-		{SessionID: "sess-steps-a", StepIndex: 0, StepType: "user_message", Content: "Deploying cluster ingress controller", CreatedAt: now.Add(-3 * time.Minute)},
-		{SessionID: "sess-steps-a", StepIndex: 1, StepType: "tool_call", ToolName: "run_command", Content: "kubectl apply -f ingress.yaml", CreatedAt: now.Add(-2 * time.Minute)},
-		{SessionID: "sess-steps-a", StepIndex: 2, StepType: "tool_result", ToolName: "run_command", Content: "error: 502 bad gateway connecting to webhook", CreatedAt: now.Add(-1 * time.Minute)},
-		{SessionID: "sess-steps-b", StepIndex: 0, StepType: "tool_call", ToolName: "read_file", Content: "reading ingress.yaml configuration", CreatedAt: now},
-		{SessionID: "sess-steps-b", StepIndex: 1, StepType: "tool_result", ToolName: "read_file", Content: "done reading configuration", CreatedAt: now},
-	}
-	if err := store.BatchInsertTranscriptSteps(ctx, steps); err != nil {
-		t.Fatalf("BatchInsertTranscriptSteps failed: %v", err)
-	}
-
-	tests := []struct {
-		name, query, session, tool string
-		since                      time.Time
-		limit, wantLen, wantStep   int
-	}{
-		{name: "text search", query: "bad gateway", limit: 10, wantLen: 1, wantStep: 2},
-		{name: "multi word non-contiguous search", query: "error webhook", limit: 10, wantLen: 1, wantStep: 2},
-		{name: "session filter", query: "ingress", session: "sess-steps-b", limit: 10, wantLen: 1},
-		{name: "tool filter", query: "ingress", tool: "read_file", limit: 10, wantLen: 1},
-		{name: "empty query tool filter", tool: "read_file", limit: 10, wantLen: 2},
-		{name: "empty query and filters", limit: 10},
-		{name: "since filter without query orders asc", since: now.Add(-5 * time.Minute), limit: 10, wantLen: 5},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			res, err := store.SearchTranscriptSteps(ctx, "", tc.query, tc.session, tc.tool, tc.limit, tc.since)
-			if err != nil {
-				t.Fatalf("SearchTranscriptSteps failed: %v", err)
-			}
-			if len(res) != tc.wantLen {
-				t.Fatalf("got %d results, want %d", len(res), tc.wantLen)
-			}
-			if tc.wantLen > 0 {
-				if tc.wantStep != 0 && res[0].StepIndex != tc.wantStep {
-					t.Errorf("got step index %d, want %d", res[0].StepIndex, tc.wantStep)
-				}
-				if tc.tool != "" && res[0].ToolName != tc.tool {
-					t.Errorf("got tool %s, want %s", res[0].ToolName, tc.tool)
-				}
-				if tc.session != "" && res[0].SessionID != tc.session {
-					t.Errorf("got session %s, want %s", res[0].SessionID, tc.session)
-				}
-			}
-		})
-	}
-
-	if allMatched, err := store.SearchTranscriptSteps(ctx, "", "ingress", "", "", -1); err != nil || len(allMatched) == 0 {
-		t.Errorf("expected steps with default limit, got %d, err: %v", len(allMatched), err)
-	}
-}
-
-func TestTranscriptStore_FakeStore_GetTranscriptStepRange(t *testing.T) {
-	ctx := context.Background()
-	store := NewFakeStore()
-	_ = store.UpsertSessionSummary(ctx, db.SessionSummary{SessionID: "sess-range-a"})
-	_ = store.UpsertSessionSummary(ctx, db.SessionSummary{SessionID: "sess-range-b"})
-
-	now := time.Now().UTC()
-	steps := []db.TranscriptStep{
-		{SessionID: "sess-range-a", StepIndex: 0, StepType: "user_message", Content: "initial prompt", CreatedAt: now.Add(-4 * time.Minute)},
-		{SessionID: "sess-range-a", StepIndex: 1, StepType: "tool_call", ToolName: "run_command", Content: "git status", CreatedAt: now.Add(-3 * time.Minute)},
-		{SessionID: "sess-range-a", StepIndex: 2, StepType: "tool_result", ToolName: "run_command", Content: "on branch main", CreatedAt: now.Add(-2 * time.Minute)},
-		{SessionID: "sess-range-a", StepIndex: 3, StepType: "tool_call", ToolName: "view_file", Content: "reading config", CreatedAt: now.Add(-1 * time.Minute)},
-		{SessionID: "sess-range-a", StepIndex: 4, StepType: "assistant_turn", Content: "done", CreatedAt: now},
-		{SessionID: "sess-range-b", StepIndex: 0, StepType: "user_message", Content: "hello", CreatedAt: now},
-	}
-	if err := store.BatchInsertTranscriptSteps(ctx, steps); err != nil {
-		t.Fatalf("BatchInsertTranscriptSteps failed: %v", err)
-	}
-
-	tests := []struct {
-		name      string
-		session   string
-		startStep int
-		endStep   int
-		wantLen   int
-		wantFirst int
-		wantLast  int
-	}{
-		{name: "normal range", session: "sess-range-a", startStep: 1, endStep: 3, wantLen: 3, wantFirst: 1, wantLast: 3},
-		{name: "single step", session: "sess-range-a", startStep: 2, endStep: 2, wantLen: 1, wantFirst: 2, wantLast: 2},
-		{name: "negative start clamped", session: "sess-range-a", startStep: -5, endStep: 1, wantLen: 2, wantFirst: 0, wantLast: 1},
-		{name: "end before start clamped", session: "sess-range-a", startStep: 3, endStep: 1, wantLen: 1, wantFirst: 3, wantLast: 3},
-		{name: "empty session returns nil", session: "", startStep: 0, endStep: 5, wantLen: 0},
-		{name: "whitespace session returns nil", session: "   ", startStep: 0, endStep: 5, wantLen: 0},
-		{name: "unknown session", session: "sess-unknown", startStep: 0, endStep: 5, wantLen: 0},
-		{name: "out of bounds high range", session: "sess-range-a", startStep: 10, endStep: 20, wantLen: 0},
-	}
-
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			got, err := store.GetTranscriptStepRange(ctx, "", tc.session, tc.startStep, tc.endStep)
-			if err != nil {
-				t.Fatalf("unexpected error: %v", err)
-			}
-			if len(got) != tc.wantLen {
-				t.Fatalf("got len=%d, want %d", len(got), tc.wantLen)
-			}
-			if tc.wantLen > 0 {
-				if got[0].StepIndex != tc.wantFirst {
-					t.Errorf("got first step index=%d, want %d", got[0].StepIndex, tc.wantFirst)
-				}
-				if got[len(got)-1].StepIndex != tc.wantLast {
-					t.Errorf("got last step index=%d, want %d", got[len(got)-1].StepIndex, tc.wantLast)
-				}
-				if got[0].RankScore != 1.0 {
-					t.Errorf("got rank score %f, want 1.0", got[0].RankScore)
-				}
-			}
-		})
 	}
 }
 
@@ -853,6 +474,12 @@ func TestFakeStore_DispatchStoreLifecycle(t *testing.T) {
 	mustOK(t, err, "GetDispatch")
 	if got == nil || got.ID != "disp-f1" || got.Status != db.StatusPending || got.Summary == "" {
 		t.Fatalf("unexpected dispatch: %+v", got)
+	}
+
+	missing, err := s.GetDispatch(ctx, "non-existent")
+	mustOK(t, err, "GetDispatch missing")
+	if missing != nil {
+		t.Errorf("expected nil dispatch for non-existent ID, got %+v", missing)
 	}
 
 	// 2. Claim pending
@@ -979,123 +606,6 @@ func TestFakeStore_GetActiveTasks_DispatchesUnion(t *testing.T) {
 	}
 }
 
-type fakeStoreEngineKindsCase struct {
-	name        string
-	stack       string
-	wantKinds   []string
-	wantEngine  string
-	wantSummary int
-	wantShell   int
-	wantMCP     int
-	wantStats   []db.TranscriptStackStats
-}
-
-func runFakeStoreEngineKindsCase(ctx context.Context, t *testing.T, store *FakeStore, tc fakeStoreEngineKindsCase) {
-	t.Helper()
-	steps, err := store.GetTranscriptStepRange(ctx, tc.stack, "sess-e", 0, 10)
-	if err != nil {
-		t.Fatalf("GetTranscriptStepRange: %v", err)
-	}
-	kinds := make([]string, 0, len(steps))
-	for _, st := range steps {
-		kinds = append(kinds, st.ToolKind)
-		if st.Engine != tc.wantEngine || st.Stack != FakeTranscriptStack {
-			t.Errorf("step %d engine=%q stack=%q, want %q/%q", st.StepIndex, st.Engine, st.Stack, tc.wantEngine, FakeTranscriptStack)
-		}
-	}
-	if !slices.Equal(kinds, tc.wantKinds) {
-		t.Errorf("kinds = %q, want %q", kinds, tc.wantKinds)
-	}
-	if found, _ := store.SearchTranscriptSteps(ctx, tc.stack, "", "sess-e", "", 10); len(found) != len(tc.wantKinds) {
-		t.Errorf("SearchTranscriptSteps len = %d, want %d", len(found), len(tc.wantKinds))
-	}
-	if sums, _ := store.SearchSessionSummaries(ctx, tc.stack, nil, "engine", 10, 0); len(sums) != tc.wantSummary {
-		t.Errorf("SearchSessionSummaries len = %d, want %d", len(sums), tc.wantSummary)
-	}
-	if shell, _ := store.SearchTranscriptSteps(ctx, tc.stack, "", "", "shell", 10); len(shell) != tc.wantShell {
-		t.Errorf("SearchTranscriptSteps(tool=shell) len = %d, want %d", len(shell), tc.wantShell)
-	}
-	if mcp, _ := store.SearchTranscriptSteps(ctx, tc.stack, "", "", "mcp", 10); len(mcp) != tc.wantMCP {
-		t.Errorf("SearchTranscriptSteps(tool=mcp) len = %d, want %d", len(mcp), tc.wantMCP)
-	}
-	if stats, err := store.GetTranscriptStats(ctx, tc.stack); err != nil || !slices.Equal(stats, tc.wantStats) {
-		t.Errorf("GetTranscriptStats = %+v err=%v, want %+v", stats, err, tc.wantStats)
-	}
-}
-
-func assertFakeStoreEngineLifecycleAndErrors(ctx context.Context, t *testing.T, store *FakeStore) {
-	t.Helper()
-	if states, err := store.GetSessionSyncStates(ctx); err != nil || states["sess-e"].Engine != "claude" || states["sess-u"].Engine != "agy" {
-		t.Errorf("sync state engines = %+v err=%v, want sess-e claude and sess-u agy", states, err)
-	}
-	if _, err := store.BackfillSessionEngines(ctx, nil); err == nil {
-		t.Error("expected error for nil infer")
-	}
-	if _, err := store.BackfillToolKinds(ctx, nil); err == nil {
-		t.Error("expected error for nil mapper")
-	}
-	if purged, err := store.PurgeMigratedLocalTranscripts(ctx); err != nil || purged != 0 {
-		t.Errorf("PurgeMigratedLocalTranscripts = %d err=%v, want 0", purged, err)
-	}
-	store.FailNext("PurgeMigratedLocalTranscripts", errors.New("boom"))
-	if _, err := store.PurgeMigratedLocalTranscripts(ctx); err == nil {
-		t.Error("expected armed PurgeMigratedLocalTranscripts failure")
-	}
-}
-
-func TestTranscriptStore_FakeStore_EngineKindsAndStackFilter(t *testing.T) {
-	t.Parallel()
-	ctx := context.Background()
-	store := NewFakeStore()
-	if stats, err := store.GetTranscriptStats(ctx, ""); err != nil || stats != nil {
-		t.Fatalf("empty index stats = %+v err=%v, want none", stats, err)
-	}
-	mustOK(t, store.UpsertSessionSummary(ctx, db.SessionSummary{SessionID: "sess-e", Engine: "claude", Summary: "engine session"}), "UpsertSessionSummary")
-	mustOK(t, store.BatchInsertTranscriptSteps(ctx, []db.TranscriptStep{
-		{SessionID: "sess-e", StepIndex: 0, ToolName: "Bash"},
-		{SessionID: "sess-e", StepIndex: 1, ToolName: "unmapped_tool"},
-		{SessionID: "sess-e", StepIndex: 2, ToolName: "Read", ToolKind: "read"},
-		{SessionID: "sess-e", StepIndex: 3},
-	}), "BatchInsertTranscriptSteps")
-	mapper := func(name string) string {
-		if name == "Bash" {
-			return "shell"
-		}
-		return ""
-	}
-	if updated, err := store.BackfillToolKinds(ctx, mapper); err != nil || updated != 1 {
-		t.Fatalf("BackfillToolKinds updated=%d err=%v, want 1", updated, err)
-	}
-	mustOK(t, store.UpsertSessionSummary(ctx, db.SessionSummary{SessionID: "sess-u", Summary: "docket work"}), "UpsertSessionSummary unlabeled")
-	mustOK(t, store.BatchInsertTranscriptSteps(ctx, []db.TranscriptStep{
-		{SessionID: "sess-u", StepIndex: 0, ToolName: "mcp_docket_create", ToolKind: "mcp:docket"},
-		{SessionID: "sess-u", StepIndex: 1, ToolName: "run_command", ToolKind: "shell"},
-		{SessionID: "sess-u", StepIndex: 2, ToolName: "run_command", ToolKind: "shell"},
-	}), "BatchInsertTranscriptSteps unlabeled")
-	var inferredFrom []string
-	infer := func(names []string) string {
-		inferredFrom = names
-		return "agy"
-	}
-	if updated, err := store.BackfillSessionEngines(ctx, infer); err != nil || updated != 1 || !slices.Equal(inferredFrom, []string{"mcp_docket_create", "run_command"}) {
-		t.Fatalf("BackfillSessionEngines updated=%d names=%q err=%v, want 1 from distinct sorted names", updated, inferredFrom, err)
-	}
-
-	tests := []fakeStoreEngineKindsCase{
-		{name: "all stacks", wantKinds: []string{"shell", "", "read", ""}, wantEngine: "claude", wantSummary: 2, wantShell: 3, wantMCP: 1, wantStats: []db.TranscriptStackStats{{Stack: FakeTranscriptStack, Sessions: 2, Steps: 7}}},
-		{name: "own stack", stack: FakeTranscriptStack, wantKinds: []string{"shell", "", "read", ""}, wantEngine: "claude", wantSummary: 2, wantShell: 3, wantMCP: 1, wantStats: []db.TranscriptStackStats{{Stack: FakeTranscriptStack, Sessions: 2, Steps: 7}}},
-		{name: "other stack sees nothing", stack: "elsewhere"},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			runFakeStoreEngineKindsCase(ctx, t, store, tc)
-		})
-	}
-
-	assertFakeStoreEngineLifecycleAndErrors(ctx, t, store)
-}
-
 type fakeStoreKnownTurnCase struct {
 	name       string
 	failNext   error
@@ -1183,6 +693,13 @@ func TestFakeStore_GetKnownTurnSessionIDs(t *testing.T) {
 				{ID: "d-hb", Source: "heartbeat", ConversationID: "hb-disp-1"},
 			},
 			wantIDs: []string{},
+		},
+		{
+			name: "only dispatches returns allowed ids",
+			dispatches: []db.Dispatch{
+				{ID: "d-only-1", Source: "user", ConversationID: "conv-only-disp"},
+			},
+			wantIDs: []string{"conv-only-disp"},
 		},
 		{
 			name: "populated store filters heartbeat and returns allowed ids",

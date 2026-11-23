@@ -1,12 +1,7 @@
 package server
 
 import (
-	"context"
-	"errors"
-	"testing"
-
 	"go.opentelemetry.io/otel"
-	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/propagation"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	"go.opentelemetry.io/otel/sdk/trace/tracetest"
@@ -43,34 +38,4 @@ func endedSpanSummary(id trace.SpanID) (name string, root bool, attrs map[string
 		attrs[string(kv.Key)] = kv.Value.String()
 	}
 	return s.Name(), !s.Parent().IsValid(), attrs
-}
-
-func TestEndSchedulerSpan(t *testing.T) {
-	t.Parallel()
-	endSchedulerSpan(nil, nil)
-	endSchedulerSpan(nil, errors.New("err"))
-
-	sr := tracetest.NewSpanRecorder()
-	tp := sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(sr))
-	tracer := tp.Tracer("test")
-
-	_, spanErr := tracer.Start(context.Background(), "test-err")
-	endSchedulerSpan(spanErr, errors.New("failure"))
-
-	_, spanOK := tracer.Start(context.Background(), "test-ok")
-	endSchedulerSpan(spanOK, nil)
-
-	ended := sr.Ended()
-	if len(ended) != 2 {
-		t.Fatalf("expected 2 ended spans, got %d", len(ended))
-	}
-	if ended[0].Status().Code != codes.Error {
-		t.Errorf("spanErr status = %v, want %v", ended[0].Status().Code, codes.Error)
-	}
-	if ended[0].Status().Description != "scheduled run failed" {
-		t.Errorf("spanErr description = %q, want 'scheduled run failed'", ended[0].Status().Description)
-	}
-	if ended[1].Status().Code != codes.Unset {
-		t.Errorf("spanOK status = %v, want %v", ended[1].Status().Code, codes.Unset)
-	}
 }

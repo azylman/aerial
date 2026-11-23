@@ -1061,9 +1061,9 @@ description: Home assistant operations workflow and automation routines.
 Procedure steps.
 `
 
-// TestWorker_RunDaily_ProceduralSkills is serial: skill consolidation
+// TestCovenDreamer_ConsolidatePass_ProceduralSkills is serial: skill consolidation
 // single-flights on the package-global extractionMutex.
-func TestWorker_RunDaily_ProceduralSkills(t *testing.T) {
+func TestCovenDreamer_ConsolidatePass_ProceduralSkills(t *testing.T) {
 	customSkills := writeHAOpsSkillDir(t, haOpsShortSkillMD)
 
 	s := newTestStore(t)
@@ -1082,8 +1082,9 @@ func TestWorker_RunDaily_ProceduralSkills(t *testing.T) {
 		CustomSkillsDir: customSkills,
 	})
 
-	// Tick 60 is daily decay + dreaming + procedural consolidation
-	w.Tick(context.Background(), 60)
+	if err := dreamOnce(w); err != nil {
+		t.Fatalf("dreamOnce() err = %v", err)
+	}
 
 	if len(pub.changes) != 1 {
 		t.Errorf("publisher changes len = %d, want 1", len(pub.changes))

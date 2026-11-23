@@ -17,7 +17,6 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/azylman/aerial/services/eri/pkg/db"
-	"github.com/azylman/aerial/services/eri/pkg/db/dbtest"
 )
 
 // sentCall is one outbound Restate call recorded by coordHarness.
@@ -30,15 +29,17 @@ type sentCall struct {
 }
 
 // coordHarness backs a mocks.MockContext with in-memory object state and records sends,
-// requests and invocation cancels.
+// requests and invocation cancels. A Run step named cancelStep returns Restate's cancellation
+// error without executing, as the runtime does when the invocation is cancelled mid-step.
 type coordHarness struct {
-	mc        *mocks.MockContext
-	state     map[string][]byte
-	sends     []sentCall
-	cancels   []string
-	target    sentCall
-	replies   map[string]CancelDispatchResponse
-	clearAlls int
+	mc         *mocks.MockContext
+	state      map[string][]byte
+	sends      []sentCall
+	cancels    []string
+	target     sentCall
+	replies    map[string]CancelDispatchResponse
+	clearAlls  int
+	cancelStep string
 }
 
 const harnessRunnerInvocation = "inv-runner"
@@ -75,7 +76,10 @@ func newCoordHarness(t *testing.T, key, requestID string, st coordinatorState) *
 		h.cancels = append(h.cancels, args.String(0))
 	}).Return().Maybe()
 
-	runHandler := func(fn func(restate.RunContext) (any, error), output any, _ ...restate.RunOption) restate.TerminalError {
+	runHandler := func(fn func(restate.RunContext) (any, error), output any, opts ...restate.RunOption) restate.TerminalError {
+		if h.cancelStep != "" && runStepName(opts) == h.cancelStep {
+			return errRestateCancel
+		}
 		res, err := fn(mockRunContext{Context: context.Background()})
 		if err != nil {
 			return restate.ToTerminalError(err)
@@ -170,20 +174,18 @@ func dispRow(id, sessionID, status string) db.Dispatch {
 	return db.Dispatch{ID: id, SessionID: sessionID, Status: status, CreatedAt: time.Date(2026, 11, 21, 0, 0, 0, 0, time.UTC)}
 }
 
-func seedStore(t *testing.T, msgs []db.Message, disps []db.Dispatch) *dbtest.FakeStore {
+// seedStore opens a private Postgres store seeded with msgs and disps, then runs the row's
+// sabotageSQL (empty = none) against it.
+func seedStore(t *testing.T, msgs []db.Message, disps []db.Dispatch, sabotageSQL string) *db.SQLStore {
 	t.Helper()
-	store := dbtest.NewFakeStore()
-	for _, m := range msgs {
-		require.NoError(t, store.InsertMessage(context.Background(), m))
-	}
-	for _, d := range disps {
-		_, err := store.InsertDispatch(context.Background(), d)
-		require.NoError(t, err)
-	}
+	store, sqlDB := newTestStore(t)
+	seedMessageRows(t, store, msgs)
+	seedDispatchRows(t, store, disps)
+	execSQL(t, sqlDB, sabotageSQL)
 	return store
 }
 
-func assertMessageRows(t *testing.T, store *dbtest.FakeStore, want map[string]rowWant) {
+func assertMessageRows(t *testing.T, store *db.SQLStore, want map[string]rowWant) {
 	t.Helper()
 	for id, w := range want {
 		m, err := store.GetMessage(context.Background(), id)
@@ -194,7 +196,7 @@ func assertMessageRows(t *testing.T, store *dbtest.FakeStore, want map[string]ro
 	}
 }
 
-func assertDispatchRows(t *testing.T, store *dbtest.FakeStore, want map[string]rowWant) {
+func assertDispatchRows(t *testing.T, store *db.SQLStore, want map[string]rowWant) {
 	t.Helper()
 	for id, w := range want {
 		d, err := store.GetDispatch(context.Background(), id)

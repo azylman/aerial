@@ -124,11 +124,7 @@ func SetupHealthMux(opts HealthMuxOptions) *http.ServeMux {
 	mux := http.NewServeMux()
 
 	healthHandler := func(w http.ResponseWriter, _ *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusOK)
-		if _, wErr := w.Write([]byte(`{"status":"ok"}`)); wErr != nil {
-			log.Printf("[eri-restate] Warning writing health response: %v", wErr)
-		}
+		httpkit.WriteJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 	}
 	mux.HandleFunc("/health", healthHandler)
 	mux.HandleFunc("/healthz", healthHandler)

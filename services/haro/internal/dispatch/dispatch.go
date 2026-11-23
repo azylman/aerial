@@ -12,7 +12,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/google/uuid"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/trace"
@@ -226,7 +225,7 @@ func (d *HTTPPromptDispatcher) dispatchPromptRestate(ctx context.Context, req Pr
 
 	msgID := strings.TrimSpace(req.MessageID)
 	if msgID == "" {
-		msgID = uuid.New().String()
+		return PromptDispatchResponse{}, errors.New("message_id cannot be empty for restate prompt dispatch")
 	}
 
 	agentName := req.Agent
@@ -278,7 +277,7 @@ func (d *HTTPPromptDispatcher) dispatchPromptRestate(ctx context.Context, req Pr
 func (d *HTTPPromptDispatcher) dispatchRestate(ctx context.Context, req eriwire.BrainDispatchRequest) (eriwire.DispatchEnqueueResponse, error) {
 	dispatchID := strings.TrimSpace(req.ID)
 	if dispatchID == "" {
-		dispatchID = uuid.New().String()
+		return eriwire.DispatchEnqueueResponse{}, errors.New("id cannot be empty for restate dispatch")
 	}
 
 	keyReq := req
@@ -295,18 +294,11 @@ func (d *HTTPPromptDispatcher) dispatchRestate(ctx context.Context, req eriwire.
 	svc := DispatchSessionServiceName(agentName)
 	endpoint := fmt.Sprintf("%s/%s/%s/Enqueue", d.restateURL, svc, url.PathEscape(sessionKey))
 
-	raw := map[string]any{
-		"id":             dispatchID,
-		"agent":          agentName,
-		"source":         req.Source,
-		"session_id":     req.SessionID,
-		"target_id":      req.TargetID,
-		"prompt":         req.Prompt,
-		"effort":         req.Effort,
-		"skip_if_active": req.SkipIfActive,
-	}
+	payload := req
+	payload.ID = dispatchID
+	payload.Agent = agentName
 
-	respBytes, err := restateingress.Post(ctx, d.httpClient, endpoint, dispatchID, raw, 0)
+	respBytes, err := restateingress.Post(ctx, d.httpClient, endpoint, dispatchID, payload, 0)
 	if err != nil {
 		return eriwire.DispatchEnqueueResponse{}, restateRequestError("dispatch", err)
 	}

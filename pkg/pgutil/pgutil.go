@@ -12,7 +12,7 @@ type PGStringSlice struct {
 
 // Scan implements database/sql.Scanner for PGStringSlice.
 func (s *PGStringSlice) Scan(src any) error {
-	vals, err := ParsePGTextArray(src)
+	vals, err := parsePGTextArray(src)
 	if err != nil {
 		return err
 	}
@@ -111,9 +111,9 @@ func parsePGArrayContent(content string) ([]string, error) {
 	return res, nil
 }
 
-// ParsePGTextArray parses a PostgreSQL text array representation (string, []byte, or []string)
+// parsePGTextArray parses a PostgreSQL text array representation (string, []byte, or []string)
 // into a slice of strings.
-func ParsePGTextArray(src any) ([]string, error) {
+func parsePGTextArray(src any) ([]string, error) {
 	if slice, ok := src.([]string); ok {
 		return slice, nil
 	}

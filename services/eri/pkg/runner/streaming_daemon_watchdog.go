@@ -7,16 +7,6 @@ import (
 	"time"
 )
 
-// SetTerminalTurnRescuer updates the terminal turn rescuer callback on the daemon.
-func (d *StreamingDaemon) SetTerminalTurnRescuer(r func(context.Context, string, time.Time) string) {
-	if d == nil {
-		return
-	}
-	d.mu.Lock()
-	defer d.mu.Unlock()
-	d.cfg.TerminalTurnRescuer = r
-}
-
 //nolint:contextcheck,nolintlint // Watchdog operates under the daemon lifetime, while turn rescue operates under TurnContext.Ctx.
 func (d *StreamingDaemon) watchdogLoop(lifetime context.Context) {
 	defer d.watchdogWg.Done()

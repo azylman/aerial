@@ -282,19 +282,19 @@ func TestRunBurstAttempt(t *testing.T) {
 			wantRows: rowA(db.StatusFailed, quotaReason, 1, 0), wantNotices: []string{"quota"},
 		},
 		{
-			name: "ReadErrorRetryable", rows: fresh, failMethod: "GetMessagesByID", failErr: errStepTransient,
-			wantKinds: []string{""}, wantCode: -1, wantRows: rowA(db.StatusProcessing, "", 0, 0),
+			name: "ReadErrorRetryable", rows: fresh, closeDB: true,
+			wantKinds: []string{""}, wantCode: -1,
 		},
 		{
-			name: "BeginAttemptIntegrityTerminal", rows: fresh, failMethod: "BeginMessageAttempt", failErr: errStepIntegrity,
+			name: "BeginAttemptIntegrityTerminal", rows: fresh, sabotageSQL: failTriggerSQL("messages", "UPDATE", "23505"),
 			wantKinds: []string{""}, wantCode: 500, wantRows: rowA(db.StatusProcessing, "", 0, 0),
 		},
 		{
-			name: "BeginAttemptRowVanishedSkipped", rows: fresh, failMethod: "BeginMessageAttempt", failErr: db.ErrRecordNotFound, scripts: []attemptScript{replyScript("still here")},
+			name: "BeginAttemptRowVanishedSkipped", rows: fresh, sabotageSQL: skipRowTriggerSQL("messages", "UPDATE", 1), scripts: []attemptScript{replyScript("still here")},
 			wantKinds: []string{AttemptKindSuccess}, wantCalls: 1, wantRows: rowA(db.StatusCompleted, "", 0, 0), wantNotices: []string{"still here"},
 		},
 		{
-			name: "LostCompletedWriteRepaired", rows: fresh, failMethod: "UpdateMessageCompleted", failErr: errStepTransient, scripts: []attemptScript{replyScript("kept")},
+			name: "LostCompletedWriteRepaired", rows: fresh, sabotageSQL: faultTriggerSQL("messages", "UPDATE OF response_text", "40001", 1), scripts: []attemptScript{replyScript("kept")},
 			wantKinds: []string{AttemptKindSuccess}, wantCalls: 1, wantRows: rowA(db.StatusCompleted, "", 1, 0), wantNotices: []string{"kept"},
 		},
 		{
@@ -330,8 +330,8 @@ type burstAttemptCase struct {
 	orphan      bool // an orphaned closure of the turn records the outcome while Begin waits
 	preStop     bool
 	autoResumes int
-	failMethod  string
-	failErr     error
+	sabotageSQL string
+	closeDB     bool
 	wantKinds   []string
 	wantBackoff []int64
 	wantReason  string
@@ -345,8 +345,7 @@ type burstAttemptCase struct {
 
 func runBurstAttemptCase(t *testing.T, tc burstAttemptCase) {
 	t.Helper()
-	store := setupTestStore(t)
-	seedMessages(t, store, tc.rows)
+	store := openStepDB(t, stepFixture{msgs: tc.rows, sabotageSQL: tc.sabotageSQL, closeDB: tc.closeDB}).store
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	notices := &noticeRecorder{}
@@ -361,10 +360,6 @@ func runBurstAttemptCase(t *testing.T, tc burstAttemptCase) {
 		ids[i] = m.ID
 	}
 	in := AttemptInput{ThreadID: "thread-steps", TurnID: "turn-1", IDs: ids, Prep: TurnPrep{Decision: TurnDecisionRun, Prompt: "answer the user"}, Ordinal: max(tc.ordinal, 1), AutoResumes: tc.autoResumes}
-	if tc.failMethod != "" {
-		store.FailNext(tc.failMethod, tc.failErr)
-	}
-
 	seq := runAttemptSequence(ctx, t, pool, store, in, max(tc.runs, 1), tc.orphan)
 	kinds, backoffs, last, err := seq.kinds, seq.backoffs, seq.last, seq.err
 	assertAttemptErr(t, err, tc.wantCode, tc.wantCancel)
@@ -379,6 +374,21 @@ func runBurstAttemptCase(t *testing.T, tc burstAttemptCase) {
 	}
 	assertRows(t, store, tc.wantRows)
 	assertNotices(t, notices.all(), tc.wantNotices, tc.wantAbsent)
+}
+
+// skipRowTriggerSQL makes the first count firings of event on table silently skip their row (a
+// BEFORE trigger returning NULL), as if the row vanished under the statement.
+func skipRowTriggerSQL(table, event string, count int) string {
+	name := sabotageName("skip", table, event)
+	return fmt.Sprintf(`CREATE SEQUENCE %[1]s_seq;
+CREATE FUNCTION %[1]s() RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+	IF nextval('%[1]s_seq') <= %[4]d THEN
+		RETURN NULL;
+	END IF;
+	RETURN NEW;
+END $$;
+CREATE TRIGGER %[1]s BEFORE %[3]s ON %[2]s FOR EACH ROW EXECUTE FUNCTION %[1]s();`, name, table, event, count)
 }
 
 // rowA expects the single row "a" in the given state.
@@ -449,55 +459,48 @@ func runBehindOrphan(ctx context.Context, t *testing.T, pool *WorkerPool, store 
 func TestRunDispatchAttempt(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
-		name       string
-		status     string
-		retry      int
-		restart    int
-		scripts    []attemptScript
-		wantKind   string
-		wantCode   int
-		wantStatus string
-		wantRetry  int
-		wantCalls  int
-		failMethod string
-		noStore    bool
-		chunkID    string
-		noAgent    bool
-		heldTurn   bool // another closure of the turn holds it and the caller's context is done
-		wantCancel bool
+		name        string
+		status      string
+		retry       int
+		restart     int
+		scripts     []attemptScript
+		wantKind    string
+		wantCode    int
+		wantStatus  string
+		wantRetry   int
+		wantCalls   int
+		sabotageSQL string
+		closeDB     bool
+		noStore     bool
+		chunkID     string
+		noAgent     bool
+		heldTurn    bool // another closure of the turn holds it and the caller's context is done
+		wantCancel  bool
 	}{
 		{name: "SuccessCompletesSilently", status: db.StatusProcessing, scripts: []attemptScript{replyScript("chunk done")}, wantKind: AttemptKindSuccess, wantStatus: db.StatusCompleted, wantRetry: 1, wantCalls: 1},
 		{name: "RecordedShortCircuit", status: db.StatusFailed, wantKind: AttemptKindRecorded, wantStatus: db.StatusFailed},
 		{name: "CrashLoopCapFails", status: db.StatusProcessing, retry: 1, restart: 2, wantKind: AttemptKindTerminal, wantStatus: db.StatusFailed, wantRetry: 1},
 		{name: "WatchdogTimeoutFails", status: db.StatusProcessing, scripts: []attemptScript{errScript(attemptWatchdogErr)}, wantKind: AttemptKindTimeout, wantStatus: db.StatusFailed, wantRetry: 1, wantCalls: 1},
 		{name: "StopMidAttemptAborted", status: db.StatusProcessing, scripts: []attemptScript{{action: "stop"}}, wantKind: AttemptKindAborted, wantCode: CodeQueueConflict, wantStatus: db.StatusProcessing, wantRetry: 1, wantCalls: 1},
-		{name: "LostCompletedWriteRepaired", status: db.StatusProcessing, failMethod: "UpdateDispatchCompleted", scripts: []attemptScript{replyScript("chunk done")}, wantKind: AttemptKindSuccess, wantStatus: db.StatusCompleted, wantRetry: 1, wantCalls: 1},
+		{name: "LostCompletedWriteRepaired", status: db.StatusProcessing, sabotageSQL: faultTriggerSQL("dispatches", "UPDATE OF response_text", "40001", 1), scripts: []attemptScript{replyScript("chunk done")}, wantKind: AttemptKindSuccess, wantStatus: db.StatusCompleted, wantRetry: 1, wantCalls: 1},
 		{name: "VanadisChunkSuccess", status: db.StatusProcessing, chunkID: "build-1-c1", scripts: []attemptScript{replyScript("chunk done")}, wantKind: AttemptKindSuccess, wantStatus: db.StatusCompleted, wantRetry: 1, wantCalls: 1},
 		{name: "NoAgentPoolTerminal", status: db.StatusProcessing, noAgent: true, wantKind: AttemptKindTerminal, wantStatus: db.StatusFailed, wantRetry: 1},
 		{name: "HeldTurnContextDoneAborted", status: db.StatusProcessing, heldTurn: true, wantCancel: true, wantKind: AttemptKindAborted, wantStatus: db.StatusProcessing},
-		{name: "ReadErrorRetryable", status: db.StatusProcessing, failMethod: "GetDispatch", wantCode: -1, wantStatus: db.StatusProcessing},
-		{name: "NoStoreTerminal", status: db.StatusProcessing, noStore: true, wantCode: 500, wantStatus: db.StatusProcessing},
+		{name: "ReadErrorRetryable", status: db.StatusProcessing, closeDB: true, wantCode: -1},
+		{name: "NoStoreTerminal", status: db.StatusProcessing, noStore: true, wantCode: 500},
 		{name: "MissingRowRecordedEmpty", wantKind: AttemptKindRecorded},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			store := setupTestStore(t)
+			fx := stepFixture{noStore: tc.noStore, sabotageSQL: tc.sabotageSQL, closeDB: tc.closeDB}
 			if tc.status != "" {
-				if _, err := store.InsertDispatch(context.Background(), db.Dispatch{ID: "d1", Source: "test", Prompt: "do the thing", Status: tc.status, RetryCount: tc.retry, RestartCount: tc.restart, VanadisChunkID: tc.chunkID}); err != nil {
-					t.Fatal(err)
-				}
+				fx.disps = []db.Dispatch{{ID: "d1", Source: "test", Prompt: "do the thing", Status: tc.status, RetryCount: tc.retry, RestartCount: tc.restart, VanadisChunkID: tc.chunkID}}
 			}
-			var poolStore db.Store = store
-			if tc.noStore {
-				poolStore = nil
-			}
-			if tc.failMethod != "" {
-				store.FailNext(tc.failMethod, errStepTransient)
-			}
+			store := openStepDB(t, fx).store
 			notices := &noticeRecorder{}
 			sr := &scriptedAttemptRunner{scripts: tc.scripts}
-			pool := newAttemptPool(t, poolStore, sr, notices, tc.noAgent)
+			pool := newAttemptPool(t, store, sr, notices, tc.noAgent)
 			sr.onStop = func() { pool.Turns().Stop("turn-d", "operator stop") }
 			ctx := context.Background()
 			if tc.heldTurn {
@@ -509,7 +512,10 @@ func TestRunDispatchAttempt(t *testing.T) {
 			}
 			got, err := pool.RunDispatchAttempt(ctx, AttemptInput{SessionKey: "dispatch-d1", TurnID: "turn-d", IDs: []string{"d1"}, Prep: TurnPrep{Decision: TurnDecisionRun, Prompt: "do the thing"}, Ordinal: 1})
 			assertAttemptErr(t, err, tc.wantCode, tc.wantCancel)
-			d, _ := store.GetDispatch(context.Background(), "d1")
+			var d *db.Dispatch
+			if !tc.noStore && !tc.closeDB {
+				d, _ = store.GetDispatch(context.Background(), "d1")
+			}
 			var status string
 			var retry int
 			if d != nil {

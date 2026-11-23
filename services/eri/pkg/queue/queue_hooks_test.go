@@ -48,7 +48,7 @@ func TestProcessBurst_RecordsTokensTelemetry(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			store := setupTestStore(t)
+			store := testStore(t)
 			pool := New(nil, WorkerPoolConfig{
 				Store: store,
 				Model: tc.model,
@@ -98,7 +98,7 @@ func TestProcessBurst_RecordsTokensTelemetry(t *testing.T) {
 
 func TestThreadStatusQueueIntegration(t *testing.T) {
 	t.Parallel()
-	store := setupTestStore(t)
+	store := testStore(t)
 	threadID := "thread-status-test-123"
 	var finalDelivered atomic.Int32
 
@@ -144,7 +144,7 @@ func TestThreadStatusQueueIntegration(t *testing.T) {
 
 func TestWorkerPool_HermeticByDefaultWithoutRetriever(t *testing.T) {
 	t.Parallel()
-	store := setupTestStore(t)
+	store := testStore(t)
 	var runnerCalled bool
 	poolWithDB := NewWorkerPool(WorkerPoolConfig{
 		Store: store,
@@ -215,7 +215,7 @@ func TestWorkerPool_NotifierInvocationMatrix(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			store := setupTestStore(t)
+			store := testStore(t)
 			if tt.seedSessionID != "" {
 				_ = rotateSessionID(store, tt.threadID, tt.seedSessionID)
 			}
@@ -308,7 +308,8 @@ type wakeHookEval struct {
 
 func runWakeHookEval(t *testing.T, hookResp *WakeResponse, hookErr error, timeoutAction, classifierResp string, inputMsgs []db.Message, emptyEffID bool, schedRunID string) wakeHookEval {
 	t.Helper()
-	store, now := setupTestStore(t), time.Now().UTC()
+	store := testStore(t)
+	now := time.Now().UTC()
 	var classifierCalled, hookCalled bool
 	var cls *classifier.Classifier
 	if classifierResp != "" {
@@ -415,7 +416,8 @@ func TestOnWakeHook_Lifecycle(t *testing.T) {
 
 func TestOnWakeHook_FullProcessBurst(t *testing.T) {
 	t.Parallel()
-	store, now := setupTestStore(t), time.Now().UTC()
+	store := testStore(t)
+	now := time.Now().UTC()
 	var mu sync.Mutex
 	var runnerCalls, deliveryCalls int
 	pool := NewWorkerPool(WorkerPoolConfig{
@@ -495,7 +497,7 @@ func TestOnWakeHook_AccessorsAndFallbacks(t *testing.T) {
 // that prep rescheduled is driven once more, as the coordinator does after the delay.
 func runPreTurnHookBurst(t *testing.T, hookResps []*PreTurnResponse, hookErr error, timeoutAction string, initialRetry int, schedRunID string, rekick bool) (int, int, string, *PreTurnRequest, *db.Message) {
 	t.Helper()
-	store := setupTestStore(t)
+	store := testStore(t)
 	var mu sync.Mutex
 	var runnerCalls, hookCalls int
 	var capturedPrompt string
@@ -609,7 +611,8 @@ func TestPreTurnHook_HelperEdgeCases(t *testing.T) {
 	teNoPool := &turnExecution{pool: nil, burst: []db.Message{msgA}}
 	teNoPool.abortBurst("test drop nil pool")
 
-	store, completedStatus := setupTestStore(t), ""
+	store := testStore(t)
+	completedStatus := ""
 	pool := NewWorkerPool(WorkerPoolConfig{Store: store, OnMessageCompleted: func(msg db.Message, status string) { completedStatus = status }})
 	schedMsg := db.Message{ID: "msg-sched-abort", ThreadID: "chan-sched", Status: db.StatusPending}
 	_ = insertMessage(store, schedMsg)
@@ -621,7 +624,7 @@ func TestPreTurnHook_HelperEdgeCases(t *testing.T) {
 
 func runPostTurnHookBurst(t *testing.T, preResp *PreTurnResponse, runnerStderr string, runnerErr error, runnerPanic string) (*PostTurnRequest, string) {
 	t.Helper()
-	store := setupTestStore(t)
+	store := testStore(t)
 	var mu sync.Mutex
 	var postCalled bool
 	var postCallCount int
@@ -771,7 +774,7 @@ func TestPostTurnHook_HelperEdgeCases(t *testing.T) {
 		t.Errorf("default status failed, got %s", reqEmpty.Status)
 	}
 
-	store := setupTestStore(t)
+	store := testStore(t)
 	var postHookFired bool
 	pool := NewWorkerPool(WorkerPoolConfig{
 		Store: store, MaxAttempts: 1,
@@ -869,7 +872,8 @@ func TestWorkerPool_MultiTurn_AlwaysDeliversFinalOutputText(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			store, tempDir := setupTestStore(t), t.TempDir()
+			store := testStore(t)
+			tempDir := t.TempDir()
 			sessDir := filepath.Join(tempDir, ".gemini", "antigravity-cli", "brain", tc.convID, ".system_generated", "logs")
 			_ = os.MkdirAll(sessDir, 0o755)
 			_ = os.WriteFile(filepath.Join(sessDir, "transcript.jsonl"), []byte(tc.transcriptContent), 0o644)
@@ -941,7 +945,8 @@ func setupSessionRotationRunner(tc sessionRotationCase, sessionID, tPath string,
 func runSessionRotationCase(t *testing.T, tc sessionRotationCase) {
 	t.Helper()
 	t.Parallel()
-	store, tmpDir := setupTestStore(t), t.TempDir()
+	store := testStore(t)
+	tmpDir := t.TempDir()
 	sessMgr := session.New(tmpDir, "")
 
 	sessionID := "sess-" + strings.ToLower(tc.name)
