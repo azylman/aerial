@@ -656,8 +656,8 @@ func runTraceparentDispatchCase(t *testing.T, target string, withParent bool, fa
 	d.eriClient.SetRetryConfig(time.Millisecond, 6)
 	switch target {
 	case "brain":
-		if err := d.DispatchBackground(ctx, DispatchRequest{Source: "webhook"}); err != nil {
-			t.Fatalf("DispatchBackground: %v", err)
+		if err := d.DispatchDirectMessage(ctx, DirectMessageRequest{ChannelID: "123456789012345678", Content: "webhook"}); err != nil {
+			t.Fatalf("DispatchDirectMessage: %v", err)
 		}
 	case "discord":
 		if err := d.DispatchDiscordMessage(ctx, DiscordMessageIngressRequest{}); err != nil {

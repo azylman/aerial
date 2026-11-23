@@ -567,7 +567,7 @@ func (te *turnExecution) runTurnEndSummaryRefresh(ctx context.Context) (string, 
 	}
 	trace.SpanFromContext(ctx).SetAttributes(attrPromptSummaryHadPrior.Bool(hadPrior))
 	llmFn, flashModel := te.resolveSummarizerLLMAndModel(ctx)
-	newSum, err := SummarizeThreadHistoryWithGroup(ctx, te.pool.SummaryGroup(), llmFn, flashModel, te.threadID, histMsgs, opts...)
+	newSum, err := SummarizeThreadHistoryWithGroup(runner.WithLLMCallerKey(ctx, ThreadSummaryCallerKey(te.threadID, watermark)), te.pool.SummaryGroup(), llmFn, flashModel, te.threadID, histMsgs, opts...)
 	if err != nil {
 		return summaryOutcomeFailed, err
 	}

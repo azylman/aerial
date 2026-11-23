@@ -240,6 +240,7 @@ func TestClassify_LLM(t *testing.T) {
 		checkParse  bool
 		wantConf    float64
 		wantReason  string
+		wantKey     string
 	}{
 		{name: "RawJSON", llmOut: `{"confidence": 0.85, "reason": "direct question"}`, wantConf: 0.85, wantReason: "direct question"},
 		{name: "RawJSONWithWhitespace", llmOut: "  \n\t{\"confidence\": 0.45, \"reason\": \"general chatter\"}\n\t  ", wantConf: 0.45, wantReason: "general chatter"},
@@ -255,12 +256,16 @@ func TestClassify_LLM(t *testing.T) {
 		{name: "EmptyModelError", blankModel: true, burst: []db.Message{{Content: "msg"}}, wantConf: 0.0, wantReason: "model is not configured"},
 		{name: "TimeoutHandling", timeoutWait: true, burst: []db.Message{{Content: "msg"}}, wantConf: 0.0, wantReason: "classifier error"},
 		{name: "ParseErrorCallback", llmOut: "not valid json {", checkParse: true, wantConf: 0.0, wantReason: "classifier error"},
+		{name: "SingleMessageKeyedByChannelAndID", llmOut: `{"confidence": 0.5, "reason": "k"}`, burst: []db.Message{{ID: "900", ChannelID: "42", ThreadID: "77", Content: "hi"}}, wantConf: 0.5, wantReason: "k", wantKey: "classify:42:900"},
+		{name: "SingleMessageFallsBackToThreadID", llmOut: `{"confidence": 0.5, "reason": "k"}`, burst: []db.Message{{ID: "900", ThreadID: "77", Content: "hi"}}, wantConf: 0.5, wantReason: "k", wantKey: "classify:77:900"},
+		{name: "SingleMessageWithoutIDUnkeyed", llmOut: `{"confidence": 0.5, "reason": "k"}`, burst: []db.Message{{ChannelID: "42", Content: "hi"}}, wantConf: 0.5, wantReason: "k"},
+		{name: "BurstKeyedByNewestMessage", llmOut: `{"confidence": 0.6, "reason": "b"}`, burst: []db.Message{{ID: "901", ChannelID: "42", Content: "a"}, {ID: "905", ChannelID: "42", Content: "b"}}, useBurst: true, wantConf: 0.6, wantReason: "b", wantKey: "classify:42:905"},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			var capturedModel, capturedRaw string
+			var capturedModel, capturedRaw, capturedKey string
 			var capturedErr error
 
 			var cls *Classifier
@@ -278,7 +283,10 @@ func TestClassify_LLM(t *testing.T) {
 				cls.Timeout = 10 * time.Millisecond
 			default:
 				cls = New(nil)
-				cls.LLMFunc = func(ctx context.Context, model, prompt string) (string, error) { return tc.llmOut, nil }
+				cls.LLMFunc = func(ctx context.Context, model, prompt string) (string, error) {
+					capturedKey = runner.LLMCallerKey(ctx)
+					return tc.llmOut, nil
+				}
 			}
 
 			if tc.checkParse {
@@ -302,6 +310,9 @@ func TestClassify_LLM(t *testing.T) {
 
 			if res.Confidence != tc.wantConf || !strings.Contains(res.Reason, tc.wantReason) {
 				t.Fatalf("got %+v, want conf %f, reason substring %q", res, tc.wantConf, tc.wantReason)
+			}
+			if capturedKey != tc.wantKey {
+				t.Errorf("caller key = %q, want %q", capturedKey, tc.wantKey)
 			}
 			if tc.checkParse {
 				if capturedRaw != "not valid json {" || capturedErr == nil || capturedModel != DefaultAGYClassifierModel {
@@ -863,6 +874,26 @@ func TestClassify_SystemOne(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			runClassifySystemOneCase(t, tc)
+		})
+	}
+}
+
+func TestTitleCallerKey(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name      string
+		messageID string
+		want      string
+	}{
+		{name: "message ID", messageID: "123456", want: "title:123456"},
+		{name: "blank message ID unkeyed", messageID: "", want: ""},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got := TitleCallerKey(tc.messageID); got != tc.want {
+				t.Errorf("TitleCallerKey(%q) = %q, want %q", tc.messageID, got, tc.want)
+			}
 		})
 	}
 }

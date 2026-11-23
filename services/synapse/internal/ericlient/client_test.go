@@ -93,36 +93,18 @@ func assertDispatch(t *testing.T, tc dispatchCase, err error, hits int32, retrie
 	}
 }
 
-func TestDispatchPrompt(t *testing.T) {
-	t.Parallel()
-	tests := []dispatchCase{
-		{name: "invalid snowflake", channel: "invalid channel!", wantErr: "invalid discord snowflake"},
-		{name: "channel name accepted", channel: "aerial-dev", body: `{"status":"queued"}`, maxAttempts: 2, wantHits: 1},
-		{name: "retry on 500 then success", channel: dispatchSnowflake, failCount: 1, retryDelay: time.Millisecond, maxAttempts: 4, wantHits: 2, wantRetry: true},
-		{name: "exhausting retries on 500", channel: dispatchSnowflake, failCount: 5, retryDelay: time.Millisecond, maxAttempts: 2, wantHits: 2, wantErr: "returned status 500"},
-		{name: "cancel during retry backoff", channel: dispatchSnowflake, failCount: 5, retryDelay: time.Hour, maxAttempts: 4, ctxState: "cancel_on_hit", wantHits: 1, wantErr: "context canceled"},
-		{name: "pre-cancelled context", channel: dispatchSnowflake, maxAttempts: 2, ctxState: "cancelled", wantErr: "context canceled"},
-		{name: "transport failure", channel: dispatchSnowflake, retryDelay: time.Millisecond, maxAttempts: 2, closedServer: true, wantErr: "request failed"},
-		{name: "zero retry bounds use defaults", channel: dispatchSnowflake, body: `{"status":"queued"}`, wantHits: 1},
-		{name: "empty brain url", channel: dispatchSnowflake, noBrainURL: true, wantErr: "brain URL is not configured"},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			c, ctx, hits := newDispatchClient(t, tc)
-			before := retryCount()
-			err := c.DispatchPrompt(ctx, model.PromptRequest{ChannelID: tc.channel, Prompt: "test prompt"})
-			assertDispatch(t, tc, err, hits.Load(), before)
-		})
-	}
-}
-
 func TestDispatchDirectMessage(t *testing.T) {
 	t.Parallel()
 	tests := []dispatchCase{
 		{name: "invalid snowflake", channel: "invalid channel!", wantErr: "invalid discord snowflake"},
+		{name: "no brain url", channel: dispatchSnowflake, noBrainURL: true, wantErr: "brain URL is not configured"},
 		{name: "retry on 500 then success", channel: dispatchSnowflake, failCount: 1, retryDelay: time.Millisecond, body: `{"status":"sent"}`, wantHits: 2, wantRetry: true},
 		{name: "400 client error no retry", channel: dispatchSnowflake, status: http.StatusBadRequest, body: `{"error":"bad request"}`, retryDelay: time.Millisecond, wantHits: 1, wantErr: `brain internal message returned status 400: {"error":"bad request"}`},
+		{name: "retries exhausted", channel: dispatchSnowflake, failCount: 6, maxAttempts: 2, retryDelay: time.Millisecond, wantHits: 3, wantRetry: true, wantErr: "returned status 500"},
+		{name: "cancelled on hit", channel: dispatchSnowflake, failCount: 5, maxAttempts: 3, ctxState: "cancel_on_hit", retryDelay: 5 * time.Second, wantHits: 1, wantErr: "context canceled"},
+		{name: "pre-cancelled context", channel: dispatchSnowflake, ctxState: "cancelled", wantErr: "context canceled"},
+		{name: "closed server connection error", channel: dispatchSnowflake, closedServer: true, maxAttempts: 1, wantErr: "failed"},
+		{name: "default attempts and delay", channel: dispatchSnowflake, maxAttempts: -1, retryDelay: -1, failCount: 1, body: `{"status":"sent"}`, wantHits: 2, wantRetry: true},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -130,64 +112,6 @@ func TestDispatchDirectMessage(t *testing.T) {
 			c, ctx, hits := newDispatchClient(t, tc)
 			before := retryCount()
 			err := c.DispatchDirectMessage(ctx, model.DirectMessageRequest{ChannelID: tc.channel, Content: "test message"})
-			assertDispatch(t, tc, err, hits.Load(), before)
-		})
-	}
-}
-
-func TestDispatchBackground(t *testing.T) {
-	t.Parallel()
-	tests := []dispatchCase{
-		{name: "success 200", body: `{"status":"accepted"}`, maxAttempts: 2, wantHits: 1},
-		{name: "retry on 500 then success", failCount: 1, retryDelay: time.Millisecond, maxAttempts: 4, wantHits: 2, wantRetry: true},
-		{name: "400 client error no retry", status: http.StatusBadRequest, body: `{"error":"bad request"}`, retryDelay: time.Millisecond, maxAttempts: 3, wantHits: 1, wantErr: "brain dispatch returned status 400"},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			c, ctx, hits := newDispatchClient(t, tc)
-			before := retryCount()
-			err := c.DispatchBackground(ctx, model.DispatchRequest{Source: "test", Prompt: "test dispatch", Effort: "medium"})
-			assertDispatch(t, tc, err, hits.Load(), before)
-		})
-	}
-}
-
-func TestDispatchDiscordMessage(t *testing.T) {
-	t.Parallel()
-	tests := []dispatchCase{
-		{name: "success 200", body: `{"status":"processed","message_id":"12345"}`, wantHits: 1},
-		{name: "400 client error", status: http.StatusBadRequest, body: `{"error":"invalid payload"}`, wantHits: 1, wantErr: `discord ingress returned status 400: {"error":"invalid payload"}`},
-		{name: "500 server error not retried", status: http.StatusInternalServerError, body: `{"error":"internal error"}`, wantHits: 1, wantErr: "status 500"},
-		{name: "empty brain url", noBrainURL: true, wantErr: "brain URL is not configured"},
-		{name: "transport failure", closedServer: true, wantErr: "discord message ingress request failed"},
-		{name: "cancelled context fails request", ctxState: "cancelled", wantErr: "discord message ingress request failed"},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			c, ctx, hits := newDispatchClient(t, tc)
-			before := retryCount()
-			err := c.DispatchDiscordMessage(ctx, model.DiscordMessageIngressRequest{BotUserID: "bot1", RoleNames: map[string]string{"r1": "admin"}, Message: &discordgo.Message{ID: "m1", Content: "hello"}})
-			assertDispatch(t, tc, err, hits.Load(), before)
-		})
-	}
-}
-
-func TestDispatchDiscordInteraction(t *testing.T) {
-	t.Parallel()
-	tests := []dispatchCase{
-		{name: "success 200", body: `{"status":"ok"}`, wantHits: 1},
-		{name: "400 client error", status: http.StatusBadRequest, body: `{"error":"invalid payload"}`, wantHits: 1, wantErr: "discord interaction returned status 400"},
-		{name: "500 server error not retried", status: http.StatusInternalServerError, body: `{"error":"internal error"}`, wantHits: 1, wantErr: "status 500"},
-		{name: "cancelled context fails request", ctxState: "cancelled", wantErr: "discord interaction request failed"},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			c, ctx, hits := newDispatchClient(t, tc)
-			before := retryCount()
-			err := c.DispatchDiscordInteraction(ctx, &discordgo.Interaction{ID: "ix1", Type: discordgo.InteractionApplicationCommand})
 			assertDispatch(t, tc, err, hits.Load(), before)
 		})
 	}
@@ -226,8 +150,14 @@ func TestClientMarshalErrors(t *testing.T) {
 	if err := c.PostBrainWithRetry(context.Background(), "/prompt", "prompt", "status", "100000000000000001", 1, 0, false, unmarshalable); err == nil {
 		t.Errorf("expected marshal error from postBrainWithRetry")
 	}
-	if err := c.PostDiscordInternalJSON(context.Background(), nil, time.Second, "/discord", "req", "status", unmarshalable); err == nil {
-		t.Errorf("expected marshal error from postDiscordInternalJSON")
+
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	t.Cleanup(ts.Close)
+	c2 := NewClient(ts.URL, nil)
+	if err := c2.PostBrainWithRetry(context.Background(), "/discord/message", "direct", "status", dispatchSnowflake, 0, 0, false, map[string]string{"k": "v"}); err != nil {
+		t.Errorf("postBrainWithRetry with nonpositive maxAttempts and delay err = %v", err)
 	}
 }
 
@@ -295,5 +225,43 @@ func TestDispatchDiscordToURL_UsesExplicitURL(t *testing.T) {
 	}
 	if got := fallbackHits.Load(); got != 0 {
 		t.Errorf("fallbackServer hits = %d, want 0", got)
+	}
+}
+
+func TestPostDiscordInternalJSONToURL_Errors(t *testing.T) {
+	t.Parallel()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+		_, _ = w.Write([]byte(`{"error":"server error"}`))
+	}))
+	t.Cleanup(srv.Close)
+
+	closedSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {}))
+	closedSrv.Close()
+
+	tests := []struct {
+		name       string
+		brainURL   string
+		eriBaseURL string
+		client     *http.Client
+		payload    any
+		wantErr    string
+	}{
+		{name: "no url configured", brainURL: "", eriBaseURL: "", client: srv.Client(), payload: map[string]string{"k": "v"}, wantErr: "brain URL is not configured"},
+		{name: "marshal error", brainURL: srv.URL, eriBaseURL: srv.URL, client: srv.Client(), payload: make(chan int), wantErr: "marshal"},
+		{name: "fallback to brainURL", brainURL: srv.URL, eriBaseURL: "", client: srv.Client(), payload: map[string]string{"k": "v"}, wantErr: "returned status 500"},
+		{name: "server error 500", brainURL: "", eriBaseURL: srv.URL, client: srv.Client(), payload: map[string]string{"k": "v"}, wantErr: "returned status 500"},
+		{name: "connection failed", brainURL: "", eriBaseURL: closedSrv.URL, client: closedSrv.Client(), payload: map[string]string{"k": "v"}, wantErr: "request failed"},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			c := NewClient(tc.brainURL, nil)
+			err := c.PostDiscordInternalJSONToURL(context.Background(), tc.eriBaseURL, tc.client, 2*time.Second, "/test", "test", "test status", tc.payload)
+			if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+				t.Fatalf("err = %v, want substring %q", err, tc.wantErr)
+			}
+		})
 	}
 }

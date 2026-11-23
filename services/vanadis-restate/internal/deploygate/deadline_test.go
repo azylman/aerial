@@ -23,7 +23,6 @@ import (
 func TestDeploygateFrozenWireValues(t *testing.T) {
 	t.Parallel()
 	require.Equal(t, "deployment_deadlines", DeploymentDeadlineKey)
-	require.Equal(t, "pending_deployment_starts", PendingDeploymentKey)
 	require.Equal(t, "deploy_started", DeployStartedEvent)
 	require.Equal(t, 15*time.Minute, MaxDeployTime)
 }
@@ -34,8 +33,6 @@ type fakeRuntime struct {
 	nowErr             error
 	attempts           map[string]Attempt
 	getErr             error
-	pending            map[string]PendingStart
-	pendingErr         error
 	scheduled          []DeploymentDeadlineRequest
 	delays             []time.Duration
 	runStepErr         error
@@ -50,12 +47,6 @@ func (r *fakeRuntime) GetAttempts() (map[string]Attempt, error) { return r.attem
 func (r *fakeRuntime) SetAttempts(a map[string]Attempt) { r.attempts = a }
 
 func (r *fakeRuntime) Now() (time.Time, error) { return r.now, r.nowErr }
-
-func (r *fakeRuntime) GetPendingStarts() (map[string]PendingStart, error) {
-	return r.pending, r.pendingErr
-}
-
-func (r *fakeRuntime) SetPendingStarts(p map[string]PendingStart) { r.pending = p }
 
 func (r *fakeRuntime) ScheduleDeadline(req DeploymentDeadlineRequest, d time.Duration) {
 	r.scheduled = append(r.scheduled, req)
@@ -179,29 +170,9 @@ func (*fakeEriClient) Message(context.Context, string, string) error { return ni
 
 var deadlineNow = time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
 
-// deadlineChunk is chunk c of PR 1 on owner/repo at head "head".
-func deadlineChunk(status, merge string) model.VanadisChunk {
-	return model.VanadisChunk{ID: "c", Repo: "owner/repo", PRNumber: 1, HeadSHA: "head", MergeSHA: merge, Status: status}
-}
-
 // deadlineAttempt is chunk c's attempt for PR 1.
 func deadlineAttempt(revision string, generation int, deadline time.Time, delivered bool) Attempt {
 	return Attempt{ChunkID: "c", PRNumber: 1, Revision: revision, Generation: generation, Deadline: deadline, Delivered: delivered}
-}
-
-// deadlineStartEvent is a deploy_started event for PR 1 with the given started jobs.
-func deadlineStartEvent(head, merge string, occurred time.Time, jobs ...string) pubsub.PRLifecycleEvent {
-	ev := pubsub.PRLifecycleEvent{Event: DeployStartedEvent, Repo: "owner/repo", PRNumber: 1, HeadSHA: head, MergeSHA: merge, OccurredAt: occurred}
-	if len(jobs) > 0 {
-		ev.RolloutState = &pubsub.PRRolloutState{StartedJobs: jobs}
-	}
-	return ev
-}
-
-// deadlinePending is a fresh pending-start map holding chunk c's start for
-// merge "merge" (fresh per row because SyncPendingStarts mutates it).
-func deadlinePending(deadline time.Time, jobs ...string) map[string]PendingStart {
-	return map[string]PendingStart{"c:merge": {ChunkID: "c", HeadSHA: "head", Deadline: deadline, Event: deadlineStartEvent("head", "merge", deadline.Add(-MaxDeployTime), jobs...)}}
 }
 
 func deadlineState(status string, chunks ...model.VanadisChunk) *model.BuildObjectState {
@@ -227,11 +198,10 @@ func requireDeadlineErr(t *testing.T, err error, wantErr string) {
 }
 
 var (
-	errSyncUnavailable = errors.New("unavailable")
-	syncIn15           = deadlineNow.Add(MaxDeployTime)
-	syncTwoJobs        = &pubsub.PRRolloutState{StartedJobs: []string{"one", "two"}}
-	syncDeploying      = model.VanadisChunk{ID: "c", Repo: "owner/repo", PRNumber: 1, MergeSHA: "sha", Status: statusDeploying, StartedAt: deadlineNow.Add(-time.Hour), RolloutState: syncTwoJobs}
-	syncCompleted      = model.VanadisChunk{ID: "completed", PRNumber: 2, MergeSHA: "done", Status: statusSynced}
+	syncIn15      = deadlineNow.Add(MaxDeployTime)
+	syncTwoJobs   = &pubsub.PRRolloutState{StartedJobs: []string{"one", "two"}}
+	syncDeploying = model.VanadisChunk{ID: "c", Repo: "owner/repo", PRNumber: 1, MergeSHA: "sha", Status: statusDeploying, StartedAt: deadlineNow.Add(-time.Hour), RolloutState: syncTwoJobs}
+	syncCompleted = model.VanadisChunk{ID: "completed", PRNumber: 2, MergeSHA: "done", Status: statusSynced}
 )
 
 // syncDeadlinesCase is one SyncDeadlines row.
@@ -245,7 +215,6 @@ type syncDeadlinesCase struct {
 	retry           *RetryRequest
 	wantErr         string
 	wantAttempts    map[string]Attempt
-	wantPending     map[string]PendingStart
 	wantDelays      []time.Duration
 	wantReconcile   bool
 	wantStoreStatus string
@@ -294,132 +263,6 @@ var syncDeadlinesCases = []syncDeadlinesCase{
 	},
 	{name: "attempt read fails", rt: fakeRuntime{getErr: errors.New("state read")}, state: deadlineState("", syncDeploying), wantErr: "state read"},
 	{name: "clock fails", rt: fakeRuntime{nowErr: errors.New("clock")}, state: deadlineState("", syncDeploying), wantErr: "clock"},
-	{
-		name: "pending read fails", rt: fakeRuntime{now: deadlineNow, pendingErr: errSyncUnavailable, pending: deadlinePending(syncIn15)},
-		store: fakeStore{chunks: []model.VanadisChunk{deadlineChunk(statusMerged, "merge")}}, state: deadlineState(statusRunning, deadlineChunk(statusMerged, "merge")),
-		wantErr: "unavailable", wantPending: deadlinePending(syncIn15), wantStoreStatus: statusMerged, wantBuildStatus: statusRunning,
-	},
-	{
-		name: "pending attempt read fails", rt: fakeRuntime{now: deadlineNow, getErr: errSyncUnavailable, pending: deadlinePending(syncIn15)},
-		store: fakeStore{chunks: []model.VanadisChunk{deadlineChunk(statusMerged, "merge")}}, state: deadlineState(statusRunning, deadlineChunk(statusMerged, "merge")),
-		wantErr: "unavailable", wantPending: deadlinePending(syncIn15), wantStoreStatus: statusMerged, wantBuildStatus: statusRunning,
-	},
-	{
-		name: "pending capture clock fails", rt: fakeRuntime{nowErr: errSyncUnavailable, pending: deadlinePending(syncIn15)}, ev: &pubsub.PRLifecycleEvent{Event: DeployStartedEvent},
-		store: fakeStore{chunks: []model.VanadisChunk{deadlineChunk(statusMerged, "merge")}}, state: deadlineState(statusRunning, deadlineChunk(statusMerged, "merge")),
-		wantErr: "unavailable", wantPending: deadlinePending(syncIn15), wantStoreStatus: statusMerged, wantBuildStatus: statusRunning,
-	},
-	{
-		name: "promotion authority read fails", rt: fakeRuntime{now: deadlineNow, pending: deadlinePending(syncIn15)},
-		store: fakeStore{getBuildErr: errSyncUnavailable, chunks: []model.VanadisChunk{deadlineChunk(statusMerged, "merge")}}, state: deadlineState(statusRunning, deadlineChunk(statusMerged, "merge")),
-		wantErr: "unavailable", wantPending: deadlinePending(syncIn15), wantStoreStatus: statusMerged, wantBuildStatus: statusRunning,
-	},
-	{
-		name: "promotion authority write fails", rt: fakeRuntime{now: deadlineNow, pending: deadlinePending(syncIn15, "web")},
-		store: fakeStore{rolloutErr: errSyncUnavailable, chunks: []model.VanadisChunk{deadlineChunk(statusMerged, "merge")}}, state: deadlineState(statusRunning, deadlineChunk(statusMerged, "merge")),
-		wantErr: "unavailable", wantPending: deadlinePending(syncIn15, "web"), wantStoreStatus: statusMerged, wantBuildStatus: statusRunning,
-	},
-	{
-		name: "promotion journal fails", rt: fakeRuntime{now: deadlineNow, runStepErr: errSyncUnavailable, pending: deadlinePending(syncIn15)},
-		store: fakeStore{chunks: []model.VanadisChunk{deadlineChunk(statusMerged, "merge")}}, state: deadlineState(statusRunning, deadlineChunk(statusMerged, "merge")),
-		wantErr: "unavailable", wantPending: deadlinePending(syncIn15), wantStoreStatus: statusMerged, wantBuildStatus: statusRunning,
-	},
-	// Deploy start observed before the merge webhook: the pending start keeps
-	// its original budget once authority proves the exact revision merged.
-	{
-		name: "start before merge promotes with the original budget", rt: fakeRuntime{now: deadlineNow.Add(5 * time.Minute), pending: deadlinePending(syncIn15, "web", "worker")},
-		store: fakeStore{chunks: []model.VanadisChunk{deadlineChunk(statusMerged, "merge")}}, state: deadlineState(statusRunning, deadlineChunk(statusMerged, "merge")),
-		wantAttempts: map[string]Attempt{"c": deadlineAttempt("merge", 1, syncIn15, false)}, wantDelays: []time.Duration{10 * time.Minute},
-		wantReconcile: true, wantStoreStatus: statusDeploying, wantBuildStatus: statusRunning,
-	},
-	{
-		name: "start before merge on an already deploying chunk after the deadline", rt: fakeRuntime{now: deadlineNow.Add(20 * time.Minute), pending: deadlinePending(syncIn15, "web")},
-		store: fakeStore{chunks: []model.VanadisChunk{deadlineChunk(statusDeploying, "merge")}}, state: deadlineState(statusRunning, deadlineChunk(statusDeploying, "merge")),
-		wantAttempts: map[string]Attempt{"c": deadlineAttempt("merge", 1, syncIn15, false)}, wantDelays: []time.Duration{0},
-		wantReconcile: true, wantStoreStatus: statusDeploying, wantBuildStatus: statusRunning,
-	},
-	{
-		name: "start before merge with the merge after the deadline", rt: fakeRuntime{now: deadlineNow.Add(20 * time.Minute), pending: deadlinePending(syncIn15, "web")},
-		store: fakeStore{chunks: []model.VanadisChunk{deadlineChunk(statusMerged, "merge")}}, state: deadlineState(statusRunning, deadlineChunk(statusMerged, "merge")),
-		wantAttempts: map[string]Attempt{"c": deadlineAttempt("merge", 1, syncIn15, false)}, wantDelays: []time.Duration{0},
-		wantReconcile: true, wantStoreStatus: statusDeploying, wantBuildStatus: statusRunning,
-	},
-	{
-		name: "start before an obsolete merge is dropped", rt: fakeRuntime{now: deadlineNow.Add(5 * time.Minute), pending: deadlinePending(syncIn15)},
-		store:           fakeStore{chunks: []model.VanadisChunk{{ID: "c", Repo: "owner/repo", PRNumber: 1, HeadSHA: "new-head", MergeSHA: "new-merge", Status: statusMerged}}},
-		state:           deadlineState(statusRunning, model.VanadisChunk{ID: "c", Repo: "owner/repo", PRNumber: 1, HeadSHA: "new-head", MergeSHA: "new-merge", Status: statusMerged}),
-		wantStoreStatus: statusMerged, wantBuildStatus: statusRunning,
-	},
-	{
-		name: "start before a superseded head is dropped", rt: fakeRuntime{now: deadlineNow.Add(5 * time.Minute), pending: deadlinePending(syncIn15)},
-		store:           fakeStore{chunks: []model.VanadisChunk{{ID: "c", Repo: "owner/repo", PRNumber: 1, HeadSHA: "new-head", MergeSHA: "merge", Status: statusMerged}}},
-		state:           deadlineState(statusRunning, model.VanadisChunk{ID: "c", Repo: "owner/repo", PRNumber: 1, HeadSHA: "new-head", MergeSHA: "merge", Status: statusMerged}),
-		wantStoreStatus: statusMerged, wantBuildStatus: statusRunning,
-	},
-	{
-		name: "start before a chunk completed is dropped", rt: fakeRuntime{now: deadlineNow.Add(5 * time.Minute), pending: deadlinePending(syncIn15)},
-		store: fakeStore{chunks: []model.VanadisChunk{deadlineChunk(statusSynced, "merge")}}, state: deadlineState(statusRunning, deadlineChunk(statusSynced, "merge")),
-		wantStoreStatus: statusSynced, wantBuildStatus: statusRunning,
-	},
-	{
-		name: "start before a chunk cancelled is dropped", rt: fakeRuntime{now: deadlineNow.Add(5 * time.Minute), pending: deadlinePending(syncIn15)},
-		store: fakeStore{chunks: []model.VanadisChunk{deadlineChunk(statusCancelled, "merge")}}, state: deadlineState(statusRunning, deadlineChunk(statusCancelled, "merge")),
-		wantStoreStatus: statusCancelled, wantBuildStatus: statusRunning,
-	},
-	{
-		name: "pending start keeps an active attempt", rt: fakeRuntime{now: deadlineNow, pending: deadlinePending(syncIn15), attempts: map[string]Attempt{"c": deadlineAttempt("merge", 7, deadlineNow.Add(time.Minute), false)}},
-		store: fakeStore{chunks: []model.VanadisChunk{deadlineChunk(statusDeploying, "merge")}}, state: deadlineState(statusRunning, deadlineChunk(statusDeploying, "merge")),
-		wantAttempts: map[string]Attempt{"c": deadlineAttempt("merge", 7, deadlineNow.Add(time.Minute), false)}, wantStoreStatus: statusDeploying, wantBuildStatus: statusRunning,
-	},
-	{
-		name: "pending start keeps a delivered attempt", rt: fakeRuntime{now: deadlineNow, pending: deadlinePending(syncIn15), attempts: map[string]Attempt{"c": deadlineAttempt("merge", 7, deadlineNow.Add(time.Minute), true)}},
-		store: fakeStore{chunks: []model.VanadisChunk{deadlineChunk(statusMerged, "merge")}}, state: deadlineState(statusRunning, deadlineChunk(statusMerged, "merge")),
-		wantAttempts: map[string]Attempt{"c": deadlineAttempt("merge", 7, deadlineNow.Add(time.Minute), true)}, wantStoreStatus: statusMerged, wantBuildStatus: statusRunning,
-	},
-	// Promotion rechecks authority instead of trusting a stale syncDeploying snapshot.
-	{
-		name: "stale snapshot of a completed chunk is not adopted", rt: fakeRuntime{now: deadlineNow, pending: deadlinePending(syncIn15)},
-		store: fakeStore{chunks: []model.VanadisChunk{deadlineChunk(statusSynced, "merge")}}, state: deadlineState(statusRunning, deadlineChunk(statusDeploying, "merge")),
-		wantStoreStatus: statusSynced, wantBuildStatus: statusRunning,
-	},
-	{
-		name: "stale snapshot of a cancelled chunk is not adopted", rt: fakeRuntime{now: deadlineNow, pending: deadlinePending(syncIn15)},
-		store: fakeStore{chunks: []model.VanadisChunk{deadlineChunk(statusCancelled, "merge")}}, state: deadlineState(statusRunning, deadlineChunk(statusDeploying, "merge")),
-		wantStoreStatus: statusCancelled, wantBuildStatus: statusRunning,
-	},
-	{
-		name: "stale snapshot of a superseded chunk is not adopted", rt: fakeRuntime{now: deadlineNow, pending: deadlinePending(syncIn15)},
-		store: fakeStore{chunks: []model.VanadisChunk{deadlineChunk(statusMerged, "new")}}, state: deadlineState(statusRunning, deadlineChunk(statusDeploying, "merge")),
-		wantStoreStatus: statusMerged, wantBuildStatus: statusRunning,
-	},
-	{
-		name: "pending start for a chunk missing from the snapshot is dropped", rt: fakeRuntime{now: deadlineNow, pending: deadlinePending(syncIn15)},
-		store:        fakeStore{chunks: []model.VanadisChunk{deadlineChunk(statusMerged, "merge")}},
-		state:        deadlineState(statusRunning, model.VanadisChunk{ID: "other", Repo: "owner/repo", PRNumber: 1, HeadSHA: "head", MergeSHA: "merge", Status: statusDeploying}),
-		wantAttempts: map[string]Attempt{"other": {ChunkID: "other", PRNumber: 1, Revision: "merge", Generation: 1, Deadline: syncIn15}},
-		wantDelays:   []time.Duration{15 * time.Minute}, wantStoreStatus: statusMerged, wantBuildStatus: statusRunning,
-	},
-	// Promotion rechecks the build too: a terminal build arms nothing.
-	{
-		name: "completed build arms nothing", rt: fakeRuntime{now: deadlineNow, pending: deadlinePending(syncIn15)},
-		store: fakeStore{buildStatus: statusCompleted, chunks: []model.VanadisChunk{deadlineChunk(statusDeploying, "merge")}}, state: deadlineState(statusRunning, deadlineChunk(statusDeploying, "merge")),
-		wantStoreStatus: statusDeploying, wantBuildStatus: statusCompleted,
-	},
-	{
-		name: "cancelled build arms nothing", rt: fakeRuntime{now: deadlineNow, pending: deadlinePending(syncIn15)},
-		store: fakeStore{buildStatus: statusCancelled, chunks: []model.VanadisChunk{deadlineChunk(statusDeploying, "merge")}}, state: deadlineState(statusRunning, deadlineChunk(statusDeploying, "merge")),
-		wantStoreStatus: statusDeploying, wantBuildStatus: statusCancelled,
-	},
-	{
-		name: "failed build arms nothing", rt: fakeRuntime{now: deadlineNow, pending: deadlinePending(syncIn15)},
-		store: fakeStore{buildStatus: statusFailed, chunks: []model.VanadisChunk{deadlineChunk(statusDeploying, "merge")}}, state: deadlineState(statusRunning, deadlineChunk(statusDeploying, "merge")),
-		wantStoreStatus: statusDeploying, wantBuildStatus: statusFailed,
-	},
-	{
-		name: "missing build arms nothing", rt: fakeRuntime{now: deadlineNow, pending: deadlinePending(syncIn15)},
-		store: fakeStore{nilBuild: true, chunks: []model.VanadisChunk{deadlineChunk(statusDeploying, "merge")}}, state: deadlineState(statusRunning, deadlineChunk(statusDeploying, "merge")),
-		wantStoreStatus: statusDeploying,
-	},
 }
 
 func TestSyncDeadlines(t *testing.T) {
@@ -429,7 +272,7 @@ func TestSyncDeadlines(t *testing.T) {
 			t.Parallel()
 			// Rows are shared package state: clone everything the gate mutates.
 			rt, st := tc.rt, tc.store
-			rt.key, rt.attempts, rt.pending = "b", maps.Clone(tc.rt.attempts), maps.Clone(tc.rt.pending)
+			rt.key, rt.attempts = "b", maps.Clone(tc.rt.attempts)
 			st.chunks = slices.Clone(tc.store.chunks)
 			var state *model.BuildObjectState
 			if tc.state != nil {
@@ -442,7 +285,11 @@ func TestSyncDeadlines(t *testing.T) {
 			err := NewGate(&st, nil).SyncDeadlines(run, state, tc.ev, tc.retry)
 			requireDeadlineErr(t, err, tc.wantErr)
 			requireDeadlineMap(t, tc.wantAttempts, rt.attempts)
-			requireDeadlineMap(t, tc.wantPending, rt.pending)
+			require.Equal(t, tc.wantDelays, rt.delays)
+			require.Equal(t, tc.wantReconcile, rt.reconcileScheduled)
+			if len(st.chunks) > 0 {
+				require.Equal(t, tc.wantStoreStatus, st.chunks[0].Status)
+			}
 			require.Equal(t, tc.wantDelays, rt.delays)
 			require.Equal(t, tc.wantReconcile, rt.reconcileScheduled)
 			if len(st.chunks) > 0 {
@@ -557,9 +404,7 @@ func TestRetryDeployment(t *testing.T) {
 func TestArmDeploymentStart(t *testing.T) {
 	t.Parallel()
 	deploying := model.VanadisChunk{ID: "c", Status: statusDeploying, PRNumber: 1, Repo: "owner/repo", MergeSHA: "sha"}
-	opened := deadlineChunk("pr_opened", "")
 	shaStart := pubsub.PRLifecycleEvent{Repo: "owner/repo", PRNumber: 1, MergeSHA: "sha", OccurredAt: deadlineNow.Add(-time.Minute)}
-	in15 := deadlineNow.Add(MaxDeployTime)
 	tests := []struct {
 		name         string
 		rt           fakeRuntime
@@ -567,7 +412,6 @@ func TestArmDeploymentStart(t *testing.T) {
 		ev           pubsub.PRLifecycleEvent
 		wantErr      string
 		wantAttempts map[string]Attempt
-		wantPending  map[string]PendingStart
 		wantDelays   []time.Duration
 	}{
 		{
@@ -579,28 +423,6 @@ func TestArmDeploymentStart(t *testing.T) {
 		{name: "terminal snapshot skips arming", store: fakeStore{buildStatus: statusCompleted, chunks: []model.VanadisChunk{deploying}}, ev: shaStart},
 		{name: "attempt read fails", rt: fakeRuntime{getErr: errors.New("state read")}, store: fakeStore{chunks: []model.VanadisChunk{deploying}}, wantErr: "state read"},
 		{name: "clock fails", rt: fakeRuntime{nowErr: errors.New("clock")}, store: fakeStore{chunks: []model.VanadisChunk{deploying}}, wantErr: "clock"},
-		// deploy_started before the merge webhook is captured as a pending start.
-		{name: "pre-merge start without merge identity", store: fakeStore{chunks: []model.VanadisChunk{opened}}, ev: deadlineStartEvent("head", "", deadlineNow)},
-		{name: "pre-merge start for a stale head", store: fakeStore{chunks: []model.VanadisChunk{opened}}, ev: deadlineStartEvent("other", "merge", deadlineNow)},
-		{
-			name: "pre-merge start backdates to the occurred time", store: fakeStore{chunks: []model.VanadisChunk{opened}}, ev: deadlineStartEvent("head", "merge", deadlineNow.Add(-5*time.Minute)),
-			wantPending: map[string]PendingStart{"c:merge": {ChunkID: "c", HeadSHA: "head", Deadline: deadlineNow.Add(10 * time.Minute), Event: deadlineStartEvent("head", "merge", deadlineNow.Add(-5*time.Minute))}},
-		},
-		{
-			name: "pre-merge start with a future timestamp starts now", store: fakeStore{chunks: []model.VanadisChunk{opened}}, ev: deadlineStartEvent("head", "merge", deadlineNow.Add(time.Hour)),
-			wantPending: map[string]PendingStart{"c:merge": {ChunkID: "c", HeadSHA: "head", Deadline: in15, Event: deadlineStartEvent("head", "merge", deadlineNow.Add(time.Hour))}},
-		},
-		{
-			name: "pre-merge start without a timestamp matches the event case-insensitively", store: fakeStore{chunks: []model.VanadisChunk{opened}},
-			ev:          pubsub.PRLifecycleEvent{Event: " DEPLOY_STARTED ", Repo: "owner/repo", PRNumber: 1, HeadSHA: "head", MergeSHA: "merge"},
-			wantPending: map[string]PendingStart{"c:merge": {ChunkID: "c", HeadSHA: "head", Deadline: in15, Event: pubsub.PRLifecycleEvent{Event: " DEPLOY_STARTED ", Repo: "owner/repo", PRNumber: 1, HeadSHA: "head", MergeSHA: "merge"}}},
-		},
-		{
-			name: "repeated pre-merge start keeps the original budget and takes the newer rollout",
-			rt:   fakeRuntime{now: deadlineNow.Add(2 * time.Minute), pending: deadlinePending(in15, "web")}, store: fakeStore{chunks: []model.VanadisChunk{opened}},
-			ev:          deadlineStartEvent("head", "merge", deadlineNow.Add(2*time.Minute), "web", "worker"),
-			wantPending: map[string]PendingStart{"c:merge": {ChunkID: "c", HeadSHA: "head", Deadline: in15, Event: deadlineStartEvent("head", "merge", deadlineNow, "web", "worker")}},
-		},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -613,7 +435,6 @@ func TestArmDeploymentStart(t *testing.T) {
 			err := NewGate(&st, nil).ArmDeploymentStart(&rt, "b", tc.ev)
 			requireDeadlineErr(t, err, tc.wantErr)
 			requireDeadlineMap(t, tc.wantAttempts, rt.attempts)
-			requireDeadlineMap(t, tc.wantPending, rt.pending)
 			require.Equal(t, tc.wantDelays, rt.delays)
 		})
 	}

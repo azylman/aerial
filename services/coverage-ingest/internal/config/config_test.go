@@ -241,16 +241,11 @@ func TestPruneKeepSet(t *testing.T) {
 		wantErr string
 	}{
 		{
-			name: "targets and push services deduped with eri-restate",
+			name: "targets and push services deduped",
 			cfg:  Config{Targets: []Target{{Service: "haro"}, {Service: "eri"}, {Service: "eri"}}, PushServices: []string{"photos-sync"}},
-			want: []string{"eri", "eri-restate", "haro", "photos-sync"},
+			want: []string{"eri", "haro", "photos-sync"},
 		},
-		{
-			name: "eri-restate target is not duplicated",
-			cfg:  Config{Targets: []Target{{Service: "eri-restate"}, {Service: "eri"}}},
-			want: []string{"eri", "eri-restate"},
-		},
-		{name: "push services only", cfg: Config{PushServices: []string{"photos-sync"}}, want: []string{"eri-restate", "photos-sync"}},
+		{name: "push services only", cfg: Config{PushServices: []string{"photos-sync"}}, want: []string{"photos-sync"}},
 		{name: "empty config refused", cfg: Config{}, wantErr: "keep set is empty"},
 		{name: "blank names refused", cfg: Config{Targets: []Target{{Service: " "}}, PushServices: []string{""}}, wantErr: "keep set is empty"},
 	}

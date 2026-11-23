@@ -94,8 +94,6 @@ type Runtime interface {
 	GetAttempts() (map[string]Attempt, error)
 	SetAttempts(attempts map[string]Attempt)
 	Now() (time.Time, error)
-	GetPendingStarts() (map[string]PendingStart, error)
-	SetPendingStarts(pending map[string]PendingStart)
 	ScheduleDeadline(req DeploymentDeadlineRequest, delay time.Duration)
 	ScheduleReconcile()
 	RunStep(name string, fn func(ctx context.Context) (StepOutput, error)) (StepOutput, error)
@@ -170,13 +168,9 @@ func ValidateRetry(state *model.BuildObjectState, attempts map[string]Attempt, r
 // deadlines. Chunk.StartedAt is the coding start, not deployment start; absent
 // a deployment event the adoption time is used rather than pretending that
 // field is a historical deployment timestamp.
-func (g *Gate) SyncDeadlines(rt Runtime, state *model.BuildObjectState, ev *pubsub.PRLifecycleEvent, retry *RetryRequest) error {
+func (*Gate) SyncDeadlines(rt Runtime, state *model.BuildObjectState, ev *pubsub.PRLifecycleEvent, retry *RetryRequest) error {
 	if rt == nil || state == nil {
 		return nil
-	}
-	starts, err := g.SyncPendingStarts(rt, state, ev)
-	if err != nil {
-		return err
 	}
 	if !buildActive(state.Build.Status) {
 		return nil
@@ -215,9 +209,6 @@ func (g *Gate) SyncDeadlines(rt Runtime, state *model.BuildObjectState, ev *pubs
 		old := attempts[c.ID]
 		explicit := retry != nil && retry.ChunkID == c.ID
 		start := startAt(now, ev, c)
-		if original, ok := starts[c.ID]; ok {
-			start = original
-		}
 		a := nextAttempt(old, c, start, explicit)
 		if a == old {
 			continue

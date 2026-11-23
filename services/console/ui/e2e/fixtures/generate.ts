@@ -22,7 +22,6 @@ import type {
   FactItem,
   FactsAPIResponse,
   OneShotSchedule,
-  QuickLaunchLink,
   ScheduleRun,
   ScheduleRunsAPIResponse,
   SchedulesAPIResponse,
@@ -126,15 +125,6 @@ const activeTasks: ActiveTaskStatus[] = TRIGGERS.map((trigger, i) => ({
   started_at: iso(-60 * (i + 1)),
 }));
 
-const quickLaunchLinks: QuickLaunchLink[] = [
-  { name: 'Console', url: '/console/', icon: '🛰️', target: '_self', is_core: true },
-  { name: 'Grafana', url: '/grafana/', icon: '📈', description: 'Telemetry dashboards', is_core: true },
-  { name: 'Docs', url: '/docs/', icon: '📚', is_core: true },
-  { name: 'Agentsview', url: '/agentsview/', icon: '🔭', is_core: true },
-  { name: 'Homepage', url: '/', icon: '🏠', target: '_self', is_core: true },
-  { name: 'Home Assistant', url: 'http://homeassistant.example.test:8123/', icon: '🏡', description: 'Smart home', is_custom: true },
-];
-
 const status: ClusterResponse = {
   system_time: FIXTURE_NOW,
   cluster_status: 'degraded',
@@ -142,7 +132,6 @@ const status: ClusterResponse = {
   active_tasks: activeTasks,
   services,
   deployments,
-  quick_launch_links: quickLaunchLinks,
   ongoing_deploy: 'console',
   is_deploying: true,
 };

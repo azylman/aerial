@@ -36,7 +36,6 @@ type (
 	BrainTasksAPIResponse       = config.BrainTasksAPIResponse
 	ClusterResponse             = config.ClusterResponse
 	ConsoleConfig               = config.ConsoleConfig
-	QuickLaunchLink             = config.QuickLaunchLink
 	DockerContainerJSON         = config.DockerContainerJSON
 	DockerContainerHealth       = config.DockerContainerHealth
 	GitHubRun                   = config.GitHubRun
@@ -67,7 +66,6 @@ type (
 )
 
 var (
-	loadQuickLaunchLinks               = config.LoadQuickLaunchLinks
 	NormalizeAgent                     = config.NormalizeAgent
 	SortConfiguredAgents               = config.SortConfiguredAgents
 	StampTaskAgent                     = config.StampTaskAgent
@@ -474,7 +472,7 @@ func fetchActiveTasksFromAgents(ctx context.Context, targets []AgentBrainTarget)
 	return out
 }
 
-func statusHandler(brainURL, configPath, gitCommit string, optionalAddrs ...string) http.HandlerFunc {
+func statusHandler(brainURL, gitCommit string, optionalAddrs ...string) http.HandlerFunc {
 	kubeAPIServer := ""
 	if len(optionalAddrs) > 0 {
 		kubeAPIServer = strings.TrimSpace(optionalAddrs[0])
@@ -517,8 +515,6 @@ func statusHandler(brainURL, configPath, gitCommit string, optionalAddrs ...stri
 			activeTasks = FilterActiveTasksByAgent(allTasks, agentParam)
 		}
 
-		quickLinks := loadQuickLaunchLinks(configPath)
-
 		if len(services) == 0 {
 			uptimeSec := int64(time.Since(startTime).Seconds())
 			services = []ServiceStatus{
@@ -549,7 +545,6 @@ func statusHandler(brainURL, configPath, gitCommit string, optionalAddrs ...stri
 			ActiveTasks:      activeTasks,
 			Services:         services,
 			Deployments:      deployments,
-			QuickLaunchLinks: quickLinks,
 			OngoingDeploy:    ongoingDeploy,
 			IsDeploying:      isDeploying,
 			ConfiguredAgents: configuredAgents,
@@ -591,8 +586,8 @@ func SetupConsoleMux(cfg ConsoleConfig, assetReg *AssetRegistry) http.Handler {
 	vanadisURL := strings.TrimSpace(cfg.VanadisURL)
 	mux.HandleFunc("/health", healthHandler)
 	mux.HandleFunc("/console/health", healthHandler)
-	mux.HandleFunc("/api/status", statusHandler(cfg.BrainURL, cfg.ConfigPath, cfg.GitCommit, cfg.KubeAPIServer, haroURL, vanadisURL))
-	mux.HandleFunc("/console/api/status", statusHandler(cfg.BrainURL, cfg.ConfigPath, cfg.GitCommit, cfg.KubeAPIServer, haroURL, vanadisURL))
+	mux.HandleFunc("/api/status", statusHandler(cfg.BrainURL, cfg.GitCommit, cfg.KubeAPIServer, haroURL, vanadisURL))
+	mux.HandleFunc("/console/api/status", statusHandler(cfg.BrainURL, cfg.GitCommit, cfg.KubeAPIServer, haroURL, vanadisURL))
 	mux.HandleFunc("/api/facts", factsHandler(memoryURL))
 	mux.HandleFunc("/console/api/facts", factsHandler(memoryURL))
 	mux.HandleFunc("/api/schedules", schedulesHandler(haroURL))
@@ -616,25 +611,9 @@ func SetupConsoleMux(cfg ConsoleConfig, assetReg *AssetRegistry) http.Handler {
 	if assetReg != nil {
 		mux.HandleFunc("/", assetReg.ServeHTTP)
 		mux.Handle("/console/", http.StripPrefix("/console", http.HandlerFunc(assetReg.ServeHTTP)))
-		for _, legacy := range []string{"/next", "/next/", "/console/next", "/console/next/"} {
-			mux.HandleFunc(legacy, redirectLegacyNext)
-		}
 	}
 
 	return securityHeadersMiddleware(tracing.Middleware("console", mux))
-}
-
-// redirectLegacyNext permanently redirects bookmarks from the retired side-by-side React mount
-// (/next/*, /console/next/*) to the same route at the console root, preserving the query string:
-// /console/next/memory?x=1 -> /console/memory?x=1, /next -> /.
-func redirectLegacyNext(w http.ResponseWriter, r *http.Request) {
-	prefix := ""
-	if strings.HasPrefix(r.URL.Path, "/console/") {
-		prefix = "/console"
-	}
-	remainder := strings.TrimPrefix(strings.TrimPrefix(r.URL.Path, prefix), "/next")
-	dest := url.URL{Path: prefix + "/" + strings.TrimPrefix(remainder, "/"), RawQuery: r.URL.RawQuery}
-	http.Redirect(w, r, dest.String(), http.StatusMovedPermanently)
 }
 
 // RunConsoleServer starts the GitHub poller, creates the asset registry, and listens on the configured port.

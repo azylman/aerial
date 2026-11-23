@@ -18,6 +18,7 @@ import (
 	"github.com/azylman/aerial/services/eri/pkg/llmcall"
 	"github.com/azylman/aerial/services/eri/pkg/metrics"
 	"github.com/azylman/aerial/services/eri/pkg/queue"
+	"github.com/azylman/aerial/services/eri/pkg/runner"
 )
 
 type remoteQuotaCase struct {
@@ -571,6 +572,8 @@ func TestRestateIngressClient_CancelDispatchImmediate(t *testing.T) {
 type newRestateLLMCase struct {
 	name         string
 	agent        string
+	callerKey    string
+	wantIdemKey  string
 	cancelCaller bool
 	nilClient    bool
 	stubStatus   int
@@ -614,6 +617,10 @@ func runNewRestateLLMCase(t *testing.T, tc newRestateLLMCase) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
+	callCtx := ctx
+	if tc.callerKey != "" {
+		callCtx = runner.WithLLMCallerKey(ctx, tc.callerKey)
+	}
 	client := NewRestateIngressClient(ts.URL, tc.agent, ts.Client())
 	if tc.nilClient {
 		client = nil
@@ -623,7 +630,7 @@ func runNewRestateLLMCase(t *testing.T, tc newRestateLLMCase) {
 	var err error
 	go func() {
 		defer close(done)
-		resp, err = NewRestateLLMFunc(client)(ctx, "flash", "summarize")
+		resp, err = NewRestateLLMFunc(client)(callCtx, "flash", "summarize")
 	}()
 	var got llmIngressCapture
 	if tc.cancelCaller {
@@ -646,18 +653,25 @@ func runNewRestateLLMCase(t *testing.T, tc newRestateLLMCase) {
 		require.NoError(t, err)
 	}
 	assert.Equal(t, tc.wantResponse, resp)
-	assert.False(t, got.hasKey, "unkeyed call must not send Idempotency-Key")
+	assert.Equal(t, tc.wantIdemKey != "", got.hasKey, "Idempotency-Key presence")
+	assert.Equal(t, tc.wantIdemKey, got.idemKey)
 	assert.Equal(t, tc.wantPath, got.path)
 	if tc.wantPath != "" {
-		assert.Equal(t, llmcall.Request{Prompt: "summarize", Model: "flash"}, got.req)
+		assert.Equal(t, llmcall.Request{Prompt: "summarize", Model: "flash", CallerKey: tc.callerKey}, got.req)
 	}
 }
+
+// summarizeFlashHash is the hand-computed sha256 over the length-prefixed
+// fields of {Prompt:"summarize", Model:"flash"} with no effort or attachments.
+const summarizeFlashHash = "4e7fc0701974d8e7bd6db7cef77ab27b740e67b1ae590039580cad25dbd2ec07"
 
 func TestNewRestateLLMFunc(t *testing.T) {
 	t.Parallel()
 
 	tests := []newRestateLLMCase{
 		{name: "unkeyed call returns response", agent: "aerial", stubStatus: http.StatusOK, stubBody: `{"response":"title"}`, wantResponse: "title", wantPath: "/LLM/Complete"},
+		{name: "classify caller key sent as idempotency key", agent: "aerial", callerKey: "classify:42:99", wantIdemKey: "llm:classify:42:99:" + summarizeFlashHash, stubStatus: http.StatusOK, stubBody: `{"response":"{}"}`, wantResponse: "{}", wantPath: "/LLM/Complete"},
+		{name: "title caller key sent as idempotency key", agent: "aerial", callerKey: "title:99", wantIdemKey: "llm:title:99:" + summarizeFlashHash, stubStatus: http.StatusOK, stubBody: `{"response":"Cute Title"}`, wantResponse: "Cute Title", wantPath: "/LLM/Complete"},
 		{name: "sibling agent service", agent: "miorine", stubStatus: http.StatusOK, stubBody: `{"response":"ok"}`, wantResponse: "ok", wantPath: "/LLM-miorine/Complete"},
 		{name: "restate failure", agent: "aerial", stubStatus: http.StatusInternalServerError, stubBody: `{"message":"boom"}`, wantErrSub: "boom", wantPath: "/LLM/Complete"},
 		{name: "cancelled caller returns promptly", agent: "aerial", cancelCaller: true, wantErrSub: "context canceled", wantPath: "/LLM/Complete"},

@@ -448,38 +448,6 @@ func TestToMCPChunkBriefs(t *testing.T) {
 	}
 }
 
-func TestStoreErrorStatus(t *testing.T) {
-	t.Parallel()
-	tests := []struct {
-		name       string
-		err        error
-		wantStatus int
-	}{
-		{name: "k8sauth validation maps to bad request", err: &k8sauth.ValidationError{Message: "bad slug"}, wantStatus: http.StatusBadRequest},
-		{name: "k8sauth unauthorized maps to unauthorized", err: &k8sauth.UnauthorizedError{Message: "no token"}, wantStatus: http.StatusUnauthorized},
-		{name: "k8sauth forbidden maps to forbidden", err: &k8sauth.ForbiddenError{Message: "denied"}, wantStatus: http.StatusForbidden},
-		{name: "timeout maps to gateway timeout", err: restate.ErrRestateTimeout, wantStatus: http.StatusGatewayTimeout},
-		{name: "invalid input maps to bad request", err: model.ErrInvalidBuildInput, wantStatus: http.StatusBadRequest},
-		{name: "build not found maps to not found", err: model.ErrBuildNotFound, wantStatus: http.StatusNotFound},
-		{name: "chunk not found maps to not found", err: model.ErrChunkNotFound, wantStatus: http.StatusNotFound},
-		{name: "conflict maps to conflict", err: model.ErrBuildConflict, wantStatus: http.StatusConflict},
-		{name: "unknown maps to internal error", err: errors.New("boom"), wantStatus: http.StatusInternalServerError},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			if got := storeErrorStatus(tc.err); got != tc.wantStatus {
-				t.Fatalf("status = %d, want %d", got, tc.wantStatus)
-			}
-			rec := httptest.NewRecorder()
-			writeStoreError(context.Background(), rec, tc.err)
-			if rec.Code != tc.wantStatus {
-				t.Fatalf("http status = %d, want %d", rec.Code, tc.wantStatus)
-			}
-		})
-	}
-}
-
 type retryIngressFixture struct {
 	status    int
 	body      string
@@ -557,12 +525,17 @@ func TestRetryActionIntake(t *testing.T) {
 				rc = restate.NewClient(config.RestateConfig{RestateIngressURL: ts.URL}, ts.Client())
 			}
 			h := &Handler{Store: &retryReadFixture{status: status, generation: tc.generation, prNumber: tc.prNumber}, Restate: rc, RestateEnabled: !tc.disabled}
-			r := httptest.NewRequest(http.MethodPost, "/builds/b1/retry-action", strings.NewReader(tc.body))
-			r.SetPathValue("id", "b1")
-			w := httptest.NewRecorder()
-			h.HandleRetryActionChunk(w, r)
-			if w.Code != tc.wantStatus {
-				t.Fatalf("status=%d body=%s", w.Code, w.Body.String())
+			var req RetryActionChunkRequest
+			unmarshalErr := json.Unmarshal([]byte(tc.body), &req)
+			var res *RetryActionChunkResult
+			var err error
+			if unmarshalErr != nil {
+				err = unmarshalErr
+			} else {
+				res, err = h.RetryActionChunk(context.Background(), req)
+			}
+			if (err != nil) != (tc.wantStatus != 200) {
+				t.Fatalf("err=%v, wantStatus=%d", err, tc.wantStatus)
 			}
 			if (tc.wantStatus == 400 || tc.name == "instruction mismatch") && f.key != "" {
 				t.Fatal("rejected request consumed durable key")
@@ -578,10 +551,9 @@ func TestRetryActionIntake(t *testing.T) {
 			if !reflect.DeepEqual(f.request, sent) {
 				t.Fatal("correction not forwarded")
 			}
-			var result RetryActionChunkResult
 			wantDispatch := cmp.Or(tc.wantDispatch, "vanadis-c1-turn-1")
-			if err := json.Unmarshal(w.Body.Bytes(), &result); err != nil || !result.Accepted || result.DispatchID != wantDispatch {
-				t.Fatalf("result=%+v err=%v", result, err)
+			if res == nil || !res.Accepted || res.DispatchID != wantDispatch {
+				t.Fatalf("result=%+v err=%v", res, err)
 			}
 		})
 	}
@@ -611,16 +583,14 @@ func TestRetryActionIdempotencyKey(t *testing.T) {
 	}
 }
 
-func TestRetryActionHTTPAndMCP(t *testing.T) {
+func TestRetryActionMCP(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
 		name       string
-		direct     bool
 		body, want string
 	}{
-		{"http", true, `{"build_id":"b1","chunk_id":"c1","expected_dispatch_id":"vanadis-c1-turn-0","reason":"retry"}`, `"dispatch_id":"vanadis-c1-turn-1"`},
-		{"mcp", false, `{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"retry_action_chunk","arguments":{"build_id":"b1","chunk_id":"c1","expected_dispatch_id":"vanadis-c1-turn-0","reason":"retry"}}}`, `"accepted":true`},
-		{"mcp invalid", false, `{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"retry_action_chunk","arguments":{"build_id":"b1","chunk_id":"c1","expected_dispatch_id":"","reason":"retry"}}}`, `"isError":true`},
+		{"mcp", `{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"retry_action_chunk","arguments":{"build_id":"b1","chunk_id":"c1","expected_dispatch_id":"vanadis-c1-turn-0","reason":"retry"}}}`, `"accepted":true`},
+		{"mcp invalid", `{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"retry_action_chunk","arguments":{"build_id":"b1","chunk_id":"c1","expected_dispatch_id":"","reason":"retry"}}}`, `"isError":true`},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -629,19 +599,11 @@ func TestRetryActionHTTPAndMCP(t *testing.T) {
 			ts := httptest.NewServer(f)
 			defer ts.Close()
 			h := &Handler{Store: &retryReadFixture{status: "failed"}, Restate: restate.NewClient(config.RestateConfig{RestateIngressURL: ts.URL}, ts.Client()), RestateEnabled: true}
-			var rec *httptest.ResponseRecorder
-			if tc.direct {
-				r := httptest.NewRequest(http.MethodPost, "/builds/b1/retry-action", strings.NewReader(tc.body))
-				r.SetPathValue("id", "b1")
-				rec = httptest.NewRecorder()
-				h.HandleRetryActionChunk(rec, r)
-			} else {
-				r := httptest.NewRequest(http.MethodPost, "/mcp", strings.NewReader(tc.body))
-				r.Header.Set("Content-Type", "application/json")
-				r.Header.Set("Accept", "application/json, text/event-stream")
-				rec = httptest.NewRecorder()
-				h.NewHTTPHandler()(rec, r)
-			}
+			r := httptest.NewRequest(http.MethodPost, "/mcp", strings.NewReader(tc.body))
+			r.Header.Set("Content-Type", "application/json")
+			r.Header.Set("Accept", "application/json, text/event-stream")
+			rec := httptest.NewRecorder()
+			h.NewHTTPHandler()(rec, r)
 			if rec.Code != 200 || !strings.Contains(rec.Body.String(), tc.want) {
 				t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
 			}

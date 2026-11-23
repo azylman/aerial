@@ -8,7 +8,6 @@ import (
 	"time"
 
 	"github.com/azylman/aerial/pkg/prwire"
-	"github.com/azylman/aerial/services/synapse/internal/kube"
 	"github.com/azylman/aerial/services/synapse/internal/model"
 )
 
@@ -142,15 +141,6 @@ func RestateClusterRolloutComplete(w model.WorkloadRollout) (done, failed bool, 
 	return true, false, ""
 }
 
-// StoppedWorkloadRolloutComplete is called only after the generation guard.
-// Inactive controllers need no readiness, registration, or matching revisions.
-func StoppedWorkloadRolloutComplete(w model.WorkloadRollout) (done, failed bool, reason string) {
-	if w.StatusReplicas == 0 && w.ReadyReplicas == 0 && w.AvailableReplicas == 0 && w.UpdatedReplicas == 0 {
-		return true, false, ""
-	}
-	return false, false, "waiting for all replicas to stop"
-}
-
 func terminatingWorkloadReason(w model.WorkloadRollout) string {
 	ts := strings.TrimSpace(w.DeletionTimestamp)
 	if len(w.Finalizers) > 0 {
@@ -182,18 +172,12 @@ func WorkloadRolloutComplete(w model.WorkloadRollout) (done, failed bool, reason
 	case "Deployment":
 		return deploymentRolloutComplete(w)
 	case kindStatefulSet:
-		if w.Replicas == 0 {
-			return StoppedWorkloadRolloutComplete(w)
-		}
 		done = w.UpdateRevision == w.CurrentRevision && w.AvailableReplicas == w.Replicas
 		reason = fmt.Sprintf("revision %s of %s, %d/%d available", w.CurrentRevision, w.UpdateRevision, w.AvailableReplicas, w.Replicas)
 	case "DaemonSet":
 		done = w.UpdatedNumberScheduled == w.DesiredNumberScheduled && w.NumberAvailable == w.DesiredNumberScheduled
 		reason = fmt.Sprintf("%d/%d updated, %d/%d available", w.UpdatedNumberScheduled, w.DesiredNumberScheduled, w.NumberAvailable, w.DesiredNumberScheduled)
 	case kindRestateDeployment:
-		if w.Replicas == 0 {
-			return kube.StoppedRestateDeploymentComplete(w)
-		}
 		done = w.ReadyConditionTrue && w.ReadyReplicas == w.Replicas && w.AvailableReplicas == w.Replicas && w.DeploymentID != ""
 		reason = fmt.Sprintf("%d/%d ready, %d/%d available, deploymentId=%s, ready=%t", w.ReadyReplicas, w.Replicas, w.AvailableReplicas, w.Replicas, w.DeploymentID, w.ReadyConditionTrue)
 	case kindRestateCluster:
@@ -216,11 +200,6 @@ type PRRolloutInput struct {
 	IncludedCommits []string
 	ExpectedJobs    []string
 	Since, Now      time.Time
-}
-
-func init() {
-	_ = ServiceJobs(nil, nil)
-	_ = CandidateDescendantTags(nil, "", nil)
 }
 
 // ServiceJobs trims, drops empty, and deduplicates entries in jobs (preserving first-occurrence

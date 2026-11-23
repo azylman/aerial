@@ -195,8 +195,6 @@ func TestDefaultOutboundDispatcher_MultiBotRouting(t *testing.T) {
 
 type mockOutboundDispatcher struct {
 	mu                           sync.Mutex
-	promptCalls                  []PromptRequest
-	dispatchCalls                []DispatchRequest
 	directMessageCalls           []DirectMessageRequest
 	discordMessageCalls          []DiscordMessageIngressRequest
 	discordInteractionCalls      []*discordgo.Interaction
@@ -204,8 +202,6 @@ type mockOutboundDispatcher struct {
 	discoverErr                  error
 	sourceRepo                   string
 	sourceRepoErr                error
-	promptErr                    error
-	dispatchErr                  error
 	directMessageErr             error
 	discordMessageErr            error
 	discordMessageFailCount      int
@@ -251,37 +247,11 @@ func (m *mockOutboundDispatcher) DiscoverRepoKustomizations(ctx context.Context,
 	return m.repoKustomizations[strings.TrimSpace(repo)], nil
 }
 
-func (m *mockOutboundDispatcher) DispatchPrompt(ctx context.Context, req PromptRequest) error {
-	m.mu.Lock()
-	m.promptCalls = append(m.promptCalls, req)
-	m.mu.Unlock()
-	return m.promptErr
-}
-
-func (m *mockOutboundDispatcher) DispatchBackground(ctx context.Context, req DispatchRequest) error {
-	m.mu.Lock()
-	m.dispatchCalls = append(m.dispatchCalls, req)
-	m.mu.Unlock()
-	return m.dispatchErr
-}
-
 func (m *mockOutboundDispatcher) DispatchDirectMessage(ctx context.Context, req DirectMessageRequest) error {
 	m.mu.Lock()
 	m.directMessageCalls = append(m.directMessageCalls, req)
 	m.mu.Unlock()
 	return m.directMessageErr
-}
-
-func (m *mockOutboundDispatcher) PromptCalls() []PromptRequest {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	return append([]PromptRequest(nil), m.promptCalls...)
-}
-
-func (m *mockOutboundDispatcher) DispatchCalls() []DispatchRequest {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	return append([]DispatchRequest(nil), m.dispatchCalls...)
 }
 
 func (m *mockOutboundDispatcher) DirectMessageCalls() []DirectMessageRequest {
