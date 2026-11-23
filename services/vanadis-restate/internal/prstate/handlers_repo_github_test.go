@@ -9,6 +9,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/azylman/aerial/pkg/prwire"
+	"github.com/azylman/aerial/pkg/pubsub"
 )
 
 // updateResult is one canned update-branch answer.
@@ -86,6 +87,32 @@ func openGitHubPR(n int, author, sha string) GitHubPR {
 	return GitHubPR{Number: n, State: "open", Title: fmt.Sprintf("PR %d", n), User: GitHubUser{Login: author}, Head: GitHubPRRef{Ref: fmt.Sprintf("b%d", n), SHA: sha}}
 }
 
+func queueCheckStatusSent(repo string, pr int, branch, sha, pos string, seq uint64) sentPR {
+	return sentPR{
+		handler: prwire.PRHandlerCheckStatus,
+		ev: PREvent{
+			Event:      "check_updated",
+			Repo:       repo,
+			PRNumber:   pr,
+			HeadSHA:    sha,
+			Branch:     branch,
+			CheckName:  MergeQueueCheckName,
+			CheckState: pos,
+			Facts: []pubsub.PRLifecycleEvent{{
+				Event:      "check_updated",
+				Repo:       repo,
+				PRNumber:   pr,
+				Branch:     branch,
+				HeadSHA:    sha,
+				JobName:    fmt.Sprintf("%s#%d", pos, seq),
+				CheckName:  MergeQueueCheckName,
+				CheckState: pos,
+				Status:     RegistryStatusOpen,
+			}},
+		},
+	}
+}
+
 var (
 	errGHRateLimited = &GitHubError{Status: 403, RateLimited: true, Message: "rate limited"}
 	errGHServer      = &GitHubError{Status: 502, Message: "bad gateway"}
@@ -94,6 +121,24 @@ var (
 )
 
 const autoUpdateKeyMain = "azylman/aerial#0@m1:gen0:github_auto_update"
+
+type autoUpdateTestCase struct {
+	name        string
+	ev          RepoEvent
+	seed        *RepoState
+	gh          *fakeGitHub
+	noGitHub    bool
+	wantErr     error
+	wantOutcome RepoEffectOutcome
+	wantCalls   []string
+	wantSent    []sentPR
+	wantEffects []string
+}
+
+func mainAutoUpdateOutcome(o RepoEffectOutcome) RepoEffectOutcome {
+	o.Key = EffectKey{Repo: "azylman/aerial", HeadSHA: "m1", Kind: prwire.EffectGitHubAutoUpdate}
+	return o
+}
 
 func TestRepoHandlersHandleAutoUpdate(t *testing.T) {
 	t.Parallel()
@@ -108,43 +153,27 @@ func TestRepoHandlersHandleAutoUpdate(t *testing.T) {
 		Kind: prwire.EffectEriDirectMessage, ChannelID: testChannel,
 		Content: "<@1> Merge conflict with `main` detected on [azylman/aerial#4](https://github.com/azylman/aerial/pull/4) (\"PR 4\", branch: b4, commit: h4) — automatic branch update could not resolve conflicts. Please rebase or merge `origin/main` and push.",
 	}
-	tests := []struct {
-		name        string
-		ev          RepoEvent
-		seed        *RepoState
-		gh          *fakeGitHub
-		noGitHub    bool
-		wantErr     error
-		wantOutcome RepoEffectOutcome
-		wantCalls   []string
-		wantSent    []sentPR
-		wantEffects []string
-	}{
+	tests := []autoUpdateTestCase{
 		{
 			name: "fired trigger dedupes", ev: mainPush(defaultPolicy), gh: &fakeGitHub{},
 			seed:        &RepoState{Repo: "azylman/aerial", RepoEffects: []string{autoUpdateKeyMain}},
-			wantOutcome: RepoEffectOutcome{Key: EffectKey{Repo: "azylman/aerial", HeadSHA: "m1", Kind: prwire.EffectGitHubAutoUpdate}, Deduped: true},
-			wantEffects: []string{autoUpdateKeyMain},
+			wantOutcome: mainAutoUpdateOutcome(RepoEffectOutcome{Deduped: true}), wantEffects: []string{autoUpdateKeyMain},
 		},
 		{
 			name: "no allowlisted authors skips", ev: mainPush(&AutoUpdatePolicy{DefaultOwner: true}), gh: &fakeGitHub{},
-			wantOutcome: RepoEffectOutcome{Key: EffectKey{Repo: "azylman/aerial", HeadSHA: "m1", Kind: prwire.EffectGitHubAutoUpdate}, Skipped: true},
-			wantEffects: []string{autoUpdateKeyMain},
+			wantOutcome: mainAutoUpdateOutcome(RepoEffectOutcome{Skipped: true}), wantEffects: []string{autoUpdateKeyMain},
 		},
 		{
 			name: "missing github client retries", ev: mainPush(defaultPolicy), noGitHub: true,
-			wantOutcome: RepoEffectOutcome{Key: EffectKey{Repo: "azylman/aerial", HeadSHA: "m1", Kind: prwire.EffectGitHubAutoUpdate}, Retry: true, Err: errGitHubUnconfigured},
+			wantOutcome: mainAutoUpdateOutcome(RepoEffectOutcome{Retry: true, Err: errGitHubUnconfigured}),
 		},
 		{
 			name: "retryable list failure retries", ev: mainPush(defaultPolicy), gh: &fakeGitHub{listErr: errGHServer},
-			wantOutcome: RepoEffectOutcome{Key: EffectKey{Repo: "azylman/aerial", HeadSHA: "m1", Kind: prwire.EffectGitHubAutoUpdate}, Retry: true, Err: errGHServer},
-			wantCalls:   []string{"list azylman/aerial"},
+			wantOutcome: mainAutoUpdateOutcome(RepoEffectOutcome{Retry: true, Err: errGHServer}), wantCalls: []string{"list azylman/aerial"},
 		},
 		{
 			name: "terminal list failure commits", ev: mainPush(defaultPolicy), gh: &fakeGitHub{listErr: errGHNotFound},
-			wantOutcome: RepoEffectOutcome{Key: EffectKey{Repo: "azylman/aerial", HeadSHA: "m1", Kind: prwire.EffectGitHubAutoUpdate}, Executed: true, Err: errGHNotFound},
-			wantCalls:   []string{"list azylman/aerial"},
-			wantEffects: []string{autoUpdateKeyMain},
+			wantOutcome: mainAutoUpdateOutcome(RepoEffectOutcome{Executed: true, Err: errGHNotFound}), wantCalls: []string{"list azylman/aerial"}, wantEffects: []string{autoUpdateKeyMain},
 		},
 		{
 			name: "cascade skips ineligible and blocked prs, forwards conflicts and stale closes, stops at the first update",
@@ -162,50 +191,67 @@ func TestRepoHandlersHandleAutoUpdate(t *testing.T) {
 				fetches: map[int]fetchResult{5: {pr: GitHubPR{Number: 5, State: "closed", Head: GitHubPRRef{Ref: "b5", SHA: "h5"}}}, 7: {pr: GitHubPR{Number: 7, State: "open"}}},
 			},
 			wantOutcome: RepoEffectOutcome{
-				Key: EffectKey{Repo: "azylman/aerial", PRNumber: 9, HeadSHA: "h9", Kind: prwire.EffectGitHubAutoUpdate, CheckName: "CI Gate"}, Executed: true, Err: errGHInvalid, Forwards: 2,
+				Key: EffectKey{Repo: "azylman/aerial", PRNumber: 9, HeadSHA: "h9", Kind: prwire.EffectGitHubAutoUpdate, CheckName: "CI Gate"}, Executed: true, Err: errGHInvalid, Forwards: 6,
 				Updates: []BranchUpdate{{PRNumber: 4, HeadSHA: "h4", Outcome: UpdateBranchConflict}, {PRNumber: 5, HeadSHA: "h5", Outcome: UpdateBranchHeadMissing}, {PRNumber: 7, HeadSHA: "h7", Outcome: UpdateBranchHeadMissing}, {PRNumber: 8, HeadSHA: "h8", Outcome: UpdateBranchUpToDate}},
 			},
 			wantCalls: []string{"list azylman/aerial", "checks h2", "checks h4", "update 4", "checks h5", "update 5", "fetch 5", "checks h6", "update 6", "checks h7", "update 7", "fetch 7", "checks h8", "update 8"},
 			wantSent: []sentPR{
 				{handler: prwire.PRHandlerBranchConflict, ev: PREvent{Event: "branch_conflict", Repo: "azylman/aerial", PRNumber: 4, HeadSHA: "h4", Branch: "b4", Title: "PR 4", EriEffects: []EriEffect{conflictDM}}},
 				{handler: prwire.PRHandlerHeadRefMissing, ev: PREvent{Event: "head_ref_missing", Repo: "azylman/aerial", PRNumber: 5, HeadSHA: "h5", Branch: "b5"}},
+				queueCheckStatusSent("azylman/aerial", 8, "b8", "h8", "1/4", 1),
+				queueCheckStatusSent("azylman/aerial", 2, "b2", "h2", "2/4", 2),
+				queueCheckStatusSent("azylman/aerial", 6, "b6", "h6", "3/4", 3),
+				queueCheckStatusSent("azylman/aerial", 10, "b10", "h10", "4/4", 4),
 			},
 			wantEffects: []string{"azylman/aerial#9@h9:gen0:github_auto_update:check=ci gate"},
 		},
 		{
-			name: "non-default owner only updates indexed prs", ev: mainPush(indexedOnly),
-			seed: &RepoState{Repo: "azylman/aerial", PRs: map[int]*RepoPRStatus{2: {}}},
-			gh:   &fakeGitHub{prs: []GitHubPR{openGitHubPR(1, "bot", "h1"), openGitHubPR(2, "bot", "h2")}, updates: map[int]updateResult{2: {outcome: UpdateBranchUpdated}}},
-			wantOutcome: RepoEffectOutcome{
-				Key: EffectKey{Repo: "azylman/aerial", HeadSHA: "m1", Kind: prwire.EffectGitHubAutoUpdate}, Executed: true,
-				Updates: []BranchUpdate{{PRNumber: 2, HeadSHA: "h2", Outcome: UpdateBranchUpdated}},
-			},
-			wantCalls:   []string{"list azylman/aerial", "checks h2", "update 2"},
+			name: "multi-pr queue position broadcasts", ev: mainPush(defaultPolicy),
+			gh:          &fakeGitHub{prs: []GitHubPR{openGitHubPR(10, "bot", "h10"), openGitHubPR(20, "bot", "h20")}, updates: map[int]updateResult{10: {outcome: UpdateBranchUpdated}}},
+			wantOutcome: mainAutoUpdateOutcome(RepoEffectOutcome{Executed: true, Forwards: 2, Updates: []BranchUpdate{{PRNumber: 10, HeadSHA: "h10", Outcome: UpdateBranchUpdated}}}),
+			wantCalls:   []string{"list azylman/aerial", "checks h10", "update 10"},
+			wantSent:    []sentPR{queueCheckStatusSent("azylman/aerial", 10, "b10", "h10", "1/2", 1), queueCheckStatusSent("azylman/aerial", 20, "b20", "h20", "2/2", 2)},
 			wantEffects: []string{autoUpdateKeyMain},
+		},
+		{
+			name: "queue positions deduplicate when unchanged", ev: mainPush(defaultPolicy),
+			seed: &RepoState{
+				Repo: "azylman/aerial", LatestMainSHA: "m1", MainPushIndex: []string{"m1"},
+				QueuePositions: map[int]string{10: "h10@1/2", 20: "h20@2/2"}, UpdatedForMain: map[int]bool{10: true},
+			},
+			gh:          &fakeGitHub{prs: []GitHubPR{openGitHubPR(10, "bot", "h10"), openGitHubPR(20, "bot", "h20")}},
+			wantOutcome: mainAutoUpdateOutcome(RepoEffectOutcome{Executed: true}), wantCalls: []string{"list azylman/aerial"}, wantEffects: []string{autoUpdateKeyMain},
+		},
+		{
+			name: "queue drain cleans up and broadcasts 1/1 when queue shrinks from two to one pr", ev: mainPush(defaultPolicy),
+			seed:        &RepoState{Repo: "azylman/aerial", QueuePositions: map[int]string{20: "h20@2/2"}},
+			gh:          &fakeGitHub{prs: []GitHubPR{openGitHubPR(20, "bot", "h20")}, updates: map[int]updateResult{20: {outcome: UpdateBranchUpToDate}}},
+			wantOutcome: mainAutoUpdateOutcome(RepoEffectOutcome{Executed: true, Forwards: 1, Updates: []BranchUpdate{{PRNumber: 20, HeadSHA: "h20", Outcome: UpdateBranchUpToDate}}}),
+			wantCalls:   []string{"list azylman/aerial", "checks h20", "update 20"},
+			wantSent:    []sentPR{queueCheckStatusSent("azylman/aerial", 20, "b20", "h20", "1/1", 1)}, wantEffects: []string{autoUpdateKeyMain},
+		},
+		{
+			name: "non-default owner only updates indexed prs", ev: mainPush(indexedOnly),
+			seed:        &RepoState{Repo: "azylman/aerial", PRs: map[int]*RepoPRStatus{2: {}}},
+			gh:          &fakeGitHub{prs: []GitHubPR{openGitHubPR(1, "bot", "h1"), openGitHubPR(2, "bot", "h2")}, updates: map[int]updateResult{2: {outcome: UpdateBranchUpdated}}},
+			wantOutcome: mainAutoUpdateOutcome(RepoEffectOutcome{Executed: true, Updates: []BranchUpdate{{PRNumber: 2, HeadSHA: "h2", Outcome: UpdateBranchUpdated}}}),
+			wantCalls:   []string{"list azylman/aerial", "checks h2", "update 2"}, wantEffects: []string{autoUpdateKeyMain},
 		},
 		{
 			name: "rate limit stops the cascade and retries", ev: mainPush(defaultPolicy),
 			gh:          &fakeGitHub{prs: []GitHubPR{openGitHubPR(1, "bot", "h1"), openGitHubPR(2, "bot", "h2")}, updates: map[int]updateResult{1: {err: errGHRateLimited}}},
-			wantOutcome: RepoEffectOutcome{Key: EffectKey{Repo: "azylman/aerial", HeadSHA: "m1", Kind: prwire.EffectGitHubAutoUpdate}, Retry: true, Err: errGHRateLimited},
-			wantCalls:   []string{"list azylman/aerial", "checks h1", "update 1"},
+			wantOutcome: mainAutoUpdateOutcome(RepoEffectOutcome{Retry: true, Err: errGHRateLimited}), wantCalls: []string{"list azylman/aerial", "checks h1", "update 1"},
 		},
 		{
 			name: "stale read failure closes nothing", ev: mainPush(defaultPolicy),
-			gh: &fakeGitHub{prs: []GitHubPR{openGitHubPR(1, "bot", "h1")}, updates: map[int]updateResult{1: {outcome: UpdateBranchHeadMissing}}, fetches: map[int]fetchResult{1: {err: errGHServer}}},
-			wantOutcome: RepoEffectOutcome{
-				Key: EffectKey{Repo: "azylman/aerial", HeadSHA: "m1", Kind: prwire.EffectGitHubAutoUpdate}, Executed: true,
-				Updates: []BranchUpdate{{PRNumber: 1, HeadSHA: "h1", Outcome: UpdateBranchHeadMissing}},
-			},
-			wantCalls:   []string{"list azylman/aerial", "checks h1", "update 1", "fetch 1"},
-			wantEffects: []string{autoUpdateKeyMain},
+			gh:          &fakeGitHub{prs: []GitHubPR{openGitHubPR(1, "bot", "h1")}, updates: map[int]updateResult{1: {outcome: UpdateBranchHeadMissing}}, fetches: map[int]fetchResult{1: {err: errGHServer}}},
+			wantOutcome: mainAutoUpdateOutcome(RepoEffectOutcome{Executed: true, Updates: []BranchUpdate{{PRNumber: 1, HeadSHA: "h1", Outcome: UpdateBranchHeadMissing}}}),
+			wantCalls:   []string{"list azylman/aerial", "checks h1", "update 1", "fetch 1"}, wantEffects: []string{autoUpdateKeyMain},
 		},
 		{
 			name: "deleted pr closes as stale", ev: mainPush(defaultPolicy),
-			gh: &fakeGitHub{prs: []GitHubPR{openGitHubPR(1, "bot", "h1")}, updates: map[int]updateResult{1: {outcome: UpdateBranchHeadMissing}}, fetches: map[int]fetchResult{1: {err: errGHNotFound}}},
-			wantOutcome: RepoEffectOutcome{
-				Key: EffectKey{Repo: "azylman/aerial", HeadSHA: "m1", Kind: prwire.EffectGitHubAutoUpdate}, Executed: true, Forwards: 1,
-				Updates: []BranchUpdate{{PRNumber: 1, HeadSHA: "h1", Outcome: UpdateBranchHeadMissing}},
-			},
+			gh:          &fakeGitHub{prs: []GitHubPR{openGitHubPR(1, "bot", "h1")}, updates: map[int]updateResult{1: {outcome: UpdateBranchHeadMissing}}, fetches: map[int]fetchResult{1: {err: errGHNotFound}}},
+			wantOutcome: mainAutoUpdateOutcome(RepoEffectOutcome{Executed: true, Forwards: 1, Updates: []BranchUpdate{{PRNumber: 1, HeadSHA: "h1", Outcome: UpdateBranchHeadMissing}}}),
 			wantCalls:   []string{"list azylman/aerial", "checks h1", "update 1", "fetch 1"},
 			wantSent:    []sentPR{{handler: prwire.PRHandlerHeadRefMissing, ev: PREvent{Event: "head_ref_missing", Repo: "azylman/aerial", PRNumber: 1}}},
 			wantEffects: []string{autoUpdateKeyMain},
@@ -399,6 +445,10 @@ func TestRepoHandlersHandleAutoUpdate_Fencing(t *testing.T) {
 			autoUpdateEV:  RepoEvent{Repo: "azylman/aerial", PRNumber: 2, HeadSHA: "h2", CheckName: "ci-gate", AutoUpdate: defaultPolicy},
 			gh:            &fakeGitHub{prs: prsTwo, blocked: map[string]bool{"h1": true}, updates: map[int]updateResult{2: {outcome: UpdateBranchUpdated}}},
 			wantFencedPR1: true,
+			wantSent: []sentPR{
+				queueCheckStatusSent("azylman/aerial", 1, "b1", "h1", "1/2", 1),
+				queueCheckStatusSent("azylman/aerial", 2, "b2", "h2", "2/2", 2),
+			},
 		},
 		{
 			name:          "main push advances sha and clears fence so pr2 is updated",
@@ -407,6 +457,10 @@ func TestRepoHandlersHandleAutoUpdate_Fencing(t *testing.T) {
 			gh:            &fakeGitHub{prs: prsTwo, blocked: map[string]bool{"h1": true}, updates: map[int]updateResult{2: {outcome: UpdateBranchUpdated}}},
 			wantUpdates:   []BranchUpdate{{PRNumber: 2, HeadSHA: "h2", Outcome: UpdateBranchUpdated}},
 			wantFencedPR2: true,
+			wantSent: []sentPR{
+				queueCheckStatusSent("azylman/aerial", 2, "b2", "h2", "1/2", 1),
+				queueCheckStatusSent("azylman/aerial", 1, "b1", "h1", "2/2", 2),
+			},
 		},
 		{
 			name:          "check failure by pr number clears fence and updates pr2",
@@ -415,6 +469,10 @@ func TestRepoHandlersHandleAutoUpdate_Fencing(t *testing.T) {
 			gh:            &fakeGitHub{prs: prsTwo, blocked: map[string]bool{"h1": true}, updates: map[int]updateResult{2: {outcome: UpdateBranchUpdated}}},
 			wantUpdates:   []BranchUpdate{{PRNumber: 2, HeadSHA: "h2", Outcome: UpdateBranchUpdated}},
 			wantFencedPR2: true,
+			wantSent: []sentPR{
+				queueCheckStatusSent("azylman/aerial", 2, "b2", "h2", "1/2", 1),
+				queueCheckStatusSent("azylman/aerial", 1, "b1", "h1", "2/2", 2),
+			},
 		},
 		{
 			name:          "check failure by head sha clears fence and updates pr2",
@@ -423,6 +481,10 @@ func TestRepoHandlersHandleAutoUpdate_Fencing(t *testing.T) {
 			gh:            &fakeGitHub{prs: prsTwo, blocked: map[string]bool{"h1": true}, updates: map[int]updateResult{2: {outcome: UpdateBranchUpdated}}},
 			wantUpdates:   []BranchUpdate{{PRNumber: 2, HeadSHA: "h2", Outcome: UpdateBranchUpdated}},
 			wantFencedPR2: true,
+			wantSent: []sentPR{
+				queueCheckStatusSent("azylman/aerial", 2, "b2", "h2", "1/2", 2),
+				queueCheckStatusSent("azylman/aerial", 1, "b1", "h1", "2/2", 3),
+			},
 		},
 		{
 			name:          "route by sha check failure clears fence before auto update",
@@ -432,7 +494,11 @@ func TestRepoHandlersHandleAutoUpdate_Fencing(t *testing.T) {
 			gh:            &fakeGitHub{prs: prsTwo, blocked: map[string]bool{"h1": true}, updates: map[int]updateResult{2: {outcome: UpdateBranchUpdated}}},
 			wantUpdates:   []BranchUpdate{{PRNumber: 2, HeadSHA: "h2", Outcome: UpdateBranchUpdated}},
 			wantFencedPR2: true,
-			wantSent:      []sentPR{{handler: prwire.PRHandlerCheckFailed, ev: PREvent{Event: "check_failed", Repo: "azylman/aerial", PRNumber: 1, Branch: "feat-1", HeadSHA: "h1"}}},
+			wantSent: []sentPR{
+				{handler: prwire.PRHandlerCheckFailed, ev: PREvent{Event: "check_failed", Repo: "azylman/aerial", PRNumber: 1, Branch: "feat-1", HeadSHA: "h1"}},
+				queueCheckStatusSent("azylman/aerial", 2, "b2", "h2", "1/2", 2),
+				queueCheckStatusSent("azylman/aerial", 1, "b1", "h1", "2/2", 3),
+			},
 		},
 		{
 			name:          "dirty mergeable state clears fence and updates pr2",
@@ -450,7 +516,12 @@ func TestRepoHandlersHandleAutoUpdate_Fencing(t *testing.T) {
 			gh:            &fakeGitHub{prs: prsTwo, blocked: map[string]bool{"h1": true}, updates: map[int]updateResult{2: {outcome: UpdateBranchUpdated}}},
 			wantUpdates:   []BranchUpdate{{PRNumber: 2, HeadSHA: "h2", Outcome: UpdateBranchUpdated}},
 			wantFencedPR2: true,
-			wantSent:      []sentPR{mainAdvanced(1), mainAdvanced(2)},
+			wantSent: []sentPR{
+				queueCheckStatusSent("azylman/aerial", 2, "b2", "h2", "1/2", 3),
+				queueCheckStatusSent("azylman/aerial", 1, "b1", "h1", "2/2", 4),
+				mainAdvanced(1),
+				mainAdvanced(2),
+			},
 		},
 	}
 	for _, tc := range tests {

@@ -109,6 +109,10 @@ func TestEvaluateBuildTerminalStatus(t *testing.T) {
 	t.Parallel()
 	k1, k2 := "c1@0001-01-01T00:00:00Z", "c2@0001-01-01T00:00:00Z"
 	failed1 := isolationChunk("c1", "failed")
+	capFailed1 := isolationChunk("c1", "failed")
+	capFailed1.Banner = "Chunk 1 failed: ci_remediation_cap_reached"
+	capFailed2 := isolationChunk("c2", "failed")
+	capFailed2.Banner = "Chunk 2 failed: ci_remediation_cap_reached"
 	tests := []struct {
 		name         string
 		buildStatus  string
@@ -124,10 +128,14 @@ func TestEvaluateBuildTerminalStatus(t *testing.T) {
 		wantNotified map[string]bool
 	}{
 		{name: "running to failed notifies once", buildStatus: "running", chunks: []model.VanadisChunk{failed1}, notified: map[string]bool{}, wantStatus: "failed", wantHeaders: []string{"[VANADIS BUILD FAILED]"}, wantNotified: map[string]bool{k1: true}, wantStored: "failed"},
+		{name: "cap-reached quiesced build suppresses build wake prompt", buildStatus: "running", chunks: []model.VanadisChunk{capFailed1}, notified: map[string]bool{}, wantStatus: "failed", wantNotified: map[string]bool{k1: true}, wantStored: "failed"},
 		{name: "failed stays failed with no wake", buildStatus: "failed", chunks: []model.VanadisChunk{failed1}, notified: map[string]bool{k1: true}, wantStatus: "failed", wantNotified: map[string]bool{k1: true}, wantStored: "failed"},
 		{name: "failed to running when launchable", buildStatus: "failed", chunks: []model.VanadisChunk{failed1, isolationChunk("c2", "pending")}, notified: map[string]bool{k1: true}, wantStatus: "running", wantNotified: map[string]bool{k1: true}, wantStored: "running"},
 		{name: "failure with running sibling wakes the chunk", buildStatus: "running", chunks: []model.VanadisChunk{failed1, isolationChunk("c2", "running")}, notified: map[string]bool{}, wantStatus: "running", wantHeaders: []string{"[VANADIS CHUNK FAILED]"}, wantNotified: map[string]bool{k1: true}, wantStored: "running"},
+		{name: "cap-reached failure with running sibling suppresses chunk wake prompt", buildStatus: "running", chunks: []model.VanadisChunk{capFailed1, isolationChunk("c2", "running")}, notified: map[string]bool{}, wantStatus: "running", wantNotified: map[string]bool{k1: true}, wantStored: "running"},
 		{name: "new failure on failed build wakes the chunk", buildStatus: "failed", chunks: []model.VanadisChunk{failed1, isolationChunk("c2", "failed")}, notified: map[string]bool{k1: true}, wantStatus: "failed", wantHeaders: []string{"[VANADIS CHUNK FAILED]"}, wantNotified: map[string]bool{k1: true, k2: true}, wantStored: "failed"},
+		{name: "new cap-reached failure on failed build suppresses chunk wake prompt", buildStatus: "failed", chunks: []model.VanadisChunk{failed1, capFailed2}, notified: map[string]bool{k1: true}, wantStatus: "failed", wantNotified: map[string]bool{k1: true, k2: true}, wantStored: "failed"},
+		{name: "mixed failures: cap-reached suppressed but non-cap failure wakes build", buildStatus: "running", chunks: []model.VanadisChunk{capFailed1, isolationChunk("c2", "failed")}, notified: map[string]bool{}, wantStatus: "failed", wantHeaders: []string{"[VANADIS BUILD FAILED]"}, wantNotified: map[string]bool{k1: true, k2: true}, wantStored: "failed"},
 		{name: "quiet build records without waking", buildStatus: "running", quiet: true, chunks: []model.VanadisChunk{failed1, isolationChunk("c2", "running")}, notified: map[string]bool{}, wantStatus: "running", wantNotified: map[string]bool{k1: true}, wantStored: "running"},
 		{name: "stale ledger keys are pruned", buildStatus: "running", chunks: []model.VanadisChunk{isolationChunk("c1", "running")}, notified: map[string]bool{"c1@old": true}, wantStatus: "running", wantNotified: map[string]bool{}, wantStored: "running"},
 		{name: "all completed", buildStatus: "running", chunks: []model.VanadisChunk{isolationChunk("c1", "completed")}, notified: map[string]bool{}, wantStatus: "completed", wantHeaders: []string{"[VANADIS BUILD COMPLETED]"}, wantNotified: map[string]bool{}, wantStored: "completed"},

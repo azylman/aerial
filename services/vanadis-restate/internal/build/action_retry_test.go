@@ -2,7 +2,6 @@ package build
 
 import (
 	"cmp"
-	"context"
 	"encoding/json"
 	"errors"
 	"net/http"
@@ -20,50 +19,6 @@ import (
 	"github.com/azylman/aerial/services/vanadis-restate/internal/model"
 	"github.com/azylman/aerial/services/vanadis-restate/internal/store"
 )
-
-type retryJournalRuntime struct {
-	*fakeObjectRuntime
-
-	journal         map[string]reconcileStepOutput
-	loseReset       bool
-	loseReconcile   bool
-	reconcileErr    error
-	terminalJournal map[string]error
-}
-
-func (r *retryJournalRuntime) RunReconcileStep(name string, fn func(context.Context) (reconcileStepOutput, error)) (reconcileStepOutput, error) {
-	if err := r.terminalJournal[name]; err != nil {
-		return reconcileStepOutput{}, err
-	}
-	if out, ok := r.journal[name]; ok {
-		return out, nil
-	}
-	if name == "retry-action-reconcile" && r.reconcileErr != nil {
-		err := r.reconcileErr
-		r.reconcileErr = nil
-		return reconcileStepOutput{}, err
-	}
-	out, err := fn(context.Background())
-	if err != nil {
-		if restate.IsTerminalError(err) {
-			if r.terminalJournal == nil {
-				r.terminalJournal = map[string]error{}
-			}
-			r.terminalJournal[name] = err
-		}
-		return out, err
-	}
-	if name == "retry-action-reset" && r.loseReset {
-		r.loseReset = false
-		return reconcileStepOutput{}, errors.New("journal acknowledgement lost")
-	}
-	if name == "retry-action-reconcile" && r.loseReconcile {
-		r.loseReconcile = false
-		return reconcileStepOutput{}, errors.New("reconcile journal lost")
-	}
-	r.journal[name] = out
-	return out, nil
-}
 
 // retryStore seeds build b1 (failed) with a completed c0 and the failed
 // action chunk c1 carrying instructions, applying sabotage afterwards.
@@ -134,7 +89,10 @@ func TestBuildRetryAction(t *testing.T) {
 			if tc.lostCommit {
 				authority.lostAcks = map[string]error{"RetryActionChunk": errors.New("commit response lost")}
 			}
-			rt := &retryJournalRuntime{fakeObjectRuntime: newFakeObjectRuntime("b1"), journal: map[string]reconcileStepOutput{}, loseReset: tc.lostJournal, reconcileErr: tc.reconcileErr}
+			rt := &fakeObjectRuntime{key: "b1", journal: map[string]reconcileStepOutput{}, failOnce: map[string]error{"retry-action-reconcile": tc.reconcileErr}}
+			if tc.lostJournal {
+				rt.lostAcks = map[string]error{"retry-action-reset": errors.New("journal acknowledgement lost")}
+			}
 			bo := NewBuildObject("", nil, func(restate.ObjectContext) objectRuntime { return rt }).WithAuthority(authority, nil)
 			if tc.noAuthority {
 				bo = bo.WithAuthority(nil, nil)
@@ -185,7 +143,7 @@ func TestBuildRetryActionConcurrent(t *testing.T) {
 			var wg sync.WaitGroup
 			for range tc.concurrent {
 				wg.Go(func() {
-					rt := &retryJournalRuntime{fakeObjectRuntime: newFakeObjectRuntime("b1"), journal: map[string]reconcileStepOutput{}}
+					rt := &fakeObjectRuntime{key: "b1", journal: map[string]reconcileStepOutput{}}
 					bo := NewBuildObject("", nil, func(restate.ObjectContext) objectRuntime { return rt }).WithAuthority(st, nil)
 					got, err := bo.RetryActionChunk(nil, req)
 					results <- got
@@ -247,7 +205,10 @@ func TestRetryActionDispatchRecovery(t *testing.T) {
 			f := &retryDispatchFixture{accepted: map[string]eriwire.BrainDispatchRequest{}}
 			ts := httptest.NewServer(f)
 			defer ts.Close()
-			rt := &retryJournalRuntime{fakeObjectRuntime: newFakeObjectRuntime("b1"), journal: map[string]reconcileStepOutput{}, loseReconcile: tc.loseJournal}
+			rt := &fakeObjectRuntime{key: "b1", journal: map[string]reconcileStepOutput{}}
+			if tc.loseJournal {
+				rt.lostAcks = map[string]error{"retry-action-reconcile": errors.New("reconcile journal lost")}
+			}
 			bo := NewBuildObject("", nil, func(restate.ObjectContext) objectRuntime { return rt }).WithAuthority(st, executor.NewExecutor(t.TempDir(), executor.NewRestateEriClient(ts.URL, "", "aerial", ts.Client()), nil, "", "example-owner", nil))
 			req := store.RetryActionChunkRequest{BuildID: "b1", ChunkID: "c1", ExpectedDispatchID: "vanadis-c1-turn-0", Reason: "retry", ExpectedInstructions: tc.expected, ReplacementInstructions: tc.replacement}
 			got, err := bo.RetryActionChunk(nil, req)

@@ -365,45 +365,6 @@ func TestBuildObject_AuthoritativeFailureContinuation(t *testing.T) {
 	assert.Equal(t, map[string]string{"c1": statusFailed}, chunkStatuses(t, storeFailChunkOk, "b-failed"))
 }
 
-// deploymentGateFakeRuntime is an in-memory deploygate.Runtime for deployment
-// gate tests that exercise BuildObject wrappers end to end.
-type deploymentGateFakeRuntime struct {
-	*fakeObjectRuntime
-
-	now       time.Time
-	attempts  map[string]deploygate.Attempt
-	pending   map[string]deploygate.PendingStart
-	scheduled []deploygate.DeploymentDeadlineRequest
-}
-
-func (r *deploymentGateFakeRuntime) GetAttempts() (map[string]deploygate.Attempt, error) {
-	return r.attempts, nil
-}
-
-func (r *deploymentGateFakeRuntime) SetAttempts(a map[string]deploygate.Attempt) { r.attempts = a }
-
-func (r *deploymentGateFakeRuntime) Now() (time.Time, error) { return r.now, nil }
-
-func (r *deploymentGateFakeRuntime) GetPendingStarts() (map[string]deploygate.PendingStart, error) {
-	return r.pending, nil
-}
-
-func (r *deploymentGateFakeRuntime) SetPendingStarts(p map[string]deploygate.PendingStart) {
-	r.pending = p
-}
-
-func (r *deploymentGateFakeRuntime) ScheduleDeadline(req deploygate.DeploymentDeadlineRequest, d time.Duration) {
-	r.scheduled = append(r.scheduled, req)
-}
-
-func (r *deploymentGateFakeRuntime) RunStep(name string, fn func(ctx context.Context) (deploygate.StepOutput, error)) (deploygate.StepOutput, error) {
-	out, err := r.RunReconcileStep(name, func(ctx context.Context) (reconcileStepOutput, error) {
-		o, runErr := fn(ctx)
-		return reconcileStepOutput(o), runErr
-	})
-	return deploygate.StepOutput(out), err
-}
-
 func TestRecordDeploymentPREvent(t *testing.T) {
 	t.Parallel()
 	web := &pubsub.PRRolloutState{ExpectedJobs: []string{"web"}}
@@ -452,7 +413,7 @@ func TestRecordDeploymentPREvent(t *testing.T) {
 func TestDeploymentDeadlineRepeatedMerge(t *testing.T) {
 	t.Parallel()
 	now := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
-	rt := &deploymentGateFakeRuntime{fakeObjectRuntime: newFakeObjectRuntime("b"), now: now}
+	rt := &fakeObjectRuntime{key: "b", now: now}
 	st := &fakeStore{builds: []model.VanadisBuild{{ID: "b", Status: statusRunning, ThreadID: "th-1"}}, chunks: []model.VanadisChunk{{ID: "c1", BuildID: "b", PRNumber: 1, Repo: "owner/repo", MergeSHA: "sha", Status: statusMerged}}}
 	b := &BuildObject{store: st}
 	ev := pubsub.PRLifecycleEvent{Event: prEventDeployStarted, Repo: "owner/repo", PRNumber: 1, MergeSHA: "sha", OccurredAt: now}

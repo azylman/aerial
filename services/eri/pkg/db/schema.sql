@@ -414,8 +414,6 @@ CREATE TABLE IF NOT EXISTS vanadis_chunks (
     ci_checks JSONB NOT NULL DEFAULT '{}'::jsonb,
     rollout_state JSONB NOT NULL DEFAULT '{}'::jsonb,
     banner TEXT NOT NULL DEFAULT '',
-    merge_awakeable_id TEXT NOT NULL DEFAULT '',
-    deploy_awakeable_id TEXT NOT NULL DEFAULT '',
     started_at TIMESTAMPTZ,
     completed_at TIMESTAMPTZ,
     created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,

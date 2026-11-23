@@ -13,6 +13,7 @@ import (
 
 	"github.com/azylman/aerial/pkg/eriwire"
 	"github.com/azylman/aerial/pkg/restateingress"
+	"github.com/azylman/aerial/pkg/tracing"
 	"github.com/azylman/aerial/services/eri/pkg/llmcall"
 	"github.com/azylman/aerial/services/eri/pkg/metrics"
 	"github.com/azylman/aerial/services/eri/pkg/queue"
@@ -230,6 +231,7 @@ func handlePromptViaRestate(ctx context.Context, client *RestateIngressClient, r
 		Model:        strings.TrimSpace(req.Model),
 		Effort:       strings.TrimSpace(req.Effort),
 		SkipIfActive: req.SkipIfActive,
+		Traceparent:  tracing.Traceparent(ctx),
 	}
 	idempotencyKey := "prompt:" + channelID + ":" + msgID
 	resp, err := client.EnqueueThread(ctx, channelID, reqEnqueue, idempotencyKey)
@@ -250,6 +252,7 @@ func handleDispatchViaRestate(ctx context.Context, client *RestateIngressClient,
 		Effort:         strings.ToLower(strings.TrimSpace(req.Effort)),
 		Model:          strings.TrimSpace(req.Model),
 		SkipIfActive:   req.SkipIfActive,
+		Traceparent:    tracing.Traceparent(ctx),
 	}
 	idempotencyKey := dispatchID
 	resp, err := client.EnqueueDispatch(ctx, sessionKey, bReq, idempotencyKey)

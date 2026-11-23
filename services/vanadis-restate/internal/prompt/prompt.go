@@ -60,6 +60,35 @@ func FormatCIFailurePrompt(ev pubsub.PRLifecycleEvent, details, chunkID, dispatc
 	)
 }
 
+// FormatInlineCapRemediationPrompt formats the prompt sent to the build's source thread
+// when worker CI remediation attempts are exhausted.
+func FormatInlineCapRemediationPrompt(ev pubsub.PRLifecycleEvent, details, chunkID string, failCount, maxAttempts int) string {
+	var extraParts []string
+	cleanBranch := strings.TrimPrefix(strings.TrimSpace(ev.Branch), "refs/heads/")
+	if cleanBranch != "" {
+		extraParts = append(extraParts, "Branch: "+cleanBranch)
+	}
+	if cleanURL := strings.TrimSpace(ev.CheckURL); cleanURL != "" {
+		extraParts = append(extraParts, "Check URL: "+cleanURL)
+	}
+	extraLine := strings.Join(extraParts, "\n")
+
+	shortRepo := strutil.FirstNonEmpty(model.CleanRepoName(ev.Repo), "aerial")
+	branchArg := strutil.FirstNonEmpty(cleanBranch, "<branch>")
+	header := fmt.Sprintf("CI check %q failed %d times for PR #%d on %s (chunk: %s, head commit: %s; worker remediation cap %d/%d reached).", ev.CheckName, failCount, ev.PRNumber, ev.Repo, chunkID, ev.HeadSHA, maxAttempts, maxAttempts)
+
+	var directive string
+	if prwire.IsRoboRevCheck(ev.CheckName) {
+		directive = "[VANADIS INLINE THREAD CI REMEDIATION — MANDATORY]\n" +
+			fmt.Sprintf("Worker CI remediation cap (%d/%d) reached. As the source-thread agent running in-line on the thread's high-effort model with full thread context, please remediate in this turn by critically evaluating each RoboRev finding against codebase reality and full thread context and either (1) checking out '/share/aerial/scripts/aerial-pr.sh init %s --branch %s' and pushing a verified fix via '/share/aerial/scripts/aerial-pr.sh submit <scratch_dir> \"<commit_msg>\"', or (2) recording a commit-SHA-bound technical rebuttal via '/share/aerial/scripts/aerial-pr.sh --repo %s override-roborev %d '<technical_rebuttal>''. Note that either action automatically recovers the paused chunk to pr_opened and resumes the build.", maxAttempts, maxAttempts, shortRepo, branchArg, shortRepo, ev.PRNumber)
+	} else {
+		directive = "[VANADIS INLINE THREAD CI REMEDIATION — MANDATORY]\n" +
+			fmt.Sprintf("Worker CI remediation cap (%d/%d) reached. As the source-thread agent running in-line on the thread's high-effort model with full thread context, please remediate in this turn by checking out '/share/aerial/scripts/aerial-pr.sh init %s --branch %s', diagnosing the root cause, verifying locally, and pushing a verified fix via '/share/aerial/scripts/aerial-pr.sh submit <scratch_dir> \"<commit_msg>\"'. Either action automatically recovers the paused chunk to pr_opened and resumes the build.", maxAttempts, maxAttempts, shortRepo, branchArg)
+	}
+
+	return formatErrorDetailsBlock(header, details, extraLine, directive)
+}
+
 // FormatNoPRResumePrompt builds a self-contained resume prompt for a PR chunk
 // whose previous turn ended without opening a PR. It re-includes the full chunk
 // prompt because sessions rotate and an aborted conversation may be damaged.

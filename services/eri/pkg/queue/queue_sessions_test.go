@@ -2,7 +2,6 @@ package queue
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"strings"
 	"sync"
@@ -547,98 +546,6 @@ func TestDispatchExecution_ScopeLockIsolation(t *testing.T) {
 	}
 
 	close(dispatchCanFinish)
-}
-
-func TestRecoverInterrupted_Dispatches(t *testing.T) {
-	t.Parallel()
-	store := dbtest.NewFakeStore()
-	ctx := context.Background()
-
-	_, _ = store.InsertDispatch(ctx, db.Dispatch{
-		ID:        "disp-rec-pending",
-		Source:    "heartbeat",
-		SessionID: "heartbeat-rec-1",
-		Prompt:    "pending prompt",
-		Status:    db.StatusPending,
-	})
-	_, _ = store.InsertDispatch(ctx, db.Dispatch{
-		ID:        "disp-rec-processing",
-		Source:    "vanadis",
-		SessionID: "",
-		Prompt:    "processing prompt",
-		Status:    db.StatusProcessing,
-	})
-	_, _ = store.InsertDispatch(ctx, db.Dispatch{
-		ID:           "disp-rec-poison",
-		Source:       "webhook",
-		SessionID:    "webhook-poison",
-		Prompt:       "poison prompt",
-		Status:       db.StatusProcessing,
-		RestartCount: DefaultMaxRestarts + 1,
-	})
-
-	var recoveredIDs []string
-	var mu sync.Mutex
-	doneWg := sync.WaitGroup{}
-	doneWg.Add(2)
-
-	memBus := pubsub.NewMemoryBus()
-	defer memBus.Close()
-	outcomePublished := make(chan pubsub.DispatchOutcomeEvent, 1)
-	_, _ = memBus.Subscribe(ctx, "aerial.dispatch.failed", "test-sub", func(msgCtx context.Context, msg pubsub.Message) error {
-		var ev pubsub.DispatchOutcomeEvent
-		if uErr := json.Unmarshal(msg.Data(), &ev); uErr == nil {
-			select {
-			case outcomePublished <- ev:
-			default:
-			}
-		}
-		return msg.Ack()
-	})
-
-	pool := NewWorkerPool(WorkerPoolConfig{
-		Store:    store,
-		EventBus: memBus,
-		RunnerWithOptionsFunc: func(ctx context.Context, agyBin, prompt, sID, apiKey, model string, opts runner.WatchdogOptions) (string, string, int, error) {
-			mu.Lock()
-			if strings.Contains(prompt, "pending prompt") {
-				recoveredIDs = append(recoveredIDs, "disp-rec-pending")
-				doneWg.Done()
-			} else if strings.Contains(prompt, "processing prompt") {
-				recoveredIDs = append(recoveredIDs, "disp-rec-processing")
-				doneWg.Done()
-			}
-			mu.Unlock()
-			return `{"conversation_id":"44444444-4444-4444-4444-444444444444","status":"SUCCESS","response":"ok"}`, "", 0, nil
-		},
-	})
-	defer pool.Stop()
-
-	RecoverInterrupted(t.Context(), store, pool)
-
-	doneWg.Wait()
-
-	mu.Lock()
-	defer mu.Unlock()
-	if len(recoveredIDs) != 2 {
-		t.Fatalf("expected 2 recovered dispatches, got %d (%v)", len(recoveredIDs), recoveredIDs)
-	}
-
-	poisonDisp, err := store.GetDispatch(ctx, "disp-rec-poison")
-	if err != nil || poisonDisp == nil || poisonDisp.Status != db.StatusFailed {
-		t.Fatalf("expected poison pill dispatch to be marked FAILED, got %+v", poisonDisp)
-	}
-
-	var poisonEv pubsub.DispatchOutcomeEvent
-	select {
-	case poisonEv = <-outcomePublished:
-	case <-time.After(3 * time.Second):
-		t.Fatal("timed out waiting for poison pill dispatch outcome event")
-	}
-
-	if poisonEv.DispatchID != "disp-rec-poison" || poisonEv.Status != "failed" {
-		t.Errorf("unexpected delivered event: %+v", poisonEv)
-	}
 }
 
 func TestDispatchExecution_RetriesAndFailure(t *testing.T) {

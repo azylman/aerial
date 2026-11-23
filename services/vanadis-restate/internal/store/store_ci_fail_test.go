@@ -369,7 +369,9 @@ func TestPostgresVanadisStore_RecordPRCheckStatus(t *testing.T) {
 func TestPostgresVanadisStore_ResetPRCheckState(t *testing.T) {
 	t.Parallel()
 	failedCI := model.VanadisChunk{ID: "c1", BuildID: "b1", Mode: "pr", Repo: "aerial", PRNumber: 12, Status: "ci_failed", Banner: "CI failed", CIChecks: map[string]string{"lint": "failed"}}
+	syncWithMQ := model.VanadisChunk{ID: "c1", BuildID: "b1", Mode: "pr", Repo: "aerial", PRNumber: 12, Status: "ci_failed", Banner: "CI failed", CIChecks: map[string]string{"lint": "failed", "_merge_queue": "2/3"}}
 	merged := model.VanadisChunk{ID: "c1", BuildID: "b1", Mode: "pr", Repo: "aerial", PRNumber: 12, Status: "merged", Banner: "merged", HeadSHA: "sha-1", MergeSHA: "merge-sha-1", CIChecks: map[string]string{"build": "passed"}}
+	mergedWithMQ := model.VanadisChunk{ID: "c1", BuildID: "b1", Mode: "pr", Repo: "aerial", PRNumber: 12, Status: "merged", Banner: "merged", HeadSHA: "sha-1", MergeSHA: "merge-sha-1", CIChecks: map[string]string{"build": "passed", "_merge_queue": "1/2"}}
 	tests := []struct {
 		name                 string
 		chunkID, headSHA     string
@@ -384,7 +386,9 @@ func TestPostgresVanadisStore_ResetPRCheckState(t *testing.T) {
 		{name: "nil database", chunkID: "c1", headSHA: "sha-1", nilDB: true, wantErr: true},
 		{name: "empty chunk id", chunkID: "", headSHA: "sha-1", chunk: failedCI, wantErr: true},
 		{name: "reset sync check state", chunkID: "c1", headSHA: "sha-2", chunk: failedCI, wantStatus: "pr_opened", wantHead: "sha-2"},
+		{name: "reset sync check state preserves merge queue", chunkID: "c1", headSHA: "sha-2", chunk: syncWithMQ, wantStatus: "pr_opened", wantHead: "sha-2", wantChecks: map[string]string{"_merge_queue": "2/3"}},
 		{name: "reset merge check state", chunkID: "c1", headSHA: "sha-2", mergeSHA: "merge-sha-1", chunk: merged, wantStatus: "merged", wantHead: "sha-2", wantMerge: "merge-sha-1", wantChecks: map[string]string{"build": "passed"}},
+		{name: "reset merge check state strips merge queue", chunkID: "c1", headSHA: "sha-2", mergeSHA: "merge-sha-1", chunk: mergedWithMQ, wantStatus: "merged", wantHead: "sha-2", wantMerge: "merge-sha-1", wantChecks: map[string]string{"build": "passed"}},
 		{name: "rejected sync check state", chunkID: "c1", headSHA: "sha-2", chunk: cfChunk("deploying"), wantErr: true, wantSkipped: true},
 		{name: "rejected merge check state", chunkID: "c1", headSHA: "sha-2", mergeSHA: "merge-sha-1", chunk: cfChunk("completed"), wantErr: true, wantSkipped: true},
 		{name: "sync check state failure", chunkID: "c1", headSHA: "sha-2", chunk: failedCI, sabotage: cfFailChunkWrite, wantErr: true},
