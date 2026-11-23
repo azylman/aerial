@@ -450,15 +450,48 @@ func TestMessage_SettledSettlementIsNoop(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
-		name string
-		msg  Message
+		name          string
+		msg           Message
+		wantSubject   string
+		wantData      string
+		wantDelivered uint64
 	}{
-		{name: "memory message", msg: &memMessage{bus: NewMemoryBus(), subject: "aerial.jobs.settled", data: []byte("d"), settled: true}},
-		{name: "jetstream message", msg: &jsMessage{
-			raw:     &fakeMsg{subject: "aerial.jobs.jsmsg", data: []byte("raw"), header: nats.Header{}},
-			bus:     newJetStreamBusWithContext(nil, &mockJetStream{}),
-			settled: true,
-		}},
+		{
+			name:          "memory message",
+			msg:           &memMessage{bus: NewMemoryBus(), subject: "aerial.jobs.settled", data: []byte("d"), delivered: 1, settled: true},
+			wantSubject:   "aerial.jobs.settled",
+			wantData:      "d",
+			wantDelivered: 1,
+		},
+		{
+			name: "jetstream message",
+			msg: &jsMessage{
+				raw:     &fakeMsg{subject: "aerial.jobs.jsmsg", data: []byte("raw"), header: nats.Header{}},
+				bus:     newJetStreamBusWithContext(nil, &mockJetStream{}),
+				settled: true,
+			},
+			wantSubject:   "aerial.jobs.jsmsg",
+			wantData:      "raw",
+			wantDelivered: 1,
+		},
+		{
+			name: "core message with header",
+			msg: &coreMessage{
+				raw: &nats.Msg{Subject: "voice.stream.settled-1", Data: []byte("vdata-1"), Header: nats.Header{"X-V": []string{"1"}}},
+			},
+			wantSubject:   "voice.stream.settled-1",
+			wantData:      "vdata-1",
+			wantDelivered: 1,
+		},
+		{
+			name: "core message nil header",
+			msg: &coreMessage{
+				raw: &nats.Msg{Subject: "voice.stream.settled-2", Data: []byte("vdata-2")},
+			},
+			wantSubject:   "voice.stream.settled-2",
+			wantData:      "vdata-2",
+			wantDelivered: 1,
+		},
 	}
 
 	for _, tc := range tests {
@@ -481,6 +514,15 @@ func TestMessage_SettledSettlementIsNoop(t *testing.T) {
 			}
 			if tc.msg.Header() == nil {
 				t.Error("Header() = nil, want a non-nil header")
+			}
+			if gotSub := tc.msg.Subject(); gotSub != tc.wantSubject {
+				t.Errorf("Subject() = %q, want %q", gotSub, tc.wantSubject)
+			}
+			if gotData := string(tc.msg.Data()); gotData != tc.wantData {
+				t.Errorf("Data() = %q, want %q", gotData, tc.wantData)
+			}
+			if gotDeliv := tc.msg.NumDelivered(); gotDeliv != tc.wantDelivered {
+				t.Errorf("NumDelivered() = %d, want %d", gotDeliv, tc.wantDelivered)
 			}
 		})
 	}
@@ -931,5 +973,320 @@ func TestJetStreamBus_ConsumerStats(t *testing.T) {
 	mjs.consumerInfoErr = errors.New("simulated consumer info err")
 	if _, _, err := bus.ConsumerStats(context.Background(), "stream", "consumer"); err == nil {
 		t.Error("expected error from bus.ConsumerStats with consumerInfoErr")
+	}
+}
+
+func TestIsCoreSubject(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		subject string
+		want    bool
+	}{
+		{subject: "voice.stream.turn-123", want: true},
+		{subject: "voice.stream.abc.def", want: true},
+		{subject: "  voice.stream.padded  ", want: true},
+		{subject: "voice.stream.", want: true},
+		{subject: "voice.stream", want: false},
+		{subject: "voice.events.turn", want: false},
+		{subject: "aerial.events.voice.stream", want: false},
+		{subject: "", want: false},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.subject, func(t *testing.T) {
+			t.Parallel()
+			if got := isCoreSubject(tc.subject); got != tc.want {
+				t.Errorf("isCoreSubject(%q) = %v, want %v", tc.subject, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestJetStreamBus_CoreVoice_PublishValidation(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name       string
+		closedConn bool
+		subject    string
+		wantErrSub string
+	}{
+		{
+			name:       "publish on core subject with nil nats connection fails",
+			subject:    "voice.stream.turn-nil-pub",
+			wantErrSub: "nats connection is nil",
+		},
+		{
+			name:       "publish on core subject with closed nats connection fails",
+			closedConn: true,
+			subject:    "voice.stream.turn-closed-pub",
+			wantErrSub: "publish to voice.stream.turn-closed-pub",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			bus := &JetStreamBus{}
+			if tc.closedConn {
+				nc := startJetStreamServer(t)
+				b, err := NewJetStreamBusFromConn(nc)
+				if err != nil {
+					t.Fatalf("NewJetStreamBusFromConn failed: %v", err)
+				}
+				if closeErr := b.Close(); closeErr != nil {
+					t.Fatalf("bus.Close failed: %v", closeErr)
+				}
+				bus = b
+			}
+
+			err := bus.PublishWithHeader(context.Background(), tc.subject, "msg-1", []byte("payload"), nil)
+			if err == nil || !strings.Contains(err.Error(), tc.wantErrSub) {
+				t.Fatalf("PublishWithHeader error = %v, want substring %q", err, tc.wantErrSub)
+			}
+		})
+	}
+}
+
+func TestJetStreamBus_CoreVoice_SubscribeValidation(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name       string
+		closedConn bool
+		subject    string
+		durable    string
+		wantErrSub string
+		wantErrIs  error
+	}{
+		{
+			name:       "subscribe on core subject with nil nats connection fails",
+			subject:    "voice.stream.turn-nil-sub",
+			durable:    "",
+			wantErrSub: "nats connection is nil",
+		},
+		{
+			name:      "subscribe on non-core subject with empty durable returns errDurableRequired",
+			subject:   "aerial.events.requires.durable",
+			durable:   "",
+			wantErrIs: errDurableRequired,
+		},
+		{
+			name:       "subscribe on core subject with closed nats connection fails",
+			closedConn: true,
+			subject:    "voice.stream.turn-closed-sub",
+			durable:    "",
+			wantErrSub: "subscribe to voice.stream.turn-closed-sub",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			bus := &JetStreamBus{}
+			if tc.closedConn {
+				nc := startJetStreamServer(t)
+				b, err := NewJetStreamBusFromConn(nc)
+				if err != nil {
+					t.Fatalf("NewJetStreamBusFromConn failed: %v", err)
+				}
+				if closeErr := b.Close(); closeErr != nil {
+					t.Fatalf("bus.Close failed: %v", closeErr)
+				}
+				bus = b
+			}
+
+			_, err := bus.Subscribe(context.Background(), tc.subject, tc.durable, func(ctx context.Context, msg Message) error {
+				return nil
+			})
+			if tc.wantErrIs != nil {
+				if !errors.Is(err, tc.wantErrIs) {
+					t.Fatalf("Subscribe error = %v, want errors.Is %v", err, tc.wantErrIs)
+				}
+				return
+			}
+			if err == nil || !strings.Contains(err.Error(), tc.wantErrSub) {
+				t.Fatalf("Subscribe error = %v, want substring %q", err, tc.wantErrSub)
+			}
+		})
+	}
+}
+
+type coreVoiceObservation struct {
+	subject   string
+	data      string
+	customVal string
+	msgID     string
+	delivered uint64
+	traceID   string
+}
+
+func assertCoreVoiceDelivery(t *testing.T, got coreVoiceObservation, wantSub, wantData, wantCustom, wantMsgID, wantTraceID string) {
+	t.Helper()
+	if got.subject != wantSub {
+		t.Errorf("gotSubject = %q, want %q", got.subject, wantSub)
+	}
+	if got.data != wantData {
+		t.Errorf("gotData = %q, want %q", got.data, wantData)
+	}
+	if wantCustom != "" && got.customVal != wantCustom {
+		t.Errorf("gotCustomVal = %q, want %q", got.customVal, wantCustom)
+	}
+	if got.msgID != wantMsgID {
+		t.Errorf("gotMsgID = %q, want %q", got.msgID, wantMsgID)
+	}
+	if got.delivered != 1 {
+		t.Errorf("gotDelivered = %d, want 1", got.delivered)
+	}
+	if wantTraceID != "" && got.traceID != wantTraceID {
+		t.Errorf("gotTraceID = %q, want %q", got.traceID, wantTraceID)
+	}
+}
+
+type coreVoiceTestCase struct {
+	name        string
+	subject     string
+	msgID       string
+	traceparent string
+	customKey   string
+	customVal   string
+	payload     string
+	handlerErr  error
+	wantSpan    spanShape
+}
+
+func runCoreVoiceTest(t *testing.T, tc coreVoiceTestCase) {
+	t.Helper()
+	nc := startJetStreamServer(t)
+	mjs := &mockJetStream{}
+	bus := newJetStreamBusWithContext(nc, mjs)
+	t.Cleanup(func() {
+		if closeErr := bus.Close(); closeErr != nil {
+			t.Errorf("bus.Close failed: %v", closeErr)
+		}
+	})
+
+	deliveredCh := make(chan struct{})
+	var obs coreVoiceObservation
+
+	sub, err := bus.Subscribe(context.Background(), tc.subject, "", func(ctx context.Context, msg Message) error {
+		defer close(deliveredCh)
+		obs = coreVoiceObservation{
+			subject:   msg.Subject(),
+			data:      string(msg.Data()),
+			customVal: msg.Header().Get(tc.customKey),
+			msgID:     msg.Header().Get(HeaderMsgID),
+			delivered: msg.NumDelivered(),
+			traceID:   trace.SpanContextFromContext(ctx).TraceID().String(),
+		}
+		return tc.handlerErr
+	})
+	if err != nil {
+		t.Fatalf("Subscribe failed: %v", err)
+	}
+	t.Cleanup(func() {
+		if unsubErr := sub.Unsubscribe(); unsubErr != nil {
+			t.Errorf("sub.Unsubscribe failed: %v", unsubErr)
+		}
+	})
+
+	ctx := context.Background()
+	if tc.traceparent != "" {
+		ctx = propagation.TraceContext{}.Extract(ctx, propagation.MapCarrier{"traceparent": tc.traceparent})
+	}
+	customHdr := nats.Header{}
+	if tc.customKey != "" {
+		customHdr.Set(tc.customKey, tc.customVal)
+	}
+
+	if pubErr := bus.PublishWithHeader(ctx, tc.subject, tc.msgID, []byte(tc.payload), customHdr); pubErr != nil {
+		t.Fatalf("PublishWithHeader failed: %v", pubErr)
+	}
+
+	select {
+	case <-deliveredCh:
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for message delivery on core subject")
+	}
+
+	if mjs.publishedCount() != 0 {
+		t.Errorf("JetStream PublishMsg called %d times for core subject, want 0", mjs.publishedCount())
+	}
+
+	wantTrace := ""
+	if tc.traceparent != "" {
+		wantTrace = testTraceID
+	}
+	assertCoreVoiceDelivery(t, obs, tc.subject, tc.payload, tc.customVal, tc.msgID, wantTrace)
+
+	spans := assertSpanShapes(t, testSpans.await(tc.subject, 2), []spanShape{
+		pubSpan("pub", parentRemote, tc.subject, tc.msgID),
+		tc.wantSpan,
+	})
+	if spans["proc"] == nil {
+		t.Errorf("expected process span for %s", tc.subject)
+	}
+}
+
+func TestJetStreamBus_CoreVoice_PublishSubscribeDispatch(t *testing.T) {
+	t.Parallel()
+
+	tests := []coreVoiceTestCase{
+		{
+			name:        "successful core dispatch propagates traceparent and attributes",
+			subject:     "voice.stream.turn-trace-ok",
+			msgID:       "vmsg-1",
+			traceparent: testTraceparent,
+			customKey:   "X-Custom-Voice",
+			customVal:   "voice-meta-ok",
+			payload:     "sentence chunk audio",
+			wantSpan:    procSpan("proc", "pub", "voice.stream.turn-trace-ok", "", "vmsg-1", 1),
+		},
+		{
+			name:        "handler error fails consumer process span",
+			subject:     "voice.stream.turn-trace-err",
+			msgID:       "vmsg-2",
+			traceparent: testTraceparent,
+			payload:     "error chunk",
+			handlerErr:  errors.New("downstream speech error"),
+			wantSpan:    procSpan("proc", "pub", "voice.stream.turn-trace-err", "", "vmsg-2", 1).failed(),
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			runCoreVoiceTest(t, tc)
+		})
+	}
+}
+
+func TestJetStreamBus_DispatchCore_Direct(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name     string
+		subject  string
+		msg      *nats.Msg
+		wantSpan spanShape
+	}{
+		{
+			name:     "dispatch with nil header starts root process span",
+			subject:  "voice.stream.direct.root",
+			msg:      &nats.Msg{Subject: "voice.stream.direct.root", Data: []byte("d")},
+			wantSpan: procSpan("proc", "", "voice.stream.direct.root", "", "", 1),
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			bus := &JetStreamBus{}
+			bus.dispatchCore(context.Background(), tc.msg, func(ctx context.Context, msg Message) error {
+				return nil
+			})
+			assertSpanShapes(t, testSpans.await(tc.subject, 1), []spanShape{tc.wantSpan})
+		})
 	}
 }

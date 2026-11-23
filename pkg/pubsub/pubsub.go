@@ -50,6 +50,7 @@ const (
 	SubjectAerialCoalescedPrefix   = "aerial.coalesced."
 	SubjectAerialTranscriptsPrefix = "aerial.transcripts."
 	SubjectTranscriptsStepsPrefix  = "aerial.transcripts.steps."
+	SubjectVoiceStreamPrefix       = "voice.stream."
 	SubjectAerialTurnCompleted     = "aerial.turn.completed"
 	SubjectCovenExtractPrefix      = "aerial.coalesced.coven_extract."
 	SubjectProsperaReportJob       = "aerial.jobs.prospera.report"
@@ -207,32 +208,33 @@ type HaroOneShotJobArgs struct {
 	RunAt    time.Time `json:"run_at"`
 }
 
+func isCoreSubject(subject string) bool {
+	return strings.HasPrefix(strings.TrimSpace(subject), SubjectVoiceStreamPrefix)
+}
+
 func cleanSubjectToken(token string) string {
 	t := strings.TrimSpace(token)
 	if t == "" {
 		return unknownSubjectToken
 	}
-	t = strings.ReplaceAll(t, "*", "-")
-	t = strings.ReplaceAll(t, ">", "-")
-	t = strings.ReplaceAll(t, " ", "-")
+	for _, old := range []string{"*", ">", " "} {
+		t = strings.ReplaceAll(t, old, "-")
+	}
 	for strings.Contains(t, "--") {
 		t = strings.ReplaceAll(t, "--", "-")
 	}
-	t = strings.Trim(t, ".-")
-	if t == "" {
+	if t = strings.Trim(t, ".-"); t == "" {
 		return unknownSubjectToken
 	}
 	return t
 }
 
 func sanitizeToken(token string) string {
-	t := cleanSubjectToken(token)
-	t = strings.ReplaceAll(t, ".", "-")
+	t := strings.ReplaceAll(cleanSubjectToken(token), ".", "-")
 	var b strings.Builder
 	b.Grow(len(t))
 	for i := range len(t) {
-		c := t[i]
-		if (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '-' || c == '_' {
+		if c := t[i]; (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '-' || c == '_' {
 			b.WriteByte(c)
 		} else {
 			b.WriteByte('-')
@@ -242,8 +244,7 @@ func sanitizeToken(token string) string {
 	for strings.Contains(res, "--") {
 		res = strings.ReplaceAll(res, "--", "-")
 	}
-	res = strings.Trim(res, "-_")
-	if res == "" {
+	if res = strings.Trim(res, "-_"); res == "" {
 		return unknownSubjectToken
 	}
 	return res
@@ -260,8 +261,7 @@ func SubjectTranscriptsStepsForAgent(agent, sessionID string) string {
 	if cleanAgent == unknownSubjectToken {
 		cleanAgent = defaultAgent
 	}
-	cleanSessionID := sanitizeToken(sessionID)
-	return SubjectTranscriptsStepsPrefix + cleanAgent + "." + cleanSessionID
+	return SubjectTranscriptsStepsPrefix + cleanAgent + "." + sanitizeToken(sessionID)
 }
 
 // ParseTranscriptsStepsSubject extracts the agent and session ID from an aerial transcripts steps subject.
@@ -269,29 +269,24 @@ func SubjectTranscriptsStepsForAgent(agent, sessionID string) string {
 // and legacy 4-token "aerial.transcripts.steps.<session_id>" (returning "", sessionID, true).
 func ParseTranscriptsStepsSubject(subject string) (agent, sessionID string, ok bool) {
 	tokens := strings.Split(subject, ".")
-	if len(tokens) == 5 && tokens[0] == "aerial" && tokens[1] == "transcripts" && tokens[2] == "steps" {
+	if len(tokens) < 4 || len(tokens) > 5 || tokens[0] != "aerial" || tokens[1] != "transcripts" || tokens[2] != "steps" {
+		return "", "", false
+	}
+	if len(tokens) == 5 {
 		if tokens[3] == "" || tokens[4] == "" {
 			return "", "", false
 		}
 		return tokens[3], tokens[4], true
 	}
-	if len(tokens) == 4 && tokens[0] == "aerial" && tokens[1] == "transcripts" && tokens[2] == "steps" {
-		if tokens[3] == "" {
-			return "", "", false
-		}
-		return "", tokens[3], true
+	if tokens[3] == "" {
+		return "", "", false
 	}
-	return "", "", false
+	return "", tokens[3], true
 }
 
 // SubjectCovenExtractCoalesced returns the coalesced subject for a thread's fact extraction.
 func SubjectCovenExtractCoalesced(threadID string) string {
-	t := cleanSubjectToken(threadID)
-	t = strings.ReplaceAll(t, ".", "-")
-	if t == "" {
-		t = unknownSubjectToken
-	}
-	return SubjectCovenExtractPrefix + t
+	return SubjectCovenExtractPrefix + strings.ReplaceAll(cleanSubjectToken(threadID), ".", "-")
 }
 
 // SubjectCovenExtractCoalescedForAgent returns the coalesced extraction subject scoped by agent.
@@ -301,10 +296,10 @@ func SubjectCovenExtractCoalescedForAgent(agent, threadID string) string {
 		a = defaultAgent
 	}
 	t := strings.TrimSpace(threadID)
-	if t == ">" || t == "*" {
-		return fmt.Sprintf("aerial.coalesced.coven_extract.%s.%s", a, t)
+	if t != ">" && t != "*" {
+		t = sanitizeToken(t)
 	}
-	return fmt.Sprintf("aerial.coalesced.coven_extract.%s.%s", a, sanitizeToken(t))
+	return fmt.Sprintf("aerial.coalesced.coven_extract.%s.%s", a, t)
 }
 
 // PRRolloutState tracks Kubernetes / GitOps rollout progress across jobs and Kustomizations.
@@ -500,10 +495,16 @@ func (b *JetStreamBus) PublishWithHeader(ctx context.Context, subject string, ms
 
 	otel.GetTextMapPropagator().Inject(ctx, propagation.HeaderCarrier(http.Header(mergedHeader)))
 
-	msg := &nats.Msg{
-		Subject: subject,
-		Data:    payload,
-		Header:  mergedHeader,
+	msg := &nats.Msg{Subject: subject, Data: payload, Header: mergedHeader}
+
+	if isCoreSubject(subject) {
+		if b == nil || b.nc == nil {
+			return fmt.Errorf("publish to %s: nats connection is nil", subject)
+		}
+		if err = b.nc.PublishMsg(msg); err != nil {
+			return fmt.Errorf("publish to %s: %w", subject, err)
+		}
+		return nil
 	}
 
 	var pubOpts []nats.PubOpt
@@ -525,13 +526,64 @@ var errDurableRequired = errors.New("pubsub: durable name required")
 // Subscribe establishes a pub/sub fan-out subscription bound to the explicitly
 // managed durable pull consumer named durable (see ensureDurableConsumer).
 // Overlapping pods share it during rolling updates and no pod ever deletes it
-// on Unsubscribe. An empty durable is rejected with errDurableRequired.
+// on Unsubscribe. An empty durable is rejected with errDurableRequired, unless
+// subject is an ephemeral Core NATS subject (e.g. voice.stream.*).
 func (b *JetStreamBus) Subscribe(ctx context.Context, subject string, durable string, handler Handler) (Subscription, error) {
+	if durable == "" && isCoreSubject(subject) {
+		return b.subscribeCore(ctx, subject, handler)
+	}
 	if durable == "" {
 		return nil, fmt.Errorf("subscribe to %s: %w", subject, errDurableRequired)
 	}
 	return b.bindDurable(ctx, subject, durable, handler)
 }
+
+func (b *JetStreamBus) subscribeCore(subCtx context.Context, subject string, handler Handler) (Subscription, error) {
+	if b == nil || b.nc == nil {
+		return nil, fmt.Errorf("subscribe to %s: nats connection is nil", subject)
+	}
+	sub, err := b.nc.Subscribe(subject, func(m *nats.Msg) { b.dispatchCore(subCtx, m, handler) })
+	if err != nil {
+		return nil, fmt.Errorf("subscribe to %s: %w", subject, err)
+	}
+	return sub, nil
+}
+
+func (*JetStreamBus) dispatchCore(subCtx context.Context, m *nats.Msg, handler Handler) {
+	ctx := context.WithoutCancel(subCtx)
+	msg := &coreMessage{raw: m}
+	if h := msg.Header(); len(h) > 0 {
+		ctx = otel.GetTextMapPropagator().Extract(ctx, propagation.HeaderCarrier(http.Header(h)))
+	}
+	ctx, span := tracing.Tracer().Start(ctx, msg.Subject()+" process", processSpanOptions(msg.Subject(), "", 1, msg.Header().Get(HeaderMsgID))...)
+	var err error
+	defer func() {
+		failSpan(span, err)
+		span.End()
+	}()
+	err = handler(ctx, msg)
+}
+
+type coreMessage struct {
+	raw *nats.Msg
+}
+
+func (m *coreMessage) Data() []byte    { return m.raw.Data }
+func (m *coreMessage) Subject() string { return m.raw.Subject }
+
+func (m *coreMessage) Header() nats.Header {
+	if m.raw.Header != nil {
+		return m.raw.Header
+	}
+	return nats.Header{}
+}
+
+func (*coreMessage) NumDelivered() uint64             { return 1 }
+func (*coreMessage) Ack() error                       { return nil }
+func (*coreMessage) NakWithDelay(time.Duration) error { return nil }
+func (*coreMessage) Term() error                      { return nil }
+func (*coreMessage) Snooze(time.Duration) error       { return nil }
+func (*coreMessage) InProgress() error                { return nil }
 
 // ConsumeQueue establishes a competing-consumer work queue subscription bound
 // to the explicitly managed durable consumer named queue.
@@ -1430,7 +1482,5 @@ func isMessageNotFoundError(err error) bool {
 		return false
 	}
 	s := strings.ToLower(err.Error())
-	return strings.Contains(s, "message not found") ||
-		strings.Contains(s, "10039") ||
-		errors.Is(err, nats.ErrMsgNotFound)
+	return strings.Contains(s, "message not found") || strings.Contains(s, "10039") || errors.Is(err, nats.ErrMsgNotFound)
 }
