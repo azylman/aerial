@@ -47,16 +47,17 @@ type (
 var (
 	NewRestateEriClient = ericlient.NewRestateEriClient
 
-	FormatChunkActiveStep     = widget.FormatChunkActiveStep
-	FindSymbolSpan            = prompt.FindSymbolSpan
-	ResolveSymbolSpans        = prompt.ResolveSymbolSpans
-	FormatCIFailurePrompt     = prompt.FormatCIFailurePrompt
-	FormatNoPRResumePrompt    = prompt.FormatNoPRResumePrompt
-	FormatActionResumePrompt  = prompt.FormatActionResumePrompt
-	FormatConflictPrompt      = prompt.FormatConflictPrompt
-	FormatDeployFailureBanner = prompt.FormatDeployFailureBanner
-	FormatDeployFailurePrompt = prompt.FormatDeployFailurePrompt
-	ExtractCIFailureDetails   = cilog.ExtractCIFailureDetails
+	FormatChunkActiveStep            = widget.FormatChunkActiveStep
+	FindSymbolSpan                   = prompt.FindSymbolSpan
+	ResolveSymbolSpans               = prompt.ResolveSymbolSpans
+	FormatCIFailurePrompt            = prompt.FormatCIFailurePrompt
+	FormatInlineCapRemediationPrompt = prompt.FormatInlineCapRemediationPrompt
+	FormatNoPRResumePrompt           = prompt.FormatNoPRResumePrompt
+	FormatActionResumePrompt         = prompt.FormatActionResumePrompt
+	FormatConflictPrompt             = prompt.FormatConflictPrompt
+	FormatDeployFailureBanner        = prompt.FormatDeployFailureBanner
+	FormatDeployFailurePrompt        = prompt.FormatDeployFailurePrompt
+	ExtractCIFailureDetails          = cilog.ExtractCIFailureDetails
 )
 
 // Executor coordinates chunk dispatch, widget sync, CI logs, prompts, and event publishing.
