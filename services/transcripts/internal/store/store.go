@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"database/sql"
+	"database/sql/driver"
 	"errors"
 	"fmt"
 	"log"
@@ -372,19 +373,31 @@ func (s *Store) AcquireThreadSummaryLock(ctx context.Context, threadID string) (
 	}, nil
 }
 
+// extractPgxConn inspects a database/sql driver connection and returns the
+// underlying *pgx.Conn if present, either directly or by unwrapping *stdlib.Conn.
+func extractPgxConn(dc any) *pgx.Conn {
+	if pc, ok := dc.(*pgx.Conn); ok {
+		return pc
+	}
+	if uc, ok := dc.(interface{ Conn() *pgx.Conn }); ok {
+		return uc.Conn()
+	}
+	return nil
+}
+
 // destroyConn permanently destroys a pooled connection (for example one whose
 // advisory unlock failed and may still hold the lock) instead of returning it
 // for reuse. It hijacks the underlying pgx connection when available so the
 // pool cannot hand the tainted session to another borrower.
 func destroyConn(conn *sql.Conn) {
 	if rawErr := conn.Raw(func(dc any) error {
-		if pc, ok := dc.(*pgx.Conn); ok {
+		if pc := extractPgxConn(dc); pc != nil {
 			if closeErr := pc.Close(context.Background()); closeErr != nil {
 				log.Printf("[Transcripts] warning: failed to destroy summary lock conn: %v", closeErr)
 			}
 		}
-		return nil
-	}); rawErr != nil {
+		return driver.ErrBadConn
+	}); rawErr != nil && !errors.Is(rawErr, driver.ErrBadConn) {
 		log.Printf("[Transcripts] warning: failed to access summary lock conn for destroy: %v", rawErr)
 	}
 	httpkit.CloseWarn(conn, "summary lock conn after failed unlock")
