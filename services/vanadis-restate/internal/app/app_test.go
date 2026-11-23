@@ -207,7 +207,7 @@ var (
 		"HandleConflictCheck", "HandleConflictResolved", "HandleDeployAttemptFailed",
 		"HandleDeployFailed", "HandleDeployFailureDeadline", "HandleDeployObserved", "HandleDeploySuccess", "HandleHeadRefMissing",
 		"HandleKustomizationRequested", "HandleMainAdvanced", "HandleMerged", "HandleOpened", "HandleReadinessRetry", "HandleReconcileLost", "HandleReopened",
-		"HandleRolloutProgress", "HandleSelfRegistered", "HandleSynchronized", "Project", "Register", "RetryEriEffect", "RetryFactEffect", "RetryFluxReconcile",
+		"HandleRolloutProgress", "HandleSelfRegistered", "HandleSynchronized", "Register", "RetryEriEffect", "RetryFactEffect", "RetryFluxReconcile",
 		"RetryReadiness",
 	}
 	bindRepoObjectHandlers = []string{
@@ -240,14 +240,13 @@ func TestBindRestateServices(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			projection := prstate.NewPgProjectionStore(nil)
 			gh := prstate.NewGitHubClient(nil, "", "")
 			kube := prstate.NewKubeClient(nil, "", "", "", "")
 			if tc.nilDeps {
-				projection, gh, kube = nil, nil, nil
+				gh, kube = nil, nil
 			}
 			srv, err := bindRestateServices(tc.agent, build.NewBuildObjectWithAgent("http://127.0.0.1:4025", tc.agent, nil), router.NewBuildRouterServiceWithAgent(nil, tc.agent),
-				projection, prstate.NewSessionEriEffector(nil), prstate.NewBusFactPublisher(nil), gh, kube)
+				prstate.NewSessionEriEffector(nil), prstate.NewBusFactPublisher(nil), gh, kube)
 			require.NoError(t, err)
 			handler, err := srv.Handler()
 			require.NoError(t, err)
@@ -396,31 +395,28 @@ func TestLoadConfig(t *testing.T) {
 // every boundary and names the missing one.
 func TestNewPRStateServices(t *testing.T) {
 	t.Parallel()
-	projection := prstate.NewPgProjectionStore(nil)
 	eri := prstate.NewSessionEriEffector(nil)
 	facts := prstate.NewBusFactPublisher(nil)
 	gh := prstate.NewGitHubClient(nil, "", "")
 	kube := prstate.NewKubeClient(nil, "", "", "", "")
 	tests := []struct {
-		name       string
-		projection *prstate.PgProjectionStore
-		eri        prstate.EriEffector
-		facts      prstate.FactPublisher
-		gh         *prstate.GitHubClient
-		kube       *prstate.KubeClient
-		wantErr    string
+		name    string
+		eri     prstate.EriEffector
+		facts   prstate.FactPublisher
+		gh      *prstate.GitHubClient
+		kube    *prstate.KubeClient
+		wantErr string
 	}{
-		{name: "every boundary wires", projection: projection, eri: eri, facts: facts, gh: gh, kube: kube},
-		{name: "nil projection fails", eri: eri, facts: facts, gh: gh, kube: kube, wantErr: "vanadis-restate: prstate dependency is nil: projection store"},
-		{name: "nil eri fails", projection: projection, facts: facts, gh: gh, kube: kube, wantErr: "vanadis-restate: prstate dependency is nil: eri effector"},
-		{name: "nil facts fails", projection: projection, eri: eri, gh: gh, kube: kube, wantErr: "vanadis-restate: prstate dependency is nil: fact publisher"},
-		{name: "nil github fails", projection: projection, eri: eri, facts: facts, kube: kube, wantErr: "vanadis-restate: prstate dependency is nil: GitHub client"},
-		{name: "nil kube fails", projection: projection, eri: eri, facts: facts, gh: gh, wantErr: "vanadis-restate: prstate dependency is nil: Kubernetes client"},
+		{name: "every boundary wires", eri: eri, facts: facts, gh: gh, kube: kube},
+		{name: "nil eri fails", facts: facts, gh: gh, kube: kube, wantErr: "vanadis-restate: prstate dependency is nil: eri effector"},
+		{name: "nil facts fails", eri: eri, gh: gh, kube: kube, wantErr: "vanadis-restate: prstate dependency is nil: fact publisher"},
+		{name: "nil github fails", eri: eri, facts: facts, kube: kube, wantErr: "vanadis-restate: prstate dependency is nil: GitHub client"},
+		{name: "nil kube fails", eri: eri, facts: facts, gh: gh, wantErr: "vanadis-restate: prstate dependency is nil: Kubernetes client"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			pr, repo, err := newPRStateServices(tc.projection, tc.eri, tc.facts, tc.gh, tc.kube)
+			pr, repo, err := newPRStateServices(tc.eri, tc.facts, tc.gh, tc.kube)
 			if tc.wantErr != "" {
 				require.EqualError(t, err, tc.wantErr)
 				require.Nil(t, pr)

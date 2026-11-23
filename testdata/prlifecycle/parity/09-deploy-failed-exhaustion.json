@@ -143,7 +143,6 @@
       "title": "Fail PR",
       "metadata": {
         "agent": "aerial",
-        "bot_id": "aerial",
         "deploy_failed_published": true
       }
     }
