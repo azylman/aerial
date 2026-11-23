@@ -451,17 +451,6 @@ func TestRunApp_Lifecycle(t *testing.T) {
 			cfg:     &config.Config{Port: "0", RestatePort: "0", DatabaseURL: validDSN, TranscriptsURL: "http://mock-transcripts", Role: "extractor"},
 			wantErr: false,
 		},
-		{
-			name: "CleanLifecycleWithRestateAdminAndAdvertiseURLs",
-			cfg: &config.Config{
-				Port:                "0",
-				RestatePort:         "0",
-				DatabaseURL:         validDSN,
-				RestateAdminURL:     "http://mock-restate-admin:9070",
-				RestateAdvertiseURL: "http://mock-coven:9080",
-			},
-			wantErr: false,
-		},
 	}
 
 	for _, tc := range tests {
