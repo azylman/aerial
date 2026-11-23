@@ -43,9 +43,16 @@ func newMockMCPServer(t *testing.T, cfg mockMCPConfig) *httptest.Server {
 
 	var srv *httptest.Server
 	srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		bodyBytes, _ := io.ReadAll(r.Body)
+		bodyBytes, err := io.ReadAll(r.Body)
+		if err != nil {
+			t.Errorf("io.ReadAll: %v", err)
+			return
+		}
 		var req map[string]any
-		_ = json.Unmarshal(bodyBytes, &req)
+		if err := json.Unmarshal(bodyBytes, &req); err != nil {
+			t.Errorf("json.Unmarshal: %v", err)
+			return
+		}
 
 		method, _ := req["method"].(string)
 		id := req["id"]
@@ -162,10 +169,14 @@ func writeMockDefaultToolsList(w http.ResponseWriter, cfg mockMCPConfig, id any)
 	if tools == nil {
 		tools = []MCPTool{{Name: "default_tool", Description: "Default mock tool"}}
 	}
-	respPayload, _ := json.Marshal(map[string]any{
+	respPayload, err := json.Marshal(map[string]any{
 		"jsonrpc": "2.0", "id": id,
 		"result": map[string]any{"tools": tools},
 	})
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
 	if cfg.useSSE {
 		w.Header().Set("Content-Type", "text/event-stream")
 		fmt.Fprintf(w, "event: message\ndata: %s\n\n", string(respPayload))
@@ -250,10 +261,14 @@ func writeMockToolsCallSuccess(w http.ResponseWriter, cfg mockMCPConfig, id any)
 			"isError": cfg.callIsError,
 		}
 	}
-	respPayload, _ := json.Marshal(map[string]any{
+	respPayload, err := json.Marshal(map[string]any{
 		"jsonrpc": "2.0", "id": id,
 		"result": resultVal,
 	})
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
 	if cfg.useSSE {
 		w.Header().Set("Content-Type", "text/event-stream")
 		fmt.Fprintf(w, "data: %s\n\n", string(respPayload))
@@ -440,8 +455,12 @@ func TestEnsureSession(t *testing.T) {
 	var wg sync.WaitGroup
 	for range 20 {
 		wg.Go(func() {
-			_ = d.getServerMutex("srv")
-			_, _ = d.EnsureSession(context.Background(), "srv")
+			if d.getServerMutex("srv") == nil {
+				t.Errorf("expected mutex")
+			}
+			if sess, err := d.EnsureSession(context.Background(), "srv"); err != nil || sess == "" {
+				t.Errorf("EnsureSession() = (%q, %v)", sess, err)
+			}
 		})
 	}
 	wg.Wait()
@@ -539,9 +558,16 @@ func TestExecute(t *testing.T) {
 
 	var emailReceived atomic.Pointer[string]
 	emailTs := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		bodyBytes, _ := io.ReadAll(r.Body)
+		bodyBytes, err := io.ReadAll(r.Body)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
 		var req map[string]any
-		_ = json.Unmarshal(bodyBytes, &req)
+		if err := json.Unmarshal(bodyBytes, &req); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
 		method, _ := req["method"].(string)
 		if method == "initialize" {
 			w.Header().Set("Content-Type", "application/json")
@@ -654,9 +680,16 @@ func TestPrime(t *testing.T) {
 
 func TestConcurrentExecute(t *testing.T) {
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		bodyBytes, _ := io.ReadAll(r.Body)
+		bodyBytes, err := io.ReadAll(r.Body)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
 		var req map[string]any
-		_ = json.Unmarshal(bodyBytes, &req)
+		if err := json.Unmarshal(bodyBytes, &req); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
 		method, _ := req["method"].(string)
 		id := req["id"]
 		switch method {
@@ -723,9 +756,16 @@ func TestConcurrentExecute(t *testing.T) {
 func TestMockMCPLifecycle(t *testing.T) {
 	var notifyReceived atomic.Bool
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		bodyBytes, _ := io.ReadAll(r.Body)
+		bodyBytes, err := io.ReadAll(r.Body)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
 		var req map[string]any
-		_ = json.Unmarshal(bodyBytes, &req)
+		if err := json.Unmarshal(bodyBytes, &req); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
 		method, _ := req["method"].(string)
 		id := req["id"]
 		switch method {

@@ -445,11 +445,23 @@ func TestSanitizeDaemonTargetKey(t *testing.T) {
 
 func TestTraceCarrierEnv(t *testing.T) {
 	t.Parallel()
-	traceID, _ := trace.TraceIDFromHex("4bf92f3577b34da6a3ce929d0e0e4736")
-	spanID, _ := trace.SpanIDFromHex("00f067aa0ba902b7")
-	ts, _ := trace.ParseTraceState("vendor=v1")
+	traceID, err := trace.TraceIDFromHex("4bf92f3577b34da6a3ce929d0e0e4736")
+	if err != nil {
+		t.Fatalf("TraceIDFromHex: %v", err)
+	}
+	spanID, err := trace.SpanIDFromHex("00f067aa0ba902b7")
+	if err != nil {
+		t.Fatalf("SpanIDFromHex: %v", err)
+	}
+	ts, err := trace.ParseTraceState("vendor=v1")
+	if err != nil {
+		t.Fatalf("ParseTraceState: %v", err)
+	}
 	sc := trace.NewSpanContext(trace.SpanContextConfig{TraceID: traceID, SpanID: spanID, TraceFlags: trace.FlagsSampled, TraceState: ts, Remote: true})
-	bag, _ := baggage.Parse("tenant=a")
+	bag, err := baggage.Parse("tenant=a")
+	if err != nil {
+		t.Fatalf("baggage.Parse: %v", err)
+	}
 	full := baggage.ContextWithBaggage(trace.ContextWithSpanContext(context.Background(), sc), bag)
 	composite := propagation.NewCompositeTextMapPropagator(propagation.TraceContext{}, propagation.Baggage{})
 	tests := []struct {
@@ -583,20 +595,24 @@ func TestExtractSkillFromTarget(t *testing.T) {
 	if gotMemQuery != "raw query" || !strings.HasPrefix(injected, "<retrieved_memory>mem</retrieved_memory>\n\n<ambient_context>amb</ambient_context>\n\nfull prompt envelope") {
 		t.Errorf("injectRetrievedContext query=%q, out=%q", gotMemQuery, injected)
 	}
-	_ = injectRetrievedContext(context.Background(), "fallback prompt", "", nil, time.Second, func(_ context.Context, q string) (string, error) {
+	if gotPrompt := injectRetrievedContext(context.Background(), "fallback prompt", "", nil, time.Second, func(_ context.Context, q string) (string, error) {
 		gotMemQuery = q
 		return "", nil
-	}, time.Second, "[Test]")
+	}, time.Second, "[Test]"); gotPrompt != "fallback prompt" {
+		t.Errorf("expected fallback prompt output, got %q", gotPrompt)
+	}
 	if gotMemQuery != "fallback prompt" {
 		t.Errorf("expected fallback prompt, got %q", gotMemQuery)
 	}
 
 	// Test error and pre-existing tag branches
-	_ = injectRetrievedContext(context.Background(), "error prompt", "q", func(context.Context) (string, error) {
+	if gotErrPrompt := injectRetrievedContext(context.Background(), "error prompt", "q", func(context.Context) (string, error) {
 		return "", errors.New("amb error")
 	}, time.Second, func(_ context.Context, _ string) (string, error) {
 		return "", errors.New("mem error")
-	}, time.Second, "[Test]")
+	}, time.Second, "[Test]"); gotErrPrompt != "error prompt" {
+		t.Errorf("expected error prompt output, got %q", gotErrPrompt)
+	}
 
 	tagPrompt := "<ambient_context>skip</ambient_context> <retrieved_memory>skip</retrieved_memory>"
 	if res := injectRetrievedContext(context.Background(), tagPrompt, "q", func(context.Context) (string, error) {
