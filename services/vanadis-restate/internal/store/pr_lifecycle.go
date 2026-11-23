@@ -8,8 +8,7 @@ package store
 // JSON, status transition rules and error behavior are byte-identical to the
 // root copies they replace.
 //
-// Recovery helpers (recoverFailedPR, failedPRHeadAccepted,
-// missingFailedPRBaseline, seedFailedPRBaseline) now live in
+// Recovery helpers (recoverFailedPR, failedPRHeadAccepted) now live in
 // store_pr_recovery.go; the shared lock helper below stays here alongside
 // its retry-module consumer. ResetPRCheckState depends on the recovery
 // fallback, which is its only caller, and the lock helper it needs.

@@ -850,7 +850,7 @@ func (c *Classifier) Classify(ctx context.Context, target db.Message, recentCont
 		return c.classifySystemOne(ctx, []db.Message{target}, recentContext)
 	}
 	prompt := BuildPrompt(target, recentContext)
-	return c.classifyWithPrompt(ctx, prompt)
+	return c.classifyWithPrompt(runner.WithLLMCallerKey(ctx, ClassifyCallerKey([]db.Message{target})), prompt)
 }
 
 // ClassifyBurst evaluates an entire burst of ambient messages as a single unit.
@@ -862,7 +862,35 @@ func (c *Classifier) ClassifyBurst(ctx context.Context, targetBurst []db.Message
 		return c.classifySystemOne(ctx, targetBurst, recentContext)
 	}
 	prompt := BuildBurstPrompt(targetBurst, recentContext)
-	return c.classifyWithPrompt(ctx, prompt)
+	return c.classifyWithPrompt(runner.WithLLMCallerKey(ctx, ClassifyCallerKey(targetBurst)), prompt)
+}
+
+// ClassifyCallerKey names the classification of msgs as one LLM operation:
+// "classify:<channel>:<newest message ID>", where channel is the message's
+// channel (falling back to its thread). Blank when either ID is unknown, so
+// the call goes out unkeyed rather than sharing a key with another burst.
+func ClassifyCallerKey(msgs []db.Message) string {
+	if len(msgs) == 0 {
+		return ""
+	}
+	last := msgs[len(msgs)-1]
+	channel := last.ChannelID
+	if channel == "" {
+		channel = last.ThreadID
+	}
+	if channel == "" || last.ID == "" {
+		return ""
+	}
+	return "classify:" + channel + ":" + last.ID
+}
+
+// TitleCallerKey names the thread-title summary for the thread started from
+// messageID: "title:<message ID>". Blank when messageID is unknown.
+func TitleCallerKey(messageID string) string {
+	if messageID == "" {
+		return ""
+	}
+	return "title:" + messageID
 }
 
 // CleanThreadTitle cleans and formats raw LLM output for use as a Discord thread title.

@@ -28,11 +28,13 @@ type fakeSummaryLLM struct {
 	err        error
 	calls      int
 	lastPrompt string
+	lastKey    string
 }
 
-func (f *fakeSummaryLLM) Complete(_ context.Context, prompt string) (string, error) {
+func (f *fakeSummaryLLM) Complete(ctx context.Context, prompt string) (string, error) {
 	f.calls++
 	f.lastPrompt = prompt
+	f.lastKey = llmKeyFrom(ctx)
 	if f.err != nil {
 		return "", f.err
 	}
@@ -583,6 +585,70 @@ func TestHTTPLLMClientIdempotencyKeyHeader(t *testing.T) {
 			}
 			if got != tc.want {
 				t.Errorf("Idempotency-Key = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestSummarizerRejectedAnswerAttempts(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name           string
+		presetAttempts int
+		response       string
+		newSteps       bool
+		wantKey        string
+		wantLLMCalls   int
+		wantAttempts   int
+		wantWatermark  int
+		wantExhausted  bool
+		wantErr        bool
+	}{
+		{name: "first attempt uses bare key and accepts", response: "good", wantKey: "transcripts:summary:aerial:sess-1:0", wantLLMCalls: 1, wantAttempts: 0, wantWatermark: 2},
+		{name: "first rejection records attempt one", response: " ", wantKey: "transcripts:summary:aerial:sess-1:0", wantLLMCalls: 1, wantAttempts: 1, wantWatermark: -1, wantErr: true},
+		{name: "second attempt sends a2", presetAttempts: 1, response: " ", wantKey: "transcripts:summary:aerial:sess-1:0:a2", wantLLMCalls: 1, wantAttempts: 2, wantWatermark: -1, wantErr: true},
+		{name: "third rejection fails terminally", presetAttempts: 2, response: " ", wantKey: "transcripts:summary:aerial:sess-1:0:a3", wantLLMCalls: 1, wantAttempts: 3, wantWatermark: -1, wantErr: true, wantExhausted: true},
+		{name: "a3 accepted answer resets attempts", presetAttempts: 2, response: "good", wantKey: "transcripts:summary:aerial:sess-1:0:a3", wantLLMCalls: 1, wantAttempts: 0, wantWatermark: 2},
+		{name: "exhausted session is skipped", presetAttempts: 3, response: "good", wantLLMCalls: 0, wantAttempts: 3, wantWatermark: -1},
+		{name: "new steps reset exhausted session", presetAttempts: 3, response: "good", newSteps: true, wantKey: "transcripts:summary:aerial:sess-1:0", wantLLMCalls: 1, wantAttempts: 0, wantWatermark: 4},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			st, db := newTestStoreWithDB(t, "aerial")
+			seedSummarizerSession(t, st, "sess-1", "thread-1", 0, 2, false)
+			if _, err := db.ExecContext(context.Background(),
+				`UPDATE session_summaries SET summary_attempts = $1 WHERE agent = 'aerial' AND session_id = 'sess-1'`, tc.presetAttempts); err != nil {
+				t.Fatalf("preset attempts: %v", err)
+			}
+			if tc.newSteps {
+				seedSummarizerSession(t, st, "sess-1", "thread-1", 3, 4, false)
+			}
+			llm := &fakeSummaryLLM{response: tc.response}
+			cfg := config.SummarizerConfig{Enabled: true}.WithDefaults()
+			sum := NewSummarizer(st, llm, &fakeSummaryEmbedder{vector: []float32{0.1}}, cfg)
+			sum.now = func() time.Time { return time.Date(2026, 11, 18, 13, 0, 0, 0, time.UTC) }
+
+			_, err := sum.RunOnce(context.Background())
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("RunOnce() err = %v, wantErr %v", err, tc.wantErr)
+			}
+			if got := errors.Is(err, ErrSummaryAttemptsExhausted); got != tc.wantExhausted {
+				t.Errorf("RunOnce() exhausted = %v, want %v (err %v)", got, tc.wantExhausted, err)
+			}
+			if llm.calls != tc.wantLLMCalls {
+				t.Errorf("llm calls = %d, want %d", llm.calls, tc.wantLLMCalls)
+			}
+			if llm.lastKey != tc.wantKey {
+				t.Errorf("llm key = %q, want %q", llm.lastKey, tc.wantKey)
+			}
+			var attempts, watermark int
+			if err := db.QueryRowContext(context.Background(),
+				`SELECT summary_attempts, summary_step_watermark FROM session_summaries WHERE agent = 'aerial' AND session_id = 'sess-1'`).Scan(&attempts, &watermark); err != nil {
+				t.Fatalf("read attempts: %v", err)
+			}
+			if attempts != tc.wantAttempts || watermark != tc.wantWatermark {
+				t.Errorf("attempts, watermark = %d, %d; want %d, %d", attempts, watermark, tc.wantAttempts, tc.wantWatermark)
 			}
 		})
 	}

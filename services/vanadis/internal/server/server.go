@@ -174,11 +174,6 @@ func (s *VanadisServer) newMCPHandler() http.HandlerFunc {
 	return s.mcpHandler().NewHTTPHandler()
 }
 
-// handleRetryActionChunk serves POST /builds/{id}/retry-action.
-func (s *VanadisServer) handleRetryActionChunk(w http.ResponseWriter, r *http.Request) {
-	s.mcpHandler().HandleRetryActionChunk(w, r)
-}
-
 func (s *VanadisServer) consumerStatsQuerier() consumerStatsQuerier {
 	if s == nil {
 		return nil
@@ -238,11 +233,10 @@ func SetupMux(server *VanadisServer) http.Handler {
 		"GET /builds": server.handleListBuilds, "GET /runs": server.handleListBuilds,
 		"POST /builds": server.handleCreateBuild, "POST /runs": server.handleCreateBuild,
 		"/builds/": server.handleBuildByID, "/runs/": server.handleBuildByID,
-		"POST /chunks/active-step":       server.handleChunksActiveStep,
-		"/chunks/attach-pr":              server.handleAttachChunkPR,
-		"/chunks/":                       server.handleChunkByID,
-		"POST /builds/{id}/retry-action": server.handleRetryActionChunk,
-		"/mcp":                           mcpHandler, "/sse": mcpHandler,
+		"POST /chunks/active-step": server.handleChunksActiveStep,
+		"/chunks/attach-pr":        server.handleAttachChunkPR,
+		"/chunks/":                 server.handleChunkByID,
+		"/mcp":                     mcpHandler, "/sse": mcpHandler,
 		"POST /debug/coverage/flush": coverageFlush, "GET /debug/coverage/flush": coverageFlush,
 	} {
 		mux.HandleFunc(p, h)
@@ -385,21 +379,6 @@ func (s *VanadisServer) handleBuildRoot(w http.ResponseWriter, r *http.Request, 
 			return
 		}
 		httpkit.WriteJSON(w, http.StatusOK, map[string]any{fieldBuild: build, fieldChunks: chunks, "entry": SummarizeBuildEntry(*build, chunks)})
-	case http.MethodPatch:
-		s.handleUpdateBuild(w, r, id)
-	default:
-		writeErr(w, http.StatusMethodNotAllowed, "method not allowed")
-	}
-}
-
-func (s *VanadisServer) handleBuildChunkRoutes(w http.ResponseWriter, r *http.Request, id, chunkRef string) {
-	switch r.Method {
-	case http.MethodGet:
-		s.handleGetBuildChunk(w, r, id, chunkRef)
-	case http.MethodPatch:
-		s.handleUpdateChunk(w, r, id, chunkRef)
-	case http.MethodDelete:
-		s.handleRemoveChunk(w, r, id, chunkRef)
 	default:
 		writeErr(w, http.StatusMethodNotAllowed, "method not allowed")
 	}
@@ -411,7 +390,6 @@ func (s *VanadisServer) handleBuildByID(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	raw := strings.TrimPrefix(strings.TrimPrefix(r.URL.Path, "/runs/"), "/builds/")
-	hasTrailingSlash := strings.HasSuffix(raw, "/")
 	clean := strings.TrimSuffix(raw, "/")
 	if clean == "" {
 		writeErr(w, http.StatusBadRequest, "build id is required")
@@ -432,30 +410,9 @@ func (s *VanadisServer) handleBuildByID(w http.ResponseWriter, r *http.Request) 
 			s.handleBuildCancel(w, r, id)
 		case "active-step":
 			s.handleBuildActiveStep(w, r, id)
-		case fieldChunks:
-			if hasTrailingSlash && (r.Method == http.MethodGet || r.Method == http.MethodPatch || r.Method == http.MethodDelete) {
-				writeErr(w, http.StatusBadRequest, "chunk_ref is required")
-				return
-			}
-			if r.Method != http.MethodPost {
-				writeErr(w, http.StatusMethodNotAllowed, "method not allowed")
-				return
-			}
-			s.handleAppendChunks(w, r, id)
 		default:
 			writeErr(w, http.StatusNotFound, "not found")
 		}
-	case 3:
-		if parts[1] == fieldChunks {
-			chunkRef := strings.TrimSpace(parts[2])
-			if chunkRef == "" {
-				writeErr(w, http.StatusBadRequest, "chunk_ref is required")
-				return
-			}
-			s.handleBuildChunkRoutes(w, r, id, chunkRef)
-			return
-		}
-		writeErr(w, http.StatusNotFound, "not found")
 	default:
 		writeErr(w, http.StatusNotFound, "not found")
 	}

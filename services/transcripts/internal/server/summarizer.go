@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log"
 	"strings"
 	"time"
 
@@ -17,6 +18,10 @@ const maxSummaryPromptChars = 2000
 // ErrSummaryLockBusy reports a per-thread summary lock held by another worker.
 // RunOnce skips the session without error so a busy thread never blocks the sweep.
 var ErrSummaryLockBusy = errors.New("transcripts summary lock busy")
+
+// ErrSummaryAttemptsExhausted reports a session whose LLM answers were rejected
+// store.MaxSummaryAttempts times; it is skipped until new steps are indexed.
+var ErrSummaryAttemptsExhausted = errors.New("transcripts summary attempts exhausted")
 
 // Summarizer refreshes per-session summaries from indexed steps for one stack.
 // It never marks a session settled and never advances the summary watermark on
@@ -154,13 +159,13 @@ func (s *Summarizer) summarizeSession(ctx context.Context, cand store.SummaryCan
 	if len(steps) == 0 {
 		return 0, nil
 	}
-	llmCtx := withLLMKey(ctx, fmt.Sprintf("transcripts:summary:%s:%s:%d", cand.Agent, cand.SessionID, fromStep))
+	llmCtx := withLLMKey(ctx, summaryCallerKey(cand.Agent, cand.SessionID, fromStep, cand.Attempts+1))
 	summary, err := s.llm.Complete(llmCtx, buildSummaryPrompt(cand.SessionID, cand.Summary, steps))
 	if err != nil {
 		return 0, fmt.Errorf("summarize session with llm: %w", err)
 	}
 	if strings.TrimSpace(summary) == "" {
-		return 0, fmt.Errorf("summarize session with llm: empty summary")
+		return 0, s.rejectSummary(ctx, cand, "empty summary")
 	}
 	if _, err := s.embedder.GenerateEmbedding(ctx, summary); err != nil {
 		return 0, fmt.Errorf("embed session summary: %w", err)
@@ -169,6 +174,34 @@ func (s *Summarizer) summarizeSession(ctx context.Context, cand store.SummaryCan
 		return 0, err
 	}
 	return 1, nil
+}
+
+// summaryCallerKey names one summary LLM call. The first attempt keeps the bare
+// key; a retry after a rejected answer appends ":a<N>" so it never replays the
+// bad answer eri cached under the previous key.
+func summaryCallerKey(agent, sessionID string, fromStep, attempt int) string {
+	key := fmt.Sprintf("transcripts:summary:%s:%s:%d", agent, sessionID, fromStep)
+	if attempt > 1 {
+		key += fmt.Sprintf(":a%d", attempt)
+	}
+	return key
+}
+
+// rejectSummary records a rejected LLM answer against the session's durable
+// attempt count. At store.MaxSummaryAttempts the session fails terminally
+// (skipped until new steps arrive) with a logged reason and a metric.
+func (s *Summarizer) rejectSummary(ctx context.Context, cand store.SummaryCandidate, reason string) error {
+	attempts, err := s.store.RecordSummaryRejection(ctx, cand.Agent, cand.SessionID, cand.LastIndexed)
+	if err != nil {
+		return fmt.Errorf("summarize session with llm: %s: %w", reason, err)
+	}
+	if attempts >= store.MaxSummaryAttempts {
+		summaryRejectionsTotal.WithLabelValues(rejectionExhausted).Inc()
+		log.Printf("[Transcripts] summary for %s/%s failed terminally after %d rejected answers: %s", cand.Agent, cand.SessionID, attempts, reason)
+		return fmt.Errorf("summarize session with llm: %s: %w", reason, ErrSummaryAttemptsExhausted)
+	}
+	summaryRejectionsTotal.WithLabelValues(rejectionRetry).Inc()
+	return fmt.Errorf("summarize session with llm: %s (attempt %d of %d)", reason, attempts, store.MaxSummaryAttempts)
 }
 
 // storeSummary persists the refreshed summary and advances only the summary

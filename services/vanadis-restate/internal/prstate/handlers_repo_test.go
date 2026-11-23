@@ -213,8 +213,8 @@ func TestRepoHandlers_HandleMainPush(t *testing.T) {
 			if st.LatestMainSHA != tc.wantLatest || len(st.MainPushIndex) != tc.wantIndexLen || st.MainPushIndex[0] != tc.wantIndexFirst {
 				t.Fatalf("index = (%q,%d,%q), want (%q,%d,%q)", st.LatestMainSHA, len(st.MainPushIndex), st.MainPushIndex[0], tc.wantLatest, tc.wantIndexLen, tc.wantIndexFirst)
 			}
-			if !slices.Equal(st.PRKeys(), tc.wantTouched) {
-				t.Fatalf("touched = %v, want %v", st.PRKeys(), tc.wantTouched)
+			if !slices.Equal(st.TouchedPRKeys, tc.wantTouched) {
+				t.Fatalf("touched = %v, want %v", st.TouchedPRKeys, tc.wantTouched)
 			}
 		})
 	}
@@ -336,12 +336,16 @@ func TestRepoHandlers_HandlePRIndex(t *testing.T) {
 			if tc.loadErr {
 				return
 			}
-			pr, _, ok := testRepoHandlers(t, store, nil, nil).ResolvePRBySHA(context.Background(), "azylman/aerial", tc.probeSHA)
-			if ok != (tc.wantPR > 0) {
-				t.Fatalf("ResolvePRBySHA(%q) ok = %v, want %v", tc.probeSHA, ok, tc.wantPR > 0)
+			st, err := store.LoadRepo("azylman/aerial")
+			if err != nil {
+				t.Fatalf("LoadRepo: %v", err)
+			}
+			var pr int
+			if entry, ok := st.ResolveSHA(tc.probeSHA); ok {
+				pr = entry.PRNumber
 			}
 			if pr != tc.wantPR {
-				t.Fatalf("ResolvePRBySHA(%q) = %d, want %d", tc.probeSHA, pr, tc.wantPR)
+				t.Fatalf("ResolveSHA(%q) = %d, want %d", tc.probeSHA, pr, tc.wantPR)
 			}
 		})
 	}
@@ -492,34 +496,6 @@ func TestRepoHandlers_ExpireHeld(t *testing.T) {
 			}
 			if left := heldSHAs(loadRepoForTest(t, store)); !slices.Equal(left, tc.wantHeld) {
 				t.Fatalf("held = %v, want %v", left, tc.wantHeld)
-			}
-		})
-	}
-}
-
-func TestRepoHandlers_ResolvePRBySHA(t *testing.T) {
-	t.Parallel()
-	tests := []struct {
-		name       string
-		seed       repoSeed
-		loadErr    bool
-		sha        string
-		wantPR     int
-		wantBranch string
-		wantOK     bool
-	}{
-		{name: "hit resolves pr and branch", seed: repoSeed{index: []PRIndexEvent{idxActive(101, "abc123", "feat-x", 0)}}, sha: "abc123", wantPR: 101, wantBranch: "feat-x", wantOK: true},
-		{name: "newest claim wins", seed: repoSeed{index: []PRIndexEvent{idxActive(101, "abc123", "old", 0), idxActive(102, "abc123", "new", 0)}}, sha: "abc123", wantPR: 102, wantBranch: "new", wantOK: true},
-		{name: "miss reports not found", seed: repoSeed{index: []PRIndexEvent{idxActive(101, "abc123", "feat-x", 0)}}, sha: "zzz999"},
-		{name: "missing state reports not found", sha: "abc123"},
-		{name: "load error reports not found", loadErr: true, sha: "abc123"},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			pr, branch, ok := testRepoHandlers(t, seedRepoStore(tc.seed, tc.loadErr), nil, nil).ResolvePRBySHA(context.Background(), "azylman/aerial", tc.sha)
-			if pr != tc.wantPR || branch != tc.wantBranch || ok != tc.wantOK {
-				t.Fatalf("ResolvePRBySHA = (%d,%q,%v), want (%d,%q,%v)", pr, branch, ok, tc.wantPR, tc.wantBranch, tc.wantOK)
 			}
 		})
 	}

@@ -41,15 +41,6 @@ var (
 		[]string{labelStatus},
 	)
 
-	// ChunksTotal tracks total Vanadis chunks by lifecycle event status.
-	ChunksTotal = prometheus.NewCounterVec(
-		prometheus.CounterOpts{
-			Name: "vanadis_chunks_total",
-			Help: "Total number of Vanadis chunks by lifecycle event status.",
-		},
-		[]string{labelStatus},
-	)
-
 	// QueueDepth tracks chunk execution jobs in the Vanadis JetStream queue categorized by state.
 	QueueDepth = prometheus.NewGaugeVec(
 		prometheus.GaugeOpts{
@@ -57,14 +48,6 @@ var (
 			Help: "Current count of chunk execution jobs by state.",
 		},
 		[]string{"state"},
-	)
-
-	// QueueOldestAgeSeconds tracks the age in seconds of the oldest pending job in the Vanadis queue.
-	QueueOldestAgeSeconds = prometheus.NewGauge(
-		prometheus.GaugeOpts{
-			Name: "vanadis_queue_oldest_age_seconds",
-			Help: "Age in seconds of the oldest pending job in the Vanadis queue.",
-		},
 	)
 )
 
@@ -79,7 +62,6 @@ var (
 	knownQueueStates         = []string{stateRunning, "queued"}
 	knownChunkActiveStatuses = []string{statePending, stateRunning, "pr_opened"}
 	knownBuildStatuses       = []string{"created", stateCompleted, "failed", "cancelled"}
-	knownChunkStatuses       = []string{"dispatched", "merged", stateCompleted, "failed", "cancelled"}
 	knownQueueDepthStates    = []string{statePending, "in_flight"}
 )
 
@@ -96,9 +78,7 @@ func init() {
 	RegisterCollector(BuildsActive)
 	RegisterCollector(ChunksActive)
 	RegisterCollector(BuildsTotal)
-	RegisterCollector(ChunksTotal)
 	RegisterCollector(QueueDepth)
-	RegisterCollector(QueueOldestAgeSeconds)
 
 	for _, qs := range knownQueueStates {
 		BuildsActive.WithLabelValues(qs).Set(0)
@@ -109,13 +89,9 @@ func init() {
 	for _, s := range knownBuildStatuses {
 		BuildsTotal.WithLabelValues(s).Add(0)
 	}
-	for _, s := range knownChunkStatuses {
-		ChunksTotal.WithLabelValues(s).Add(0)
-	}
 	for _, js := range knownQueueDepthStates {
 		QueueDepth.WithLabelValues(js).Set(0)
 	}
-	QueueOldestAgeSeconds.Set(0)
 }
 
 // RecordBuildTotal increments the vanadis_builds_total counter for a given status.
@@ -165,7 +141,6 @@ func ResetQueueMetrics() {
 	for _, st := range knownQueueDepthStates {
 		QueueDepth.WithLabelValues(st).Set(0)
 	}
-	QueueOldestAgeSeconds.Set(0)
 }
 
 // QueueConsumer names a durable JetStream consumer whose backlog feeds the queue gauges.

@@ -876,3 +876,25 @@ func TestConvertDiscordMessagesToHistory(t *testing.T) {
 		t.Errorf("resolveDiscordReplyAuthor(nil) = %q, want empty", got)
 	}
 }
+
+func TestThreadSummaryCallerKey(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name      string
+		threadID  string
+		watermark string
+		want      string
+	}{
+		{name: "thread and watermark", threadID: "77", watermark: "905", want: "summary:77:905"},
+		{name: "blank watermark unkeyed", threadID: "77", watermark: "", want: ""},
+		{name: "blank thread unkeyed", threadID: "", watermark: "905", want: ""},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got := ThreadSummaryCallerKey(tc.threadID, tc.watermark); got != tc.want {
+				t.Errorf("ThreadSummaryCallerKey(%q, %q) = %q, want %q", tc.threadID, tc.watermark, got, tc.want)
+			}
+		})
+	}
+}

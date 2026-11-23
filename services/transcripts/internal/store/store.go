@@ -236,7 +236,7 @@ func applyResetBatch(ctx context.Context, tx *sql.Tx, stack, sessionID string, b
 		 VALUES ($1, $2, $3, $4, $5, $6, $7, CURRENT_TIMESTAMP)
 		 ON CONFLICT (agent, session_id) DO UPDATE SET engine = EXCLUDED.engine, thread_id = EXCLUDED.thread_id,
 		 last_indexed_step = EXCLUDED.last_indexed_step, last_mtime = EXCLUDED.last_mtime, is_settled = EXCLUDED.is_settled,
-		 updated_at = CURRENT_TIMESTAMP`,
+		 summary_attempts = 0, updated_at = CURRENT_TIMESTAMP`,
 		stack, sessionID, strings.TrimSpace(batch.Engine), strings.TrimSpace(batch.ThreadID),
 		batch.LastStep, batch.FileMtime.UTC(), batch.Final); err != nil {
 		return 0, fmt.Errorf("upsert reset session summary: %w", err)
@@ -258,7 +258,7 @@ func applyInsertBatch(ctx context.Context, tx *sql.Tx, stack, sessionID string, 
 		return 0, err
 	}
 	if _, err := tx.ExecContext(ctx,
-		`UPDATE session_summaries SET last_indexed_step = CASE WHEN last_indexed_step > $3 THEN last_indexed_step ELSE $3 END, is_settled = is_settled OR $4, updated_at = CURRENT_TIMESTAMP WHERE agent = $1 AND session_id = $2`,
+		`UPDATE session_summaries SET last_indexed_step = CASE WHEN last_indexed_step > $3 THEN last_indexed_step ELSE $3 END, summary_attempts = CASE WHEN $3 > last_indexed_step THEN 0 ELSE summary_attempts END, is_settled = is_settled OR $4, updated_at = CURRENT_TIMESTAMP WHERE agent = $1 AND session_id = $2`,
 		stack, sessionID, batch.LastStep, batch.Final); err != nil {
 		return 0, fmt.Errorf("advance session summary: %w", err)
 	}
@@ -275,7 +275,7 @@ func applyAppendBatch(ctx context.Context, tx *sql.Tx, stack, sessionID string, 
 		mtime = cur.lastMtime
 	}
 	if _, err := tx.ExecContext(ctx,
-		`UPDATE session_summaries SET last_indexed_step = CASE WHEN last_indexed_step > $3 THEN last_indexed_step ELSE $3 END, last_mtime = $4, is_settled = is_settled OR $5, engine = CASE WHEN $6 <> '' THEN $6 ELSE engine END, thread_id = CASE WHEN $7 <> '' THEN $7 ELSE thread_id END, updated_at = CURRENT_TIMESTAMP WHERE agent = $1 AND session_id = $2`,
+		`UPDATE session_summaries SET last_indexed_step = CASE WHEN last_indexed_step > $3 THEN last_indexed_step ELSE $3 END, summary_attempts = CASE WHEN $3 > last_indexed_step THEN 0 ELSE summary_attempts END, last_mtime = $4, is_settled = is_settled OR $5, engine = CASE WHEN $6 <> '' THEN $6 ELSE engine END, thread_id = CASE WHEN $7 <> '' THEN $7 ELSE thread_id END, updated_at = CURRENT_TIMESTAMP WHERE agent = $1 AND session_id = $2`,
 		stack, sessionID, batch.LastStep, mtime, batch.Final, strings.TrimSpace(batch.Engine), strings.TrimSpace(batch.ThreadID)); err != nil {
 		return 0, fmt.Errorf("advance session summary: %w", err)
 	}
@@ -403,7 +403,12 @@ func destroyConn(conn *sql.Conn) {
 	httpkit.CloseWarn(conn, "summary lock conn after failed unlock")
 }
 
+// MaxSummaryAttempts caps rejected LLM answers per unchanged session: after
+// this many, the session is skipped until new steps are indexed.
+const MaxSummaryAttempts = 3
+
 // SummaryCandidate is one session whose indexed steps outran its summary watermark.
+// Attempts counts LLM answers already rejected for the current indexed steps.
 type SummaryCandidate struct {
 	Agent       string
 	SessionID   string
@@ -411,6 +416,7 @@ type SummaryCandidate struct {
 	Summary     string
 	LastIndexed int
 	Watermark   int
+	Attempts    int
 }
 
 // ListDueSessions lists sessions whose indexed steps outran the summary watermark,
@@ -427,10 +433,11 @@ func (s *Store) ListDueSessions(ctx context.Context, idleThreshold time.Duration
 	cutoff := now.UTC().Add(-idleThreshold)
 	scanLimit := batchLimit * 4
 	rows, err := s.db.QueryContext(queryCtx,
-		`SELECT agent, session_id, thread_id, summary, last_indexed_step, summary_step_watermark, last_mtime, is_settled FROM session_summaries
+		`SELECT agent, session_id, thread_id, summary, last_indexed_step, summary_step_watermark, summary_attempts, last_mtime, is_settled FROM session_summaries
 		 WHERE summary_step_watermark < last_indexed_step
+		   AND summary_attempts < $3
 		   AND (summary = '' OR (summary_step_watermark > 0 AND last_indexed_step - summary_step_watermark >= $1))
-		 ORDER BY updated_at ASC LIMIT $2`, minStepDelta, scanLimit)
+		 ORDER BY updated_at ASC LIMIT $2`, minStepDelta, scanLimit, MaxSummaryAttempts)
 	if err != nil {
 		return nil, fmt.Errorf("select summary candidates: %w", err)
 	}
@@ -440,7 +447,7 @@ func (s *Store) ListDueSessions(ctx context.Context, idleThreshold time.Duration
 		var cand SummaryCandidate
 		var lastMtime sql.NullTime
 		var isSettled sql.NullBool
-		if err := rows.Scan(&cand.Agent, &cand.SessionID, &cand.ThreadID, &cand.Summary, &cand.LastIndexed, &cand.Watermark, &lastMtime, &isSettled); err != nil {
+		if err := rows.Scan(&cand.Agent, &cand.SessionID, &cand.ThreadID, &cand.Summary, &cand.LastIndexed, &cand.Watermark, &cand.Attempts, &lastMtime, &isSettled); err != nil {
 			return nil, fmt.Errorf("scan summary candidate: %w", err)
 		}
 		cand.Agent = strings.TrimSpace(cand.Agent)
@@ -472,10 +479,35 @@ func (s *Store) SaveSummary(ctx context.Context, agent, sessionID, summary strin
 	queryCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
 	if _, err := s.db.ExecContext(queryCtx,
-		`UPDATE session_summaries SET summary = $1, summary_step_watermark = $2, updated_at = CURRENT_TIMESTAMP
+		`UPDATE session_summaries SET summary = $1, summary_step_watermark = $2, summary_attempts = 0, updated_at = CURRENT_TIMESTAMP
 		 WHERE agent = $3 AND session_id = $4`,
 		summary, lastIndexed, agent, sessionID); err != nil {
 		return fmt.Errorf("store session summary: %w", err)
 	}
 	return nil
+}
+
+// RecordSummaryRejection counts one rejected LLM answer for the session's
+// current indexed steps and returns the new attempt count. When new steps were
+// indexed since lastIndexed (which resets the count), nothing is recorded and
+// 0 is returned.
+func (s *Store) RecordSummaryRejection(ctx context.Context, agent, sessionID string, lastIndexed int) (int, error) {
+	if err := s.checkWriter(); err != nil {
+		return 0, err
+	}
+	queryCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+	var attempts int
+	err := s.db.QueryRowContext(queryCtx,
+		`UPDATE session_summaries SET summary_attempts = summary_attempts + 1, updated_at = CURRENT_TIMESTAMP
+		 WHERE agent = $1 AND session_id = $2 AND last_indexed_step = $3
+		 RETURNING summary_attempts`,
+		agent, sessionID, lastIndexed).Scan(&attempts)
+	if errors.Is(err, sql.ErrNoRows) {
+		return 0, nil
+	}
+	if err != nil {
+		return 0, fmt.Errorf("record summary rejection: %w", err)
+	}
+	return attempts, nil
 }

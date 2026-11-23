@@ -692,11 +692,6 @@ func (d *DiscordWidgetDeliverer) DeliverDirectMessageWithAgent(ctx context.Conte
 	return nil
 }
 
-// DeliverDirectMessage delivers a direct plain-text channel alert message to Discord REST.
-func (d *DiscordWidgetDeliverer) DeliverDirectMessage(ctx context.Context, channelID, content string) error {
-	return d.DeliverDirectMessageWithAgent(ctx, defaultAgent, channelID, content)
-}
-
 func isNotFoundError(err error) bool {
 	if err == nil {
 		return false

@@ -66,16 +66,6 @@ export interface ActiveTaskStatus {
   readonly agent?: string;
 }
 
-export interface QuickLaunchLink {
-  readonly name: string;
-  readonly url: string;
-  readonly icon?: string;
-  readonly description?: string;
-  readonly target?: string;
-  readonly is_core?: boolean;
-  readonly is_custom?: boolean;
-}
-
 export interface ClusterResponse {
   readonly system_time: IsoTimestamp;
   readonly cluster_status: string;
@@ -83,7 +73,6 @@ export interface ClusterResponse {
   readonly active_tasks: readonly ActiveTaskStatus[];
   readonly services: readonly ServiceStatus[];
   readonly deployments: readonly DeploymentStatus[];
-  readonly quick_launch_links: readonly QuickLaunchLink[] | null;
   readonly ongoing_deploy: string;
   readonly is_deploying: boolean;
   readonly configured_agents?: readonly string[];
