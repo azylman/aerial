@@ -34,7 +34,7 @@ const DefaultRestateAdminURL = "http://restate.aerial:9070"
 const DefaultRestateAdvertiseURL = "http://coven.default.svc.cluster.local:9080"
 
 // DefaultOllamaModel is the default embedding model.
-const DefaultOllamaModel = "all-minilm"
+const DefaultOllamaModel = "bge-small-en-v1.5"
 
 // DefaultOllamaNumCtx is the default context length for embedding generation.
 const DefaultOllamaNumCtx = 512

@@ -12,7 +12,7 @@ import (
 )
 
 // DefaultSensesModel is the fallback embedding model served by senses.
-const DefaultSensesModel = "bge-small-en-v1.5"
+const DefaultSensesModel = ollama.DefaultModel
 
 // Embedder generates a vector embedding for summary text via senses.
 type Embedder interface {

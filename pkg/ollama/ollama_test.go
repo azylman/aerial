@@ -31,12 +31,12 @@ func TestNewDynamicClient_TableDriven(t *testing.T) {
 		{"static default values", Config{}, false, ""},
 		{
 			"static custom base url with trailing slash",
-			Config{BaseURL: "http://custom-ollama:11434/", Model: "nomic-embed-text", NumCtx: 1024},
+			Config{BaseURL: "http://senses.aerial:8080/", Model: "nomic-embed-text", NumCtx: 1024},
 			false,
-			"http://custom-ollama:11434",
+			"http://senses.aerial:8080",
 		},
 		{"dynamic with nil func", Config{}, true, ""},
-		{"dynamic with valid func", Config{BaseURL: "http://dynamic-host:11434"}, false, "http://dynamic-host:11434"},
+		{"dynamic with valid func", Config{BaseURL: "http://pjev.aerial:8080"}, false, "http://pjev.aerial:8080"},
 	}
 
 	for _, tc := range tests {
