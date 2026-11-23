@@ -24,7 +24,6 @@ import (
 	"github.com/azylman/aerial/services/eri/pkg/classifier"
 	"github.com/azylman/aerial/services/eri/pkg/config"
 	"github.com/azylman/aerial/services/eri/pkg/db"
-	"github.com/azylman/aerial/services/eri/pkg/db/dbtest"
 	"github.com/azylman/aerial/services/eri/pkg/metrics"
 	"github.com/azylman/aerial/services/eri/pkg/runner"
 	"github.com/azylman/aerial/services/eri/pkg/session"
@@ -49,7 +48,8 @@ func TestWorker_PoolDaemonAccessors(t *testing.T) {
 
 func TestWorker_PassesSessionIDToAgentPool(t *testing.T) {
 	t.Parallel()
-	store, tmpHome, tempData := setupTestStore(t), t.TempDir(), t.TempDir()
+	store := testStore(t)
+	tmpHome, tempData := t.TempDir(), t.TempDir()
 	var mu sync.Mutex
 	capturedConfigs := make([]runner.DaemonConfig, 0)
 
@@ -114,7 +114,7 @@ func TestWorker_PassesSessionIDToAgentPool(t *testing.T) {
 }
 
 func TestWorker_PersistentDaemonExecutionErrors(t *testing.T) {
-	store, tmpHome, tempData := setupTestStore(t), t.TempDir(), t.TempDir()
+	t.Parallel()
 	tests := []struct {
 		name, agyBin, threadID, sessID, script string
 	}{
@@ -123,6 +123,9 @@ func TestWorker_PersistentDaemonExecutionErrors(t *testing.T) {
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			store := testStore(t)
+			tmpHome, tempData := t.TempDir(), t.TempDir()
 			binPath := tc.agyBin
 			if tc.script != "" {
 				binPath = filepath.Join(t.TempDir(), "mock_err.sh")
@@ -225,7 +228,8 @@ func assertPersistentDaemonTurnChecks(t *testing.T, tc persistentDaemonTurnCase,
 
 func runPersistentDaemonTurnCase(t *testing.T, tc persistentDaemonTurnCase) {
 	t.Helper()
-	store, tmpHome, tempData := setupTestStore(t), t.TempDir(), t.TempDir()
+	store := testStore(t)
+	tmpHome, tempData := t.TempDir(), t.TempDir()
 	procPool := runner.NewUnifiedProcessPool(runner.PoolConfig{DefaultModel: "gemini-2.5-flash"}, newScriptedDaemonSpawner(tc.daemonUUID, tc.turnResponses...))
 	defer procPool.Close()
 
@@ -333,7 +337,9 @@ func TestWorkerPool_PersistentDaemonTurns(t *testing.T) {
 }
 
 func TestWorkerPool_TransientRetry_RotatesBloatedSession(t *testing.T) {
-	tmpHome, tempData, store := t.TempDir(), t.TempDir(), setupTestStore(t)
+	t.Parallel()
+	store := testStore(t)
+	tmpHome, tempData := t.TempDir(), t.TempDir()
 	validUUID := "c4444444-5555-6666-7777-888888888888"
 	sessDir := filepath.Join(tempData, "brain", validUUID, ".system_generated", "logs")
 	_ = os.MkdirAll(sessDir, 0o755)
@@ -403,7 +409,8 @@ func TestWorker_DualPoolRouting(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			store, tmpHome, tempData := setupTestStore(t), t.TempDir(), t.TempDir()
+			store := testStore(t)
+			tmpHome, tempData := t.TempDir(), t.TempDir()
 			var primarySpawnCount, lowSpawnCount, medSpawnCount atomic.Int32
 			newCountedPool := func(sessID, resp, model string, counter *atomic.Int32) (*runner.UnifiedProcessPool, func()) {
 				sp := newScriptedDaemonSpawner(sessID, fmt.Sprintf(`{"event":"result","result":{"status":"SUCCESS","response":%q,"usage":{"total_tokens":5}}}`+"\n", resp))
@@ -462,7 +469,8 @@ func TestWorker_DualPoolRouting(t *testing.T) {
 
 func TestWorker_EphemeralLowEffortPool_SkipsColdStartContextAndRotates(t *testing.T) {
 	t.Parallel()
-	store, tmpHome, tempData := setupTestStore(t), t.TempDir(), t.TempDir()
+	store := testStore(t)
+	tmpHome, tempData := t.TempDir(), t.TempDir()
 	primarySessUUID, prevSessUUID := "11111111-1111-1111-1111-111111111111", "99999999-9999-9999-9999-999999999999"
 
 	var spawnSeq int
@@ -582,7 +590,8 @@ func (*mockAcquireLeaseFailPool) AcquireLease(ctx context.Context, targetKey str
 
 func TestWorker_EphemeralHighEffort_FailsBurst(t *testing.T) {
 	t.Parallel()
-	store, tmpHome, tempData := setupTestStore(t), t.TempDir(), t.TempDir()
+	store := testStore(t)
+	tmpHome, tempData := t.TempDir(), t.TempDir()
 	primarySessUUID := "11111111-1111-1111-1111-111111111111"
 
 	var spawned atomic.Int32
@@ -632,7 +641,8 @@ type statefulResumeCase struct {
 
 func runStatefulResumeCase(t *testing.T, tc statefulResumeCase) {
 	t.Helper()
-	store, tmpHome, tempData := setupTestStore(t), t.TempDir(), t.TempDir()
+	store := testStore(t)
+	tmpHome, tempData := t.TempDir(), t.TempDir()
 	existingSessUUID := "11111111-1111-1111-1111-111111111111"
 	rotatedSessUUID := "22222222-2222-2222-2222-222222222222"
 
@@ -881,7 +891,6 @@ func TestWorker_ResolveTurnPolicy_ParentChannelFallback_TableDriven(t *testing.T
 			t.Parallel()
 			pool := &WorkerPool{
 				cfg: WorkerPoolConfig{
-					Store: dbtest.NewFakeStore(),
 					ResolveChannelPolicy: func(channelID, channelName string) config.ChannelPolicy {
 						return config.ChannelPolicy{Mode: "channel"}
 					},
@@ -1164,7 +1173,7 @@ func TestWorkerPool_PublishTurnCompleted_Scenarios(t *testing.T) {
 
 func TestWorkerPool_ProcessInteractiveTurn_PublishesTurnCompleted(t *testing.T) {
 	t.Parallel()
-	store := setupTestStore(t)
+	store := testStore(t)
 	memBus := pubsub.NewMemoryBus()
 	defer memBus.Close()
 	tracker := newTurnCompletedTracker(t, memBus, "aerial.turn.*", "interactive-sub")
