@@ -776,7 +776,10 @@ func TestGitHubSkillPublisher_NotifyShortFriction(t *testing.T) {
 		if r.URL.Path == "/discord/message" && r.Method == http.MethodPost {
 			httpCalls++
 			var payload map[string]string
-			_ = json.NewDecoder(r.Body).Decode(&payload)
+			if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+				http.Error(w, err.Error(), http.StatusBadRequest)
+				return
+			}
 			lastHTTPPayload = payload
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusOK)
@@ -942,7 +945,9 @@ func setupConsolidateProceduralSkillsDir(t *testing.T, validSkillMD, customSkill
 
 	if customSkillsDir == "FILE_AS_DIR" {
 		dummyFile := filepath.Join(tmpDir, "dummy-file")
-		_ = os.WriteFile(dummyFile, []byte("not-a-dir"), 0o644)
+		if err := os.WriteFile(dummyFile, []byte("not-a-dir"), 0o644); err != nil {
+			t.Fatalf("failed to write dummy file: %v", err)
+		}
 		return dummyFile
 	}
 	if customSkillsDir != "" {
