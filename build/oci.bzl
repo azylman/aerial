@@ -43,6 +43,42 @@ go_cover_binary = rule(
     },
 )
 
+def _go_pure_binary_transition_impl(settings, attr):
+    return {
+        "//command_line_option:strip": "always",
+        "@rules_go//go/config:pure": True,
+        "@rules_go//go/config:tags": ["timetzdata"],
+    }
+
+_go_pure_binary_transition = transition(
+    implementation = _go_pure_binary_transition_impl,
+    inputs = [],
+    outputs = [
+        "//command_line_option:strip",
+        "@rules_go//go/config:pure",
+        "@rules_go//go/config:tags",
+    ],
+)
+
+def _go_pure_binary_impl(ctx):
+    actual = ctx.attr.actual[0]
+    return [
+        DefaultInfo(
+            files = actual[DefaultInfo].files,
+            runfiles = actual[DefaultInfo].default_runfiles,
+        ),
+    ]
+
+go_pure_binary = rule(
+    implementation = _go_pure_binary_impl,
+    attrs = {
+        "actual": attr.label(
+            cfg = _go_pure_binary_transition,
+            mandatory = True,
+        ),
+    },
+)
+
 def _build_covdata_impl(ctx):
     go = ctx.toolchains["@rules_go//go:toolchain"]
     out = ctx.actions.declare_file("covdata")
@@ -109,6 +145,13 @@ def aerial_go_image(
             actual = binary,
         )
         bin_target = ":" + cover_bin_name
+    else:
+        pure_bin_name = name + "_pure_bin"
+        go_pure_binary(
+            name = pure_bin_name,
+            actual = binary,
+        )
+        bin_target = ":" + pure_bin_name
 
     named_bin_target = name + "_bin_named"
     native.genrule(
