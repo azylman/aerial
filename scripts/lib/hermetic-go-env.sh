@@ -39,10 +39,30 @@ discover_go_services() {
 }
 
 ensure_bazel_build_files() {
-    root="${1:-${REPO_ROOT:-}}"
-    [ -n "$root" ] || root="$(git rev-parse --show-toplevel 2>/dev/null || pwd)"
-    [ -f "$root/MODULE.bazel" ] || return 0
-    command -v bazel >/dev/null 2>&1 || { echo "🚨 [Aerial] Error: bazel is required" >&2; return 1; }
+    local root="${1:-${REPO_ROOT:-}}"
+    if [ -z "$root" ]; then
+        if command -v git >/dev/null 2>&1; then
+            root="$(git rev-parse --show-toplevel 2>/dev/null || pwd)"
+        else
+            root="$(pwd)"
+        fi
+    fi
+
+    if [ -f "$root/MODULE.bazel" ] && ! command -v bazel >/dev/null 2>&1; then
+        echo "🚨 [Aerial] Error: bazel is required when MODULE.bazel is present" >&2
+        return 1
+    fi
+    if [ ! -f "$root/MODULE.bazel" ]; then
+        return 0
+    fi
+
+    if [ ! -f "${DOCKER_CONFIG:-$HOME/.docker}/config.json" ] && curl -fsS --connect-timeout 1 -m 2 http://127.0.0.1:4028/healthz >/dev/null 2>&1; then
+        cat > /tmp/aerial-bazel-downloader.cfg <<'EOF'
+rewrite https://ghcr.io/token(.*) http://127.0.0.1:4028/internal/github-ghcr-token$1
+EOF
+        mkdir -p "$HOME"
+        grep -qF 'aerial-bazel-downloader.cfg' "$HOME/.bazelrc" 2>/dev/null || echo 'common --downloader_config=/tmp/aerial-bazel-downloader.cfg' >> "$HOME/.bazelrc"
+    fi
     if [ ! -f "$root/MODULE.bazel.lock" ] || [ "$root/go.mod" -nt "$root/MODULE.bazel.lock" ]; then
         (cd "$root" && bazel mod tidy) || return $?
     fi
