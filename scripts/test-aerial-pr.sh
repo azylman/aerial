@@ -5,7 +5,7 @@ TMPD="$(mktemp -d)"; trap 'rm -rf "$TMPD"' EXIT
 export TMPD AERIAL_SCRATCH_BASE_DIR="$TMPD/scratch" AERIAL_USE_LOOPBACK_GITHUB=1 PATH="$TMPD/bin:$PATH"
 mkdir -p "$TMPD/bin" "$TMPD/repo" "$AERIAL_SCRATCH_BASE_DIR"
 git -C "$TMPD/repo" init -b main -q && git -C "$TMPD/repo" config user.email "t@e.com" && git -C "$TMPD/repo" config user.name "T"
-touch "$TMPD/repo/f" && git -C "$TMPD/repo" add f && git -C "$TMPD/repo" commit -m "init" -q
+touch "$TMPD/repo/f" "$TMPD/repo/MODULE.bazel" && git -C "$TMPD/repo" add f MODULE.bazel && git -C "$TMPD/repo" commit -m "init" -q
 git init --bare "$TMPD/origin.git" -q && git -C "$TMPD/repo" remote add origin "$TMPD/origin.git" && git -C "$TMPD/repo" push -u origin main -q
 export AERIAL_REPO_URL_OVERRIDE="file://$TMPD/origin.git"
 cat << 'CURL_EOF' > "$TMPD/bin/curl"
@@ -37,6 +37,7 @@ fi
 [[ "$url" =~ /actions/runs ]] && { [ -f "$TMPD/run_prog" ] && s="in_progress" || s="completed"; echo "{\"workflow_runs\":[{\"id\":888,\"status\":\"$s\",\"name\":\"RoboRev Code Review\",\"path\":\".github/workflows/roborev.yml\"}]}"; printf "\n200"; exit 0; }
 printf "[]\n200"
 CURL_EOF
+printf '#!/usr/bin/env bash\n[ "${1:-}" = "shutdown" ] && pwd > "$TMPD/bazel_shutdown_dir"\nexit 0\n' > "$TMPD/bin/bazel" && chmod +x "$TMPD/bin/bazel"
 chmod +x "$TMPD/bin/curl"
 assert() { "$@" || { echo "ASSERT FAILED: $*" >&2; exit 1; }; }
 assert_fail() { ! "$@" 2>/dev/null || { echo "EXPECTED FAILURE: $*" >&2; exit 1; }; }
@@ -53,9 +54,9 @@ assert echo "$res1" | jq -e '.status == "initialized" and (.branch | contains("v
 mkdir -p "$s1/scripts"; printf '#!/bin/sh\nexit 1\n' > "$s1/scripts/verify.sh"; chmod +x "$s1/scripts/verify.sh"
 echo "hello" > "$s1/hello.txt"; echo "PR desc" > "$s1/PR_DESCRIPTION.md"
 assert_fail "$SCRIPT" submit "$s1" "feat: fail verify"
-assert [ -f "$s1/PR_DESCRIPTION.md" ] && rm -rf "$s1/scripts"
+assert [ -f "$s1/PR_DESCRIPTION.md" ] && assert [ ! -f "$TMPD/bazel_shutdown_dir" ] && rm -rf "$s1/scripts"
 res2=$("$SCRIPT" submit "$s1" "feat: add hello" -b "desc from b")
-assert echo "$res2" | jq -e '.status == "submitted" and .pr_number == 99' && grep -q "desc from b" "$TMPD/last_post_body"
+assert echo "$res2" | jq -e '.status == "submitted" and .pr_number == 99' && grep -q "desc from b" "$TMPD/last_post_body" && assert [ "$(cat "$TMPD/bazel_shutdown_dir")" = "$s1" ]
 snc=$("$SCRIPT" init --repo aerial | jq -r .scratch_dir)
 assert echo "$("$SCRIPT" submit "$snc" "feat: nc" -b "nc")" | jq -e '.status == "no_changes"'
 senc=$("$SCRIPT" init --repo aerial | jq -r .scratch_dir)

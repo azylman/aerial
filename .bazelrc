@@ -1,4 +1,5 @@
 startup --experimental_remote_repo_contents_cache
+startup --max_idle_secs=300
 
 common --enable_bzlmod
 common --incompatible_allow_tags_propagation
