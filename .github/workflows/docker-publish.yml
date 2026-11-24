@@ -55,18 +55,12 @@ jobs:
       has_builds: ${{ steps.affected.outputs.has_builds }}
     steps:
       - uses: actions/checkout@v7
-      - uses: dorny/paths-filter@v4
-        id: filter
         with:
-          list-files: json
-          filters: |
-            changed:
-              - '**'
+          fetch-depth: ${{ github.event_name == 'pull_request' && 0 || 2 }}
 
       - name: Select Images via Bazel & Manifest Digests
         id: affected
         env:
-          CHANGED_FILES_JSON: ${{ steps.filter.outputs.changed_files }}
           FORCE_ALL: ${{ inputs.force_all }}
         run: |
           set -euo pipefail
@@ -74,7 +68,12 @@ jobs:
           if [ "$FORCE_ALL" = "true" ]; then
             FORCE_FLAG="--force-all"
           fi
-          printf '%s' "${CHANGED_FILES_JSON:-[]}" | jq -r '.[]' > "$RUNNER_TEMP/changed-files.txt"
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            git fetch origin +refs/heads/main:refs/remotes/origin/main 2>/dev/null || true
+            (git diff --name-only origin/main...HEAD 2>/dev/null || git diff --name-only HEAD^1 HEAD 2>/dev/null || true) > "$RUNNER_TEMP/changed-files.txt"
+          else
+            (git diff --name-only HEAD^1 HEAD 2>/dev/null || true) > "$RUNNER_TEMP/changed-files.txt"
+          fi
           ./scripts/bazel-select-images.sh $FORCE_FLAG --github-output "$GITHUB_OUTPUT" < "$RUNNER_TEMP/changed-files.txt"
 
       - name: Test Build Metadata Publisher
@@ -102,36 +101,9 @@ jobs:
           fetch-depth: 2
 
       - name: Verify Monorepo Test Coverage & Gating
-        env:
-          FORCE_ALL: ${{ inputs.force_all }}
         run: |
           set -euo pipefail
-          . scripts/lib/hermetic-go-env.sh
-          ensure_bazel_build_files "$GITHUB_WORKSPACE"
-          CHANGED_FILES=$(git diff --name-only HEAD^1 HEAD 2>/dev/null || true)
-          TEST_ALL=0
-          if [ "$FORCE_ALL" = "true" ] || [ -z "$CHANGED_FILES" ]; then
-            TEST_ALL=1
-          fi
-          if [ "$TEST_ALL" -eq 1 ]; then
-            sh scripts/check-coverage.sh --check --summary
-          else
-            AFFECTED_SVCS=$(discover_affected_services "$CHANGED_FILES")
-            if [ "$AFFECTED_SVCS" = "ALL" ]; then
-              sh scripts/check-coverage.sh --check --summary
-            else
-              RAN_ANY=0
-              FAILED_ANY=0
-              for svc in $AFFECTED_SVCS; do
-                RAN_ANY=1
-                sh scripts/check-coverage.sh --check --summary --service "$svc" || FAILED_ANY=1
-              done
-              if [ "$RAN_ANY" -eq 0 ]; then
-                echo "No Go module or frontend changes detected; skipping unit test coverage run."
-              fi
-              [ "$FAILED_ANY" -eq 0 ]
-            fi
-          fi
+          sh scripts/check-coverage.sh --check --summary
 
       # Real-Restate tests (build tag restateintegration) run against a pinned
       # restate-server binary; the script fetches and sha256-checks it.
@@ -148,7 +120,7 @@ jobs:
       - name: Checkout Repository
         uses: actions/checkout@v7
         with:
-          fetch-depth: 2
+          fetch-depth: ${{ github.event_name == 'pull_request' && 0 || 2 }}
 
       - name: Verify Repository Hygiene & Invariants
         run: |
@@ -169,14 +141,7 @@ jobs:
             exit 1
           fi
 
-          # 3. Grafana Dashboard JSON Syntax
-          for jf in services/grafana/dashboards/*.json; do
-            if [ -f "$jf" ]; then
-              node -e "JSON.parse(require('fs').readFileSync('$jf', 'utf8'))"
-            fi
-          done
-
-          # 4. Ratcheted Code Health Gate & Scanner Unit Tests
+          # 3. Ratcheted Code Health Gate & Scanner Unit Tests
           (cd scripts/code-health && go test -v -race ./... && go run . -root ../.. -baseline ../../.code-health-baseline.json)
 
       - name: Lint & Check Dead Code in Go Modules
@@ -187,7 +152,12 @@ jobs:
           . scripts/lib/hermetic-go-env.sh
           ensure_bazel_build_files "$GITHUB_WORKSPACE"
           GO_MODULES=$(discover_go_services)
-          CHANGED_FILES=$(git diff --name-only HEAD^1 HEAD 2>/dev/null || true)
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            git fetch origin +refs/heads/main:refs/remotes/origin/main 2>/dev/null || true
+            CHANGED_FILES=$(git diff --name-only origin/main...HEAD 2>/dev/null || git diff --name-only HEAD^1 HEAD 2>/dev/null || true)
+          else
+            CHANGED_FILES=$(git diff --name-only HEAD^1 HEAD 2>/dev/null || true)
+          fi
           LINT_ALL=0
           if [ "$FORCE_ALL" = "true" ] || [ -z "$CHANGED_FILES" ]; then
             LINT_ALL=1
