@@ -27,6 +27,7 @@ const (
 	minCrossPkgCloneGrams    = 6
 	maxFileLines             = 1500
 	maxDepth                 = 5
+	maxTestTableFields       = 16
 	maxShellFileLines        = 100
 	minCloneFuncLines        = 20
 	minCloneTokens           = 12
