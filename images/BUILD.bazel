@@ -137,7 +137,6 @@ genrule(
         tar --sort=name --mtime='2020-01-01 00:00:00Z' --owner=0 --group=0 --numeric-owner --transform 's|^|app/static/|' -cf "$$OLDPWD/$@" -C dist .
     """,
     tags = [
-        "local",
         "no-sandbox",
         "requires-network",
     ],
