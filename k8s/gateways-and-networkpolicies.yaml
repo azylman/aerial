@@ -889,6 +889,8 @@ spec:
                   - synapse
                   - eri
                   - console
+                  - vision
+                  - vision-restate
                   - vmsingle
                   - victoriametrics
                   - gatus
