@@ -48,12 +48,13 @@ if [ "$FORCE_ALL" = "true" ]; then CAND_OCI=("${OCI_SVCS[@]}"); else
                 ;;
             web/theme/*) [ -f "$REPO_ROOT/web/theme/BUILD.bazel" ] && b_pkgs+=("//web/theme:all") ;;
             images/*) [ -f "$REPO_ROOT/images/BUILD.bazel" ] && b_pkgs+=("//images:all") ;;
+            docs/*|k8s/*|rules/*|*.md|.gitignore|.git*|.agents/*|channels/*|custom-skills/*|scripts/*|Makefile|.code-health-baseline.json|.golangci.yml) ;;
             *) chk_all="true" ;;
         esac
     done
-    if [ "$chk_all" = "true" ] || [ ${#b_pkgs[@]} -eq 0 ]; then
+    if [ "$chk_all" = "true" ]; then
         CAND_OCI=("${OCI_SVCS[@]}")
-    else
+    elif [ ${#b_pkgs[@]} -gt 0 ]; then
         . "$REPO_ROOT/scripts/lib/hermetic-go-env.sh" && ensure_bazel_build_files "$REPO_ROOT"
         p_set=$(printf '%s ' "${b_pkgs[@]}")
         q_out=$(bazel query "kind(oci_image, rdeps(//images:all, set($p_set)))" 2>/dev/null) || CAND_OCI=("${OCI_SVCS[@]}")

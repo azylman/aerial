@@ -9,7 +9,11 @@ import (
 	"strings"
 )
 
-var ddlRegex = regexp.MustCompile(`(?i)\b(CREATE|ALTER|DROP)\s+TABLE\b`)
+var (
+	ddlRegex        = regexp.MustCompile(`(?i)\b(CREATE|ALTER|DROP)\s+TABLE\b`)
+	mainCallRegex   = regexp.MustCompile(`\bmain\(\)`)
+	depDirLineRegex = regexp.MustCompile(`(?m)^[ \t]*(?:-[ \t]*)?directory:[ \t]*["']?(/[^"'\s#]*)["']?[ \t]*(?:#.*)?$`)
+)
 
 func isCandidateDDLFile(rel string) bool {
 	if strings.HasSuffix(rel, "_test.go") || strings.HasSuffix(rel, ".test.ts") || strings.HasPrefix(filepath.Base(rel), "test_") ||
@@ -42,6 +46,15 @@ func checkNoImperativeDDL(absRoot string, targets []string) []string {
 		}
 	}
 	return violations
+}
+
+func isCandidateAnyFile(rel string) bool {
+	for seg := range strings.SplitSeq(rel, "/") {
+		if isExcludedDir(seg) || seg == ".." {
+			return false
+		}
+	}
+	return true
 }
 
 func checkSynapseZeroVanadis(absRoot string, targets []string) []string {
@@ -89,8 +102,15 @@ func checkNoMainInTests(absRoot string, testTargets []string) []string {
 		if err != nil {
 			continue
 		}
-		if bytes.Contains(data, []byte("main()")) {
-			violations = append(violations, rel+": direct execution of main() in test file detected")
+		for line := range bytes.SplitSeq(data, []byte("\n")) {
+			trimmed := bytes.TrimSpace(line)
+			if bytes.HasPrefix(trimmed, []byte("//")) || bytes.HasPrefix(trimmed, []byte("/*")) || bytes.HasPrefix(trimmed, []byte("*")) {
+				continue
+			}
+			if mainCallRegex.Match(trimmed) {
+				violations = append(violations, rel+": direct execution of main() in test file detected")
+				break
+			}
 		}
 	}
 	return violations
@@ -154,13 +174,14 @@ func checkDependabotCoverage(absRoot string) []string {
 		return []string{err.Error()}
 	}
 	depContent := string(depBytes)
+	configuredDirs := make(map[string]bool)
+	for _, m := range depDirLineRegex.FindAllStringSubmatch(depContent, -1) {
+		configuredDirs[m[1]] = true
+	}
 
 	var violations []string
 	for targetDir := range discoveredDirs {
-		qDouble := "\"" + targetDir + "\""
-		qSingle := "'" + targetDir + "'"
-		dirMatch := "directory: " + targetDir
-		if !strings.Contains(depContent, qDouble) && !strings.Contains(depContent, qSingle) && !strings.Contains(depContent, dirMatch) {
+		if !configuredDirs[targetDir] {
 			violations = append(violations, ".github/dependabot.yml: missing package manifest coverage for directory "+targetDir)
 		}
 	}

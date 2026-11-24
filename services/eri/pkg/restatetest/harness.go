@@ -27,28 +27,36 @@ import (
 
 var restateServerBin = flag.String("restate-server-bin", "", "path to the restate-server binary")
 
+func isExecFile(p string) bool {
+	fi, err := os.Stat(p)
+	return err == nil && !fi.IsDir() && (fi.Mode()&0o111 != 0)
+}
+
+func resolveEnvRestateBin(env string) string {
+	if filepath.IsAbs(env) && isExecFile(env) {
+		return env
+	}
+	for _, root := range []string{"", os.Getenv("RUNFILES_DIR"), os.Getenv("TEST_SRCDIR"), filepath.Join(os.Getenv("TEST_SRCDIR"), "_main")} {
+		if root == "" && !filepath.IsAbs(env) {
+			continue
+		}
+		if cand := filepath.Join(root, env); isExecFile(cand) {
+			return cand
+		}
+	}
+	return ""
+}
+
 func resolveRestateServerBin() string {
 	if *restateServerBin != "" {
 		return *restateServerBin
 	}
 	if env := os.Getenv("RESTATE_SERVER_BIN"); env != "" {
-		if filepath.IsAbs(env) {
-			if fi, err := os.Stat(env); err == nil && !fi.IsDir() && (fi.Mode()&0o111 != 0) {
-				return env
-			}
-		}
-		for _, root := range []string{"", os.Getenv("RUNFILES_DIR"), os.Getenv("TEST_SRCDIR"), filepath.Join(os.Getenv("TEST_SRCDIR"), "_main")} {
-			if root == "" && !filepath.IsAbs(env) {
-				continue
-			}
-			cand := filepath.Join(root, env)
-			if fi, err := os.Stat(cand); err == nil && !fi.IsDir() && (fi.Mode()&0o111 != 0) {
-				return cand
-			}
+		if cand := resolveEnvRestateBin(env); cand != "" {
+			return cand
 		}
 	}
-	arch := runtime.GOARCH
-	repo := "restate_server_linux_" + arch
+	repo := "restate_server_linux_" + runtime.GOARCH
 	for _, root := range []string{os.Getenv("RUNFILES_DIR"), os.Getenv("TEST_SRCDIR")} {
 		if root == "" {
 			continue
@@ -60,7 +68,7 @@ func resolveRestateServerBin() string {
 			filepath.Join(root, "_main/external/"+repo+"/restate-server"),
 			filepath.Join(root, "+http_archive+"+repo+"/restate-server"),
 		} {
-			if fi, err := os.Stat(cand); err == nil && !fi.IsDir() && (fi.Mode()&0o111 != 0) {
+			if isExecFile(cand) {
 				return cand
 			}
 		}

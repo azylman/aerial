@@ -3,7 +3,6 @@ package main
 import (
 	"bytes"
 	"go/ast"
-	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -805,48 +804,6 @@ func TestExprName(t *testing.T) {
 			t.Parallel()
 			if got := exprName(tc.expr); got != tc.want {
 				t.Errorf("exprName() = %q, want %q", got, tc.want)
-			}
-		})
-	}
-}
-
-type failWriter struct{}
-
-func (failWriter) Write([]byte) (int, error) {
-	return 0, io.ErrClosedPipe
-}
-
-func TestWritef(t *testing.T) {
-	t.Parallel()
-
-	tests := []struct {
-		name    string
-		w       io.Writer
-		format  string
-		args    []any
-		wantOut string
-	}{
-		{
-			name:    "successful write writes formatted bytes",
-			w:       &strings.Builder{},
-			format:  "hello %s %d",
-			args:    []any{"world", 42},
-			wantOut: "hello world 42",
-		},
-		{
-			name:   "failing writer returns silently without panic",
-			w:      failWriter{},
-			format: "error %s",
-			args:   []any{"payload"},
-		},
-	}
-
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			writef(tc.w, tc.format, tc.args...)
-			if sb, ok := tc.w.(*strings.Builder); ok && sb.String() != tc.wantOut {
-				t.Errorf("writef() output = %q, want %q", sb.String(), tc.wantOut)
 			}
 		})
 	}

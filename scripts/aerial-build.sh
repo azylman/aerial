@@ -1,8 +1,10 @@
 #!/usr/bin/env bash
 set -euo pipefail
 read_cfg() {
-    for f in "${CONFIG_PATH:-}" /local/config.yaml /share/aerial-config/config.yaml; do
-        [ -r "$f" ] && awk -v k="$1" '$0 ~ "^" k ":[ \t]*" { sub("^" k ":[ \t]*", ""); sub(/[ \t]*#.*$/, ""); gsub(/^["\x27]|["\x27]$/, ""); print; exit }' "$f" 2>/dev/null && return 0
+    for f in "${CONFIG_PATH:-}" "${AERIAL_LOCAL_CONFIG_PATH:-/local/config.yaml}" "${AERIAL_SHARED_CONFIG_PATH:-/share/aerial-config/config.yaml}"; do
+        [ -r "$f" ] || continue
+        local v; v=$(awk -v k="$1" '$0 ~ "^" k ":[ \t]*" { sub("^" k ":[ \t]*", ""); sub(/[ \t]*#.*$/, ""); gsub(/^["\x27]|["\x27]$/, ""); print; exit }' "$f" 2>/dev/null || true)
+        [ -n "$v" ] && { echo "$v"; return 0; }
     done
     echo ""
 }

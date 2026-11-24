@@ -71,4 +71,5 @@ EOF
     else
         (cd "$root" && bazel run //:gazelle) || return $?
     fi
+    grep -q 'schema.sql' "$root/services/eri/pkg/db/BUILD.bazel" 2>/dev/null || printf '\nexports_files(["schema.sql"], visibility = ["//visibility:public"])\n' >> "$root/services/eri/pkg/db/BUILD.bazel"
 }

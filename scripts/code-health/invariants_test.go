@@ -95,11 +95,23 @@ func TestCheckNoImperativeDDL(t *testing.T) {
 			relPath:     "docs/readme.md",
 			expectCount: 0,
 		},
+		{
+			name:        "parent_dir_traversal_exempt",
+			content:     "CREATE TABLE foo (id INT)\n",
+			relPath:     "../outside.go",
+			expectCount: 0,
+		},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
+			if tc.relPath == "../outside.go" {
+				if isCandidateAnyFile(tc.relPath) {
+					t.Fatal("expected ../outside.go to be rejected by isCandidateAnyFile")
+				}
+				return
+			}
 			dir := t.TempDir()
 			rel := "services/eri/internal/server/main.go"
 			switch {
@@ -240,7 +252,7 @@ func TestCheckNoMainInTests(t *testing.T) {
 		{
 			name:        "normal_eri_test",
 			rel:         "services/eri/eri_test.go",
-			content:     "package eri_test\n\nfunc TestX(t *testing.T) {}\n",
+			content:     "package eri_test\n// main() in comment\nfunc TestX(t *testing.T) { runMain() }\n",
 			expectCount: 0,
 		},
 		{
@@ -321,6 +333,13 @@ updates:
 updates:
   - package-ecosystem: "gomod"
     directory: "/"
+    groups:
+      v:
+        applies-to: version-updates
+      s:
+        applies-to: security-updates
+  - package-ecosystem: "npm"
+    directory: "/services/console/ui-other"
     groups:
       v:
         applies-to: version-updates

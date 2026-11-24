@@ -156,9 +156,15 @@ func runCheck(absRoot, baselinePath string, targets, testTargets []string, r rul
 		writef(stderr, "code-health: collect ddl targets: %v\n", err)
 		return 1
 	}
+	allTargets, err := collectTargetsMatching(absRoot, nil, isCandidateAnyFile)
+	if err != nil {
+		writef(stderr, "code-health: collect all targets: %v\n", err)
+		return 1
+	}
+	allTargets = r.withoutSkipped(allTargets)
 	violations = append(violations, checkNoImperativeDDL(absRoot, r.withoutSkipped(ddlTargets))...)
-	violations = append(violations, checkSynapseZeroVanadis(absRoot, targets)...)
-	violations = append(violations, checkUTF8BOM(absRoot, append(targets, shellTargets...))...)
+	violations = append(violations, checkSynapseZeroVanadis(absRoot, allTargets)...)
+	violations = append(violations, checkUTF8BOM(absRoot, allTargets)...)
 	violations = append(violations, checkNoMainInTests(absRoot, testTargets)...)
 	violations = append(violations, checkDependabotCoverage(absRoot)...)
 	if len(violations) > 0 {
