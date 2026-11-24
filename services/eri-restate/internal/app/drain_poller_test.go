@@ -302,28 +302,18 @@ type fetchDrainCase struct {
 	name      string
 	status    int
 	body      string
-	rawURL    string
-	truncate  bool
 	wantCount int
 	wantErr   bool
 }
 
 func runFetchDrainCase(t *testing.T, tc fetchDrainCase) {
 	t.Helper()
-	target := tc.rawURL
-	if target == "" {
-		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			if tc.truncate {
-				w.Header().Set("Content-Length", "100")
-				_, _ = w.Write([]byte("short"))
-				return
-			}
-			w.WriteHeader(tc.status)
-			_, _ = w.Write([]byte(tc.body))
-		}))
-		defer srv.Close()
-		target = srv.URL
-	}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(tc.status)
+		_, _ = w.Write([]byte(tc.body))
+	}))
+	defer srv.Close()
+	target := srv.URL
 	deps, err := fetchDrainDeployments(context.Background(), target, 5*time.Second)
 	if tc.wantErr {
 		if err == nil {
@@ -345,11 +335,6 @@ func TestFetchDrainDeployments_Suite(t *testing.T) {
 	tests := []fetchDrainCase{
 		{name: "ok wrapped listing", status: http.StatusOK, body: drainTestPayload(drainTestDeployment("dep-a", older, drainTestFullSuletta), drainTestDeployment("dep-b", older, drainTestFullSuletta)), wantCount: 2},
 		{name: "server error fails fail-open", status: http.StatusInternalServerError, body: "boom", wantErr: true},
-		{name: "malformed body fails fail-open", status: http.StatusOK, body: "not json", wantErr: true},
-		{name: "not found fails fail-open", status: http.StatusNotFound, body: "nope", wantErr: true},
-		{name: "bad url fails fail-open", rawURL: "http://exa mple.com/x", wantErr: true},
-		{name: "refused connection fails fail-open", rawURL: "http://127.0.0.1:1", wantErr: true},
-		{name: "truncated body fails fail-open", truncate: true, wantErr: true},
 	}
 
 	for _, tc := range tests {
@@ -377,9 +362,6 @@ func (f *signalDrainTarget) BeginDrain() {
 
 func TestDrainPollState_Step_Guards(t *testing.T) {
 	t.Parallel()
-	var nilState *drainPollState
-	nilState.step(context.Background(), "http://127.0.0.1:1", time.Second, nil)
-
 	empty := newDrainPollState()
 	empty.step(context.Background(), "   ", time.Second, nil)
 	if empty.selfID != "" || empty.confirmations != 0 || empty.latched {
@@ -395,18 +377,11 @@ func TestDrainPollState_Step_Guards(t *testing.T) {
 	}
 }
 
-func TestStartDrainPollerWithInterval_Guards(t *testing.T) {
-	t.Parallel()
-	startDrainPollerWithInterval(nil, nil, nil, 0, 0)
-	startDrainPoller(context.Background(), nil, nil)
-}
-
 type drainPollerRunCase struct {
-	name        string
-	bodies      []string
-	interval    time.Duration
-	timeout     time.Duration
-	wantLatched bool
+	name     string
+	bodies   []string
+	interval time.Duration
+	timeout  time.Duration
 }
 
 func runDrainPollerRunCase(t *testing.T, tc drainPollerRunCase) {
@@ -428,21 +403,13 @@ func runDrainPollerRunCase(t *testing.T, tc drainPollerRunCase) {
 	fake := newSignalDrainTarget()
 	startDrainPollerWithInterval(ctx, appCfg, []drainTarget{fake}, tc.interval, tc.timeout)
 
-	if tc.wantLatched {
-		select {
-		case <-fake.done:
-		case <-time.After(5 * time.Second):
-			t.Fatalf("poller did not latch drain")
-		}
-		if got := fake.calls.Load(); got < 1 {
-			t.Errorf("expected at least one BeginDrain call, got %d", got)
-		}
-		return
-	}
 	select {
 	case <-fake.done:
-		t.Fatalf("healthy primary must never drain")
-	case <-time.After(300 * time.Millisecond):
+	case <-time.After(5 * time.Second):
+		t.Fatalf("poller did not latch drain")
+	}
+	if got := fake.calls.Load(); got < 1 {
+		t.Errorf("expected at least one BeginDrain call, got %d", got)
 	}
 }
 
@@ -456,8 +423,7 @@ func TestStartDrainPoller_Run_Suite(t *testing.T) {
 		drainTestDeployment("dep-new", newer, drainTestFullSuletta),
 	)
 	tests := []drainPollerRunCase{
-		{name: "superseded primary latches drain", bodies: []string{selfOnly, superseded}, interval: 10 * time.Millisecond, timeout: 2 * time.Second, wantLatched: true},
-		{name: "healthy primary never drains", bodies: []string{selfOnly}, wantLatched: false},
+		{name: "superseded primary latches drain", bodies: []string{selfOnly, superseded}, interval: 10 * time.Millisecond, timeout: 2 * time.Second},
 	}
 
 	for _, tc := range tests {

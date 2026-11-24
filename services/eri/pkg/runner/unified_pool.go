@@ -1075,6 +1075,10 @@ func (p *UnifiedProcessPool) AcquireLease(ctx context.Context, targetKey string)
 	if err != nil {
 		return nil, err
 	}
+	if p.Draining() {
+		p.releaseTargetLock(trimmedKey, tl)
+		return nil, ErrPoolDraining
+	}
 
 	var rec SessionRecord
 	if p.cfg.GetSessionRecord != nil {

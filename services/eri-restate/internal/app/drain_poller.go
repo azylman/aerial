@@ -256,7 +256,7 @@ func startDrainPoller(ctx context.Context, appCfg *config.Config, targets []drai
 
 // startDrainPollerWithInterval is startDrainPoller with injectable timing for tests.
 func startDrainPollerWithInterval(ctx context.Context, appCfg *config.Config, targets []drainTarget, interval, timeout time.Duration) {
-	if ctx == nil || appCfg == nil {
+	if appCfg == nil {
 		return
 	}
 	if interval <= 0 {
