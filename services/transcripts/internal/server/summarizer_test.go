@@ -133,35 +133,24 @@ func TestBuildSummaryPrompt(t *testing.T) {
 	}
 }
 
-type summarizerRunCase struct {
+type summarizerEligibilityCase struct {
 	name            string
 	first           int
 	last            int
-	applyPreset     bool
 	presetWatermark int
 	presetSummary   string
 	extraSessions   int
 	batchLimit      int
-	lockBusy        bool
-	lockErr         bool
-	llmErr          bool
-	emptyLLM        bool
-	embedErr        bool
-	failStore       bool
 	deleteSteps     bool
 	maxSteps        int
 	emptyThread     bool
 	recentMtime     bool
 	wantSummarized  int
-	wantErr         bool
 	wantWatermark   int
-	wantSummaryFrag string
-	wantLLMCalls    int
-	wantEmbedCalls  int
 	wantPromptFrag  string
 }
 
-func seedSummarizerRunCase(t *testing.T, tc summarizerRunCase) (*store.Store, *sql.DB) {
+func seedSummarizerEligibilityCase(t *testing.T, tc summarizerEligibilityCase) (*store.Store, *sql.DB) {
 	t.Helper()
 	st, db := newTestStoreWithDB(t, "aerial")
 	thread := "thread-1"
@@ -172,7 +161,7 @@ func seedSummarizerRunCase(t *testing.T, tc summarizerRunCase) (*store.Store, *s
 	for i := range tc.extraSessions {
 		seedSummarizerSession(t, st, fmt.Sprintf("sess-extra-%d", i), "thread-1", 0, 1, false)
 	}
-	if tc.applyPreset {
+	if tc.presetSummary != "" {
 		presetSummaryWatermark(t, db, "sess-1", tc.presetWatermark, tc.presetSummary)
 	}
 	if tc.recentMtime {
@@ -189,6 +178,183 @@ func seedSummarizerRunCase(t *testing.T, tc summarizerRunCase) (*store.Store, *s
 			t.Fatalf("delete steps: %v", err)
 		}
 	}
+	return st, db
+}
+
+func runSummarizerEligibility(t *testing.T, st *store.Store, tc summarizerEligibilityCase) (int, *fakeSummaryLLM, *fakeSummaryEmbedder, error) {
+	t.Helper()
+	llm := &fakeSummaryLLM{response: "fresh summary"}
+	embedder := &fakeSummaryEmbedder{vector: []float32{0.1, 0.2}}
+	cfg := config.SummarizerConfig{Enabled: true, BatchLimit: tc.batchLimit, MaxSteps: tc.maxSteps}.WithDefaults()
+	sum := NewSummarizer(st, llm, embedder, cfg)
+	testNow := time.Date(2026, 11, 18, 13, 0, 0, 0, time.UTC)
+	sum.now = func() time.Time { return testNow }
+	got, err := sum.RunOnce(context.Background())
+	return got, llm, embedder, err
+}
+
+func assertSummarizerEligibility(t *testing.T, db *sql.DB, tc summarizerEligibilityCase, got int, err error, llm *fakeSummaryLLM, embedder *fakeSummaryEmbedder) {
+	t.Helper()
+	if err != nil {
+		t.Fatalf("RunOnce() err = %v, want nil", err)
+	}
+	if got != tc.wantSummarized {
+		t.Errorf("RunOnce() = %d, want %d", got, tc.wantSummarized)
+	}
+	wantCalls := 0
+	if tc.wantSummarized > 0 {
+		wantCalls = 1
+	}
+	if llm.calls != wantCalls {
+		t.Errorf("llm calls = %d, want %d", llm.calls, wantCalls)
+	}
+	if embedder.calls != wantCalls {
+		t.Errorf("embedder calls = %d, want %d", embedder.calls, wantCalls)
+	}
+	if tc.wantPromptFrag != "" && !strings.Contains(llm.lastPrompt, tc.wantPromptFrag) {
+		t.Errorf("llm prompt missing %q, got:\n%s", tc.wantPromptFrag, llm.lastPrompt)
+	}
+	if tc.wantWatermark == -2 {
+		return
+	}
+	summary, watermark, settled := readSummaryRow(t, db, "sess-1")
+	if watermark != tc.wantWatermark {
+		t.Errorf("watermark = %d, want %d", watermark, tc.wantWatermark)
+	}
+	wantSummary := ""
+	if tc.wantSummarized == 1 {
+		wantSummary = "fresh summary"
+	} else if tc.presetSummary != "" {
+		wantSummary = tc.presetSummary
+	}
+	if wantSummary != "" && !strings.Contains(summary, wantSummary) {
+		t.Errorf("summary = %q, want fragment %q", summary, wantSummary)
+	}
+	if settled {
+		t.Errorf("is_settled = true, summarizer must never settle on success or failure")
+	}
+}
+
+type summarizerFailureCase struct {
+	name           string
+	lockBusy       bool
+	lockErr        bool
+	llmErr         bool
+	emptyLLM       bool
+	embedErr       bool
+	failStore      bool
+	wantErr        bool
+	wantLLMCalls   int
+	wantEmbedCalls int
+}
+
+func TestSummarizerRunOnce_EligibilityAndWindowing(t *testing.T) {
+	t.Parallel()
+	tests := []summarizerEligibilityCase{
+		{
+			name:           "due session summarizes from stored steps",
+			first:          0,
+			last:           2,
+			wantSummarized: 1,
+			wantWatermark:  2,
+			wantPromptFrag: "content",
+		},
+		{
+			name:            "up-to-date session skips",
+			first:           0,
+			last:            2,
+			presetWatermark: 2,
+			presetSummary:   "old",
+			wantSummarized:  0,
+			wantWatermark:   2,
+		},
+		{
+			name:           "pruned steps skip without calls",
+			first:          0,
+			last:           2,
+			deleteSteps:    true,
+			wantSummarized: 0,
+			wantWatermark:  -1,
+		},
+		{
+			name:           "max steps window summarizes tail",
+			first:          0,
+			last:           9,
+			maxSteps:       3,
+			wantSummarized: 1,
+			wantWatermark:  9,
+			wantPromptFrag: "Step 9",
+		},
+		{
+			name:           "batch limit summarizes one of three",
+			first:          0,
+			last:           1,
+			extraSessions:  2,
+			batchLimit:     1,
+			wantSummarized: 1,
+			wantWatermark:  -2,
+			wantPromptFrag: "content",
+		},
+		{
+			name:            "legacy pre-populated summary skips",
+			first:           0,
+			last:            2,
+			presetWatermark: 0,
+			presetSummary:   "legacy summary",
+			wantSummarized:  0,
+			wantWatermark:   0,
+		},
+		{
+			name:            "sub-delta steps skip re-summarization",
+			first:           0,
+			last:            25,
+			presetWatermark: 10,
+			presetSummary:   "prior summary",
+			wantSummarized:  0,
+			wantWatermark:   10,
+		},
+		{
+			name:            "delta reaches threshold folds prior summary",
+			first:           0,
+			last:            35,
+			presetWatermark: 10,
+			presetSummary:   "prior summary",
+			wantSummarized:  1,
+			wantWatermark:   35,
+			wantPromptFrag:  "Prior summary: prior summary",
+		},
+		{
+			name:           "empty thread falls back to session lock",
+			first:          0,
+			last:           2,
+			emptyThread:    true,
+			wantSummarized: 1,
+			wantWatermark:  2,
+			wantPromptFrag: "content",
+		},
+		{
+			name:           "active unsettled session skips until idle",
+			first:          0,
+			last:           2,
+			recentMtime:    true,
+			wantSummarized: 0,
+			wantWatermark:  -1,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			st, db := seedSummarizerEligibilityCase(t, tc)
+			got, llm, embedder, err := runSummarizerEligibility(t, st, tc)
+			assertSummarizerEligibility(t, db, tc, got, err, llm, embedder)
+		})
+	}
+}
+
+func runSummarizerFailure(t *testing.T, tc summarizerFailureCase) {
+	t.Helper()
+	st, db := newTestStoreWithDB(t, "aerial")
+	seedSummarizerSession(t, st, "sess-1", "thread-1", 0, 2, false)
 	if tc.failStore {
 		if _, err := db.ExecContext(context.Background(),
 			`CREATE FUNCTION abort_write() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'no summary'; END $$;
@@ -196,11 +362,6 @@ func seedSummarizerRunCase(t *testing.T, tc summarizerRunCase) (*store.Store, *s
 			t.Fatalf("create trigger: %v", err)
 		}
 	}
-	return st, db
-}
-
-func runSummarizerSweep(t *testing.T, st *store.Store, tc summarizerRunCase) (int, *fakeSummaryLLM, *fakeSummaryEmbedder, error) {
-	t.Helper()
 	llm := &fakeSummaryLLM{response: "fresh summary"}
 	if tc.llmErr {
 		llm.err = errors.New("llm down")
@@ -212,7 +373,7 @@ func runSummarizerSweep(t *testing.T, st *store.Store, tc summarizerRunCase) (in
 	if tc.embedErr {
 		embedder.err = errors.New("senses down")
 	}
-	cfg := config.SummarizerConfig{Enabled: true, BatchLimit: tc.batchLimit, MaxSteps: tc.maxSteps}.WithDefaults()
+	cfg := config.SummarizerConfig{Enabled: true}.WithDefaults()
 	sum := NewSummarizer(st, llm, embedder, cfg)
 	testNow := time.Date(2026, 11, 18, 13, 0, 0, 0, time.UTC)
 	sum.now = func() time.Time { return testNow }
@@ -227,7 +388,43 @@ func runSummarizerSweep(t *testing.T, st *store.Store, tc summarizerRunCase) (in
 		}
 	}
 	got, err := sum.RunOnce(context.Background())
-	return got, llm, embedder, err
+	if (err != nil) != tc.wantErr {
+		t.Fatalf("RunOnce() err = %v, wantErr = %v", err, tc.wantErr)
+	}
+	if got != 0 {
+		t.Errorf("RunOnce() = %d, want 0", got)
+	}
+	if llm.calls != tc.wantLLMCalls {
+		t.Errorf("llm calls = %d, want %d", llm.calls, tc.wantLLMCalls)
+	}
+	if embedder.calls != tc.wantEmbedCalls {
+		t.Errorf("embedder calls = %d, want %d", embedder.calls, tc.wantEmbedCalls)
+	}
+	_, watermark, settled := readSummaryRow(t, db, "sess-1")
+	if watermark != -1 {
+		t.Errorf("watermark = %d, want -1", watermark)
+	}
+	if settled {
+		t.Errorf("is_settled = true, summarizer must never settle on success or failure")
+	}
+}
+
+func TestSummarizerRunOnce_LocksAndFailures(t *testing.T) {
+	t.Parallel()
+	tests := []summarizerFailureCase{
+		{name: "busy lock skips without error or llm call", lockBusy: true, wantErr: false, wantLLMCalls: 0, wantEmbedCalls: 0},
+		{name: "lock error fails the sweep", lockErr: true, wantErr: true, wantLLMCalls: 0, wantEmbedCalls: 0},
+		{name: "llm failure keeps watermark and summary", llmErr: true, wantErr: true, wantLLMCalls: 1, wantEmbedCalls: 0},
+		{name: "empty llm reply keeps watermark", emptyLLM: true, wantErr: true, wantLLMCalls: 1, wantEmbedCalls: 0},
+		{name: "embed failure keeps watermark", embedErr: true, wantErr: true, wantLLMCalls: 1, wantEmbedCalls: 1},
+		{name: "store failure keeps watermark", failStore: true, wantErr: true, wantLLMCalls: 1, wantEmbedCalls: 1},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			runSummarizerFailure(t, tc)
+		})
+	}
 }
 
 func TestStartSummarizerLoopEnabled(t *testing.T) {
@@ -249,68 +446,6 @@ func TestStartSummarizerLoopEnabled(t *testing.T) {
 			cfg := &config.Config{Port: "4017", Stack: "aerial", Summarizer: config.SummarizerConfig{Enabled: true}}
 			stop := startSummarizerLoop(context.Background(), st, cfg)
 			stop()
-		})
-	}
-}
-
-func assertSummarizerSweep(t *testing.T, db *sql.DB, tc summarizerRunCase, got int, err error, llm *fakeSummaryLLM, embedder *fakeSummaryEmbedder) {
-	t.Helper()
-	if (err != nil) != tc.wantErr {
-		t.Fatalf("RunOnce() err = %v, wantErr = %v", err, tc.wantErr)
-	}
-	if got != tc.wantSummarized {
-		t.Errorf("RunOnce() = %d, want %d", got, tc.wantSummarized)
-	}
-	if llm.calls != tc.wantLLMCalls {
-		t.Errorf("llm calls = %d, want %d", llm.calls, tc.wantLLMCalls)
-	}
-	if embedder.calls != tc.wantEmbedCalls {
-		t.Errorf("embedder calls = %d, want %d", embedder.calls, tc.wantEmbedCalls)
-	}
-	if tc.wantPromptFrag != "" && !strings.Contains(llm.lastPrompt, tc.wantPromptFrag) {
-		t.Errorf("llm prompt missing %q, got:\n%s", tc.wantPromptFrag, llm.lastPrompt)
-	}
-	if tc.wantWatermark == -2 {
-		return
-	}
-	summary, watermark, settled := readSummaryRow(t, db, "sess-1")
-	if watermark != tc.wantWatermark {
-		t.Errorf("watermark = %d, want %d", watermark, tc.wantWatermark)
-	}
-	if tc.wantSummaryFrag != "" && !strings.Contains(summary, tc.wantSummaryFrag) {
-		t.Errorf("summary = %q, want fragment %q", summary, tc.wantSummaryFrag)
-	}
-	if settled {
-		t.Errorf("is_settled = true, summarizer must never settle on success or failure")
-	}
-}
-
-func TestSummarizerRunOnce(t *testing.T) {
-	t.Parallel()
-	tests := []summarizerRunCase{
-		{"due session summarizes from stored steps", 0, 2, false, 0, "", 0, 0, false, false, false, false, false, false, false, 0, false, false, 1, false, 2, "fresh summary", 1, 1, "content"},
-		{"up-to-date session skips", 0, 2, true, 2, "old", 0, 0, false, false, false, false, false, false, false, 0, false, false, 0, false, 2, "old", 0, 0, ""},
-		{"busy lock skips without error or llm call", 0, 2, false, 0, "", 0, 0, true, false, false, false, false, false, false, 0, false, false, 0, false, -1, "", 0, 0, ""},
-		{"lock error fails the sweep", 0, 2, false, 0, "", 0, 0, false, true, false, false, false, false, false, 0, false, false, 0, true, -1, "", 0, 0, ""},
-		{"llm failure keeps watermark and summary", 0, 2, false, 0, "", 0, 0, false, false, true, false, false, false, false, 0, false, false, 0, true, -1, "", 1, 0, ""},
-		{"empty llm reply keeps watermark", 0, 2, false, 0, "", 0, 0, false, false, false, true, false, false, false, 0, false, false, 0, true, -1, "", 1, 0, ""},
-		{"embed failure keeps watermark", 0, 2, false, 0, "", 0, 0, false, false, false, false, true, false, false, 0, false, false, 0, true, -1, "", 1, 1, ""},
-		{"store failure keeps watermark", 0, 2, false, 0, "", 0, 0, false, false, false, false, false, true, false, 0, false, false, 0, true, -1, "", 1, 1, ""},
-		{"pruned steps skip without calls", 0, 2, false, 0, "", 0, 0, false, false, false, false, false, false, true, 0, false, false, 0, false, -1, "", 0, 0, ""},
-		{"max steps window summarizes tail", 0, 9, false, 0, "", 0, 0, false, false, false, false, false, false, false, 3, false, false, 1, false, 9, "fresh summary", 1, 1, "Step 9"},
-		{"empty thread falls back to session lock", 0, 2, false, 0, "", 0, 0, false, false, false, false, false, false, false, 0, true, false, 1, false, 2, "fresh summary", 1, 1, "content"},
-		{"batch limit summarizes one of three", 0, 1, false, 0, "", 2, 1, false, false, false, false, false, false, false, 0, false, false, 1, false, -2, "fresh summary", 1, 1, "content"},
-		{"legacy pre-populated summary skips", 0, 2, true, 0, "legacy summary", 0, 0, false, false, false, false, false, false, false, 0, false, false, 0, false, 0, "legacy summary", 0, 0, ""},
-		{"sub-delta steps skip re-summarization", 0, 25, true, 10, "prior summary", 0, 0, false, false, false, false, false, false, false, 0, false, false, 0, false, 10, "prior summary", 0, 0, ""},
-		{"delta reaches threshold folds prior summary", 0, 35, true, 10, "prior summary", 0, 0, false, false, false, false, false, false, false, 0, false, false, 1, false, 35, "fresh summary", 1, 1, "Prior summary: prior summary"},
-		{"active unsettled session skips until idle", 0, 2, false, 0, "", 0, 0, false, false, false, false, false, false, false, 0, false, true, 0, false, -1, "", 0, 0, ""},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			st, db := seedSummarizerRunCase(t, tc)
-			got, llm, embedder, err := runSummarizerSweep(t, st, tc)
-			assertSummarizerSweep(t, db, tc, got, err, llm, embedder)
 		})
 	}
 }
