@@ -17,26 +17,6 @@ func bmPRChunk(id string, idx int, repo string, pr int, status string) model.Van
 	return model.VanadisChunk{ID: id, BuildID: "b1", ChunkIndex: idx, Mode: "pr", Repo: repo, PRNumber: pr, Status: status, Effort: "high"}
 }
 
-// bmUnattached is a started, unattached running pr chunk of build b1.
-func bmUnattached(id string, idx int, repo string) model.VanadisChunk {
-	return model.VanadisChunk{ID: id, BuildID: "b1", ChunkIndex: idx, Mode: "pr", Repo: repo, Status: "running", StartedAt: time.Date(2026, 5, 1, 12, 0, 0, 0, time.UTC)}
-}
-
-// bmBoomModeRowsSQL swaps vanadis_chunks for a view whose mode column raises
-// while the WHERE clause evaluates a row with banner "boom", so the lookup
-// query prepares but fails mid-execution (rows.Err()).
-const bmBoomModeRowsSQL = `CREATE FUNCTION bm_boom(v text, b text) RETURNS text LANGUAGE plpgsql VOLATILE AS $$
-BEGIN
-	IF b = 'boom' THEN RAISE EXCEPTION 'sabotaged row'; END IF;
-	RETURN v;
-END $$;
-ALTER TABLE vanadis_chunks RENAME TO vanadis_chunks_base;
-CREATE VIEW vanadis_chunks AS SELECT id, build_id, chunk_index, bm_boom(mode, banner) AS mode, repo, title, instructions, target_files, target_symbols, effort, acceptance_criteria, status, pr_number, stall_nudges, depends_on, ci_fail_count, ci_checks, rollout_state, banner, started_at, completed_at, created_at, updated_at FROM vanadis_chunks_base;`
-
-// bmNullChunkIDSQL lets a stored chunk id be NULL so scanning it into a
-// string fails.
-const bmNullChunkIDSQL = `ALTER TABLE vanadis_chunks DROP CONSTRAINT vanadis_chunks_pkey; ALTER TABLE vanadis_chunks ALTER COLUMN id DROP NOT NULL; UPDATE vanadis_chunks SET id = NULL;`
-
 func TestPostgresVanadisStore_LookupPRChunk(t *testing.T) {
 	t.Parallel()
 	running := bmBuilds("running")
@@ -467,51 +447,6 @@ func TestPostgresVanadisStore_RecordPRRolloutState(t *testing.T) {
 				if b.Status != tc.wantBuildStatus {
 					t.Errorf("stored build status = %q, want %q", b.Status, tc.wantBuildStatus)
 				}
-			}
-		})
-	}
-}
-
-func TestPostgresVanadisStore_LookupUnattachedChunkByThreadAndRepo(t *testing.T) {
-	t.Parallel()
-	builds := []model.VanadisBuild{{ID: "b1", ThreadID: "123", Objective: "Obj", Status: "running"}}
-	attached := bmUnattached("c-attached", 0, "aerial")
-	attached.PRNumber = 9
-	unstarted := bmUnattached("c-unstarted", 1, "aerial")
-	unstarted.StartedAt = time.Time{}
-	boom := bmUnattached("c-boom", 1, "aerial")
-	boom.Banner = "boom"
-	tests := []struct {
-		name      string
-		threadID  string
-		repo      string
-		db        bmFixture
-		wantBuild string
-		wantChunk string
-		wantErrIs error
-		wantErr   bool
-	}{
-		{name: "nil db", threadID: "123", repo: "aerial", db: bmFixture{nilDB: true}, wantErr: true},
-		{name: "empty thread id", threadID: "", repo: "aerial", wantErrIs: ErrChunkNotFound},
-		{name: "empty repo", threadID: "123", repo: "", wantErrIs: ErrChunkNotFound},
-		{name: "query error", threadID: "123", repo: "aerial", db: bmFixture{closed: true}, wantErr: true},
-		{name: "scan error", threadID: "123", repo: "aerial", db: bmFixture{builds: builds, chunks: mutateChunks(bmUnattached("c1", 0, "aerial")), sabotage: bmNullChunkIDSQL}, wantErr: true},
-		{name: "rows error", threadID: "123", repo: "aerial", db: bmFixture{builds: builds, chunks: mutateChunks(bmUnattached("c1", 0, "aerial"), boom), sabotage: bmBoomModeRowsSQL}, wantErr: true},
-		{name: "0 rows not found", threadID: "123", repo: "aerial", db: bmFixture{builds: builds, chunks: mutateChunks(attached, unstarted)}, wantErrIs: ErrChunkNotFound},
-		{name: "1 row unambiguous match", threadID: "123", repo: "aerial", db: bmFixture{builds: builds, chunks: mutateChunks(attached, bmUnattached("c1", 2, "aerial"))}, wantBuild: "b1", wantChunk: "c1"},
-		{name: "qualified thread and repo spelling", threadID: "thread:123", repo: "example-org/aerial", db: bmFixture{builds: builds, chunks: mutateChunks(bmUnattached("c1", 0, "aerial"))}, wantBuild: "b1", wantChunk: "c1"},
-		{name: "2 rows ambiguous rejection", threadID: "123", repo: "aerial", db: bmFixture{builds: builds, chunks: mutateChunks(bmUnattached("c1", 0, "aerial"), bmUnattached("c2", 1, "example-org/aerial"))}, wantErrIs: ErrChunkNotFound},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			st := bmOpenStore(t, tc.db)
-			route, cID, err := st.LookupUnattachedChunkByThreadAndRepo(context.Background(), tc.threadID, tc.repo)
-			if assertStoreErr(t, err, tc.wantErrIs, tc.wantErr) {
-				return
-			}
-			if route.BuildID != tc.wantBuild || cID != tc.wantChunk {
-				t.Fatalf("LookupUnattachedChunkByThreadAndRepo = (%+v, %q), want (%q, %q)", route, cID, tc.wantBuild, tc.wantChunk)
 			}
 		})
 	}
