@@ -60,6 +60,14 @@ echo "$res_stacked" | jq -e '.status == "submitted"' >/dev/null
 git -C "$TMPD/origin.git" merge-base --is-ancestor "$old_sha" "refs/heads/$br"
 git -C "$TMPD/origin.git" merge-base --is-ancestor "$rem_sha" "refs/heads/$br"
 
+s_div=$("$SCRIPT" init --repo aerial --branch "$br" | jq -r .scratch_dir)
+echo "div local" > "$s_div/div_l.txt" && git -C "$s_div" add div_l.txt && git -C "$s_div" commit -m "div local" -q
+git -C "$TMPD/repo" fetch origin "$br" -q && git -C "$TMPD/repo" reset --hard "origin/$br" -q
+echo "div rem" > "$TMPD/repo/div_r.txt" && git -C "$TMPD/repo" add div_r.txt && git -C "$TMPD/repo" commit -m "div rem" -q && git -C "$TMPD/repo" push origin "$br" -q
+echo "desc" > "$s_div/PR_DESCRIPTION.md"
+if "$SCRIPT" submit "$s_div" "feat: submit diverged" 2>/dev/null; then echo "Expected diverged failure" >&2; exit 1; fi
+rm -rf "$s_div"
+
 res_422_init=$("$SCRIPT" init --repo aerial --vanadis-chunk chunk-422)
 s_dir_422=$(echo "$res_422_init" | jq -r .scratch_dir)
 echo "new 422 work" > "$s_dir_422/work.txt"
@@ -67,6 +75,12 @@ echo "PR 422 desc" > "$s_dir_422/PR_DESCRIPTION.md"
 res_422=$("$SCRIPT" submit "$s_dir_422" "feat: 422 chunk")
 echo "$res_422" | jq -e '.status == "submitted" and .pr_number == 101' >/dev/null
 [ -f "$TMPD/post_422_seen" ]
+
+s_rf=$("$SCRIPT" init --repo aerial | jq -r .scratch_dir)
+head -c 24000 /dev/zero | tr '\0' 'A' > "$s_rf/GEMINI.md" && echo "desc" > "$s_rf/PR_DESCRIPTION.md"
+if "$SCRIPT" submit "$s_rf" "feat: test rule size" 2>/dev/null; then echo "Expected rule size failure" >&2; exit 1; fi
+if "$SCRIPT" submit "$s_rf" "feat: test missing bfile" --body-file "$TMPD/nonexistent" 2>/dev/null; then echo "Expected missing bfile failure" >&2; exit 1; fi
+rm -rf "$s_rf"
 
 cd "$TMPD/repo"
 res3=$("$SCRIPT" override-roborev 99 "valid rebuttal")

@@ -45,26 +45,27 @@ if [ "$CMD" = "init" ]; then
   jq -n --arg s "initialized" --arg sd "$s_dir" --arg b "$b_name" --arg r "$REPO_NAME" '{status:$s,scratch_dir:$sd,branch:$b,repo:$r}'
 elif [ "$CMD" = "submit" ]; then
   s_dir="${ARGS[0]:-}"; msg="${ARGS[1]:-}"; s_desc=""; s_cont=""; [ -d "$s_dir" ] || { echo "ERROR: valid scratch dir required" >&2; exit 1; }
-  [ -n "$BFILE" ] && { [ -f "$BFILE" ] && BODY="$(cat "$BFILE")" || { [ -f "$s_dir/$BFILE" ] && BODY="$(cat "$s_dir/$BFILE")"; }; }
+  [ -n "$BFILE" ] && { r_file="$BFILE"; [ ! -f "$r_file" ] && [ -f "$s_dir/$r_file" ] && r_file="$s_dir/$r_file"; [ -r "$r_file" ] || { echo "ERROR: body file not found: $BFILE" >&2; exit 1; }; BODY="$(cat "$r_file")"; }
   for df in "$s_dir/PR_DESCRIPTION.md" "$s_dir/.pr_description.md"; do [ -s "$df" ] && s_desc="$df" && s_cont="$(cat "$df")" && break; done; [ -z "$BODY" ] && BODY="$s_cont"; rm -f "$s_dir/PR_DESCRIPTION.md" "$s_dir/.pr_description.md"
   trap 'rc=$?; if [ $rc -ne 0 ]; then [ -n "$s_desc" ] && printf "%s\n" "$s_cont" > "$s_desc"; else rm -rf "$s_dir"; fi' EXIT INT TERM
-  cd "$s_dir"; git config user.name "Aerial"; git config user.email "aerial@noreply.github.com"; parse_remote
+  cd "$s_dir"; git config user.name "Aerial"; git config user.email "aerial@noreply.github.com"; parse_remote; git_auth
   cur_b=$(git rev-parse --abbrev-ref HEAD); ex_pr=""; [ -n "$cur_b" ] && [ "$cur_b" != "$DEFAULT_BRANCH" ] && ex_pr=$(gh_call -X GET "$GITHUB_API/repos/$REPO_OWNER/$REPO_NAME/pulls?state=open&head=$REPO_OWNER:$cur_b" | sed '$d' | jq -c '.[0] // empty' 2>/dev/null || true); [ -n "$ex_pr" ] && { [ -z "$BODY" ] && BODY=$(echo "$ex_pr" | jq -r '.body // .title // "Automated update"'); [ -z "$msg" ] && msg=$(echo "$ex_pr" | jq -r '.title // empty'); }
   BODY="${BODY:0:60000}"; [ -z "${BODY//[[:space:]]/}" ] && { echo "ERROR: PR description mandatory" >&2; exit 1; }
+  for rf in GEMINI.md AGENTS.md; do [ -f "$rf" ] && [ $(wc -c < "$rf") -gt 23040 ] && { echo "ERROR: $rf exceeds 22.5 KB ceiling" >&2; exit 1; }; done
   git add -A && git rm --cached -f PR_DESCRIPTION.md .pr_description.md 2>/dev/null || true
   git fetch origin "+refs/heads/$DEFAULT_BRANCH:refs/remotes/origin/$DEFAULT_BRANCH" "+refs/heads/$cur_b:refs/remotes/origin/$cur_b" >/dev/null 2>&1 || true
-  r_sha=$(git rev-parse --verify -q "refs/remotes/origin/$cur_b" 2>/dev/null || echo ""); t_sha=$(git rev-parse --verify -q "refs/remotes/origin/$DEFAULT_BRANCH" 2>/dev/null || echo ""); o_head=$(git rev-parse HEAD); temp_sha=""
-  if [ -n "$r_sha" ] && [ "$r_sha" != "$o_head" ] || { [ -n "$t_sha" ] && ! git merge-base --is-ancestor "$t_sha" HEAD 2>/dev/null; }; then
-    ! git diff --cached --quiet && { git commit -q -m "chore: temp" >/dev/null 2>&1 && temp_sha=$(git rev-parse HEAD); }
-    git reset --hard "${r_sha:-$o_head}" >/dev/null 2>&1
-    [ "$o_head" != "${r_sha:-$o_head}" ] && ! git merge-base --is-ancestor "$o_head" HEAD 2>/dev/null && { git merge --no-edit -q "$o_head" >/dev/null 2>&1 || { git merge --abort >/dev/null 2>&1 || true; [ -n "$temp_sha" ] && { git reset --hard "$temp_sha" >/dev/null 2>&1; git reset --soft "$o_head" >/dev/null 2>&1; }; echo "ERROR: Merge conflict with origin/$cur_b" >&2; exit 1; }; }
+  r_sha=$(git rev-parse --verify -q "refs/remotes/origin/$cur_b" 2>/dev/null || echo ""); t_sha=$(git rev-parse --verify -q "refs/remotes/origin/$DEFAULT_BRANCH" 2>/dev/null || echo ""); o_head=$(git rev-parse HEAD); temp_sha=""; r_base=""
+  [ -n "$r_sha" ] && [ "$r_sha" != "$o_head" ] && { git merge-base --is-ancestor "$r_sha" "$o_head" 2>/dev/null || { git merge-base --is-ancestor "$o_head" "$r_sha" 2>/dev/null && r_base="$r_sha" || { echo "ERROR: Remote branch has diverged from local HEAD" >&2; exit 1; }; }; }
+  if [ -n "$r_base" ] || { [ -n "$t_sha" ] && ! git merge-base --is-ancestor "$t_sha" "$o_head" 2>/dev/null; }; then
+    ! git diff --cached --quiet && { git commit -q -m "chore: temp" >/dev/null 2>&1 || { echo "ERROR: temp commit failed" >&2; exit 1; }; temp_sha=$(git rev-parse HEAD); }
+    git reset --hard "${r_base:-$o_head}" >/dev/null 2>&1
     [ -n "$t_sha" ] && ! git merge-base --is-ancestor "$t_sha" HEAD 2>/dev/null && { git merge --no-edit -q "$t_sha" >/dev/null 2>&1 || { git merge --abort >/dev/null 2>&1 || true; [ -n "$temp_sha" ] && { git reset --hard "$temp_sha" >/dev/null 2>&1; git reset --soft "$o_head" >/dev/null 2>&1; }; echo "ERROR: Merge conflict with origin/$DEFAULT_BRANCH" >&2; exit 1; }; }
     [ -n "$temp_sha" ] && { git cherry-pick -n "$temp_sha" >/dev/null 2>&1 || { git cherry-pick --abort >/dev/null 2>&1 || true; git reset --hard "$temp_sha" >/dev/null 2>&1; git reset --soft "$o_head" >/dev/null 2>&1; echo "ERROR: Merge conflict applying staged changes" >&2; exit 1; }; }
   fi
   has_c=0; [ "$(git rev-parse HEAD 2>/dev/null)" != "$(git rev-parse origin/$DEFAULT_BRANCH 2>/dev/null || true)" ] && has_c=1; git diff --cached --quiet && [ "$has_c" -eq 0 ] && { jq -n --arg s "no_changes" --arg m "No modifications detected in scratch directory." '{status:$s,message:$m}'; exit 0; }
-  [ -f scripts/verify.sh ] && { chmod +x scripts/verify.sh && ./scripts/verify.sh --staged >&2 || { [ -n "$temp_sha" ] && { git reset --hard "$temp_sha" >/dev/null 2>&1; git reset --soft "$o_head" >/dev/null 2>&1; }; echo "ERROR: Pre-flight verification failed" >&2; exit 1; }; }
+  if [ -f .git/.aerial-verified-tree ] && [ "$(git write-tree 2>/dev/null)" = "$(cat .git/.aerial-verified-tree 2>/dev/null)" ]; then echo "⚡ Skipping duplicate pre-flight verification (staged tree already verified)." >&2; elif [ -f scripts/verify.sh ]; then chmod +x scripts/verify.sh && ./scripts/verify.sh --staged >&2 || { [ -n "$temp_sha" ] && { git reset --hard "$temp_sha" >/dev/null 2>&1; git reset --soft "$o_head" >/dev/null 2>&1; }; echo "ERROR: Pre-flight verification failed" >&2; exit 1; }; fi
   title="${msg:-feat($REPO_NAME): automated update by Aerial}"; title=$(printf "%s\n" "$title" | awk 'NF{print;exit}' | cut -c 1-256); ! git diff --cached --quiet && git commit -m "$(printf "%s\n\n%s" "$title" "$BODY")" >/dev/null
-  git_auth; if ! git push -u origin "$cur_b" >/dev/null 2>&1; then [ -n "$r_sha" ] && git push "--force-with-lease=refs/heads/$cur_b:$r_sha" -u origin "$cur_b" >/dev/null 2>&1 || { echo "ERROR: push failed" >&2; exit 1; }; fi
+  [ -n "$r_sha" ] && ! git merge-base --is-ancestor "$r_sha" HEAD 2>/dev/null && { echo "ERROR: Remote branch has commits not in local HEAD" >&2; exit 1; }; if ! git push -u origin "$cur_b" >/dev/null 2>&1; then [ -n "$r_sha" ] && git push "--force-with-lease=refs/heads/$cur_b:$r_sha" -u origin "$cur_b" >/dev/null 2>&1 || { echo "ERROR: push failed" >&2; exit 1; }; fi
   if [ -z "$ex_pr" ]; then
     raw=$(gh_call -X POST "$GITHUB_API/repos/$REPO_OWNER/$REPO_NAME/pulls" -d "$(jq -n --arg t "$title" --arg h "$cur_b" --arg b "$DEFAULT_BRANCH" --arg bd "$BODY" '{title:$t,head:$h,base:$b,body:$bd}')")
     p_code=$(echo "$raw" | tail -n1); p_resp=$(echo "$raw" | sed '$d')
@@ -85,8 +86,7 @@ elif [ "$CMD" = "override-roborev" ] || [ "$CMD" = "dispute-roborev" ]; then
     is_ok "$(echo "$raw" | tail -n1)" || { echo "ERROR: Comment failed" >&2; exit 1; }
   fi
   runs=$(gh_call -X GET "$GITHUB_API/repos/$REPO_OWNER/$REPO_NAME/actions/runs?head_sha=$h_sha" | sed '$d'); target_run=$(echo "$runs" | jq -c '([.workflow_runs[]? | select((.name // "") == "RoboRev Code Review" or (.path // "" | endswith("roborev.yml")))] | first) // ([.workflow_runs[]? | select((.name // "") == "Continuous Delivery" or (.name // "") == "Validate Configuration" or (.path // "" | test("(docker-publish|ci|validate)\\.yml$")))] | first) // empty'); run_id=$(echo "$target_run" | jq -r '.id // empty'); run_stat=$(echo "$target_run" | jq -r '.status // empty'); [ -n "$run_id" ] || { echo "ERROR: No workflow run found" >&2; exit 1; }
-  rerun_call() { local c; c=$(gh_call -X POST "$GITHUB_API/repos/$REPO_OWNER/$REPO_NAME/actions/runs/$run_id/$1" | tail -n1); [ "$c" = "403" ] || [ "$c" = "409" ] || is_ok "$c"; }
-  [ "$run_stat" = "completed" ] && { rerun_call rerun-failed-jobs || rerun_call rerun || { echo "ERROR: Rerun failed" >&2; exit 1; }; }
+  rerun_call() { local c; c=$(gh_call -X POST "$GITHUB_API/repos/$REPO_OWNER/$REPO_NAME/actions/runs/$run_id/$1" | tail -n1); [ "$c" = "403" ] || [ "$c" = "409" ] || is_ok "$c"; }; [ "$run_stat" = "completed" ] && { rerun_call rerun-failed-jobs || rerun_call rerun || { echo "ERROR: Rerun failed" >&2; exit 1; }; }
   jq -n --arg pr_url "$pr_url" --argjson pr_number "$pr" --arg commit_sha "$h_sha" --argjson run_id "$run_id" --arg repo "$REPO_NAME" --arg message "RoboRev gate overridden for PR #$pr ($short_sha) on $REPO_OWNER/$REPO_NAME. Re-run triggered." \
     '{status: "overridden", pr_url: $pr_url, pr_number: $pr_number, commit_sha: $commit_sha, run_id: $run_id, repo: $repo, turn_action: "end_turn", message: $message}'
 else
