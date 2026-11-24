@@ -14,12 +14,7 @@ import (
 
 type collaboratorCIFailureTestCase struct {
 	name          string
-	resRepo       string
-	resPRNum      int
-	resBranch     string
-	resHeadSHA    string
-	resTargetID   string
-	resCheckName  string
+	res           ResolvedGitHubEvent
 	checkURL      string
 	apiState      string
 	apiMerged     bool
@@ -39,13 +34,13 @@ func runCollaboratorCIFailureCase(ctx context.Context, t *testing.T, tc collabor
 	t.Parallel()
 
 	mockServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if strings.Contains(r.URL.Path, fmt.Sprintf("/pulls/%d", tc.resPRNum)) {
+		if strings.Contains(r.URL.Path, fmt.Sprintf("/pulls/%d", tc.res.PRNumber)) {
 			sha := tc.apiHeadSHA
 			if sha == "" {
-				sha = tc.resHeadSHA
+				sha = tc.res.HeadSHA
 			}
 			pr := GitHubPullRequest{
-				Number: tc.resPRNum,
+				Number: tc.res.PRNumber,
 				Title:  "Test Collaborator PR",
 				State:  tc.apiState,
 				Merged: tc.apiMerged,
@@ -54,7 +49,7 @@ func runCollaboratorCIFailureCase(ctx context.Context, t *testing.T, tc collabor
 					Login string `json:"login"`
 				}{Login: tc.apiAuthor},
 				Head: GitHubPRRef{
-					Ref: tc.resBranch,
+					Ref: tc.res.Branch,
 					SHA: sha,
 				},
 			}
@@ -67,16 +62,8 @@ func runCollaboratorCIFailureCase(ctx context.Context, t *testing.T, tc collabor
 
 	srv, ingress, disp := newCollaboratorRouter(t, mockServer, tc.alertRules, tc.alertFails)
 
-	res := &ResolvedGitHubEvent{
-		Repo:      tc.resRepo,
-		PRNumber:  tc.resPRNum,
-		Branch:    tc.resBranch,
-		HeadSHA:   tc.resHeadSHA,
-		TargetID:  tc.resTargetID,
-		CheckName: tc.resCheckName,
-	}
-
-	err := srv.notifyCollaboratorCIFailure(ctx, res, tc.checkURL)
+	res := tc.res
+	err := srv.notifyCollaboratorCIFailure(ctx, &res, tc.checkURL)
 	if (err != nil) != tc.wantErr {
 		t.Fatalf("notifyCollaboratorCIFailure() err = %v, wantErr = %v", err, tc.wantErr)
 	}
@@ -104,11 +91,7 @@ func TestNotifyCollaboratorCIFailure(t *testing.T) {
 	tests := []collaboratorCIFailureTestCase{
 		{
 			name:          "unregistered collaborator pr failure dispatches dm and resends on duplicate",
-			resRepo:       "azylman/aerial",
-			resPRNum:      42,
-			resBranch:     "feat/collab",
-			resHeadSHA:    "sha-collab-1",
-			resCheckName:  "Test",
+			res:           ResolvedGitHubEvent{Repo: "azylman/aerial", PRNumber: 42, Branch: "feat/collab", HeadSHA: "sha-collab-1", CheckName: "Test"},
 			checkURL:      "https://ci.example.com/build/1",
 			apiState:      "open",
 			apiMerged:     false,
@@ -119,23 +102,16 @@ func TestNotifyCollaboratorCIFailure(t *testing.T) {
 			wantContains:  "<@123456> CI check \"Test\" failed",
 		},
 		{
-			name:        "registered pr with target id skips dm",
-			resRepo:     "azylman/aerial",
-			resPRNum:    43,
-			resBranch:   "feat/collab",
-			resHeadSHA:  "sha-collab-2",
-			resTargetID: "123456789012345678",
-			apiState:    "open",
-			apiAuthor:   "collab-user",
-			alertRules:  standardRules,
-			wantAlerts:  0,
+			name:       "registered pr with target id skips dm",
+			res:        ResolvedGitHubEvent{Repo: "azylman/aerial", PRNumber: 43, Branch: "feat/collab", HeadSHA: "sha-collab-2", TargetID: "123456789012345678"},
+			apiState:   "open",
+			apiAuthor:  "collab-user",
+			alertRules: standardRules,
+			wantAlerts: 0,
 		},
 		{
 			name:       "pr with aerial trailer skips dm",
-			resRepo:    "azylman/aerial",
-			resPRNum:   44,
-			resBranch:  "feat/collab",
-			resHeadSHA: "sha-collab-3",
+			res:        ResolvedGitHubEvent{Repo: "azylman/aerial", PRNumber: 44, Branch: "feat/collab", HeadSHA: "sha-collab-3"},
 			apiState:   "open",
 			apiBody:    "PR body\n<!-- aerial-pr:{\"target_id\":\"100000000000000001\"} -->",
 			apiAuthor:  "collab-user",
@@ -144,10 +120,7 @@ func TestNotifyCollaboratorCIFailure(t *testing.T) {
 		},
 		{
 			name:       "unconfigured author skips dm",
-			resRepo:    "azylman/aerial",
-			resPRNum:   45,
-			resBranch:  "feat/collab",
-			resHeadSHA: "sha-collab-4",
+			res:        ResolvedGitHubEvent{Repo: "azylman/aerial", PRNumber: 45, Branch: "feat/collab", HeadSHA: "sha-collab-4"},
 			apiState:   "open",
 			apiAuthor:  "unknown-user",
 			alertRules: standardRules,
@@ -155,10 +128,7 @@ func TestNotifyCollaboratorCIFailure(t *testing.T) {
 		},
 		{
 			name:       "closed pr skips dm",
-			resRepo:    "azylman/aerial",
-			resPRNum:   46,
-			resBranch:  "feat/collab",
-			resHeadSHA: "sha-collab-5",
+			res:        ResolvedGitHubEvent{Repo: "azylman/aerial", PRNumber: 46, Branch: "feat/collab", HeadSHA: "sha-collab-5"},
 			apiState:   "closed",
 			apiAuthor:  "collab-user",
 			alertRules: standardRules,
@@ -166,10 +136,7 @@ func TestNotifyCollaboratorCIFailure(t *testing.T) {
 		},
 		{
 			name:       "api head sha mismatch skips dm",
-			resRepo:    "azylman/aerial",
-			resPRNum:   48,
-			resBranch:  "feat/collab",
-			resHeadSHA: "sha-collab-7",
+			res:        ResolvedGitHubEvent{Repo: "azylman/aerial", PRNumber: 48, Branch: "feat/collab", HeadSHA: "sha-collab-7"},
 			apiHeadSHA: "sha-collab-different",
 			apiState:   "open",
 			apiAuthor:  "collab-user",
@@ -178,10 +145,7 @@ func TestNotifyCollaboratorCIFailure(t *testing.T) {
 		},
 		{
 			name:       "dm error propagates",
-			resRepo:    "azylman/aerial",
-			resPRNum:   49,
-			resBranch:  "feat/collab",
-			resHeadSHA: "sha-collab-8",
+			res:        ResolvedGitHubEvent{Repo: "azylman/aerial", PRNumber: 49, Branch: "feat/collab", HeadSHA: "sha-collab-8"},
 			apiState:   "open",
 			apiAuthor:  "collab-user",
 			alertRules: standardRules,
