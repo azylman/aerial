@@ -2,8 +2,8 @@
 
 **Date:** 2026-11-23  
 **Task:** 271 (Monorepo Build, Test & Container Image Pipeline Modernization)  
-**Status:** Proposed Design Specification  
-**Scope:** Unified Bazel 9.3.3 (Bzlmod) build and test pipeline, LAN `bazel-remote` action/repository cache on `quiet-zero`, single-module `go.mod` consolidation in `azylman/aerial`, ephemeral `gazelle` `BUILD.bazel` generation, and `rules_oci` daemonless container image publishing across `azylman/aerial`, `azylman/mirrormere`, and `azylman/aerial-sidecars`.
+**Status:** Implemented  
+**Scope:** Unified Bazel 9.3.3 (Bzlmod) build, test, and container image pipeline: LAN `bazel-remote` action/repository cache on `quiet-zero`, single-module `go.mod` consolidation in `azylman/aerial`, ephemeral `gazelle` `BUILD.bazel` generation, and `rules_oci` daemonless container image publishing across `azylman/aerial` (16 `rules_oci` images + 4 retained `Dockerfile`s + 6 non-Go `sh_test` targets), `azylman/aerial-config` (Bazel 9.3.3 + ephemeral `gazelle` for `//scripts/validate/...`), and `azylman/aerial-sidecars` (5 `rules_oci` images + 5 `Dockerfile` images unified under `scripts/bazel-select-images.sh` + 3 non-Go `sh_test` targets), with `azylman/mirrormere` intentionally left on its native open-source `Dockerfile` and `go test` workflow per user directive.
 
 ---
 
@@ -217,9 +217,9 @@ To guarantee `rules_oci` binaries include Go's `-cover` instrumentation (support
        - `console`: `static/` + Vite `ui/dist/` + `web/theme/aerial-tokens.css` -> `/app/static`.
        - `coverage-ingest`: includes a Bazel-built static `cmd/covdata` binary at `/usr/local/bin/covdata` and a 2-line `/usr/local/bin/go` wrapper (`#!/bin/sh` / `shift; shift; exec /usr/local/bin/covdata "$@"`) plus `@alpine_base` `/bin/sh` so `ExecCovdata` (`go tool covdata func -i=...`) runs in `readOnlyRootFilesystem: true` without bundling a 300 MB Go SDK.
 
-### 5.6 Image Build Matrix Across the Three Repositories
+### 5.6 Image Build Matrix Across the Repositories
 
-#### 1. `azylman/aerial` (20 Images Total)
+#### 1. `azylman/aerial` (20 Images Total + 6 Non-Go `sh_test` Targets)
 - **16 Images Migrated to `rules_oci` in Checked-In `images/BUILD.bazel` (16 `Dockerfile`s Deleted):**
   - **Pure Go Services with `cover = True` (12):** `eri`, `haro`, `coven`, `docket-mcp`, `kernel-mcp`, `synapse`, `transcripts`, `vanadis`, `vanadis-restate`, `vanadis-nats`, `prospera`, plus `console` (Go binary + Vite UI dist tar + static/theme tars).
   - **Pure Go Services with `cover = False` (2):** `redact-pattern` (`bin_path = "/usr/local/bin/redact-pattern"`), `coverage-ingest` (`cover = False` + bundled `covdata` binary).
@@ -231,19 +231,19 @@ To guarantee `rules_oci` binaries include Go's `-cover` instrumentation (support
   - `github-runner` (`services/github-runner/Dockerfile`).
   - `discord-mcp` (`mcp/discord-mcp/Dockerfile`).
   - `infisical-mcp` (`mcp/infisical-mcp/Dockerfile`).
+- **6 Non-Go `sh_test` Targets:** Repo-level test targets covering shell scripts, verification invariants, and schema validation.
 
-#### 2. `azylman/mirrormere` (3 Images — Open-Source `Dockerfile` Preservation)
-- **Open-Source Contract:**
-  - `.gitignore` excludes all generated `BUILD.bazel` files; only root `MODULE.bazel`, `MODULE.bazel.lock`, `.bazelrc`, `.bazelversion`, and root `BUILD.bazel` are tracked.
-  - All 3 `Dockerfile`s (`./Dockerfile`, `client/remote/Dockerfile`, `client/cast-watcher/Dockerfile`) remain in the repository untouched so any external user can run `docker build` or `go test ./...` with zero Bazel awareness.
-- **CI Test & Image Pipeline:**
-  - `ensure_bazel_build_files && bazel test //...` runs all Go tests against `bazel-remote` on `quiet-zero` in ~1–2s.
-  - For the 3 container images, CI computes each binary's transitive Bazel target hash (`bazel cquery --output=starlark` over `//cmd/server`, `//client/remote`, `//client/cast-watcher`, plus `web/ui/**` for the root image) and only builds/pushes the `Dockerfile`s whose target hash changed relative to `main`.
+#### 2. `azylman/aerial-config` (Validation Pipeline)
+- Runs Bazel 9.3.3 + ephemeral `gazelle` for `//scripts/validate/...` (validating rules, channels, services, crons, and YAML configurations against cluster schemas).
 
-#### 3. `azylman/aerial-sidecars` (11 Sidecars)
+#### 3. `azylman/aerial-sidecars` (10 Images Total + 3 Non-Go `sh_test` Targets)
 - Add root `MODULE.bazel` (`rules_go` + `rules_python` + `rules_oci`), `.bazelrc` pointing to `bazel-remote.aerial:9092`, and ephemeral `gazelle`.
-- Build and test the 9 Go and Python sidecars via Bazel + `rules_oci`.
-- Leave the 2 CUDA/C++ Rust sidecars (`senses` and `pjev`) on their existing `Dockerfile`s, triggered only when `senses/**` or `pjev/**` changes.
+- **5 Images Migrated to `rules_oci`:** Pure Go and Python sidecars.
+- **5 Images Retained on `Dockerfile`s:** Hardware and CUDA/C++ sidecars (e.g. `senses` and `pjev`).
+- Unified under `scripts/bazel-select-images.sh` for change detection and image selection alongside 3 non-Go `sh_test` targets.
+
+#### 4. `azylman/mirrormere` (Native Open-Source Preservation)
+- Intentionally left on its native open-source `Dockerfile` and `go test` workflow per user directive, preserving frictionless upstream Docker and Go development without requiring Bazel.
 
 ### 5.7 Change Selection & `scripts/build-metadata.cjs` / `synapse` Continuity
 To ensure `synapse` (`ResolveRunMetadata` and `RepoObject.HandleImagePromotion`) and `vanadis` continue tracking image builds and updating `ConfigMap/aerial-image-tags` in `flux-system` without modification:
