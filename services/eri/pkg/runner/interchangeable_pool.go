@@ -196,6 +196,23 @@ func (p *InterchangeablePool) evictOverflow(workerKey string) {
 	}()
 }
 
+// Draining reports whether BeginDrain has latched on the underlying pool.
+func (p *InterchangeablePool) Draining() bool {
+	if p == nil || p.underlying == nil {
+		return false
+	}
+	return p.underlying.Draining()
+}
+
+// BeginDrain latches drain on the underlying unified pool so the new primary
+// resumes the same sessions; in-flight worker turns finish via Release.
+func (p *InterchangeablePool) BeginDrain() {
+	if p == nil || p.underlying == nil {
+		return
+	}
+	p.underlying.BeginDrain()
+}
+
 func (p *InterchangeablePool) Close() error {
 	if p == nil {
 		return nil

@@ -360,6 +360,7 @@ type ConfigData struct {
 	HaroURL                   string                   `yaml:"haro_url"                               json:"haro_url"`
 	CovenURL                  string                   `yaml:"coven_url"                              json:"coven_url"`
 	NATSURL                   string                   `yaml:"nats_url"                               json:"nats_url"`
+	RestateAdminURL           string                   `yaml:"restate_admin_url"                      json:"restate_admin_url"`
 	Transcripts               TranscriptsConfig        `yaml:"transcripts,omitempty"                  json:"transcripts,omitempty"`
 	PushScan                  PushScanConfig           `yaml:"push_scan,omitempty"                    json:"push_scan,omitempty"`
 	EgressScan                EgressScanConfig         `yaml:"egress_scan,omitempty"                  json:"egress_scan,omitempty"`
@@ -592,6 +593,7 @@ func (c *ConfigData) UnmarshalYAML(value *yaml.Node) error {
 		HaroURL                   string                   `yaml:"haro_url"`
 		CovenURL                  string                   `yaml:"coven_url"`
 		NATSURL                   string                   `yaml:"nats_url"`
+		RestateAdminURL           string                   `yaml:"restate_admin_url"`
 		Transcripts               TranscriptsConfig        `yaml:"transcripts"`
 		PushScan                  PushScanConfig           `yaml:"push_scan"`
 		EgressScan                EgressScanConfig         `yaml:"egress_scan"`
@@ -625,6 +627,7 @@ func (c *ConfigData) UnmarshalYAML(value *yaml.Node) error {
 	c.HaroURL = strings.TrimRight(strings.TrimSpace(raw.HaroURL), "/")
 	c.CovenURL = strings.TrimRight(strings.TrimSpace(raw.CovenURL), "/")
 	c.NATSURL = strings.TrimRight(strings.TrimSpace(raw.NATSURL), "/")
+	c.RestateAdminURL = strings.TrimRight(strings.TrimSpace(raw.RestateAdminURL), "/")
 	c.Transcripts = TranscriptsConfig{
 		Stack:         strings.TrimSpace(raw.Transcripts.Stack),
 		IndexerURL:    strings.TrimRight(strings.TrimSpace(raw.Transcripts.IndexerURL), "/"),
@@ -1119,6 +1122,7 @@ func applyEnvironmentOverrides(data *ConfigData, lookup func(string) string) {
 	overrideEnvStr(&data.DataDir, lookup, "DATA_DIR")
 	overrideEnvStr(&data.MCPConfig, lookup, "MCP_CONFIG")
 	overrideEnvStr(&data.NATSURL, lookup, "NATS_URL")
+	overrideEnvStr(&data.RestateAdminURL, lookup, "RESTATE_ADMIN_URL")
 	overrideEnvDuration(&data.DaemonIdleTimeout, lookup, "DAEMON_IDLE_TIMEOUT", false)
 	overrideEnvDuration(&data.MaxBackgroundTaskDuration, lookup, "MAX_BACKGROUND_TASK_DURATION", false)
 }
