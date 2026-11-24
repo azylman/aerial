@@ -16,7 +16,7 @@ if [ ${#CHANGED_FILES[@]} -eq 0 ] && git rev-parse --git-dir >/dev/null 2>&1; th
     [ ${#CHANGED_FILES[@]} -eq 0 ] && mapfile -t CHANGED_FILES < <(git diff --name-only HEAD~1 2>/dev/null || git diff --name-only HEAD 2>/dev/null || git status --porcelain | awk '{print $NF}')
 fi
 for f in "${CHANGED_FILES[@]}"; do
-    case "$f" in .github/workflows/docker-publish.yml|.dockerignore|images/BUILD.bazel|build/*|MODULE.bazel*|BUILD.bazel|go.mod|go.sum) FORCE_ALL="true" ;; esac
+    case "$f" in .github/workflows/docker-publish.yml|.dockerignore) FORCE_ALL="true" ;; esac
 done
 OCI_SVCS=("eri" "haro" "coven" "docket-mcp" "kernel-mcp" "synapse" "transcripts" "vanadis" "vanadis-restate" "vanadis-nats" "prospera" "console" "redact-pattern" "coverage-ingest" "docs" "migrator" "eri-restate" "github-runner" "discord-mcp" "infisical-mcp")
 DOCKER_CFG=("eri-restate:.:./services/eri-restate/Dockerfile:services/eri-restate/Dockerfile" "github-runner:.:./services/github-runner/Dockerfile:services/github-runner/Dockerfile" "discord-mcp:.:./mcp/discord-mcp/Dockerfile:mcp/discord-mcp/Dockerfile" "infisical-mcp:./mcp/infisical-mcp:./mcp/infisical-mcp/Dockerfile:mcp/infisical-mcp/Dockerfile")
@@ -40,6 +40,7 @@ if [ "$FORCE_ALL" = "true" ]; then CAND_OCI=("${OCI_SVCS[@]}"); else
     b_pkgs=(); chk_all="false"; [ ${#CHANGED_FILES[@]} -eq 0 ] && chk_all="true"
     for f in "${CHANGED_FILES[@]}"; do
         case "$f" in
+            images/BUILD.bazel|build/*|MODULE.bazel*|BUILD.bazel|go.mod|go.sum) chk_all="true" ;;
             scripts/*|rules/*|.agents/*) b_pkgs+=("//:all") ;;
             services/docs-service/*) [ -f "$REPO_ROOT/services/docs-service/BUILD.bazel" ] && b_pkgs+=("//services/docs-service:all") ;;
             services/eri/pkg/db/migrations/*) [ -f "$REPO_ROOT/services/eri/pkg/db/BUILD.bazel" ] && b_pkgs+=("//services/eri/pkg/db:all") ;;
@@ -68,7 +69,7 @@ if [ "$FORCE_ALL" = "true" ]; then
     for s in "${OCI_SVCS[@]}"; do [ "${D_TRIG[$s]}" = "true" ] && continue; SEL["$s"]="true"; AFF["$s"]="true"; done
 elif [ ${#CAND_OCI[@]} -gt 0 ]; then
     b_targets=(); b_svcs=()
-    for s in "${CAND_OCI[@]}"; do [ "${D_TRIG[$s]:-false}" = "true" ] && continue; b_targets+=("//images:${s}"); b_svcs+=("$s"); AFF["$s"]="true"; done
+    for s in "${CAND_OCI[@]}"; do [ "${D_TRIG[$s]:-false}" = "true" ] && continue; b_targets+=("//images:${s}"); b_svcs+=("$s"); done
     if [ ${#b_targets[@]} -gt 0 ]; then
         command -v crane >/dev/null 2>&1 || { echo "::error::crane binary is required" >&2; exit 1; }
         bazel build --remote_download_toplevel "${b_targets[@]}"
@@ -77,7 +78,7 @@ elif [ ${#CAND_OCI[@]} -gt 0 ]; then
             [ -n "$ldig" ] || { echo "::error::missing local digest for $s" >&2; exit 1; }
             rdig=""
             if rdig_out=$(crane digest "ghcr.io/${OWNER}/aerial-${s}:latest" 2>&1); then rdig="$rdig_out"; elif echo "$rdig_out" | grep -q -i -E '(404|not found|NAME_UNKNOWN|MANIFEST_UNKNOWN|UNAUTHORIZED|DENIED)'; then rdig=""; else echo "::error::crane error for $s: $rdig_out" >&2; exit 1; fi
-            [ -z "$rdig" ] || [ "$ldig" != "$rdig" ] && { echo "Image $s changed: local=$ldig remote=$rdig" >&2; SEL["$s"]="true"; }
+            [ -z "$rdig" ] || [ "$ldig" != "$rdig" ] && { echo "Image $s changed: local=$ldig remote=$rdig" >&2; SEL["$s"]="true"; AFF["$s"]="true"; }
         done
     fi
 fi

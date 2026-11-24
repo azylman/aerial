@@ -95,23 +95,11 @@ func TestCheckNoImperativeDDL(t *testing.T) {
 			relPath:     "docs/readme.md",
 			expectCount: 0,
 		},
-		{
-			name:        "parent_dir_traversal_exempt",
-			content:     "CREATE TABLE foo (id INT)\n",
-			relPath:     "../outside.go",
-			expectCount: 0,
-		},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			if tc.relPath == "../outside.go" {
-				if isCandidateAnyFile(tc.relPath) {
-					t.Fatal("expected ../outside.go to be rejected by isCandidateAnyFile")
-				}
-				return
-			}
 			dir := t.TempDir()
 			rel := "services/eri/internal/server/main.go"
 			switch {

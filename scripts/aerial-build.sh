@@ -50,6 +50,7 @@ vanadis_req() {
     [ "$code" -ge 200 ] && [ "$code" -lt 300 ] || { echo "ERROR: Vanadis request $m $p failed with HTTP $code: $body" >&2; return 1; }
     printf '%s\n' "$body"
 }
+usage() { echo "Usage: $(basename "$0") {enqueue <plan.json>|status <build_id>|cancel <build_id>}"; }
 case "${1:-}" in
     enqueue)
         shift; pf=""
@@ -57,6 +58,7 @@ case "${1:-}" in
             case "$1" in
                 --file|-f) [ $# -ge 2 ] || { echo "ERROR: --file requires an argument" >&2; exit 1; }; pf="$2"; shift 2 ;;
                 --file=*) pf="${1#*=}"; shift ;;
+                -h|--help) usage; exit 0 ;;
                 -*) echo "ERROR: Unknown option $1" >&2; exit 1 ;;
                 *) [ -z "$pf" ] && pf="$1" || { echo "ERROR: Extra arg $1" >&2; exit 1; }; shift ;;
             esac
@@ -79,7 +81,10 @@ case "${1:-}" in
         [ -n "${2:-}" ] || { echo "ERROR: build_id is required" >&2; exit 1; }
         vanadis_req "POST" "/builds/$2/cancel"
         ;;
+    -h|--help|help)
+        usage; exit 0
+        ;;
     *)
-        echo "Usage: $(basename "$0") {enqueue <plan.json>|status <build_id>|cancel <build_id>}" >&2; exit 1
+        usage >&2; exit 1
         ;;
 esac

@@ -31,6 +31,11 @@ CURL_EOF
 chmod +x "$TMPD/bin/curl"
 assert() { "$@" || { echo "ASSERT FAILED: $*" >&2; exit 1; }; }
 assert_fail() { ! "$@" 2>/dev/null || { echo "EXPECTED FAILURE: $*" >&2; exit 1; }; }
+assert "$SCRIPT" --help
+assert "$SCRIPT" -h
+assert "$SCRIPT" help
+assert "$SCRIPT" enqueue --help
+assert "$SCRIPT" enqueue -h
 assert_fail "$SCRIPT"
 assert_fail "$SCRIPT" unknown-cmd
 assert_fail "$SCRIPT" enqueue
