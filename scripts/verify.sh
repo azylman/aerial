@@ -9,9 +9,6 @@ if [ "$MODE" = "staged" ]; then
     CHANGED_FILES=$(git diff --cached --name-only 2>/dev/null || true)
     [ -n "$CHANGED_FILES" ] || { echo "✅ [Aerial Verify] Nothing staged."; exit 0; }
 fi
-if [ "$MODE" = "staged" ]; then
-    for f in $(echo "$CHANGED_FILES" | grep -E '\.go$' || true); do [ -f "$f" ] && gofmt -w "$f" && git add "$f"; done
-fi
 unformatted=$(gofmt -l . 2>/dev/null | grep -v -E '(^|/)vendor/' || true)
 [ -z "$unformatted" ] || { echo "🚨 [Aerial Verify] Unformatted Go files: $unformatted" >&2; exit 1; }
 if command -v buildifier >/dev/null 2>&1; then
@@ -30,12 +27,19 @@ MODS=""
 if [ "$MODE" = "full" ]; then MODS=$(discover_go_services); else
     for m in $(discover_go_services); do echo "$CHANGED_FILES" | grep -q "^$m/" && MODS="$MODS $m"; done
 fi
+if [ -n "$MODS" ] && { [ "${CI:-}" = "true" ] || [ "${GITHUB_ACTIONS:-}" = "true" ]; }; then
+    command -v deadcode >/dev/null 2>&1 || { echo "🚨 [Aerial Verify] deadcode required in CI" >&2; exit 1; }
+fi
 for m in $MODS; do
     (cd "$m" && golangci-lint run ./...)
     if command -v deadcode >/dev/null 2>&1; then
         if [ "$m" = "pkg" ]; then (cd "$m" && deadcode -test ./...); else
             f_flag="-filter=^github\.com/azylman/aerial/${m}(/|$)"
-            [ "$m" = "services/eri" ] && m_pkgs=$(go list -f '{{if eq .Name "main"}}{{.ImportPath}}{{end}}' ./services/eri/... ./services/eri-restate/...) || m_pkgs=$(cd "$m" && go list -f '{{if eq .Name "main"}}{{.ImportPath}}{{end}}' ./...)
+            if [ "$m" = "services/eri" ]; then
+                m_pkgs=$(go list -f '{{if eq .Name "main"}}{{.ImportPath}}{{end}}' ./services/eri/... ./services/eri-restate/...)
+            else
+                m_pkgs=$(cd "$m" && go list -f '{{if eq .Name "main"}}{{.ImportPath}}{{end}}' ./...)
+            fi
             [ -n "$m_pkgs" ] && deadcode $f_flag $m_pkgs
             (cd "$m" && deadcode -test $f_flag ./...)
         fi

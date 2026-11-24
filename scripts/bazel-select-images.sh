@@ -22,6 +22,14 @@ OCI_SVCS=("eri" "haro" "coven" "docket-mcp" "kernel-mcp" "synapse" "transcripts"
 DOCKER_CFG=("eri-restate:.:./services/eri-restate/Dockerfile:services/eri-restate/*|services/eri/*|scripts/*|rules/*|.agents/*|pkg/*|go.mod|go.sum" "github-runner:.:./services/github-runner/Dockerfile:services/github-runner/*" "discord-mcp:.:./mcp/discord-mcp/Dockerfile:mcp/discord-mcp/*" "infisical-mcp:./mcp/infisical-mcp:./mcp/infisical-mcp/Dockerfile:mcp/infisical-mcp/*")
 PKG_CHANGED="false"; for f in "${CHANGED_FILES[@]}"; do [[ "$f" == pkg/* ]] && { PKG_CHANGED="true"; break; }; done
 declare -A AFF SEL; for s in "${OCI_SVCS[@]}"; do AFF["$s"]="false"; SEL["$s"]="false"; done; for ent in "${DOCKER_CFG[@]}"; do IFS=":" read -r s _ _ _ <<< "$ent"; AFF["$s"]="false"; SEL["$s"]="false"; done
+for f in "${CHANGED_FILES[@]}"; do
+    case "$f" in
+        services/docs-service/*) AFF["docs"]="true" ;;
+        services/eri/pkg/db/migrations/*) AFF["migrator"]="true"; AFF["eri"]="true" ;;
+        web/theme/*) AFF["console"]="true"; AFF["docs"]="true" ;;
+        services/*|mcp/*) sd=$(echo "$f" | cut -d/ -f2); [ -n "${AFF[$sd]+_}" ] && AFF["$sd"]="true" ;;
+    esac
+done
 CAND_OCI=()
 if [ "$FORCE_ALL" = "true" ]; then CAND_OCI=("${OCI_SVCS[@]}"); else
     filtered=()
@@ -29,26 +37,29 @@ if [ "$FORCE_ALL" = "true" ]; then CAND_OCI=("${OCI_SVCS[@]}"); else
     if [ ${#filtered[@]} -gt 0 ]; then
         . "$REPO_ROOT/scripts/lib/hermetic-go-env.sh" && ensure_bazel_build_files "$REPO_ROOT"
         f_set=$(printf '%s ' "${filtered[@]}")
-        while IFS= read -r m || [ -n "$m" ]; do c="${m#//images:}"; [ -n "$c" ] && CAND_OCI+=("$c"); done < <(bazel query "kind(oci_image, rdeps(//images:all, same_pkg_direct_rdeps(set($f_set))))" 2>/dev/null || true)
+        q_out=$(bazel query "kind(oci_image, rdeps(//images:all, same_pkg_direct_rdeps(set($f_set))))" 2>/dev/null) || CAND_OCI=("${OCI_SVCS[@]}")
+        if [ ${#CAND_OCI[@]} -eq 0 ]; then
+            while IFS= read -r m || [ -n "$m" ]; do c="${m#//images:}"; [ -n "$c" ] && CAND_OCI+=("$c"); done <<< "$q_out"
+        fi
     fi
 fi
 if [ "$FORCE_ALL" = "true" ]; then
     for s in "${OCI_SVCS[@]}"; do SEL["$s"]="true"; AFF["$s"]="true"; done
 elif [ ${#CAND_OCI[@]} -gt 0 ]; then
-    b_targets=()
-    for s in "${CAND_OCI[@]}"; do b_targets+=("//images:${s}"); AFF["$s"]="true"; done
+    command -v crane >/dev/null 2>&1 || { echo "::error::crane binary is required" >&2; exit 1; }
+    b_targets=(); for s in "${CAND_OCI[@]}"; do b_targets+=("//images:${s}"); AFF["$s"]="true"; done
     bazel build --remote_download_toplevel "${b_targets[@]}"
     for s in "${CAND_OCI[@]}"; do
         ldig=$(jq -r '.manifests[0].digest // empty' "bazel-bin/images/${s}/index.json" 2>/dev/null || true)
-        rdig=$(crane digest "ghcr.io/${OWNER}/aerial-${s}:latest" 2>/dev/null || true)
+        [ -n "$ldig" ] || { echo "::error::missing local digest for $s" >&2; exit 1; }
+        rdig=""
+        if rdig_out=$(crane digest "ghcr.io/${OWNER}/aerial-${s}:latest" 2>&1); then rdig="$rdig_out"; elif echo "$rdig_out" | grep -q -i -E '(404|not found|NAME_UNKNOWN|MANIFEST_UNKNOWN|UNAUTHORIZED|DENIED)'; then rdig=""; else echo "::error::crane error for $s: $rdig_out" >&2; exit 1; fi
         [ -z "$rdig" ] || [ "$ldig" != "$rdig" ] && { echo "Image $s changed: local=$ldig remote=$rdig" >&2; SEL["$s"]="true"; }
     done
 fi
-SEL_MAT=()
-for s in "${OCI_SVCS[@]}"; do [ "${SEL[$s]}" = "true" ] && SEL_MAT+=("{\"service\":\"$s\",\"image_name\":\"aerial-$s\",\"type\":\"bazel\"}"); done
+SEL_MAT=(); for s in "${OCI_SVCS[@]}"; do [ "${SEL[$s]}" = "true" ] && SEL_MAT+=("{\"service\":\"$s\",\"image_name\":\"aerial-$s\",\"type\":\"bazel\"}"); done
 for ent in "${DOCKER_CFG[@]}"; do
-    IFS=":" read -r s ctx df pat <<< "$ent"
-    sel="$FORCE_ALL"
+    IFS=":" read -r s ctx df pat <<< "$ent"; sel="$FORCE_ALL"
     if [ "$sel" = "false" ]; then
         for f in "${CHANGED_FILES[@]}"; do eval "case \"\$f\" in $pat) AFF[\"\$s\"]=\"true\"; [[ \"\$f\" =~ (_test\.go|testdata/) ]] || sel=\"true\" ;; esac"; [ "$sel" = "true" ] && break; done
     else AFF["$s"]="true"; fi

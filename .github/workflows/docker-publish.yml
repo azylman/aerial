@@ -106,7 +106,7 @@ jobs:
       # restate-server binary; the script fetches and sha256-checks it.
       - name: Run Real-Restate Integration Tests
         if: needs.changes.outputs.eri == 'true' || needs.changes.outputs.eri-restate == 'true' || inputs.force_all == true
-        run: bazel test --@rules_go//go/config:tags=restateintegration --test_arg=-test.v //services/eri/pkg/restatetest:... //services/eri/pkg/queue:...
+        run: bazel test --@rules_go//go/config:tags=restateintegration --test_arg=-test.v //services/eri/pkg/restatetest/... //services/eri/pkg/queue/...
 
   lint:
     name: Lint Microservices & Frontend

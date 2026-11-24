@@ -25,7 +25,7 @@ if [[ "$url" =~ /pulls ]] && [[ "$*" =~ POST ]]; then
   [[ "$*" =~ chunk-422 ]] && { touch "$TMPD/p422"; echo '{"message":"fail"}'; printf "\n422"; exit 0; }
   touch "$TMPD/has_pr"; echo '{"number":99,"html_url":"https://github.com/a/b/pull/99"}'; printf "\n201"; exit 0
 fi
-[[ "$url" =~ /git/refs/heads/ ]] && [[ "$*" =~ DELETE ]] && { touch "$TMPD/del_ref"; printf "\n204"; exit 0; }
+[[ "$url" =~ /git/refs/heads/ ]] && [[ "$*" =~ DELETE ]] && { [[ "$url" =~ %2F ]] || touch "$TMPD/del_ref"; printf "\n204"; exit 0; }
 [[ "$url" =~ /actions/runs/[0-9]+/rerun ]] && { touch "$TMPD/rerun"; printf "\n201"; exit 0; }
 [[ "$url" =~ /actions/runs ]] && { [ -f "$TMPD/run_prog" ] && s="in_progress" || s="completed"; echo "{\"workflow_runs\":[{\"id\":888,\"status\":\"$s\",\"name\":\"RoboRev Code Review\",\"path\":\".github/workflows/roborev.yml\"}]}"; printf "\n200"; exit 0; }
 printf "[]\n200"

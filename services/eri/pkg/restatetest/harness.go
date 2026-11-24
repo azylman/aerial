@@ -37,20 +37,27 @@ func resolveRestateServerBin() string {
 		if root == "" {
 			continue
 		}
+		for _, cand := range []string{
+			filepath.Join(root, "restate_server_linux_amd64+/restate-server"),
+			filepath.Join(root, "restate_server_linux_amd64/restate-server"),
+			filepath.Join(root, "_main/external/restate_server_linux_amd64+/restate-server"),
+		} {
+			if fi, err := os.Stat(cand); err == nil && !fi.IsDir() && (fi.Mode()&0o111 != 0) {
+				return cand
+			}
+		}
 		var found string
-		walkErr := filepath.Walk(root, func(path string, info os.FileInfo, err error) error {
+		_ = filepath.Walk(root, func(path string, info os.FileInfo, err error) error {
 			if err != nil {
 				return err
 			}
-			if found != "" {
-				return nil
-			}
 			if !info.IsDir() && filepath.Base(path) == "restate-server" && (info.Mode()&0o111 != 0) {
 				found = path
+				return filepath.SkipAll
 			}
 			return nil
 		})
-		if walkErr == nil && found != "" {
+		if found != "" {
 			return found
 		}
 	}
