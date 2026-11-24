@@ -251,27 +251,19 @@ func TestActionRepairInFlight(t *testing.T) {
 	}
 }
 
-func TestPostgresVanadisStore_RecordPRCheckStatus(t *testing.T) {
+func TestPostgresVanadisStore_RecordPRCheckStatus_ValidationAndWrites(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
-		name                  string
-		chunkID, headSHA      string
-		checkName, checkState string
-		chunkStatus, sabotage string
-		buildStatus           string
-		isActionChunk         bool
-		hasSibling            bool
-		siblingChunk          model.VanadisChunk
-		initialChecks         map[string]string
-		initialBanner         string
-		initialFailCount      int
-		nilDB                 bool
-		wantErr, wantSkipped  bool
-		wantStatus            string
-		wantBuildStatus       string
-		wantChecks            map[string]string
-		wantBanner            string
-		wantFailCount         int
+		name        string
+		chunkID     string
+		headSHA     string
+		checkName   string
+		checkState  string
+		chunkStatus string
+		sabotage    string
+		nilDB       bool
+		wantErr     bool
+		wantSkipped bool
 	}{
 		{name: "nil database", chunkID: "c1", headSHA: "sha-1", checkName: "test", checkState: "passed", nilDB: true, wantErr: true},
 		{name: "empty chunk id", chunkID: "", headSHA: "sha-1", checkName: "test", checkState: "passed", chunkStatus: "pr_opened", wantErr: true},
@@ -279,36 +271,76 @@ func TestPostgresVanadisStore_RecordPRCheckStatus(t *testing.T) {
 		{name: "record passed status", chunkID: "c1", headSHA: "sha-1", checkName: "test", checkState: "passed", chunkStatus: "pr_opened"},
 		{name: "skipped transition rejected", chunkID: "c1", headSHA: "sha-1", checkName: "test", checkState: "passed", chunkStatus: "deploying", wantErr: true, wantSkipped: true},
 		{name: "persistence failure", chunkID: "c1", headSHA: "sha-1", checkName: "test", checkState: "passed", chunkStatus: "pr_opened", sabotage: cfFailChunkWrite, wantErr: true},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			chunk := cfChunk(tc.chunkStatus)
+			chunk.HeadSHA = tc.headSHA
+			chunks := []model.VanadisChunk{chunk}
+			st, pool := cfOpenWithBuild(t, tc.nilDB, "running", chunks, tc.sabotage)
+			err := st.RecordPRCheckStatus(context.Background(), tc.chunkID, tc.headSHA, tc.checkName, tc.checkState)
+			assert.Equal(t, tc.wantErr, err != nil, "err = %v", err)
+			assert.Equal(t, tc.wantSkipped, errors.Is(err, ErrPRTransitionSkipped))
+			if tc.wantErr {
+				return
+			}
+			got := loadChunk(t, pool, "c1")
+			assert.Equal(t, map[string]string{tc.checkName: tc.checkState}, got.CIChecks)
+			assert.Equal(t, tc.headSHA, got.HeadSHA)
+		})
+	}
+}
+
+func TestPostgresVanadisStore_RecordPRCheckStatus_RecoveryAndSiblings(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name             string
+		checkState       string
+		chunkStatus      string
+		buildStatus      string
+		isActionChunk    bool
+		siblingChunk     model.VanadisChunk
+		initialChecks    map[string]string
+		initialBanner    string
+		initialFailCount int
+		wantErr          bool
+		wantSkipped      bool
+		wantStatus       string
+		wantBuildStatus  string
+		wantChecks       map[string]string
+	}{
 		{
-			name:    "failed pr chunk recovered to pr_opened and reopens build",
-			chunkID: "c1", headSHA: "sha-1", checkName: "test", checkState: "passed",
-			chunkStatus: "failed", buildStatus: "failed", initialBanner: "ci failed", initialFailCount: 3,
-			wantStatus: "pr_opened", wantBuildStatus: "running", wantFailCount: 0, wantChecks: map[string]string{"test": "passed"},
+			name:       "failed pr chunk recovered to pr_opened and reopens build",
+			checkState: "passed", chunkStatus: "failed", buildStatus: "failed",
+			initialBanner: "ci failed", initialFailCount: 3,
+			wantStatus: "pr_opened", wantBuildStatus: "running",
+			wantChecks: map[string]string{"test": "passed"},
 		},
 		{
-			name:    "failed pr check failure recorded while staying failed",
-			chunkID: "c1", headSHA: "sha-1", checkName: "test", checkState: "failed",
-			chunkStatus: "failed", buildStatus: "failed", initialBanner: "ci failed", initialFailCount: 3,
-			wantStatus: "failed", wantBuildStatus: "failed", wantBanner: "ci failed", wantFailCount: 3, wantChecks: map[string]string{"test": "failed"},
+			name:       "failed pr check failure recorded while staying failed",
+			checkState: "failed", chunkStatus: "failed", buildStatus: "failed",
+			initialBanner: "ci failed", initialFailCount: 3,
+			wantStatus: "failed", wantBuildStatus: "failed",
+			wantChecks: map[string]string{"test": "failed"},
 		},
 		{
-			name:    "failed pr chunk stays failed when another check remains failed",
-			chunkID: "c1", headSHA: "sha-1", checkName: "test", checkState: "passed",
-			chunkStatus: "failed", buildStatus: "failed", initialChecks: map[string]string{"lint": "failed"}, initialBanner: "ci failed", initialFailCount: 3,
-			wantStatus: "failed", wantBuildStatus: "failed", wantBanner: "ci failed", wantFailCount: 3, wantChecks: map[string]string{"lint": "failed", "test": "passed"},
+			name:       "failed pr chunk stays failed when another check remains failed",
+			checkState: "passed", chunkStatus: "failed", buildStatus: "failed",
+			initialChecks: map[string]string{"lint": "failed"}, initialBanner: "ci failed", initialFailCount: 3,
+			wantStatus: "failed", wantBuildStatus: "failed",
+			wantChecks: map[string]string{"lint": "failed", "test": "passed"},
 		},
 		{
-			name:    "failed pr chunk with failed sibling does not reopen build",
-			chunkID: "c1", headSHA: "sha-1", checkName: "test", checkState: "passed",
-			chunkStatus: "failed", buildStatus: "failed", initialBanner: "ci failed", initialFailCount: 2,
-			hasSibling: true, siblingChunk: model.VanadisChunk{ID: "c2", BuildID: "b1", ChunkIndex: 1, Mode: "pr", Repo: "aerial", Status: "failed"},
-			wantStatus: "pr_opened", wantBuildStatus: "failed", wantFailCount: 0, wantChecks: map[string]string{"test": "passed"},
+			name:       "failed pr chunk with failed sibling does not reopen build",
+			checkState: "passed", chunkStatus: "failed", buildStatus: "failed",
+			initialBanner: "ci failed", initialFailCount: 2,
+			siblingChunk: model.VanadisChunk{ID: "c2", BuildID: "b1", ChunkIndex: 1, Mode: "pr", Repo: "aerial", Status: "failed"},
+			wantStatus:   "pr_opened", wantBuildStatus: "failed",
+			wantChecks: map[string]string{"test": "passed"},
 		},
 		{
 			name:          "conflict pr chunk recovered to pr_opened on passed check",
-			chunkID:       "c1",
-			headSHA:       "sha-1",
-			checkName:     "test",
 			checkState:    "passed",
 			chunkStatus:   "conflict",
 			initialBanner: "Merge conflict detected",
@@ -316,10 +348,12 @@ func TestPostgresVanadisStore_RecordPRCheckStatus(t *testing.T) {
 			wantChecks:    map[string]string{"test": "passed"},
 		},
 		{
-			name:    "failed action chunk rejected",
-			chunkID: "c1", headSHA: "sha-1", checkName: "test", checkState: "passed",
-			chunkStatus: "failed", isActionChunk: true,
-			wantErr: true, wantSkipped: true,
+			name:          "failed action chunk rejected",
+			checkState:    "passed",
+			chunkStatus:   "failed",
+			isActionChunk: true,
+			wantErr:       true,
+			wantSkipped:   true,
 		},
 	}
 	for _, tc := range tests {
@@ -331,16 +365,16 @@ func TestPostgresVanadisStore_RecordPRCheckStatus(t *testing.T) {
 				chunk.Repo = ""
 				chunk.PRNumber = 0
 			}
-			chunk.HeadSHA = tc.headSHA
+			chunk.HeadSHA = "sha-1"
 			chunk.Banner = tc.initialBanner
 			chunk.CIFailCount = tc.initialFailCount
 			chunk.CIChecks = tc.initialChecks
 			chunks := []model.VanadisChunk{chunk}
-			if tc.hasSibling {
+			if tc.siblingChunk.ID != "" {
 				chunks = append(chunks, tc.siblingChunk)
 			}
-			st, pool := cfOpenWithBuild(t, tc.nilDB, tc.buildStatus, chunks, tc.sabotage)
-			err := st.RecordPRCheckStatus(context.Background(), tc.chunkID, tc.headSHA, tc.checkName, tc.checkState)
+			st, pool := cfOpenWithBuild(t, false, tc.buildStatus, chunks, "")
+			err := st.RecordPRCheckStatus(context.Background(), "c1", "sha-1", "test", tc.checkState)
 			assert.Equal(t, tc.wantErr, err != nil, "err = %v", err)
 			assert.Equal(t, tc.wantSkipped, errors.Is(err, ErrPRTransitionSkipped))
 			if tc.wantErr {
@@ -350,19 +384,20 @@ func TestPostgresVanadisStore_RecordPRCheckStatus(t *testing.T) {
 			if tc.wantChecks != nil {
 				assert.Equal(t, tc.wantChecks, got.CIChecks)
 			} else {
-				assert.Equal(t, map[string]string{tc.checkName: tc.checkState}, got.CIChecks)
+				assert.Equal(t, map[string]string{"test": tc.checkState}, got.CIChecks)
 			}
-			assert.Equal(t, tc.headSHA, got.HeadSHA)
+			assert.Equal(t, "sha-1", got.HeadSHA)
 			if tc.wantStatus != "" {
 				assert.Equal(t, tc.wantStatus, got.Status)
 			}
-			if tc.wantBanner != "" {
-				assert.Equal(t, tc.wantBanner, got.Banner)
-			} else if tc.wantStatus == "pr_opened" {
+			if tc.wantStatus == "pr_opened" {
 				assert.Empty(t, got.Banner)
 				assert.True(t, got.CompletedAt.IsZero())
+				assert.Zero(t, got.CIFailCount)
+			} else if tc.initialBanner != "" {
+				assert.Equal(t, tc.initialBanner, got.Banner)
+				assert.Equal(t, tc.initialFailCount, got.CIFailCount)
 			}
-			assert.Equal(t, tc.wantFailCount, got.CIFailCount)
 			if tc.wantBuildStatus != "" {
 				b := loadBuild(t, pool, "b1")
 				assert.Equal(t, tc.wantBuildStatus, b.Status)

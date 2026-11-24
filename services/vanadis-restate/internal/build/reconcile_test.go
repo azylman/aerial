@@ -142,6 +142,54 @@ func widgetStatus(c *eritest.Client) string {
 
 func cks(cs ...model.VanadisChunk) []model.VanadisChunk { return cs }
 
+func TestExecuteObjectTransition_GuardsAndErrors(t *testing.T) {
+	t.Parallel()
+
+	pending := ck("c1", "pending", "pr", 0)
+
+	tests := []struct {
+		name        string
+		build       model.VanadisBuild
+		chunks      []model.VanadisChunk
+		missing     bool
+		closed      bool
+		nilStore    bool
+		mutation    *BuildMutationRequest
+		dispatchErr error
+		wantStatus  string
+		wantErr     string
+	}{
+		{name: "dispatch error fails transition", build: bld("running"), chunks: cks(pending), dispatchErr: errors.New("dispatch failed"), wantErr: "dispatch failed"},
+		{name: "build not found", missing: true, wantStatus: statusNotFound},
+		{name: "store read failure", closed: true, wantErr: "closed pool"},
+		{name: "reconcile without store", nilStore: true, wantErr: "store not configured"},
+		{name: "mutate without store", nilStore: true, mutation: &BuildMutationRequest{Action: "chunk_merged", ChunkID: "c1"}, wantErr: "store not configured"},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			raw := reconcileStore(t, tc.build, tc.chunks, tc.missing, tc.closed)
+			st := &faultStore{VanadisStore: raw}
+			eri := &eritest.Client{DispatchErr: tc.dispatchErr}
+			bo := NewBuildObject("", nil)
+			if !tc.nilStore {
+				bo = bo.WithAuthority(st, executor.NewExecutor(t.TempDir(), eri, pubsub.NewMemoryBus(), "token", "example-owner", nil))
+			}
+			rt := newFakeObjectRuntime("b1")
+			res, err := bo.executeObjectTransition(rt, "reconcile", tc.mutation)
+			if tc.wantErr != "" {
+				assert.ErrorContains(t, err, tc.wantErr)
+				return
+			}
+			require.NoError(t, err)
+			assert.Equal(t, "b1", res.BuildID)
+			assert.Equal(t, tc.wantStatus, res.Status)
+			assert.True(t, rt.cleared)
+		})
+	}
+}
+
 func TestExecuteObjectTransition(t *testing.T) {
 	t.Parallel()
 
@@ -156,16 +204,10 @@ func TestExecuteObjectTransition(t *testing.T) {
 		name         string
 		build        model.VanadisBuild
 		chunks       []model.VanadisChunk
-		missing      bool
-		closed       bool
-		nilStore     bool
 		mutation     *BuildMutationRequest
 		prior        *model.BuildObjectState
-		dispatchErr  error
-		failErr      error
 		wantStatus   string
 		wantChunks   []string
-		wantErr      string
 		wantCleared  bool
 		wantLaunched map[string]bool
 		wantReserved []string
@@ -175,16 +217,11 @@ func TestExecuteObjectTransition(t *testing.T) {
 		wantBuildRow string
 	}{
 		{name: "pending chunk launches", build: bld("running"), chunks: cks(pending), prior: launchedState(nil, "c0"), wantStatus: "running", wantChunks: []string{"c1"}, wantReserved: []string{"c1"}, wantWidget: "running"},
-		{name: "dispatch error fails transition", build: bld("running"), chunks: cks(pending), dispatchErr: errors.New("dispatch failed"), wantErr: "dispatch failed"},
 		{name: "merged and completed clears state", build: bld("running"), chunks: cks(ck("c1", "completed", "pr", 0)), mutation: &BuildMutationRequest{Action: "chunk_merged", ChunkID: "c1"}, prior: launchedState(nil, "c0"), wantStatus: statusCompleted, wantCleared: true, wantWidget: statusCompleted},
 		{name: "failed build keeps state and launched", build: bld(statusFailed), chunks: cks(ck("c1", statusFailed, "pr", 0)), prior: launchedState(nil, "c0"), wantStatus: statusFailed, wantLaunched: map[string]bool{"c0": true}},
 		{name: "cancelled build clears state", build: bld(statusCancelled), chunks: cks(ck("c1", statusCancelled, "pr", 0)), wantStatus: statusCancelled, wantCleared: true},
 		{name: "cancel mutation clears state", build: bld(statusCancelled), chunks: cks(running), mutation: &BuildMutationRequest{Action: "cancelled", Reason: "user requested"}, prior: objState(bld(statusCancelled), running), wantStatus: statusCancelled, wantCleared: true},
 		{name: "completed build reports completed", build: bld(statusCompleted), chunks: cks(ck("c1", statusCompleted, "pr", 0)), wantStatus: statusCompleted, wantCleared: true},
-		{name: "build not found", missing: true, wantStatus: statusNotFound, wantCleared: true},
-		{name: "store read failure", closed: true, wantErr: "closed pool"},
-		{name: "reconcile without store", nilStore: true, wantErr: "store not configured"},
-		{name: "mutate without store", nilStore: true, mutation: &BuildMutationRequest{Action: "chunk_merged", ChunkID: "c1"}, wantErr: "store not configured"},
 		{name: "unchanged widget state skips sync", build: bld("running"), chunks: cks(ciChunk("running", "passed", 0, rollout)), prior: syncedPrior("running"), wantStatus: "running", wantStored: map[string]string{"c1": "running"}},
 		{name: "ci check change syncs widget", build: bld("running"), chunks: cks(ciChunk("pr_opened", "pending", 0, nil)), prior: syncedPrior("pr_opened"), wantStatus: "running", wantWidget: "running"},
 		{name: "chunk status change syncs widget", build: bld("running"), chunks: cks(running), prior: syncedPrior("pending"), wantStatus: "running", wantWidget: "running"},
@@ -200,20 +237,13 @@ func TestExecuteObjectTransition(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			raw := reconcileStore(t, tc.build, tc.chunks, tc.missing, tc.closed)
-			st := &faultStore{VanadisStore: raw, errs: map[string]error{"FailChunk": tc.failErr}}
-			eri := &eritest.Client{DispatchErr: tc.dispatchErr}
-			bo := NewBuildObject("", nil)
-			if !tc.nilStore {
-				bo = bo.WithAuthority(st, executor.NewExecutor(t.TempDir(), eri, pubsub.NewMemoryBus(), "token", "example-owner", nil))
-			}
+			raw := reconcileStore(t, tc.build, tc.chunks, false, false)
+			st := &faultStore{VanadisStore: raw}
+			eri := &eritest.Client{}
+			bo := NewBuildObject("", nil).WithAuthority(st, executor.NewExecutor(t.TempDir(), eri, pubsub.NewMemoryBus(), "token", "example-owner", nil))
 			rt := newFakeObjectRuntime("b1")
 			rt.state = tc.prior
 			res, err := bo.executeObjectTransition(rt, "reconcile", tc.mutation)
-			if tc.wantErr != "" {
-				assert.ErrorContains(t, err, tc.wantErr)
-				return
-			}
 			require.NoError(t, err)
 			assert.Equal(t, "b1", res.BuildID)
 			assert.Equal(t, tc.wantStatus, res.Status)
