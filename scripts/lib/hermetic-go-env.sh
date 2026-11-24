@@ -165,6 +165,14 @@ ensure_bazel_build_files() {
         return 0
     fi
 
+    if [ ! -f "${DOCKER_CONFIG:-$HOME/.docker}/config.json" ] && curl -fsS --connect-timeout 1 -m 2 http://127.0.0.1:4028/healthz >/dev/null 2>&1; then
+        cat > /tmp/aerial-bazel-downloader.cfg <<'EOF'
+rewrite https://ghcr.io/token(.*) http://127.0.0.1:4028/internal/github-ghcr-token$1
+EOF
+        mkdir -p "$HOME"
+        grep -qF 'aerial-bazel-downloader.cfg' "$HOME/.bazelrc" 2>/dev/null || echo 'common --downloader_config=/tmp/aerial-bazel-downloader.cfg' >> "$HOME/.bazelrc"
+    fi
+
     if [ ! -f "$root/MODULE.bazel.lock" ] || [ "$root/go.mod" -nt "$root/MODULE.bazel.lock" ]; then
         (cd "$root" && bazel mod tidy) || return $?
     fi
