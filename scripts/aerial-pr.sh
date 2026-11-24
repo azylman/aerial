@@ -52,15 +52,18 @@ elif [ "$CMD" = "submit" ]; then
   cur_b=$(git rev-parse --abbrev-ref HEAD); ex_pr=""; [ -n "$cur_b" ] && [ "$cur_b" != "$DEFAULT_BRANCH" ] && ex_pr=$(gh_call -X GET "$GITHUB_API/repos/$REPO_OWNER/$REPO_NAME/pulls?state=open&head=$REPO_OWNER:$cur_b" | sed '$d' | jq -c '.[0] // empty' 2>/dev/null || true); [ -n "$ex_pr" ] && { [ -z "$BODY" ] && BODY=$(echo "$ex_pr" | jq -r '.body // .title // "Automated update"'); [ -z "$msg" ] && msg=$(echo "$ex_pr" | jq -r '.title // empty'); }
   BODY="${BODY:0:60000}"; [ -z "${BODY//[[:space:]]/}" ] && { echo "ERROR: PR description mandatory" >&2; exit 1; }
   git add -A && git rm --cached -f PR_DESCRIPTION.md .pr_description.md 2>/dev/null || true
-  has_c=0; [ "$(git rev-parse HEAD 2>/dev/null)" != "$(git rev-parse origin/$DEFAULT_BRANCH 2>/dev/null || true)" ] && has_c=1
-  git diff --cached --quiet && [ "$has_c" -eq 0 ] && { jq -n --arg s "no_changes" --arg m "No modifications detected in scratch directory." '{status:$s,message:$m}'; exit 0; }
-  [ -f scripts/verify.sh ] && { chmod +x scripts/verify.sh && ./scripts/verify.sh --staged >&2 || { echo "ERROR: Pre-flight verification failed" >&2; exit 1; }; }
-  title="${msg:-feat($REPO_NAME): automated update by Aerial}"; title=$(printf "%s\n" "$title" | awk 'NF{print;exit}' | cut -c 1-256)
-  ! git diff --cached --quiet && git commit -m "$(printf "%s\n\n%s" "$title" "$BODY")" >/dev/null
   git fetch origin "+refs/heads/$DEFAULT_BRANCH:refs/remotes/origin/$DEFAULT_BRANCH" "+refs/heads/$cur_b:refs/remotes/origin/$cur_b" >/dev/null 2>&1 || true
-  r_sha=$(git rev-parse --verify -q "refs/remotes/origin/$cur_b" 2>/dev/null || echo "")
-  [ -n "$r_sha" ] && ! git merge-base --is-ancestor "$r_sha" HEAD 2>/dev/null && { git merge --no-edit -q "$r_sha" >/dev/null 2>&1 || { git merge --abort >/dev/null 2>&1 || true; echo "ERROR: Merge conflict with origin/$cur_b" >&2; exit 1; }; }
-  git rev-parse --verify "refs/remotes/origin/$DEFAULT_BRANCH" >/dev/null 2>&1 && ! git merge-base --is-ancestor "origin/$DEFAULT_BRANCH" HEAD 2>/dev/null && { git merge --no-edit -q "origin/$DEFAULT_BRANCH" >/dev/null 2>&1 || { git merge --abort >/dev/null 2>&1 || true; echo "ERROR: Merge conflict with origin/$DEFAULT_BRANCH" >&2; exit 1; }; }
+  r_sha=$(git rev-parse --verify -q "refs/remotes/origin/$cur_b" 2>/dev/null || echo ""); t_sha=$(git rev-parse --verify -q "refs/remotes/origin/$DEFAULT_BRANCH" 2>/dev/null || echo ""); o_head=$(git rev-parse HEAD); temp_sha=""
+  if [ -n "$r_sha" ] && [ "$r_sha" != "$o_head" ] || { [ -n "$t_sha" ] && ! git merge-base --is-ancestor "$t_sha" HEAD 2>/dev/null; }; then
+    ! git diff --cached --quiet && { git commit -q -m "chore: temp" >/dev/null 2>&1 && temp_sha=$(git rev-parse HEAD); }
+    git reset --hard "${r_sha:-$o_head}" >/dev/null 2>&1
+    [ "$o_head" != "${r_sha:-$o_head}" ] && ! git merge-base --is-ancestor "$o_head" HEAD 2>/dev/null && { git merge --no-edit -q "$o_head" >/dev/null 2>&1 || { git merge --abort >/dev/null 2>&1 || true; [ -n "$temp_sha" ] && { git reset --hard "$temp_sha" >/dev/null 2>&1; git reset --soft "$o_head" >/dev/null 2>&1; }; echo "ERROR: Merge conflict with origin/$cur_b" >&2; exit 1; }; }
+    [ -n "$t_sha" ] && ! git merge-base --is-ancestor "$t_sha" HEAD 2>/dev/null && { git merge --no-edit -q "$t_sha" >/dev/null 2>&1 || { git merge --abort >/dev/null 2>&1 || true; [ -n "$temp_sha" ] && { git reset --hard "$temp_sha" >/dev/null 2>&1; git reset --soft "$o_head" >/dev/null 2>&1; }; echo "ERROR: Merge conflict with origin/$DEFAULT_BRANCH" >&2; exit 1; }; }
+    [ -n "$temp_sha" ] && { git cherry-pick -n "$temp_sha" >/dev/null 2>&1 || { git cherry-pick --abort >/dev/null 2>&1 || true; git reset --hard "$temp_sha" >/dev/null 2>&1; git reset --soft "$o_head" >/dev/null 2>&1; echo "ERROR: Merge conflict applying staged changes" >&2; exit 1; }; }
+  fi
+  has_c=0; [ "$(git rev-parse HEAD 2>/dev/null)" != "$(git rev-parse origin/$DEFAULT_BRANCH 2>/dev/null || true)" ] && has_c=1; git diff --cached --quiet && [ "$has_c" -eq 0 ] && { jq -n --arg s "no_changes" --arg m "No modifications detected in scratch directory." '{status:$s,message:$m}'; exit 0; }
+  [ -f scripts/verify.sh ] && { chmod +x scripts/verify.sh && ./scripts/verify.sh --staged >&2 || { [ -n "$temp_sha" ] && { git reset --hard "$temp_sha" >/dev/null 2>&1; git reset --soft "$o_head" >/dev/null 2>&1; }; echo "ERROR: Pre-flight verification failed" >&2; exit 1; }; }
+  title="${msg:-feat($REPO_NAME): automated update by Aerial}"; title=$(printf "%s\n" "$title" | awk 'NF{print;exit}' | cut -c 1-256); ! git diff --cached --quiet && git commit -m "$(printf "%s\n\n%s" "$title" "$BODY")" >/dev/null
   git_auth; if ! git push -u origin "$cur_b" >/dev/null 2>&1; then [ -n "$r_sha" ] && git push "--force-with-lease=refs/heads/$cur_b:$r_sha" -u origin "$cur_b" >/dev/null 2>&1 || { echo "ERROR: push failed" >&2; exit 1; }; fi
   if [ -z "$ex_pr" ]; then
     raw=$(gh_call -X POST "$GITHUB_API/repos/$REPO_OWNER/$REPO_NAME/pulls" -d "$(jq -n --arg t "$title" --arg h "$cur_b" --arg b "$DEFAULT_BRANCH" --arg bd "$BODY" '{title:$t,head:$h,base:$b,body:$bd}')")
