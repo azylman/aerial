@@ -4,6 +4,7 @@ set -eu
 if [ -n "${TEST_SRCDIR:-}" ]; then
     cd "${TEST_SRCDIR}/${TEST_WORKSPACE:-_main}"
 fi
+if [ -n "${NODE_BIN:-}" ] && [ -x "$NODE_BIN" ]; then export PATH="$(cd "$(dirname "$NODE_BIN")" && pwd):$PATH"; fi
 
 if ! command -v node >/dev/null 2>&1; then
     echo "🚨 Error: node is required to run theme tests" >&2

@@ -15,5 +15,7 @@ sh_test(
     data = [
         ":migrations",
         "//services/eri/pkg/db:schema.sql",
+        "@atlas_linux_amd64//file",
     ],
+    env = {"ATLAS_BIN": "$(rootpath @atlas_linux_amd64//file)"},
 )

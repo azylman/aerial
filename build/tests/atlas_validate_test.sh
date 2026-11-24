@@ -5,10 +5,13 @@ if [ -n "${TEST_SRCDIR:-}" ]; then
     cd "${TEST_SRCDIR}/${TEST_WORKSPACE:-_main}"
 fi
 
-if ! command -v atlas >/dev/null 2>&1; then
+ATLAS="${ATLAS_BIN:-atlas}"
+[ -x "$ATLAS" ] && ATLAS="$(cd "$(dirname "$ATLAS")" && pwd)/$(basename "$ATLAS")"
+
+if ! command -v "$ATLAS" >/dev/null 2>&1; then
     echo "🚨 Error: atlas CLI is required to validate database migrations" >&2
     exit 1
 fi
 
 cd services/eri/pkg/db
-atlas migrate validate --dir file://migrations
+"$ATLAS" migrate validate --dir file://migrations

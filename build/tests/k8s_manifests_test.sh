@@ -5,12 +5,15 @@ if [ -n "${TEST_SRCDIR:-}" ]; then
     cd "${TEST_SRCDIR}/${TEST_WORKSPACE:-_main}"
 fi
 
+KUBECTL="${KUBECTL_BIN:-kubectl}"
+[ -x "$KUBECTL" ] && KUBECTL="$(cd "$(dirname "$KUBECTL")" && pwd)/$(basename "$KUBECTL")"
+
 # Step A: Validate Kustomize rendering (required)
-if ! command -v kubectl >/dev/null 2>&1; then
+if ! command -v "$KUBECTL" >/dev/null 2>&1; then
     echo "🚨 Error: kubectl is required for Kubernetes manifest validation" >&2
     exit 1
 fi
-kubectl kustomize --load-restrictor=LoadRestrictionsNone k8s >/dev/null
+"$KUBECTL" kustomize --load-restrictor=LoadRestrictionsNone k8s >/dev/null
 
 # Step B: Standard-library Python validation of Flux substitutions (required)
 if ! command -v python3 >/dev/null 2>&1; then

@@ -16,5 +16,9 @@ sh_test(
     data = [
         "lib/merge.js",
         "prepare-config.js",
+        "@nodejs_linux_amd64//:node_bin",
+        "@nodejs_linux_amd64//:node_files",
+        "@nodejs_linux_amd64//:npm_files",
     ] + glob(["test/*.test.js"]),
+    env = {"NODE_BIN": "$(rootpath @nodejs_linux_amd64//:node_bin)"},
 )
