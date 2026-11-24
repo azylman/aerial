@@ -291,7 +291,11 @@ rebase_staged_changes() {
             fi
             git cherry-pick --abort >/dev/null 2>&1 || true
             git merge --abort >/dev/null 2>&1 || true
-            [ -n "$temp_sha" ] && git reset --hard "$temp_sha" >/dev/null 2>&1 && git reset --soft "$remote_branch_sha" >/dev/null 2>&1
+            if [ -n "$temp_sha" ]; then
+                git reset --hard "$temp_sha" >/dev/null 2>&1 && git reset --soft "$head_sha" >/dev/null 2>&1
+            else
+                git reset --hard "$head_sha" >/dev/null 2>&1
+            fi
             echo "ERROR: Failed to merge origin/${target_branch} into ${current_branch} due to merge conflicts. Aborting submit." >&2
             return 1
         fi
@@ -305,7 +309,11 @@ rebase_staged_changes() {
         if ! git merge-base --is-ancestor "$upstream_sha" HEAD 2>/dev/null; then
             if ! git merge --no-edit -q "origin/${target_branch}" >/dev/null 2>&1; then
                 git merge --abort >/dev/null 2>&1 || true
-                [ -n "$temp_sha" ] && git reset --hard "$temp_sha" >/dev/null 2>&1 && git reset --soft "$head_sha" >/dev/null 2>&1
+                if [ -n "$temp_sha" ]; then
+                    git reset --hard "$temp_sha" >/dev/null 2>&1 && git reset --soft "$head_sha" >/dev/null 2>&1
+                else
+                    git reset --hard "$head_sha" >/dev/null 2>&1
+                fi
                 echo "ERROR: Failed to merge origin/${target_branch} into ${current_branch} due to merge conflicts. Aborting submit." >&2
                 return 1
             fi
