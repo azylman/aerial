@@ -413,54 +413,43 @@ func TestAttachStandalonePR_RecordsOwner(t *testing.T) {
 	}
 }
 
-type donorHydrationCase struct {
-	name               string
-	mode               string
-	donorStatus        string
-	donorBuildStatus   string
-	emptyDonorEvidence bool
-	targetStatus       string
-	targetPR           int
-	targetParent       string
-	donorBanner        string
-	reqRepo            string
-	targetRepo         string
-	wantStatus         string
-	wantBanner         string
-	wantJobs           []string
-	wantCIChecks       bool
-	wantEmptyEvidence  bool
-	wantCompletedAt    bool
-	wantParentStatus   string
+type donorHydrationPRCase struct {
+	name             string
+	donorStatus      string
+	donorBuildStatus string
+	targetStatus     string
+	targetPR         int
+	targetParent     string
+	donorBanner      string
+	reqRepo          string
+	targetRepo       string
+	wantStatus       string
+	wantBanner       string
+	wantJobs         []string
+	wantCompletedAt  bool
+	wantParentStatus string
 }
 
-func initHydrationFixture(tc donorHydrationCase, stamp time.Time, donorCIChecks map[string]string, donorRollout *pubsub.PRRolloutState) (paFixture, AttachChunkPRRequest) {
+func initPRHydrationFixture(tc donorHydrationPRCase, stamp time.Time, donorCIChecks map[string]string, donorRollout *pubsub.PRRolloutState) (paFixture, AttachChunkPRRequest) {
 	dBuildStatus := strutil.FirstNonEmpty(tc.donorBuildStatus, "running")
 	tParentStatus := strutil.FirstNonEmpty(tc.targetParent, "running")
 	tRepo := tc.targetRepo
-	if tRepo == "" && tc.mode == "pr" {
+	if tRepo == "" {
 		tRepo = "aerial"
 	}
 	donorBuild := paBuild("b-donor", "thread-donor", dBuildStatus)
 	targetBuild := paBuild("b-target", "thread-target", tParentStatus)
 	donorChunk := paChunk("c-donor", "b-donor", "pr", "aerial", tc.donorStatus, 0, 101)
-	if !tc.emptyDonorEvidence {
-		donorChunk.RolloutState = donorRollout
-		donorChunk.CIChecks = donorCIChecks
-	}
+	donorChunk.RolloutState = donorRollout
+	donorChunk.CIChecks = donorCIChecks
 	donorChunk.Banner = tc.donorBanner
 	donorChunk.CompletedAt = stamp
-	targetChunk := paChunk("c-target", "b-target", tc.mode, tRepo, tc.targetStatus, 0, tc.targetPR)
+	targetChunk := paChunk("c-target", "b-target", "pr", tRepo, tc.targetStatus, 0, tc.targetPR)
 	if tc.targetPR != 0 && (tc.targetStatus == statusCompleted || tc.targetStatus == statusDeployed || tc.targetStatus == statusMerged || tc.targetStatus == "deploy_failed") {
 		targetChunk.CompletedAt = stamp
-		if tc.targetStatus == "deploy_failed" {
-			targetChunk.Banner = "old deploy failure"
-			targetChunk.RolloutState = &pubsub.PRRolloutState{ExpectedJobs: []string{"old-job"}}
-			targetChunk.CIChecks = map[string]string{"old-check": "failure"}
-		}
 	}
 	reqRepo := "aerial"
-	if tc.mode == "pr" && tc.targetRepo != "" && tc.reqRepo == "" {
+	if tc.targetRepo != "" && tc.reqRepo == "" {
 		reqRepo = ""
 	} else if tc.reqRepo != "" {
 		reqRepo = tc.reqRepo
@@ -473,13 +462,211 @@ func initHydrationFixture(tc donorHydrationCase, stamp time.Time, donorCIChecks 
 	return fix, req
 }
 
-func checkHydratedChunkFields(t *testing.T, got model.VanadisChunk, tc donorHydrationCase, donorCIChecks map[string]string) {
+func checkPRHydratedChunkFields(t *testing.T, got model.VanadisChunk, tc donorHydrationPRCase, donorCIChecks map[string]string) {
 	t.Helper()
 	if got.Status != tc.wantStatus {
 		t.Errorf("status = %q, want %q", got.Status, tc.wantStatus)
 	}
 	if got.Banner != tc.wantBanner {
 		t.Errorf("banner = %q, want %q", got.Banner, tc.wantBanner)
+	}
+	if got.PRNumber != 101 {
+		t.Errorf("pr_number = %d, want 101", got.PRNumber)
+	}
+	if tc.wantJobs != nil {
+		if got.RolloutState == nil {
+			t.Fatalf("expected rollout_state, got nil")
+		}
+		if !reflect.DeepEqual(tc.wantJobs, got.RolloutState.ExpectedJobs) {
+			t.Errorf("jobs = %v, want %v", got.RolloutState.ExpectedJobs, tc.wantJobs)
+		}
+		if !reflect.DeepEqual(donorCIChecks, got.CIChecks) {
+			t.Errorf("ci_checks = %v, want %v", got.CIChecks, donorCIChecks)
+		}
+	} else if len(got.CIChecks) != 0 {
+		t.Errorf("expected empty ci_checks, got %v", got.CIChecks)
+	}
+	if tc.wantCompletedAt && got.CompletedAt.IsZero() {
+		t.Errorf("expected completed_at to be set, was zero")
+	}
+	if !tc.wantCompletedAt && !got.CompletedAt.IsZero() {
+		t.Errorf("expected completed_at to be zero, was %v", got.CompletedAt)
+	}
+}
+
+func checkHydratedBuild(t *testing.T, pool *pgxpool.Pool, wantStatus string) {
+	t.Helper()
+	if wantStatus == "" {
+		return
+	}
+	gotBuild := loadBuild(t, pool, "b-target")
+	if gotBuild.Status != wantStatus {
+		t.Errorf("parent build status = %q, want %q", gotBuild.Status, wantStatus)
+	}
+}
+
+func donorHydrationPRCases() []donorHydrationPRCase {
+	return []donorHydrationPRCase{
+		{
+			name:            "pr chunk adopts completed from completed donor",
+			donorStatus:     "completed",
+			targetStatus:    "running",
+			wantStatus:      "completed",
+			wantBanner:      "",
+			wantJobs:        []string{"eri"},
+			wantCompletedAt: true,
+		},
+		{
+			name:            "pr chunk maps deployed donor to completed",
+			donorStatus:     "deployed",
+			targetStatus:    "running",
+			wantStatus:      "completed",
+			wantBanner:      "",
+			wantJobs:        []string{"eri"},
+			wantCompletedAt: true,
+		},
+		{
+			name:            "pr chunk adopts merged from merged donor",
+			donorStatus:     "merged",
+			targetStatus:    "running",
+			wantStatus:      "merged",
+			wantBanner:      "",
+			wantJobs:        []string{"eri"},
+			wantCompletedAt: true,
+		},
+		{
+			name:            "pr chunk adopts ci_failed and banner from donor",
+			donorStatus:     "ci_failed",
+			targetStatus:    "running",
+			donorBanner:     "tests failed",
+			wantStatus:      "ci_failed",
+			wantBanner:      "tests failed",
+			wantJobs:        []string{"eri"},
+			wantCompletedAt: false,
+		},
+		{
+			name:            "pr chunk adopts deploy_failed and banner from donor",
+			donorStatus:     "deploy_failed",
+			targetStatus:    "running",
+			donorBanner:     "deploy failed",
+			wantStatus:      "deploy_failed",
+			wantBanner:      "deploy failed",
+			wantJobs:        []string{"eri"},
+			wantCompletedAt: true,
+		},
+		{
+			name:            "pr chunk adopts conflict and banner from donor",
+			donorStatus:     "conflict",
+			targetStatus:    "running",
+			donorBanner:     "merge conflict",
+			wantStatus:      "conflict",
+			wantBanner:      "merge conflict",
+			wantJobs:        []string{"eri"},
+			wantCompletedAt: false,
+		},
+		{
+			name:            "pr_opened donor does not advance target chunk",
+			donorStatus:     "pr_opened",
+			targetStatus:    "running",
+			wantStatus:      "pr_opened",
+			wantBanner:      "",
+			wantJobs:        nil,
+			wantCompletedAt: false,
+		},
+		{
+			name:             "cancelled donor build is ignored",
+			donorStatus:      "completed",
+			donorBuildStatus: "cancelled",
+			targetStatus:     "running",
+			wantStatus:       "pr_opened",
+			wantBanner:       "",
+			wantJobs:         nil,
+			wantCompletedAt:  false,
+		},
+		{
+			name:             "recovers failed worker and reopens parent build even with completed donor",
+			donorStatus:      "completed",
+			targetStatus:     "failed",
+			targetParent:     "failed",
+			wantStatus:       "completed",
+			wantBanner:       "",
+			wantJobs:         []string{"eri"},
+			wantCompletedAt:  true,
+			wantParentStatus: "running",
+		},
+		{
+			name:            "empty req repo derives repo from pr chunk",
+			donorStatus:     "completed",
+			targetStatus:    "running",
+			targetRepo:      "aerial",
+			reqRepo:         "",
+			wantStatus:      "completed",
+			wantBanner:      "",
+			wantJobs:        []string{"eri"},
+			wantCompletedAt: true,
+		},
+		{
+			name:            "completed target chunk does not regress when attached with merged donor",
+			donorStatus:     "merged",
+			targetStatus:    "completed",
+			targetPR:        101,
+			wantStatus:      "completed",
+			wantBanner:      "",
+			wantJobs:        nil,
+			wantCompletedAt: true,
+		},
+	}
+}
+
+type donorHydrationActionCase struct {
+	name               string
+	donorStatus        string
+	donorBanner        string
+	emptyDonorEvidence bool
+	targetStatus       string
+	targetRepo         string
+	targetPR           int
+	wantStatus         string
+	wantJobs           []string
+	wantCIChecks       bool
+	wantEmptyEvidence  bool
+	wantCompletedAt    bool
+}
+
+func initActionHydrationFixture(tc donorHydrationActionCase, stamp time.Time, donorCIChecks map[string]string, donorRollout *pubsub.PRRolloutState) (paFixture, AttachChunkPRRequest) {
+	donorBuild := paBuild("b-donor", "thread-donor", "running")
+	targetBuild := paBuild("b-target", "thread-target", "running")
+	donorChunk := paChunk("c-donor", "b-donor", "pr", "aerial", tc.donorStatus, 0, 101)
+	if !tc.emptyDonorEvidence {
+		donorChunk.RolloutState = donorRollout
+		donorChunk.CIChecks = donorCIChecks
+	}
+	donorChunk.Banner = tc.donorBanner
+	donorChunk.CompletedAt = stamp
+	targetChunk := paChunk("c-target", "b-target", "action", tc.targetRepo, tc.targetStatus, 0, tc.targetPR)
+	if tc.targetPR != 0 && (tc.targetStatus == statusCompleted || tc.targetStatus == statusDeployed || tc.targetStatus == statusMerged || tc.targetStatus == "deploy_failed") {
+		targetChunk.CompletedAt = stamp
+		if tc.targetStatus == "deploy_failed" {
+			targetChunk.Banner = "old deploy failure"
+			targetChunk.RolloutState = &pubsub.PRRolloutState{ExpectedJobs: []string{"old-job"}}
+			targetChunk.CIChecks = map[string]string{"old-check": "failure"}
+		}
+	}
+	fix := paFixture{
+		builds: []model.VanadisBuild{donorBuild, targetBuild},
+		chunks: []model.VanadisChunk{donorChunk, targetChunk},
+	}
+	req := AttachChunkPRRequest{ChunkID: "c-target", PRNumber: 101, Repo: "aerial"}
+	return fix, req
+}
+
+func checkActionHydratedChunkFields(t *testing.T, got model.VanadisChunk, tc donorHydrationActionCase, donorCIChecks map[string]string) {
+	t.Helper()
+	if got.Status != tc.wantStatus {
+		t.Errorf("status = %q, want %q", got.Status, tc.wantStatus)
+	}
+	if got.Banner != "" {
+		t.Errorf("banner = %q, want empty", got.Banner)
 	}
 	if got.PRNumber != 101 {
 		t.Errorf("pr_number = %d, want 101", got.PRNumber)
@@ -511,213 +698,57 @@ func checkHydratedChunkFields(t *testing.T, got model.VanadisChunk, tc donorHydr
 	}
 }
 
-func checkHydratedBuild(t *testing.T, pool *pgxpool.Pool, wantStatus string) {
-	t.Helper()
-	if wantStatus == "" {
-		return
-	}
-	gotBuild := loadBuild(t, pool, "b-target")
-	if gotBuild.Status != wantStatus {
-		t.Errorf("parent build status = %q, want %q", gotBuild.Status, wantStatus)
-	}
-}
-
-func donorHydrationPRCases() []donorHydrationCase {
-	return []donorHydrationCase{
-		{
-			name:            "pr chunk adopts completed from completed donor",
-			mode:            "pr",
-			donorStatus:     "completed",
-			targetStatus:    "running",
-			wantStatus:      "completed",
-			wantBanner:      "",
-			wantJobs:        []string{"eri"},
-			wantCIChecks:    true,
-			wantCompletedAt: true,
-		},
-		{
-			name:            "pr chunk maps deployed donor to completed",
-			mode:            "pr",
-			donorStatus:     "deployed",
-			targetStatus:    "running",
-			wantStatus:      "completed",
-			wantBanner:      "",
-			wantJobs:        []string{"eri"},
-			wantCIChecks:    true,
-			wantCompletedAt: true,
-		},
-		{
-			name:            "pr chunk adopts merged from merged donor",
-			mode:            "pr",
-			donorStatus:     "merged",
-			targetStatus:    "running",
-			wantStatus:      "merged",
-			wantBanner:      "",
-			wantJobs:        []string{"eri"},
-			wantCIChecks:    true,
-			wantCompletedAt: true,
-		},
-		{
-			name:            "pr chunk adopts ci_failed and banner from donor",
-			mode:            "pr",
-			donorStatus:     "ci_failed",
-			targetStatus:    "running",
-			donorBanner:     "tests failed",
-			wantStatus:      "ci_failed",
-			wantBanner:      "tests failed",
-			wantJobs:        []string{"eri"},
-			wantCIChecks:    true,
-			wantCompletedAt: false,
-		},
-		{
-			name:            "pr chunk adopts deploy_failed and banner from donor",
-			mode:            "pr",
-			donorStatus:     "deploy_failed",
-			targetStatus:    "running",
-			donorBanner:     "deploy failed",
-			wantStatus:      "deploy_failed",
-			wantBanner:      "deploy failed",
-			wantJobs:        []string{"eri"},
-			wantCIChecks:    true,
-			wantCompletedAt: true,
-		},
-		{
-			name:            "pr chunk adopts conflict and banner from donor",
-			mode:            "pr",
-			donorStatus:     "conflict",
-			targetStatus:    "running",
-			donorBanner:     "merge conflict",
-			wantStatus:      "conflict",
-			wantBanner:      "merge conflict",
-			wantJobs:        []string{"eri"},
-			wantCIChecks:    true,
-			wantCompletedAt: false,
-		},
-		{
-			name:            "pr_opened donor does not advance target chunk",
-			mode:            "pr",
-			donorStatus:     "pr_opened",
-			targetStatus:    "running",
-			wantStatus:      "pr_opened",
-			wantBanner:      "",
-			wantJobs:        nil,
-			wantCIChecks:    false,
-			wantCompletedAt: false,
-		},
-		{
-			name:             "cancelled donor build is ignored",
-			mode:             "pr",
-			donorStatus:      "completed",
-			donorBuildStatus: "cancelled",
-			targetStatus:     "running",
-			wantStatus:       "pr_opened",
-			wantBanner:       "",
-			wantJobs:         nil,
-			wantCIChecks:     false,
-			wantCompletedAt:  false,
-		},
-		{
-			name:             "recovers failed worker and reopens parent build even with completed donor",
-			mode:             "pr",
-			donorStatus:      "completed",
-			targetStatus:     "failed",
-			targetParent:     "failed",
-			wantStatus:       "completed",
-			wantBanner:       "",
-			wantJobs:         []string{"eri"},
-			wantCIChecks:     true,
-			wantCompletedAt:  true,
-			wantParentStatus: "running",
-		},
-		{
-			name:            "empty req repo derives repo from pr chunk",
-			mode:            "pr",
-			donorStatus:     "completed",
-			targetStatus:    "running",
-			targetRepo:      "aerial",
-			reqRepo:         "",
-			wantStatus:      "completed",
-			wantBanner:      "",
-			wantJobs:        []string{"eri"},
-			wantCIChecks:    true,
-			wantCompletedAt: true,
-		},
-		{
-			name:            "completed target chunk does not regress when attached with merged donor",
-			mode:            "pr",
-			donorStatus:     "merged",
-			targetStatus:    "completed",
-			targetPR:        101,
-			wantStatus:      "completed",
-			wantBanner:      "",
-			wantJobs:        nil,
-			wantCIChecks:    false,
-			wantCompletedAt: true,
-		},
-	}
-}
-
-func donorHydrationActionCases() []donorHydrationCase {
-	return []donorHydrationCase{
+func donorHydrationActionCases() []donorHydrationActionCase {
+	return []donorHydrationActionCase{
 		{
 			name:            "action chunk with deployed donor stays in running and clears banner",
-			mode:            "action",
 			donorStatus:     "deployed",
 			targetStatus:    "running",
 			donorBanner:     "ignore me",
 			wantStatus:      "running",
-			wantBanner:      "",
 			wantJobs:        []string{"eri"},
 			wantCIChecks:    true,
 			wantCompletedAt: false,
 		},
 		{
 			name:            "action chunk in failed status with completed donor stays failed",
-			mode:            "action",
 			donorStatus:     "completed",
 			targetStatus:    "failed",
 			wantStatus:      "failed",
-			wantBanner:      "",
 			wantJobs:        []string{"eri"},
 			wantCIChecks:    true,
 			wantCompletedAt: false,
 		},
 		{
 			name:            "action chunk already completed for same PR preserves completed with deployed donor",
-			mode:            "action",
 			donorStatus:     "deployed",
 			targetStatus:    "completed",
 			targetRepo:      "aerial",
 			targetPR:        101,
 			wantStatus:      "completed",
-			wantBanner:      "",
 			wantJobs:        nil,
 			wantCIChecks:    false,
 			wantCompletedAt: true,
 		},
 		{
 			name:            "action chunk in deploy_failed with completed donor adopts pr_opened and clears completed_at",
-			mode:            "action",
 			donorStatus:     "completed",
 			targetStatus:    "deploy_failed",
 			targetRepo:      "aerial",
 			targetPR:        50,
 			wantStatus:      "pr_opened",
-			wantBanner:      "",
 			wantJobs:        []string{"eri"},
 			wantCIChecks:    true,
 			wantCompletedAt: false,
 		},
 		{
 			name:               "action chunk in deploy_failed with empty-evidence completed donor clears stale evidence and completed_at",
-			mode:               "action",
 			donorStatus:        "completed",
 			emptyDonorEvidence: true,
 			targetStatus:       "deploy_failed",
 			targetRepo:         "aerial",
 			targetPR:           50,
 			wantStatus:         "pr_opened",
-			wantBanner:         "",
 			wantJobs:           nil,
 			wantCIChecks:       false,
 			wantEmptyEvidence:  true,
@@ -726,19 +757,15 @@ func donorHydrationActionCases() []donorHydrationCase {
 	}
 }
 
-func donorHydrationCases() []donorHydrationCase {
-	return append(donorHydrationPRCases(), donorHydrationActionCases()...)
-}
-
-func TestPostgresVanadisStore_AttachChunkPR_DonorHydration(t *testing.T) {
+func TestAttachPRToChunk_DonorHydrationPR(t *testing.T) {
 	t.Parallel()
 	stamp := time.Date(2026, 5, 1, 12, 0, 0, 0, time.UTC)
 	donorCIChecks := map[string]string{"ci": "passed"}
 	donorRollout := &pubsub.PRRolloutState{ExpectedJobs: []string{"eri"}}
-	for _, tc := range donorHydrationCases() {
+	for _, tc := range donorHydrationPRCases() {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			fix, req := initHydrationFixture(tc, stamp, donorCIChecks, donorRollout)
+			fix, req := initPRHydrationFixture(tc, stamp, donorCIChecks, donorRollout)
 			st, pool := fix.open(t)
 			bID, cID, thID, err := st.AttachChunkPR(context.Background(), req)
 			if err != nil {
@@ -749,8 +776,32 @@ func TestPostgresVanadisStore_AttachChunkPR_DonorHydration(t *testing.T) {
 			}
 
 			got := loadChunk(t, pool, "c-target")
-			checkHydratedChunkFields(t, got, tc, donorCIChecks)
+			checkPRHydratedChunkFields(t, got, tc, donorCIChecks)
 			checkHydratedBuild(t, pool, tc.wantParentStatus)
+		})
+	}
+}
+
+func TestAttachPRToChunk_DonorHydrationAction(t *testing.T) {
+	t.Parallel()
+	stamp := time.Date(2026, 5, 1, 12, 0, 0, 0, time.UTC)
+	donorCIChecks := map[string]string{"ci": "passed"}
+	donorRollout := &pubsub.PRRolloutState{ExpectedJobs: []string{"eri"}}
+	for _, tc := range donorHydrationActionCases() {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			fix, req := initActionHydrationFixture(tc, stamp, donorCIChecks, donorRollout)
+			st, pool := fix.open(t)
+			bID, cID, thID, err := st.AttachChunkPR(context.Background(), req)
+			if err != nil {
+				t.Fatalf("AttachChunkPR failed: %v", err)
+			}
+			if bID != "b-target" || cID != "c-target" || thID != "thread-target" {
+				t.Fatalf("AttachChunkPR returned (%q, %q, %q), want (b-target, c-target, thread-target)", bID, cID, thID)
+			}
+
+			got := loadChunk(t, pool, "c-target")
+			checkActionHydratedChunkFields(t, got, tc, donorCIChecks)
 		})
 	}
 }
