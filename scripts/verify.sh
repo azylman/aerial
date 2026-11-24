@@ -378,6 +378,7 @@ run_go_pkgs_coverage() {
     for pkg in "$@"; do
         rel_pkg="${pkg#/}"
         rel_pkg="${rel_pkg%/}"
+        rm -rf "${REPO_ROOT}/bazel-testlogs/${rel_pkg}"
         targets="${targets:+$targets }//${rel_pkg}:all"
     done
 
@@ -401,7 +402,8 @@ run_go_pkgs_coverage() {
         rel_pkg="${rel_pkg%/}"
         cov_files=$(find "${REPO_ROOT}/bazel-testlogs/${rel_pkg}" -maxdepth 5 -name "coverage.dat" 2>/dev/null || true)
         if [ -z "$cov_files" ]; then
-            continue
+            echo "🚨 [Aerial Verify] No coverage.dat found for package //${rel_pkg}:all" >&2
+            exit 1
         fi
 
         prof_file=$(mktemp /tmp/aerial-staged-cov.XXXXXX)
@@ -413,36 +415,51 @@ run_go_pkgs_coverage() {
             exit 1
         fi
 
-        awk -v prefix="github.com/azylman/aerial/${rel_pkg}/" '
+        awk -v p1="github.com/azylman/aerial/${rel_pkg}/" -v p2="${rel_pkg}/" '
             /^mode:/ { print; next }
-            index($1, prefix) == 1 && substr($1, length(prefix)+1) !~ /\// { print }
+            index($1, p1) == 1 {
+                rem = substr($1, length(p1)+1)
+                if (rem !~ /\//) { print; next }
+            }
+            index($1, p2) == 1 {
+                rem = substr($1, length(p2)+1)
+                if (rem !~ /\//) { print; next }
+            }
         ' "$prof_file" > "$filtered_prof"
         rm -f "$prof_file"
 
-        if [ -s "$filtered_prof" ]; then
-            counts=$(awk '
-                BEGIN { tot=0; cov=0 }
-                /^mode:/ { next }
-                NF >= 3 {
-                    stmts = $(NF-1) + 0
-                    count = $NF + 0
-                    tot += stmts
-                    if (count > 0) cov += stmts
-                }
-                END { printf("%d %d\n", tot, cov) }
-            ' "$filtered_prof")
-            pkg_tot=$(echo "$counts" | awk '{print $1}')
-            pkg_cov=$(echo "$counts" | awk '{print $2}')
-            if [ "$pkg_tot" -gt 0 ]; then
-                pct_val=$(awk "BEGIN { printf \"%.1f\", ($pkg_cov / $pkg_tot) * 100.0 }")
-                is_violation=$(awk "BEGIN { print ($pkg_cov * 100 < $pkg_tot * 95.0) ? 1 : 0 }")
-                if [ "$is_violation" -eq 1 ]; then
-                    echo "🚨 [Aerial Verify] Package $rel_pkg coverage ($pct_val% — $pkg_cov/$pkg_tot stmts) is below required 95.0% floor." >&2
-                    (cd "$REPO_ROOT" && go tool cover -func="$filtered_prof" 2>/dev/null | awk '$1 !~ /^total:/ && $NF != "100.0%"' | sort -k3 -n | head -n 5 | sed 's/^/   • /') >&2 || true
-                    rm -f "$filtered_prof"
-                    exit 1
-                fi
-            fi
+        if [ ! -s "$filtered_prof" ]; then
+            echo "🚨 [Aerial Verify] Per-package coverage filter produced empty profile for $rel_pkg" >&2
+            rm -f "$filtered_prof"
+            exit 1
+        fi
+
+        counts=$(awk '
+            BEGIN { tot=0; cov=0 }
+            /^mode:/ { next }
+            NF >= 3 {
+                stmts = $(NF-1) + 0
+                count = $NF + 0
+                tot += stmts
+                if (count > 0) cov += stmts
+            }
+            END { printf("%d %d\n", tot, cov) }
+        ' "$filtered_prof")
+        pkg_tot=$(echo "$counts" | awk '{print $1}')
+        pkg_cov=$(echo "$counts" | awk '{print $2}')
+        if [ "$pkg_tot" -le 0 ]; then
+            echo "🚨 [Aerial Verify] Package $rel_pkg coverage profile has 0 countable statements." >&2
+            rm -f "$filtered_prof"
+            exit 1
+        fi
+
+        pct_val=$(awk "BEGIN { printf \"%.1f\", ($pkg_cov / $pkg_tot) * 100.0 }")
+        is_violation=$(awk "BEGIN { print ($pkg_cov * 100 < $pkg_tot * 95.0) ? 1 : 0 }")
+        if [ "$is_violation" -eq 1 ]; then
+            echo "🚨 [Aerial Verify] Package $rel_pkg coverage ($pct_val% — $pkg_cov/$pkg_tot stmts) is below required 95.0% floor." >&2
+            (cd "$REPO_ROOT" && go tool cover -func="$filtered_prof" 2>/dev/null | awk '$1 !~ /^total:/ && $NF != "100.0%"' | sort -k3 -n | head -n 5 | sed 's/^/   • /') >&2 || true
+            rm -f "$filtered_prof"
+            exit 1
         fi
         rm -f "$filtered_prof"
     done
@@ -764,7 +781,9 @@ if [ "$MODE" = "staged" ]; then
         run_go_pkgs_coverage $staged_cov_pkgs
     fi
 
-    # Non-Go validation suites via cached Bazel sh_tests
+    # Non-Go validation suites via cached Bazel sh_tests.
+    # Unconditionally evaluated in staged mode because bazel-remote caches unchanged targets in <0.3s
+    # while eliminating path regex filters across stacked PR diffs. (run_atlas_validate remains for full mode).
     bazel test //k8s:manifests_test //web/theme:theme_test //services/docs-service:syntax_test //services/homepage:homepage_test //services/grafana:dashboards_test //services/eri/pkg/db:atlas_validate_test
 
     # Check React console UI (typecheck, coverage-gated tests, production build)
