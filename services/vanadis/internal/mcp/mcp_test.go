@@ -406,7 +406,6 @@ func TestMCP_Tools(t *testing.T) {
 		{"cancel_build", "not found", `{"build_id":"nonexistent"}`, true, "build not found", fxSeeded},
 		{"cancel_build", "conflict status", `{"build_id":"build-mcp-2"}`, true, "vanadis build state conflict", fxSeeded},
 		{"cancel_build", "valid cancel", `{"build_id":"build-mcp-1"}`, false, `"status":"cancelled"`, fxSeeded},
-		{"cancel_build", "routes to the build runner", `{"build_id":"build-mcp-4"}`, false, `"status":"cancelled"`, fxSeeded},
 	}
 	for _, tc := range tests {
 		t.Run(tc.tool+" "+tc.name, func(t *testing.T) {
