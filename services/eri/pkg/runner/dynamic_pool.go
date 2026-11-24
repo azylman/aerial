@@ -5,6 +5,7 @@ import (
 	"errors"
 	"log"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -20,6 +21,7 @@ type DynamicVoicePool struct {
 	factory     DynamicVoicePoolFactory
 	retiringWg  sync.WaitGroup
 	closed      bool
+	draining    atomic.Bool
 }
 
 var _ AgentPool = (*DynamicVoicePool)(nil)
@@ -170,6 +172,7 @@ func (p *DynamicVoicePool) MarkDirty() {
 		}
 		return
 	}
+	propagateDrainToCandidate(candidatePool, p.draining.Load())
 
 	p.mu.Lock()
 	if p.closed {
@@ -196,6 +199,17 @@ func (p *DynamicVoicePool) MarkDirty() {
 	}
 }
 
+// propagateDrainToCandidate latches drain on a freshly adopted pool when the
+// wrapper already drained, so the new primary resumes the same sessions.
+func propagateDrainToCandidate(candidatePool AgentPool, draining bool) {
+	if !draining {
+		return
+	}
+	if d, ok := candidatePool.(interface{ BeginDrain() }); ok {
+		d.BeginDrain()
+	}
+}
+
 // AcquireLease delegates lease acquisition to the underlying pool.
 func (p *DynamicVoicePool) AcquireLease(ctx context.Context, targetKey string) (SessionLease, error) {
 	pool, err := p.activePool()
@@ -203,4 +217,23 @@ func (p *DynamicVoicePool) AcquireLease(ctx context.Context, targetKey string) (
 		return nil, err
 	}
 	return pool.AcquireLease(ctx, targetKey)
+}
+
+// Draining reports whether BeginDrain has latched on this pool.
+func (p *DynamicVoicePool) Draining() bool {
+	return p != nil && p.draining.Load()
+}
+
+// BeginDrain latches drain on the active pool and propagates to any pool adopted by
+// a later reload, so the new primary resumes the same sessions.
+func (p *DynamicVoicePool) BeginDrain() {
+	if p == nil {
+		return
+	}
+	p.draining.Store(true)
+	if pool, err := p.activePool(); err == nil {
+		if d, ok := pool.(interface{ BeginDrain() }); ok {
+			d.BeginDrain()
+		}
+	}
 }

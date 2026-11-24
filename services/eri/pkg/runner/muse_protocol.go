@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"fmt"
 	"log"
 	"strings"
 	"time"
@@ -45,6 +46,34 @@ func extractMuseSessionID(resultRaw json.RawMessage, fallback string) string {
 	return fallback
 }
 
+// MuseResumeError reports a session/resume RPC rejection that is not a definite
+// not-found, so the caller retries instead of starting a fresh session and the
+// failure propagates retryably through AcquireLease.
+type MuseResumeError struct {
+	Code    int
+	Message string
+}
+
+func (e *MuseResumeError) Error() string {
+	if e == nil {
+		return "muse session/resume rejected"
+	}
+	return fmt.Sprintf("muse session/resume rejected (code %d: %s)", e.Code, e.Message)
+}
+
+// isMuseSessionNotFound reports whether a resume rejection definitely means the
+// session is gone (including an abandoned incomplete start that never produced
+// a session), in which case the caller may start a fresh session.
+func isMuseSessionNotFound(msg string) bool {
+	lowered := strings.ToLower(strings.TrimSpace(msg))
+	for _, sub := range []string{"not found", "unknown session", "no such session", "session expired", "session does not exist", "abandon"} {
+		if strings.Contains(lowered, sub) {
+			return true
+		}
+	}
+	return false
+}
+
 func (d *StreamingDaemon) tryResumeMuseSession(ctx context.Context, reader *bufio.Reader, deadline time.Time, commandID, trimmedSess, baseModel string) (string, bool, error) {
 	if !d.cfg.ResumeSession || trimmedSess == "" {
 		return "", false, nil
@@ -73,8 +102,11 @@ func (d *StreamingDaemon) tryResumeMuseSession(ctx context.Context, reader *bufi
 		return "", false, nil
 	}
 	if resp.Error != nil {
-		log.Printf("eri: [muse] session/resume rejected for %s: %s", trimmedSess, resp.Error.Message)
-		return "", false, nil
+		if isMuseSessionNotFound(resp.Error.Message) {
+			log.Printf("eri: [muse] session/resume rejected for %s: %s", trimmedSess, resp.Error.Message)
+			return "", false, nil
+		}
+		return "", false, &MuseResumeError{Code: resp.Error.Code, Message: resp.Error.Message}
 	}
 	sessID := extractMuseSessionID(resp.Result, trimmedSess)
 	approvalParams := map[string]any{

@@ -56,6 +56,7 @@ type UnifiedProcessPool struct {
 	daemons        map[string]*StreamingDaemon
 	prewarming     map[string]bool
 	targetLocks    map[string]*targetLock
+	draining       atomic.Bool
 	mu             sync.RWMutex
 	targetMu       sync.Mutex
 	sf             singleflight.Group
@@ -77,6 +78,43 @@ var (
 
 // DefaultMaxIdle is the default maximum idle duration for unleased pre-warmed daemons before eviction.
 const DefaultMaxIdle = 15 * time.Minute
+
+// ErrPoolDraining is returned by AcquireLease and ExecuteEphemeral once BeginDrain
+// has latched. It is retryable by design: never wrap it with restate.ToTerminalError
+// and never map it to 409/412 (see services/eri/pkg/queue/turn_contract.go), so the
+// new primary can resume the same sessions.
+var ErrPoolDraining = errors.New("unified process pool is draining")
+
+// Draining reports whether BeginDrain has latched on this pool.
+func (p *UnifiedProcessPool) Draining() bool {
+	return p != nil && p.draining.Load()
+}
+
+// BeginDrain irreversibly (CompareAndSwap) moves the pool into drain mode: new leases
+// and ephemeral spawns are refused, pre-warming stops, and every daemon with zero
+// in-flight turns that is not holding a target lock is evicted after unlocking,
+// reusing the reapIdlePrewarmedDaemons eligibility via closeEvictedEntries.
+// Daemons backing in-flight turns are untouched; their leases evict on Release.
+func (p *UnifiedProcessPool) BeginDrain() {
+	if p == nil {
+		return
+	}
+	if !p.draining.CompareAndSwap(false, true) {
+		return
+	}
+	p.mu.Lock()
+	var toEvict []evictedEntry
+	for target, d := range p.daemons {
+		if d != nil && d.InflightCount() == 0 && !p.isTargetLocked(target) {
+			delete(p.daemons, target)
+			toEvict = append(toEvict, evictedEntry{targetKey: target, daemon: d})
+		}
+	}
+	p.bgWg.Add(len(toEvict))
+	p.mu.Unlock()
+
+	p.closeEvictedEntries(toEvict)
+}
 
 // NewUnifiedProcessPool creates a new process pool with the given configuration and spawner.
 func NewUnifiedProcessPool(cfg PoolConfig, spawner DaemonSpawner) *UnifiedProcessPool {
@@ -267,6 +305,9 @@ func (p *UnifiedProcessPool) Initialize(ctx context.Context) error {
 }
 
 func (p *UnifiedProcessPool) prewarmTarget(ctx context.Context, targetKey string) error {
+	if p.Draining() {
+		return nil
+	}
 	trimmed := strings.TrimSpace(targetKey)
 	if trimmed == "" {
 		return nil
@@ -648,6 +689,9 @@ type evictedEntry struct {
 }
 
 func (p *UnifiedProcessPool) shouldPrewarmTargetLocked(target string) bool {
+	if p.draining.Load() {
+		return false
+	}
 	if p.prewarming[target] || p.isTargetLocked(target) {
 		return false
 	}
@@ -672,7 +716,7 @@ func (p *UnifiedProcessPool) collectDirtyEvictionsAndPrewarmsLocked() ([]evicted
 			delete(p.daemons, target)
 			toClose = append(toClose, evictedEntry{targetKey: target, daemon: d})
 			d.MarkDirty()
-			if prewarmedSet[target] && !p.prewarming[target] {
+			if !p.draining.Load() && prewarmedSet[target] && !p.prewarming[target] {
 				p.prewarming[target] = true
 				toPrewarm = append(toPrewarm, target)
 			}
@@ -850,6 +894,9 @@ func (p *UnifiedProcessPool) ExecuteEphemeral(ctx context.Context, targetKey, pr
 	if err := ctx.Err(); err != nil {
 		return "", err
 	}
+	if p.Draining() {
+		return "", fmt.Errorf("refusing ephemeral spawn for %q while draining: %w", strings.TrimSpace(targetKey), ErrPoolDraining)
+	}
 	daemon, err := p.GetOrCreate(ctx, targetKey, "")
 	if err != nil {
 		return "", fmt.Errorf("failed to acquire ephemeral daemon for %q: %w", targetKey, err)
@@ -996,6 +1043,21 @@ func (p *UnifiedProcessPool) releaseTargetLock(targetKey string, tl *targetLock)
 	releasePoolTargetLock(&p.targetMu, p.targetLocks, targetKey, tl, true)
 }
 
+// isLeaseCold reports whether a lease must be treated as cold: the recorded turn
+// count is at most one, the record carries no active session, or the daemon's
+// session differs from the record's active session (e.g. resume fell back to a
+// fresh session), so the new primary resumes rather than continues.
+func isLeaseCold(recTurnCount int, recActiveSessionID, daemonSessionID string) bool {
+	if recTurnCount <= 1 || strings.TrimSpace(recActiveSessionID) == "" {
+		return true
+	}
+	sess := strings.TrimSpace(daemonSessionID)
+	if sess == "" {
+		sess = strings.TrimSpace(recActiveSessionID)
+	}
+	return sess != "" && sess != strings.TrimSpace(recActiveSessionID)
+}
+
 // AcquireLease blocks until the target lock is acquired and returns an exclusive SessionLease.
 func (p *UnifiedProcessPool) AcquireLease(ctx context.Context, targetKey string) (SessionLease, error) {
 	if p == nil {
@@ -1005,10 +1067,17 @@ func (p *UnifiedProcessPool) AcquireLease(ctx context.Context, targetKey string)
 	if trimmedKey == "" {
 		return nil, errors.New("targetKey cannot be empty")
 	}
+	if p.Draining() {
+		return nil, ErrPoolDraining
+	}
 
 	tl, err := p.acquireTargetLock(ctx, trimmedKey)
 	if err != nil {
 		return nil, err
+	}
+	if p.Draining() {
+		p.releaseTargetLock(trimmedKey, tl)
+		return nil, ErrPoolDraining
 	}
 
 	var rec SessionRecord
@@ -1023,13 +1092,13 @@ func (p *UnifiedProcessPool) AcquireLease(ctx context.Context, targetKey string)
 		return nil, fmt.Errorf("failed to get or create daemon for %s: %w", trimmedKey, dErr)
 	}
 
-	isCold, turnCount := rec.TurnCount <= 1 || rec.ActiveSessionID == "", rec.TurnCount
-	if isCold {
-		turnCount = 0
-	}
 	sessID := d.SessionID()
 	if sessID == "" {
 		sessID = rec.ActiveSessionID
+	}
+	isCold, turnCount := isLeaseCold(rec.TurnCount, rec.ActiveSessionID, d.SessionID()), rec.TurnCount
+	if isCold {
+		turnCount = 0
 	}
 
 	return &unifiedSessionLease{
@@ -1316,6 +1385,13 @@ func (l *unifiedSessionLease) Release() error {
 	var releaseErr error
 	l.releaseOnce.Do(func() {
 		defer l.pool.releaseTargetLock(l.targetKey, l.lock)
+		if l.pool.Draining() {
+			if evictErr := l.pool.EvictSession(l.targetKey); evictErr != nil {
+				log.Printf("[UnifiedProcessPool] Warning evicting session for %s during drain: %v", l.targetKey, evictErr)
+				releaseErr = evictErr
+			}
+			return
+		}
 		shouldRotate, reason := l.evaluateRotation()
 		if !shouldRotate {
 			return
