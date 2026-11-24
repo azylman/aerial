@@ -497,6 +497,7 @@ spec:
                   - victoriametrics
                   - vmsingle
                   - vision
+                  - vision-restate
                   - gatus
                   - scratch-service
                   - mirrormere-core
@@ -722,6 +723,7 @@ spec:
                   - synapse
                   - console
                   - vision
+                  - vision-restate
                   - gatus
                   - vmsingle
                   - coverage-ingest
