@@ -17,7 +17,7 @@ var (
 
 func isCandidateDDLFile(rel string) bool {
 	if strings.HasSuffix(rel, "_test.go") || strings.HasSuffix(rel, ".test.ts") || strings.HasPrefix(filepath.Base(rel), "test_") ||
-		strings.HasPrefix(rel, "services/eri/pkg/db/") || strings.HasPrefix(rel, "scripts/") {
+		strings.HasPrefix(rel, "scripts/") {
 		return false
 	}
 	return strings.HasSuffix(rel, ".go") || strings.HasSuffix(rel, ".py") || strings.HasSuffix(rel, ".ts")

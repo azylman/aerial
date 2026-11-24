@@ -40,13 +40,18 @@ discover_go_services() {
 
 bootstrap_tool() {
     local name="$1" url="$2" sha="$3" tdir="${BAZEL_TOOLS_DIR:-$HOME/.cache/aerial/bin}"
-    command -v "$name" >/dev/null 2>&1 && return 0
-    [ -x "$tdir/$name" ] && { export PATH="$tdir:$PATH"; return 0; }
-    command -v curl >/dev/null 2>&1 && command -v sha256sum >/dev/null 2>&1 || return 0
+    if command -v "$name" >/dev/null 2>&1; then return 0; fi
+    if [ -x "$tdir/$name" ]; then export PATH="$tdir:$PATH"; return 0; fi
+    case "$(uname -m)" in x86_64|amd64) ;; *) return 0 ;; esac
+    if ! command -v curl >/dev/null 2>&1 || ! command -v sha256sum >/dev/null 2>&1; then return 0; fi
     mkdir -p "$tdir" && local tmp="$tdir/.$name.$$"
     if curl -fsSL --retry 3 "$url" -o "$tmp" && echo "$sha  $tmp" | sha256sum -c - >/dev/null 2>&1; then
         chmod 0755 "$tmp" && mv -f "$tmp" "$tdir/$name" && export PATH="$tdir:$PATH"
-    else rm -f "$tmp"; fi
+    else
+        rm -f "$tmp"
+        echo "🚨 [Aerial] Error: failed to bootstrap SHA256-verified $name" >&2
+        return 1
+    fi
 }
 
 ensure_bazel_build_files() {
@@ -59,8 +64,8 @@ ensure_bazel_build_files() {
         fi
     fi
 
-    bootstrap_tool atlas "https://release.ariga.io/atlas/atlas-linux-amd64-v0.31.0" "c69e5d9cffbb7454238e8ec34731db2ff6fa2c5d4efd7e68e27ca6a2b89694c9"
-    bootstrap_tool kubectl "https://dl.k8s.io/release/v1.32.2/bin/linux/amd64/kubectl" "4f6a959dcc5b702135f8354cc7109b542a2933c46b808b248a214c1f69f817ea"
+    bootstrap_tool atlas "https://release.ariga.io/atlas/atlas-linux-amd64-v0.31.0" "c69e5d9cffbb7454238e8ec34731db2ff6fa2c5d4efd7e68e27ca6a2b89694c9" || return 1
+    bootstrap_tool kubectl "https://dl.k8s.io/release/v1.32.2/bin/linux/amd64/kubectl" "4f6a959dcc5b702135f8354cc7109b542a2933c46b808b248a214c1f69f817ea" || return 1
 
     if [ -f "$root/MODULE.bazel" ] && ! command -v bazel >/dev/null 2>&1; then
         echo "🚨 [Aerial] Error: bazel is required when MODULE.bazel is present" >&2

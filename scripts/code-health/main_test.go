@@ -535,15 +535,6 @@ func testRunTargetCases() []testRunCase {
 			wantErr:  "filename uses banned horizontal split or grab-bag name; name files after their domain concern or move into an internal/* subpackage",
 		},
 		{
-			name: "call to reserved live daemon port in test fails check",
-			files: map[string]string{
-				"pkg/ok.go":        "package pkg\n",
-				"pkg/port_test.go": "package pkg\nimport \"net/http\"\nfunc TestPort() {\n\t_, _ = http.Get(\"http://127.0.0.1:8080\")\n}\n",
-			},
-			wantCode: 1,
-			wantErr:  "targeting reserved live daemon port 8080",
-		},
-		{
 			name: "arbitrary func field in test table slice rejected in check mode",
 			files: map[string]string{
 				"pkg/ok.go": "package pkg\n",

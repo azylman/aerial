@@ -14,8 +14,15 @@ url=""; for a in "$@"; do [[ "$a" =~ http ]] && url="$a"; [[ "$a" =~ ^Authorizat
 [[ "$url" =~ /healthz ]] && { printf "\n200"; exit 0; }
 if [[ "$url" =~ /pulls\?state=open ]]; then
   [[ "$url" =~ test%2Bbranch ]] && touch "$TMPD/seen_encoded_branch"
-  [[ "$url" =~ chunk-emptybody ]] && { echo '[{"number":102,"html_url":"https://github.com/a/b/pull/102","title":"t","body":""}]'; printf "\n200"; exit 0; }
-  [[ "$url" =~ chunk-422 ]] && [ -f "$TMPD/p422" ] && echo '[{"number":101,"html_url":"https://github.com/a/b/pull/101","title":"t"}]' || { [[ "$url" =~ chunk-test ]] && [ -f "$TMPD/has_pr" ] && echo '[{"number":99,"html_url":"https://github.com/a/b/pull/99","title":"t","body":"existing"}]' || echo '[]'; }
+  if [[ "$url" =~ chunk-emptybody ]]; then
+    echo '[{"number":102,"html_url":"https://github.com/a/b/pull/102","title":"t","body":""}]'
+  elif [[ "$url" =~ chunk-422 ]] && [ -f "$TMPD/p422" ]; then
+    echo '[{"number":101,"html_url":"https://github.com/a/b/pull/101","title":"t"}]'
+  elif [[ "$url" =~ chunk-test ]] && [ -f "$TMPD/has_pr" ]; then
+    echo '[{"number":99,"html_url":"https://github.com/a/b/pull/99","title":"t","body":"existing"}]'
+  else
+    echo '[]'
+  fi
   printf "\n200"; exit 0
 fi
 [[ "$url" =~ /pulls/98 ]] && { echo '{"state":"closed","html_url":"https://github.com/a/b/pull/98"}'; printf "\n200"; exit 0; }

@@ -10,89 +10,107 @@ func TestCheckNoImperativeDDL(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
 		name        string
-		content     string
-		isTestFile  bool
-		isDbPkg     bool
 		relPath     string
+		content     string
+		writeFile   bool
 		expectCount int
 	}{
 		{
 			name:        "clean_go_code",
+			relPath:     "services/eri/internal/server/main.go",
 			content:     "package main\n\nfunc Run() {}\n",
+			writeFile:   true,
 			expectCount: 0,
 		},
 		{
 			name:        "imperative_create_table",
+			relPath:     "services/eri/internal/server/main.go",
 			content:     "package main\n\nconst q = `CREATE TABLE users (id int)`\n",
+			writeFile:   true,
 			expectCount: 1,
 		},
 		{
 			name:        "imperative_alter_table",
+			relPath:     "services/eri/internal/server/main.go",
 			content:     "package main\n\nfunc m() { db.Exec(\"ALTER TABLE foo ADD col text\") }\n",
+			writeFile:   true,
 			expectCount: 1,
 		},
 		{
 			name:        "commented_ddl",
+			relPath:     "services/eri/internal/server/main.go",
 			content:     "package main\n// CREATE TABLE test (id int)\n",
+			writeFile:   true,
 			expectCount: 0,
 		},
 		{
 			name:        "test_file_exempt",
+			relPath:     "services/eri/internal/server/main_test.go",
 			content:     "package main\n\nfunc TestX() { db.Exec(\"CREATE TABLE t (id int)\") }\n",
-			isTestFile:  true,
+			writeFile:   true,
 			expectCount: 0,
 		},
 		{
-			name:        "db_pkg_exempt",
-			content:     "package db\n\nconst create = \"CREATE TABLE schema_migrations (version int)\"\n",
-			isDbPkg:     true,
+			name:        "sql_file_exempt",
+			relPath:     "services/eri/pkg/db/migrations/001_init.sql",
+			content:     "CREATE TABLE schema_migrations (version int);\n",
+			writeFile:   true,
 			expectCount: 0,
 		},
 		{
 			name:        "nonexistent_file_skipped",
+			relPath:     "services/eri/internal/server/nonexistent.go",
 			content:     "",
+			writeFile:   false,
 			expectCount: 0,
 		},
 		{
 			name:        "python_create_table",
-			content:     "query = 'CREATE TABLE foo (id INT)'\n",
 			relPath:     "services/foo/main.py",
+			content:     "query = 'CREATE TABLE foo (id INT)'\n",
+			writeFile:   true,
 			expectCount: 1,
 		},
 		{
 			name:        "python_comment_exempt",
-			content:     "# CREATE TABLE foo (id INT)\n",
 			relPath:     "services/foo/main.py",
+			content:     "# CREATE TABLE foo (id INT)\n",
+			writeFile:   true,
 			expectCount: 0,
 		},
 		{
 			name:        "ts_alter_table",
-			content:     "const q = 'ALTER TABLE bar ADD COLUMN x INT';\n",
 			relPath:     "services/console/ui/db.ts",
+			content:     "const q = 'ALTER TABLE bar ADD COLUMN x INT';\n",
+			writeFile:   true,
 			expectCount: 1,
 		},
 		{
 			name:        "ts_test_exempt",
-			content:     "const q = 'ALTER TABLE bar ADD COLUMN x INT';\n",
 			relPath:     "services/console/ui/db.test.ts",
+			content:     "const q = 'ALTER TABLE bar ADD COLUMN x INT';\n",
+			writeFile:   true,
 			expectCount: 0,
 		},
 		{
 			name:        "python_test_exempt",
-			content:     "q = 'CREATE TABLE foo (id INT)'\n",
 			relPath:     "services/foo/test_bar.py",
+			content:     "q = 'CREATE TABLE foo (id INT)'\n",
+			writeFile:   true,
 			expectCount: 0,
 		},
 		{
 			name:        "scripts_py_exempt",
-			content:     "q = 'CREATE TABLE foo (id INT)'\n",
 			relPath:     "scripts/build.py",
+			content:     "q = 'CREATE TABLE foo (id INT)'\n",
+			writeFile:   true,
 			expectCount: 0,
 		},
 		{
 			name:        "non_candidate_md_exempt",
-			content:     "CREATE TABLE foo (id INT)\n",
 			relPath:     "docs/readme.md",
+			content:     "CREATE TABLE foo (id INT)\n",
+			writeFile:   true,
 			expectCount: 0,
 		},
 	}
@@ -101,29 +119,11 @@ func TestCheckNoImperativeDDL(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			dir := t.TempDir()
-			rel := "services/eri/internal/server/main.go"
-			switch {
-			case tc.relPath != "":
-				rel = tc.relPath
-			case tc.isTestFile:
-				rel = "services/eri/internal/server/main_test.go"
-			case tc.isDbPkg:
-				rel = "services/eri/pkg/db/migrations/main.go"
-			case tc.name == "nonexistent_file_skipped":
-				rel = "services/eri/internal/server/nonexistent.go"
-			}
-			if tc.name != "nonexistent_file_skipped" {
-				fullPath := filepath.Join(dir, rel)
-				if err := os.MkdirAll(filepath.Dir(fullPath), 0o755); err != nil {
-					t.Fatal(err)
-				}
-				if err := os.WriteFile(fullPath, []byte(tc.content), 0o644); err != nil {
-					t.Fatal(err)
-				}
+			if tc.writeFile {
+				writeTestFile(t, dir, tc.relPath, tc.content)
 			}
 
-			v := checkNoImperativeDDL(dir, []string{rel})
-			if len(v) != tc.expectCount {
+			if v := checkNoImperativeDDL(dir, []string{tc.relPath}); len(v) != tc.expectCount {
 				t.Fatalf("expected %d violations, got %d: %v", tc.expectCount, len(v), v)
 			}
 		})
@@ -187,21 +187,26 @@ func TestCheckUTF8BOM(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
 		name        string
+		writeFile   bool
 		prefixBOM   bool
 		expectCount int
 	}{
 		{
 			name:        "clean_file",
+			writeFile:   true,
 			prefixBOM:   false,
 			expectCount: 0,
 		},
 		{
 			name:        "file_with_bom",
+			writeFile:   true,
 			prefixBOM:   true,
 			expectCount: 1,
 		},
 		{
 			name:        "nonexistent_file",
+			writeFile:   false,
+			prefixBOM:   false,
 			expectCount: 0,
 		},
 	}
@@ -210,12 +215,12 @@ func TestCheckUTF8BOM(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			dir := t.TempDir()
-			fullPath := filepath.Join(dir, "file.go")
-			if tc.name != "nonexistent_file" {
+			if tc.writeFile {
 				content := []byte("package main\n")
 				if tc.prefixBOM {
 					content = append([]byte{0xef, 0xbb, 0xbf}, content...)
 				}
+				fullPath := filepath.Join(dir, "file.go")
 				if err := os.WriteFile(fullPath, content, 0o644); err != nil {
 					t.Fatal(err)
 				}
@@ -229,36 +234,52 @@ func TestCheckUTF8BOM(t *testing.T) {
 	}
 }
 
+func writeTestFile(t *testing.T, dir, rel, content string) {
+	t.Helper()
+	full := filepath.Join(dir, rel)
+	if err := os.MkdirAll(filepath.Dir(full), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(full, []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestCheckNoMainInTests(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
 		name        string
 		rel         string
 		content     string
+		writeFile   bool
 		expectCount int
 	}{
 		{
 			name:        "normal_eri_test",
 			rel:         "services/eri/eri_test.go",
 			content:     "package eri_test\n// main() in comment\nfunc TestX(t *testing.T) { runMain() }\n",
+			writeFile:   true,
 			expectCount: 0,
 		},
 		{
 			name:        "direct_main_call_in_eri",
 			rel:         "services/eri/internal/server_test.go",
 			content:     "package server_test\n\nfunc TestX(t *testing.T) { main() }\n",
+			writeFile:   true,
 			expectCount: 1,
 		},
 		{
 			name:        "non_eri_service_exempt",
 			rel:         "services/haro/haro_test.go",
 			content:     "package haro_test\n\nfunc TestH(t *testing.T) { main() }\n",
+			writeFile:   true,
 			expectCount: 0,
 		},
 		{
 			name:        "nonexistent_test_skipped",
 			rel:         "services/eri/nonexistent_test.go",
 			content:     "",
+			writeFile:   false,
 			expectCount: 0,
 		},
 	}
@@ -267,18 +288,11 @@ func TestCheckNoMainInTests(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			dir := t.TempDir()
-			if tc.name != "nonexistent_test_skipped" {
-				full := filepath.Join(dir, tc.rel)
-				if err := os.MkdirAll(filepath.Dir(full), 0o755); err != nil {
-					t.Fatal(err)
-				}
-				if err := os.WriteFile(full, []byte(tc.content), 0o644); err != nil {
-					t.Fatal(err)
-				}
+			if tc.writeFile {
+				writeTestFile(t, dir, tc.rel, tc.content)
 			}
 
-			v := checkNoMainInTests(dir, []string{tc.rel})
-			if len(v) != tc.expectCount {
+			if v := checkNoMainInTests(dir, []string{tc.rel}); len(v) != tc.expectCount {
 				t.Fatalf("expected %d violations, got %d: %v", tc.expectCount, len(v), v)
 			}
 		})
@@ -288,13 +302,15 @@ func TestCheckNoMainInTests(t *testing.T) {
 func TestCheckDependabotManifests(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
-		name        string
-		dependabot  string
-		manifests   []string
-		expectCount int
+		name            string
+		writeDependabot bool
+		dependabot      string
+		manifests       []string
+		expectCount     int
 	}{
 		{
-			name: "covered",
+			name:            "covered",
+			writeDependabot: true,
 			dependabot: `version: 2
 updates:
   - package-ecosystem: "gomod"
@@ -316,7 +332,8 @@ updates:
 			expectCount: 0,
 		},
 		{
-			name: "missing_manifest_dir",
+			name:            "missing_manifest_dir",
+			writeDependabot: true,
 			dependabot: `version: 2
 updates:
   - package-ecosystem: "gomod"
@@ -338,7 +355,8 @@ updates:
 			expectCount: 1,
 		},
 		{
-			name: "grouping_mismatch",
+			name:            "grouping_mismatch",
+			writeDependabot: true,
 			dependabot: `version: 2
 updates:
   - package-ecosystem: "gomod"
@@ -348,22 +366,25 @@ updates:
 			expectCount: 1,
 		},
 		{
-			name:        "dependabot_file_missing",
-			dependabot:  "",
-			manifests:   []string{"go.mod"},
-			expectCount: 1,
+			name:            "dependabot_file_missing",
+			writeDependabot: false,
+			dependabot:      "",
+			manifests:       []string{"go.mod"},
+			expectCount:     1,
 		},
 		{
-			name:        "no_manifests",
-			dependabot:  "version: 2\n",
-			manifests:   nil,
-			expectCount: 0,
+			name:            "no_manifests",
+			writeDependabot: true,
+			dependabot:      "version: 2\n",
+			manifests:       nil,
+			expectCount:     0,
 		},
 		{
-			name:        "no_ecosystems",
-			dependabot:  "version: 2\nupdates:\n  - directory: \"/\"\n",
-			manifests:   []string{"go.mod"},
-			expectCount: 1,
+			name:            "no_ecosystems",
+			writeDependabot: true,
+			dependabot:      "version: 2\nupdates:\n  - directory: \"/\"\n",
+			manifests:       []string{"go.mod"},
+			expectCount:     1,
 		},
 	}
 
@@ -371,7 +392,7 @@ updates:
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			dir := t.TempDir()
-			if tc.name != "dependabot_file_missing" {
+			if tc.writeDependabot {
 				dotGithub := filepath.Join(dir, ".github")
 				if err := os.MkdirAll(dotGithub, 0o755); err != nil {
 					t.Fatal(err)
