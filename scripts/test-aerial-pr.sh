@@ -79,7 +79,15 @@ echo "$res_422" | jq -e '.status == "submitted" and .pr_number == 101' >/dev/nul
 s_rf=$("$SCRIPT" init --repo aerial | jq -r .scratch_dir)
 head -c 24000 /dev/zero | tr '\0' 'A' > "$s_rf/GEMINI.md" && echo "desc" > "$s_rf/PR_DESCRIPTION.md"
 if "$SCRIPT" submit "$s_rf" "feat: test rule size" 2>/dev/null; then echo "Expected rule size failure" >&2; exit 1; fi
-if "$SCRIPT" submit "$s_rf" "feat: test missing bfile" --body-file "$TMPD/nonexistent" 2>/dev/null; then echo "Expected missing bfile failure" >&2; exit 1; fi
+rm -f "$s_rf/GEMINI.md"
+if "$SCRIPT" submit "$s_rf" "feat: test missing bfile" --body-file "$TMPD/nonexistent" 2>"$TMPD/bfile.err"; then echo "Expected missing bfile failure" >&2; exit 1; fi
+grep -q "body file not found" "$TMPD/bfile.err"
+mkdir -p "$s_rf/scripts" && printf '#!/bin/sh\nexit 1\n' > "$s_rf/scripts/verify.sh" && chmod +x "$s_rf/scripts/verify.sh"
+git -C "$s_rf" add scripts/verify.sh && git -C "$s_rf" commit -m "with failing verify" -q && pre_head=$(git -C "$s_rf" rev-parse HEAD)
+git -C "$TMPD/repo" checkout main -q && echo "main advance" > "$TMPD/repo/m.txt" && git -C "$TMPD/repo" add m.txt && git -C "$TMPD/repo" commit -m "main advance" -q && git -C "$TMPD/repo" push origin main -q
+echo "desc" > "$s_rf/PR_DESCRIPTION.md"
+if "$SCRIPT" submit "$s_rf" "feat: fail verify after merge" 2>/dev/null; then echo "Expected verify failure after merge" >&2; exit 1; fi
+[ "$(git -C "$s_rf" rev-parse HEAD)" = "$pre_head" ]
 rm -rf "$s_rf"
 
 cd "$TMPD/repo"
