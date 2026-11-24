@@ -13,9 +13,7 @@ fi
 command -v buildifier >/dev/null 2>&1 && { bzl=$(git ls-files '*.bazel' '*.bzl' 2>/dev/null || true); [ -n "$bzl" ] && buildifier -mode=check -lint=warn $bzl; }
 for f in rules/*/*.md rules/*/*/*.md GEMINI.md AGENTS.md; do [ -f "$f" ] && [ "$(wc -c < "$f")" -gt 23040 ] && { echo "🚨 [Aerial Verify] $f exceeds 23040 bytes" >&2; exit 1; }; done
 [ -x scripts/check-cnpg-immutability.sh ] && ./scripts/check-cnpg-immutability.sh "$REPO_ROOT"
-run_ch="false"; [ "$MODE" = "full" ] && run_ch="true"
-[ "$run_ch" = "false" ] && for f in $CHANGED_FILES; do case "$f" in *.go|*.sh|*.py|*.ts|.code-health-baseline.json) run_ch="true"; break ;; esac; done
-[ "$run_ch" = "true" ] && (cd scripts/code-health && go run . -root ../.. -baseline ../../.code-health-baseline.json)
+(cd scripts/code-health && go run . -root ../.. -baseline ../../.code-health-baseline.json)
 MODS=""
 if [ "$MODE" = "full" ] || echo "$CHANGED_FILES" | grep -q -E '(^pkg/|^\.golangci\.ya?ml|^scripts/|^go\.(mod|sum)$|^build/|^MODULE\.bazel|^\.github/)'; then
     MODS=$(discover_go_services)
@@ -36,6 +34,8 @@ for m in $MODS; do
         dt=$(cd "$m" && deadcode -test "$fl" ./...); [ -z "$dt" ] || { echo "🚨 [Aerial Verify] Unreachable test code in $m: $dt" >&2; exit 1; }
     fi
 done
+command -v kubectl >/dev/null 2>&1 || { echo "🚨 [Aerial Verify] kubectl is required" >&2; exit 1; }
+command -v atlas >/dev/null 2>&1 || { echo "🚨 [Aerial Verify] atlas is required" >&2; exit 1; }
 bazel test //k8s:manifests_test //web/theme:theme_test //services/docs-service:syntax_test //services/homepage:homepage_test //services/grafana:dashboards_test //services/eri/pkg/db/migrations:atlas_validate_test
 TEST_TARGETS=""; TARGET_PKGS=""
 if [ "$MODE" = "full" ]; then

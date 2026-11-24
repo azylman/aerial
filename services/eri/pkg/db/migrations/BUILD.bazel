@@ -2,7 +2,10 @@ load("@rules_shell//shell:sh_test.bzl", "sh_test")
 
 filegroup(
     name = "migrations",
-    srcs = glob(["**"]),
+    srcs = glob(
+        ["**"],
+        exclude = ["BUILD.bazel"],
+    ),
     visibility = ["//visibility:public"],
 )
 

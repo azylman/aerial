@@ -38,6 +38,17 @@ discover_go_services() {
     ) | sort -u | tr '\n' ' ' | sed 's/[[:space:]]*$//'
 }
 
+bootstrap_tool() {
+    local name="$1" url="$2" sha="$3" tdir="${BAZEL_TOOLS_DIR:-$HOME/.cache/aerial/bin}"
+    command -v "$name" >/dev/null 2>&1 && return 0
+    [ -x "$tdir/$name" ] && { export PATH="$tdir:$PATH"; return 0; }
+    command -v curl >/dev/null 2>&1 && command -v sha256sum >/dev/null 2>&1 || return 0
+    mkdir -p "$tdir" && local tmp="$tdir/.$name.$$"
+    if curl -fsSL --retry 3 "$url" -o "$tmp" && echo "$sha  $tmp" | sha256sum -c - >/dev/null 2>&1; then
+        chmod 0755 "$tmp" && mv -f "$tmp" "$tdir/$name" && export PATH="$tdir:$PATH"
+    else rm -f "$tmp"; fi
+}
+
 ensure_bazel_build_files() {
     local root="${1:-${REPO_ROOT:-}}"
     if [ -z "$root" ]; then
@@ -47,6 +58,9 @@ ensure_bazel_build_files() {
             root="$(pwd)"
         fi
     fi
+
+    bootstrap_tool atlas "https://release.ariga.io/atlas/atlas-linux-amd64-v0.31.0" "c69e5d9cffbb7454238e8ec34731db2ff6fa2c5d4efd7e68e27ca6a2b89694c9"
+    bootstrap_tool kubectl "https://dl.k8s.io/release/v1.32.2/bin/linux/amd64/kubectl" "4f6a959dcc5b702135f8354cc7109b542a2933c46b808b248a214c1f69f817ea"
 
     if [ -f "$root/MODULE.bazel" ] && ! command -v bazel >/dev/null 2>&1; then
         echo "🚨 [Aerial] Error: bazel is required when MODULE.bazel is present" >&2

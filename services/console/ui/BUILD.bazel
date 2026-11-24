@@ -3,6 +3,7 @@ filegroup(
     srcs = glob(
         ["**"],
         exclude = [
+            "BUILD.bazel",
             "node_modules/**",
             "dist/**",
         ],
