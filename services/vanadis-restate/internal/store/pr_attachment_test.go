@@ -118,6 +118,28 @@ func TestFirstAttachmentRecovery(t *testing.T) {
 	}
 }
 
+func initSelectionChunk(index, previous, ciCap int, status string) model.VanadisChunk {
+	c := paChunk("selected", "b1", "pr", "aerial", status, index, previous)
+	c.CIFailCount = ciCap
+	if status == "deploy_failed" {
+		c.Banner = "prior deploy failure"
+		c.CompletedAt = time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+		c.CIChecks = map[string]string{"build": "success"}
+		c.RolloutState = &pubsub.PRRolloutState{ExpectedJobs: []string{"web"}}
+	}
+	return c
+}
+
+func checkDeployFailedReset(t *testing.T, status, wantStatus string, previous int, got model.VanadisChunk) {
+	t.Helper()
+	if wantStatus != "pr_opened" || status != "deploy_failed" || previous == 101 {
+		return
+	}
+	if got.Banner != "" || !got.CompletedAt.IsZero() || got.RolloutState != nil || len(got.CIChecks) != 0 {
+		t.Fatalf("deploy_failed re-attach did not clear prior state: banner=%q completed_at=%v rollout=%v checks=%v", got.Banner, got.CompletedAt, got.RolloutState, got.CIChecks)
+	}
+}
+
 // Real rows drive selection, the recovery rule and the SQL status CASE;
 // sabotage rows inject write and commit failures.
 func TestAttachmentSelectionAndErrors(t *testing.T) {
@@ -145,7 +167,7 @@ func TestAttachmentSelectionAndErrors(t *testing.T) {
 		{name: "deployed matching PR", parent: "running", status: "deployed", previous: 101, wantStatus: "deployed", wantParent: "running"},
 		{name: "deployed different PR", parent: "running", status: "deployed", previous: 100, wantErrIs: ErrBuildConflict},
 		{name: "deploy_failed matching PR", parent: "running", status: "deploy_failed", previous: 101, wantStatus: "deploy_failed", wantParent: "running"},
-		{name: "deploy_failed different PR", parent: "running", status: "deploy_failed", previous: 100, wantErrIs: ErrBuildConflict},
+		{name: "deploy_failed different PR", parent: "running", status: "deploy_failed", previous: 100, wantStatus: "pr_opened", wantParent: "running"},
 		{name: "duplicate at cap", parent: "failed", status: "failed", previous: 101, cap: 3, wantStatus: "failed", wantParent: "failed"},
 		{name: "cancelled parent", parent: "cancelled", status: "failed", wantErrIs: ErrBuildConflict},
 		{name: "completed parent", parent: "completed", status: "failed", wantErrIs: ErrBuildConflict},
@@ -163,8 +185,7 @@ func TestAttachmentSelectionAndErrors(t *testing.T) {
 				paChunk("between", "b1", "pr", "other", "completed", 1, 0),
 				paChunk("after", "b1", "pr", "other", "completed", 2, 0),
 			}
-			chunks[tc.index] = paChunk("selected", "b1", "pr", "aerial", tc.status, tc.index, tc.previous)
-			chunks[tc.index].CIFailCount = tc.cap
+			chunks[tc.index] = initSelectionChunk(tc.index, tc.previous, tc.cap, tc.status)
 			if tc.sibling != "" {
 				chunks[(tc.index+1)%3].Status = tc.sibling
 			}
@@ -182,12 +203,14 @@ func TestAttachmentSelectionAndErrors(t *testing.T) {
 			if b != "b1" || c != "selected" || th != "thread-1" {
 				t.Fatalf("attachment = %q %q %q", b, c, th)
 			}
-			if got := loadChunk(t, pool, "selected"); got.Status != tc.wantStatus || got.PRNumber != 101 {
-				t.Fatalf("stored status=%s pr=%d, want %s/101", got.Status, got.PRNumber, tc.wantStatus)
+			gotChunk := loadChunk(t, pool, "selected")
+			if gotChunk.Status != tc.wantStatus || gotChunk.PRNumber != 101 {
+				t.Fatalf("stored status=%s pr=%d, want %s/101", gotChunk.Status, gotChunk.PRNumber, tc.wantStatus)
 			}
 			if got := loadBuild(t, pool, "b1"); got.Status != tc.wantParent {
 				t.Fatalf("parent status = %s, want %s", got.Status, tc.wantParent)
 			}
+			checkDeployFailedReset(t, tc.status, tc.wantStatus, tc.previous, gotChunk)
 		})
 	}
 }
@@ -277,6 +300,16 @@ func TestPostgresVanadisStore_AttachChunkPR(t *testing.T) {
 		{
 			name: "action chunk matches owner-qualified attached repo", req: attachRequest("c-act", "aerial"), db: paFixture{builds: running("b-action", "thread-action"), chunks: actionChunk("c-act", "b-action", "example-org/aerial", "ci_failed", 101)},
 			want: attachResult{"b-action", "c-act", "thread-action"}, wantRepo: "aerial", wantStatus: "ci_failed",
+		},
+		{
+			name: "reattaches new repair pr to deploy_failed pr chunk", req: attachRequest("c-df", "aerial"),
+			db:   paFixture{builds: running("b-df", "thread-df"), chunks: prChunk("c-df", "b-df", "aerial", "deploy_failed", 50)},
+			want: attachResult{"b-df", "c-df", "thread-df"}, wantRepo: "aerial", wantStatus: "pr_opened",
+		},
+		{
+			name: "reattaches new repair pr to deploy_failed action chunk", req: attachRequest("c-act-df", "aerial"),
+			db:   paFixture{builds: running("b-act-df", "thread-act-df"), chunks: actionChunk("c-act-df", "b-act-df", "aerial", "deploy_failed", 50)},
+			want: attachResult{"b-act-df", "c-act-df", "thread-act-df"}, wantRepo: "aerial", wantStatus: "pr_opened",
 		},
 		{name: "action attachment terminal parent", req: existing, db: paFixture{builds: []model.VanadisBuild{paBuild("b1", "", "completed")}, chunks: actionChunk("c1", "b1", "", "running", 0)}, wantErrIs: ErrBuildConflict},
 		{name: "action attachment mismatching repository", req: existing, db: paFixture{builds: running("b1", ""), chunks: actionChunk("c1", "b1", "other/repo", "pr_opened", 5)}, wantErrIs: ErrBuildConflict},
@@ -381,22 +414,24 @@ func TestAttachStandalonePR_RecordsOwner(t *testing.T) {
 }
 
 type donorHydrationCase struct {
-	name             string
-	mode             string
-	donorStatus      string
-	donorBuildStatus string
-	targetStatus     string
-	targetPR         int
-	targetParent     string
-	donorBanner      string
-	reqRepo          string
-	targetRepo       string
-	wantStatus       string
-	wantBanner       string
-	wantJobs         []string
-	wantCIChecks     bool
-	wantCompletedAt  bool
-	wantParentStatus string
+	name               string
+	mode               string
+	donorStatus        string
+	donorBuildStatus   string
+	emptyDonorEvidence bool
+	targetStatus       string
+	targetPR           int
+	targetParent       string
+	donorBanner        string
+	reqRepo            string
+	targetRepo         string
+	wantStatus         string
+	wantBanner         string
+	wantJobs           []string
+	wantCIChecks       bool
+	wantEmptyEvidence  bool
+	wantCompletedAt    bool
+	wantParentStatus   string
 }
 
 func initHydrationFixture(tc donorHydrationCase, stamp time.Time, donorCIChecks map[string]string, donorRollout *pubsub.PRRolloutState) (paFixture, AttachChunkPRRequest) {
@@ -409,13 +444,20 @@ func initHydrationFixture(tc donorHydrationCase, stamp time.Time, donorCIChecks 
 	donorBuild := paBuild("b-donor", "thread-donor", dBuildStatus)
 	targetBuild := paBuild("b-target", "thread-target", tParentStatus)
 	donorChunk := paChunk("c-donor", "b-donor", "pr", "aerial", tc.donorStatus, 0, 101)
-	donorChunk.RolloutState = donorRollout
-	donorChunk.CIChecks = donorCIChecks
+	if !tc.emptyDonorEvidence {
+		donorChunk.RolloutState = donorRollout
+		donorChunk.CIChecks = donorCIChecks
+	}
 	donorChunk.Banner = tc.donorBanner
 	donorChunk.CompletedAt = stamp
 	targetChunk := paChunk("c-target", "b-target", tc.mode, tRepo, tc.targetStatus, 0, tc.targetPR)
-	if tc.targetPR != 0 && (tc.targetStatus == statusCompleted || tc.targetStatus == statusDeployed || tc.targetStatus == statusMerged) {
+	if tc.targetPR != 0 && (tc.targetStatus == statusCompleted || tc.targetStatus == statusDeployed || tc.targetStatus == statusMerged || tc.targetStatus == "deploy_failed") {
 		targetChunk.CompletedAt = stamp
+		if tc.targetStatus == "deploy_failed" {
+			targetChunk.Banner = "old deploy failure"
+			targetChunk.RolloutState = &pubsub.PRRolloutState{ExpectedJobs: []string{"old-job"}}
+			targetChunk.CIChecks = map[string]string{"old-check": "failure"}
+		}
 	}
 	reqRepo := "aerial"
 	if tc.mode == "pr" && tc.targetRepo != "" && tc.reqRepo == "" {
@@ -450,11 +492,22 @@ func checkHydratedChunkFields(t *testing.T, got model.VanadisChunk, tc donorHydr
 			t.Errorf("jobs = %v, want %v", got.RolloutState.ExpectedJobs, tc.wantJobs)
 		}
 	}
-	if tc.wantCIChecks && !reflect.DeepEqual(donorCIChecks, got.CIChecks) {
-		t.Errorf("ci_checks = %v, want %v", got.CIChecks, donorCIChecks)
+	if tc.wantEmptyEvidence && got.RolloutState != nil {
+		t.Errorf("expected nil rollout_state, got %v", got.RolloutState)
+	}
+	if tc.wantCIChecks {
+		if !reflect.DeepEqual(donorCIChecks, got.CIChecks) {
+			t.Errorf("ci_checks = %v, want %v", got.CIChecks, donorCIChecks)
+		}
+	}
+	if tc.wantEmptyEvidence && len(got.CIChecks) != 0 {
+		t.Errorf("expected empty ci_checks, got %v", got.CIChecks)
 	}
 	if tc.wantCompletedAt && got.CompletedAt.IsZero() {
 		t.Errorf("expected completed_at to be set, was zero")
+	}
+	if !tc.wantCompletedAt && !got.CompletedAt.IsZero() {
+		t.Errorf("expected completed_at to be zero, was %v", got.CompletedAt)
 	}
 }
 
@@ -641,6 +694,34 @@ func donorHydrationActionCases() []donorHydrationCase {
 			wantJobs:        nil,
 			wantCIChecks:    false,
 			wantCompletedAt: true,
+		},
+		{
+			name:            "action chunk in deploy_failed with completed donor adopts pr_opened and clears completed_at",
+			mode:            "action",
+			donorStatus:     "completed",
+			targetStatus:    "deploy_failed",
+			targetRepo:      "aerial",
+			targetPR:        50,
+			wantStatus:      "pr_opened",
+			wantBanner:      "",
+			wantJobs:        []string{"eri"},
+			wantCIChecks:    true,
+			wantCompletedAt: false,
+		},
+		{
+			name:               "action chunk in deploy_failed with empty-evidence completed donor clears stale evidence and completed_at",
+			mode:               "action",
+			donorStatus:        "completed",
+			emptyDonorEvidence: true,
+			targetStatus:       "deploy_failed",
+			targetRepo:         "aerial",
+			targetPR:           50,
+			wantStatus:         "pr_opened",
+			wantBanner:         "",
+			wantJobs:           nil,
+			wantCIChecks:       false,
+			wantEmptyEvidence:  true,
+			wantCompletedAt:    false,
 		},
 	}
 }

@@ -793,12 +793,12 @@ func chunkRepoMatches(owner, chunkRepo, eventRepo string, candidates []string) b
 func isEligibleBranchChunk(owner string, build *model.VanadisBuild, c *model.VanadisChunk, ev pubsub.PRLifecycleEvent) bool {
 	req := store.AttachChunkPRRequest{Repo: strings.TrimSpace(ev.Repo), PRNumber: ev.PRNumber}
 	if c.Mode == chunkModeAction {
-		return c.Status == statusRunning && (c.Repo == "" || store.AttachmentMatches(owner, *c, *build, req))
+		return (c.Status == statusRunning || c.Status == statusDeployFailed) && (c.Repo == "" || store.AttachmentMatches(owner, *c, *build, req))
 	}
 	if (c.Mode != "" && c.Mode != "pr") || c.StartedAt.IsZero() {
 		return false
 	}
-	if c.Status != statusRunning && c.Status != statusCoding && (c.Status != statusFailed || c.CIFailCount != 0) {
+	if c.Status != statusRunning && c.Status != statusCoding && c.Status != statusDeployFailed && (c.Status != statusFailed || c.CIFailCount != 0) {
 		return false
 	}
 	return store.AttachmentMatches(owner, *c, *build, req)
@@ -808,7 +808,7 @@ func isEligibleThreadChunk(owner string, build *model.VanadisBuild, c *model.Van
 	if (c.Mode != "" && c.Mode != "pr") || c.StartedAt.IsZero() {
 		return false
 	}
-	if c.Status != statusRunning && c.Status != statusCoding {
+	if c.Status != statusRunning && c.Status != statusCoding && c.Status != statusDeployFailed {
 		return false
 	}
 	return store.AttachmentMatches(owner, *c, *build, store.AttachChunkPRRequest{Repo: strings.TrimSpace(ev.Repo), PRNumber: ev.PRNumber})
@@ -816,7 +816,10 @@ func isEligibleThreadChunk(owner string, build *model.VanadisBuild, c *model.Van
 
 // IsEligibleUnattachedChunk reports whether a chunk may adopt an unattached PR.
 func IsEligibleUnattachedChunk(owner string, build *model.VanadisBuild, c *model.VanadisChunk, ev pubsub.PRLifecycleEvent) bool {
-	if build == nil || c == nil || c.PRNumber != 0 {
+	if build == nil || c == nil {
+		return false
+	}
+	if c.PRNumber != 0 && (c.Status != statusDeployFailed || ev.PRNumber <= 0 || ev.PRNumber == c.PRNumber) {
 		return false
 	}
 	if buildThread := model.NormalizeDiscordThreadID(build.ThreadID); buildThread != "" && strings.TrimSpace(ev.TargetID) != "" && model.NormalizeDiscordThreadID(ev.TargetID) != buildThread {
