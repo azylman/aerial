@@ -225,8 +225,10 @@ func TestBuildRouterService_RoutePREvent(t *testing.T) {
 			wantBuildID: "b-branch",
 		},
 		{
-			name: "thread and repo fallback resolution", ev: pubsub.PRLifecycleEvent{Repo: "aerial", PRNumber: 103, Event: "opened", Branch: branchTS, TargetID: "thread-123"},
-			db: thread, wantBuildID: "b-thread",
+			name:            "standalone pr opened on thread with active unattached chunk creates new build",
+			ev:              pubsub.PRLifecycleEvent{Repo: "aerial", PRNumber: 103, Event: "opened", Branch: branchTS, TargetID: "thread-123"},
+			db:              thread,
+			wantBuildPrefix: "build-",
 		},
 		{
 			name: "dependabot guard exclusion", ev: pubsub.PRLifecycleEvent{Repo: "aerial", PRNumber: 104, Event: "opened", Branch: "refs/heads/dependabot/npm_and_yarn/foo", TargetID: "thread-123"},
@@ -252,10 +254,6 @@ func TestBuildRouterService_RoutePREvent(t *testing.T) {
 			name: "branch-based lookup error propagates", ev: pubsub.PRLifecycleEvent{Repo: "aerial", PRNumber: 107, Event: "opened", Branch: branchChunk},
 			db:      &dbFixture{sabotage: `ALTER TABLE vanadis_chunks ALTER COLUMN id TYPE integer USING 0`},
 			wantErr: true, wantMetric: 1,
-		},
-		{
-			name: "thread-based lookup error propagates", ev: pubsub.PRLifecycleEvent{Repo: "aerial", PRNumber: 108, Event: "opened", Branch: branchTS, TargetID: "thread-123"},
-			db: &dbFixture{sabotage: `ALTER TABLE vanadis_builds DROP COLUMN thread_id`}, wantErr: true, wantMetric: 1,
 		},
 	}
 	for _, tc := range tests {

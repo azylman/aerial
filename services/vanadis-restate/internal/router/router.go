@@ -128,16 +128,6 @@ func (s *BuildRouterService) resolvePRBuildRoutes(rc restate.RunContext, repo st
 		return nil, nil
 	}
 
-	if build.CanFallbackThreadRepoLookup(ev) {
-		route, _, err := s.store.LookupUnattachedChunkByThreadAndRepo(rc, ev.TargetID, repo)
-		if err == nil && route.BuildID != "" {
-			return []store.BuildRoute{route}, nil
-		}
-		if err != nil && !isLookupNotFound(err) {
-			return nil, err
-		}
-	}
-
 	return nil, nil
 }
 
