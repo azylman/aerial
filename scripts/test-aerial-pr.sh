@@ -11,6 +11,7 @@ cat << 'CURL_EOF' > "$TMPD/bin/curl"
 url=""; for arg in "$@"; do [[ "$arg" =~ http ]] && url="$arg"; done; [[ "$url" =~ /healthz ]] && { printf "\n200"; exit 0; }
 if [[ "$url" =~ /pulls\?state=open ]]; then
   [[ "$url" =~ test%2Bbranch ]] && touch "$TMPD/seen_encoded_branch"
+  [[ "$url" =~ chunk-emptybody ]] && { echo '[{"number":102,"html_url":"https://github.com/azylman/aerial/pull/102","title":"empty body title","body":""}]'; printf "\n200"; exit 0; }
   [[ "$url" =~ chunk-422 ]] && { [ -f "$TMPD/post_422_seen" ] && echo '[{"number":101,"html_url":"https://github.com/azylman/aerial/pull/101","title":"422 pr"}]' || echo '[]'; } || { [[ "$url" =~ chunk-test ]] && [ -f "$TMPD/has_existing_pr" ] && echo '[{"number":99,"html_url":"https://github.com/azylman/aerial/pull/99","title":"existing"}]' || echo '[]'; }
   printf "\n200"; exit 0
 fi
@@ -44,7 +45,7 @@ s_enc=$("$SCRIPT" init --repo aerial | jq -r .scratch_dir); git -C "$s_enc" chec
 old_sha=$(git -C "$TMPD/origin.git" rev-parse "refs/heads/$br"); s_behind=$("$SCRIPT" init --repo aerial --branch "$br" | jq -r .scratch_dir)
 git -C "$TMPD/repo" fetch origin "$br" -q && git -C "$TMPD/repo" checkout "$br" -q && echo "remote advance" > "$TMPD/repo/adv.txt" && git -C "$TMPD/repo" add adv.txt && git -C "$TMPD/repo" commit -m "remote advance" -q && git -C "$TMPD/repo" push origin "$br" -q
 rem_sha=$(git -C "$TMPD/origin.git" rev-parse "refs/heads/$br"); echo "local work" > "$s_behind/local.txt"
-res_stacked=$("$SCRIPT" submit "$s_behind" "feat: stacked local commit"); assert echo "$res_stacked" | jq -e '.status == "submitted"'; assert git -C "$TMPD/origin.git" merge-base --is-ancestor "$old_sha" "refs/heads/$br"; assert git -C "$TMPD/origin.git" merge-base --is-ancestor "$rem_sha" "refs/heads/$br"
+res_stacked=$("$SCRIPT" submit "$s_behind" "feat: stacked local commit"); assert echo "$res_stacked" | jq -e '.status == "submitted"'; assert git -C "$TMPD/origin.git" merge-base --is-ancestor "$old_sha" "refs/heads/$br"; assert git -C "$TMPD/origin.git" merge-base --is-ancestor "$rem_sha" "refs/heads/$br"; assert [ "$(git -C "$TMPD/origin.git" log -1 --format=%B "refs/heads/$br")" = "feat: stacked local commit" ]
 s_div=$("$SCRIPT" init --repo aerial --branch "$br" | jq -r .scratch_dir)
 echo "div local" > "$s_div/div_l.txt" && git -C "$s_div" add div_l.txt && git -C "$s_div" commit -m "div local" -q
 git -C "$TMPD/repo" fetch origin "$br" -q && git -C "$TMPD/repo" reset --hard "origin/$br" -q && echo "div rem" > "$TMPD/repo/div_r.txt" && git -C "$TMPD/repo" add div_r.txt && git -C "$TMPD/repo" commit -m "div rem" -q && git -C "$TMPD/repo" push origin "$br" -q
@@ -52,6 +53,10 @@ echo "desc" > "$s_div/PR_DESCRIPTION.md"; assert_fail "$SCRIPT" submit "$s_div" 
 res_422_init=$("$SCRIPT" init --repo aerial --vanadis-chunk chunk-422); s_dir_422=$(echo "$res_422_init" | jq -r .scratch_dir)
 echo "new 422 work" > "$s_dir_422/work.txt"; echo "PR 422 desc" > "$s_dir_422/PR_DESCRIPTION.md"
 res_422=$("$SCRIPT" submit "$s_dir_422" "feat: 422 chunk"); assert echo "$res_422" | jq -e '.status == "submitted" and .pr_number == 101'; assert [ -f "$TMPD/post_422_seen" ]
+res_eb_init=$("$SCRIPT" init --repo aerial --vanadis-chunk chunk-emptybody); s_eb=$(echo "$res_eb_init" | jq -r .scratch_dir); echo "eb work" > "$s_eb/work.txt"
+res_eb=$("$SCRIPT" submit "$s_eb" "feat: empty body pr"); assert echo "$res_eb" | jq -e '.status == "submitted" and .pr_number == 102'
+s_pos=$("$SCRIPT" init --repo aerial | jq -r .scratch_dir); echo "pos" > "$s_pos/pos.txt"; res_pos=$("$SCRIPT" submit "$s_pos" "init" -b "init body"); assert echo "$res_pos" | jq -e '.status == "submitted"'
+mkdir -p "$TMPD/scratch/stale-scratch.old" && touch -d "2 days ago" "$TMPD/scratch/stale-scratch.old" && "$SCRIPT" init --repo aerial >/dev/null && assert [ ! -d "$TMPD/scratch/stale-scratch.old" ]
 s_500=$("$SCRIPT" init --repo aerial --vanadis-chunk chunk-500 | jq -r .scratch_dir); echo "500 work" > "$s_500/w.txt"; echo "desc" > "$s_500/PR_DESCRIPTION.md"; assert_fail "$SCRIPT" submit "$s_500" "feat: 500 fail"; assert [ -f "$TMPD/deleted_orphan_ref" ]; rm -rf "$s_500"
 s_rf=$("$SCRIPT" init --repo aerial | jq -r .scratch_dir)
 head -c 24000 /dev/zero | tr '\0' 'A' > "$s_rf/GEMINI.md" && echo "desc" > "$s_rf/PR_DESCRIPTION.md"; assert_fail "$SCRIPT" submit "$s_rf" "feat: test rule size"; rm -f "$s_rf/GEMINI.md"

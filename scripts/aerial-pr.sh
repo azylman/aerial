@@ -13,10 +13,9 @@ anc() { git merge-base --is-ancestor "$1" "$2" 2>/dev/null || { [ -f .git/shallo
 if [ "${1:-}" = "--source-only" ] || [ "${REPO_TEST_MODE:-0}" = "1" ]; then return 0 2>/dev/null || exit 0; fi
 CMD=""; BR=""; BODY=""; BFILE=""; RFILE=""; REB=""; CHUNK="${AERIAL_VANADIS_CHUNK_ID:-${VANADIS_CHUNK_ID:-}}"; ARGS=()
 [ "${AERIAL_NO_VANADIS_CHUNK:-0}" = "1" ] && CHUNK=""
-for a in "$@"; do case "$a" in init|submit|override-roborev|dispute-roborev) CMD="$a"; break;; esac; done
 while [ $# -gt 0 ]; do
   case "$1" in
-    init|submit|override-roborev|dispute-roborev) shift;;
+    init|submit|override-roborev|dispute-roborev) [ -z "$CMD" ] && CMD="$1" || ARGS+=("$1"); shift;;
     --source-only) return 0 2>/dev/null || exit 0;;
     --repo|-r|--repo=*) REPO_EXP=1; REPO_NAME="$(norm_repo "$(get_v "$1" "${1%%=*}" $# "${2:-}")")"; [ "$1" = "${1%%=*}" ] && shift 2 || shift;;
     --branch|--branch=*) [ "$CMD" = "init" ] || { echo "ERROR: --branch only for init" >&2; exit 1; }; BR="$(get_v "$1" "${1%%=*}" $# "${2:-}")"; [ "$1" = "${1%%=*}" ] && shift 2 || shift;;
@@ -33,7 +32,7 @@ done
 if [ "$CMD" = "init" ]; then
   [ -n "${ARGS[0]:-}" ] && [ "$REPO_EXP" = "0" ] && REPO_NAME="$(norm_repo "${ARGS[0]}")"; r_url="${AERIAL_REPO_URL_OVERRIDE:-https://github.com/${REPO_OWNER}/${REPO_NAME}.git}"
   [ "$LOOP" = "1" ] && [ -z "${AERIAL_REPO_URL_OVERRIDE:-}" ] && r_url="${PROXY}/internal/github-git/${REPO_OWNER}/${REPO_NAME}.git"
-  base="${AERIAL_SCRATCH_BASE_DIR:-/data/scratch}"; [ ! -w "$base" ] && base="${TMPDIR:-/tmp}"; mkdir -p "$base"; tid="${AERIAL_TARGET_ID:-${DISCORD_THREAD_ID:-${DISCORD_CHANNEL_ID:-}}}"; [[ ! "$tid" =~ ^[0-9]{17,20}$ ]] && tid=""
+  base="${AERIAL_SCRATCH_BASE_DIR:-/data/scratch}"; [ ! -w "$base" ] && base="${TMPDIR:-/tmp}"; mkdir -p "$base"; find "$base" -maxdepth 1 -type d -name '*-scratch.*' -mmin +1440 -exec rm -rf {} + 2>/dev/null || true; tid="${AERIAL_TARGET_ID:-${DISCORD_THREAD_ID:-${DISCORD_CHANNEL_ID:-}}}"; [[ ! "$tid" =~ ^[0-9]{17,20}$ ]] && tid=""
   rnd=$(head -c 8 /dev/urandom | md5sum | head -c 6); s_dir=""; b_name="$BR"; [ -z "$b_name" ] && [ -n "$CHUNK" ] && { sc="$(printf '%s' "$CHUNK" | sed 's/[^a-zA-Z0-9_-]/_/g')"; s_dir="${base}/vanadis-${sc}-${REPO_NAME}"; b_name="feat/${REPO_NAME}-pr-vanadis-${sc}${tid:+-t$tid}-${rnd}"; }; [ -z "$b_name" ] && b_name="feat/${REPO_NAME}-pr${tid:+-t$tid}-$(date +%Y%m%d%H%M%S)-${rnd}"
   if [ -n "$s_dir" ] && [ -d "$s_dir/.git" ] && git -C "$s_dir" rev-parse --verify HEAD >/dev/null 2>&1; then
     rm -f "$s_dir/.git/index.lock"; ex_b="$(git -C "$s_dir" symbolic-ref --short HEAD 2>/dev/null || true)"
@@ -51,7 +50,7 @@ elif [ "$CMD" = "submit" ]; then
   for df in "$s_dir/PR_DESCRIPTION.md" "$s_dir/.pr_description.md"; do [ -s "$df" ] && s_desc="$df" && s_cont="$(cat "$df")" && break; done; [ -z "$BODY" ] && BODY="$s_cont"; rm -f "$s_dir/PR_DESCRIPTION.md" "$s_dir/.pr_description.md"
   trap 'rc=$?; if [ $rc -ne 0 ]; then [ -n "$s_desc" ] && printf "%s\n" "$s_cont" > "$s_desc"; else rm -rf "$s_dir"; fi' EXIT INT TERM
   cd "$s_dir"; git config user.name "Aerial"; git config user.email "aerial@noreply.github.com"; parse_remote; git_auth
-  cur_b=$(git rev-parse --abbrev-ref HEAD); enc_b=$(jq -rn --arg b "$cur_b" '$b|@uri'); ex_pr=""; [ -n "$cur_b" ] && [ "$cur_b" != "$DEFAULT_BRANCH" ] && ex_pr=$(gh_call -X GET "$GITHUB_API/repos/$REPO_OWNER/$REPO_NAME/pulls?state=open&head=$REPO_OWNER:$enc_b" | sed '$d' | jq -c '.[0] // empty' 2>/dev/null || true); [ -n "$ex_pr" ] && { [ -z "$BODY" ] && BODY=$(echo "$ex_pr" | jq -r '.body // .title // "Automated update"'); [ -z "$msg" ] && msg=$(echo "$ex_pr" | jq -r '.title // empty'); }
+  cur_b=$(git rev-parse --abbrev-ref HEAD); enc_b=$(jq -rn --arg b "$cur_b" '$b|@uri'); ex_pr=""; b_from_ex=0; [ -n "$cur_b" ] && [ "$cur_b" != "$DEFAULT_BRANCH" ] && ex_pr=$(gh_call -X GET "$GITHUB_API/repos/$REPO_OWNER/$REPO_NAME/pulls?state=open&head=$REPO_OWNER:$enc_b" | sed '$d' | jq -c '.[0] // empty' 2>/dev/null || true); [ -n "$ex_pr" ] && { [ -z "$BODY" ] && { BODY=$(echo "$ex_pr" | jq -r 'if ((.body // "") | test("\\S")) then .body else (.title // "Automated update") end'); b_from_ex=1; }; [ -z "$msg" ] && msg=$(echo "$ex_pr" | jq -r '.title // empty'); }
   [ "${#BODY}" -gt 60000 ] && BODY="${BODY:0:60000}"$'\n\n> ⚠️ **[Aerial Notice]**: PR description was truncated because it exceeded 60,000 characters.'; [ -z "${BODY//[[:space:]]/}" ] && { echo "ERROR: PR description mandatory" >&2; exit 1; }
   for rf in GEMINI.md AGENTS.md; do [ -f "$rf" ] && [ "$(wc -c < "$rf" | tr -d '[:space:]')" -gt 23040 ] && { echo "ERROR: $rf exceeds 22.5 KB ceiling" >&2; exit 1; }; done
   git add -A && git rm --cached -f PR_DESCRIPTION.md .pr_description.md 2>/dev/null || true
@@ -66,7 +65,7 @@ elif [ "$CMD" = "submit" ]; then
   fi
   has_c=0; [ -n "$t_sha" ] && ! git diff --quiet "$t_sha" HEAD 2>/dev/null && has_c=1; [ -z "$t_sha" ] && [ "$(git rev-parse HEAD 2>/dev/null)" != "$(git rev-parse "$DEFAULT_BRANCH" 2>/dev/null || true)" ] && has_c=1; git diff --cached --quiet && [ "$has_c" -eq 0 ] && { jq -n --arg s "no_changes" --arg m "No modifications detected in scratch directory." '{status:$s,message:$m}'; exit 0; }
   if [ -f .git/.aerial-verified-tree ] && git diff --quiet 2>/dev/null && [ "$(git write-tree 2>/dev/null)" = "$(cat .git/.aerial-verified-tree 2>/dev/null)" ]; then echo "⚡ Skipping duplicate pre-flight verification (staged tree already verified)." >&2; elif [ -f scripts/verify.sh ]; then chmod +x scripts/verify.sh && ./scripts/verify.sh --staged >&2 || { [ -n "$temp_sha" ] && { git reset --hard "$temp_sha" >/dev/null 2>&1; git reset --soft "$o_head" >/dev/null 2>&1; } || { [ "$(git rev-parse HEAD)" != "$o_head" ] && git reset --hard "$o_head" >/dev/null 2>&1 || true; }; echo "ERROR: Pre-flight verification failed" >&2; exit 1; }; fi
-  title="${msg:-feat($REPO_NAME): automated update by Aerial}"; title=$(printf "%s\n" "$title" | awk 'NF{print;exit}' | cut -c 1-256); ! git diff --cached --quiet && git commit -m "$(printf "%s\n\n%s" "$title" "$BODY")" >/dev/null
+  title="${msg:-feat($REPO_NAME): automated update by Aerial}"; title=$(printf "%s\n" "$title" | awk 'NF{print;exit}' | cut -c 1-256); c_msg="$title"; [ "$b_from_ex" = "0" ] && [[ "$msg" != *"$BODY"* ]] && c_msg=$(printf "%s\n\n%s" "$title" "$BODY"); ! git diff --cached --quiet && git commit -m "$c_msg" >/dev/null
   [ -n "$r_sha" ] && ! anc "$r_sha" HEAD && { echo "ERROR: Remote branch has commits not in local HEAD" >&2; exit 1; }; if ! p_err=$(git push -u origin "$cur_b" 2>&1); then echo "ERROR: push failed: $p_err" >&2; exit 1; fi
   if [ -z "$ex_pr" ]; then
     raw=$(gh_call -X POST "$GITHUB_API/repos/$REPO_OWNER/$REPO_NAME/pulls" -d "$(jq -n --arg t "$title" --arg h "$cur_b" --arg b "$DEFAULT_BRANCH" --arg bd "$BODY" '{title:$t,head:$h,base:$b,body:$bd}')")
