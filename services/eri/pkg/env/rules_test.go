@@ -13,25 +13,16 @@ import (
 )
 
 type compileAndDiscoverRulesCase struct {
-	name                string
-	target              RuleTarget
-	engine              string
-	prompt              string
-	fileSizeLimit       bool
-	tornZeroByte        bool
-	dirIsFile           bool
-	userSubIsFile       bool
-	aerialPersonaIsFile bool
-	configPersonaIsFile bool
-	aerialEngineIsFile  bool
-	userEngineIsFile    bool
-	aerialEngineTorn    bool
-	userEngineOversized bool
-	wantErr             bool
-	wantPromptMD        bool
-	wantPersona         bool
-	wantPrefixOrder     []string
-	wantExcludedPrefix  string
+	name               string
+	target             RuleTarget
+	engine             string
+	prompt             string
+	fault              string
+	wantErr            bool
+	wantPromptMD       bool
+	wantPersona        bool
+	wantPrefixOrder    []string
+	wantExcludedPrefix string
 }
 
 func TestResolveDir(t *testing.T) {
@@ -110,41 +101,46 @@ func TestDiscoverRuleFiles(t *testing.T) {
 
 func setupCompileRuleBlockers(t *testing.T, aerialDir, configDir string, tc compileAndDiscoverRulesCase) {
 	t.Helper()
-	if tc.aerialEngineIsFile {
+	switch tc.fault {
+	case "aerial_engine_is_file":
 		path := filepath.Join(aerialDir, "discord", "claude")
 		_ = os.RemoveAll(path)
 		if err := os.WriteFile(path, []byte("file-not-dir"), 0o644); err != nil {
 			t.Fatalf("WriteFile: %v", err)
 		}
-	}
-	if tc.userEngineIsFile {
+	case "user_engine_is_file":
 		path := filepath.Join(configDir, "discord", "claude")
 		_ = os.RemoveAll(path)
 		if err := os.WriteFile(path, []byte("file-not-dir"), 0o644); err != nil {
 			t.Fatalf("WriteFile: %v", err)
 		}
-	}
-	if tc.aerialEngineTorn {
+	case "aerial_engine_torn":
 		writeTestFile(t, filepath.Join(aerialDir, "discord", "claude", "torn.md"), "")
-	}
-	if tc.userEngineOversized {
+	case "user_engine_oversized":
 		writeTestFile(t, filepath.Join(configDir, "discord", "claude", "oversized.md"), strings.Repeat("B", MaxSourceRuleFileSizeBytes+200))
-	}
-
-	for _, pt := range []struct {
-		cond bool
-		path string
-	}{
-		{tc.dirIsFile, filepath.Join(aerialDir, "common")},
-		{tc.userSubIsFile, filepath.Join(configDir, "discord")},
-		{tc.aerialPersonaIsFile, filepath.Join(aerialDir, "persona")},
-		{tc.configPersonaIsFile, filepath.Join(configDir, "persona")},
-	} {
-		if pt.cond {
-			_ = os.RemoveAll(pt.path)
-			if err := os.WriteFile(pt.path, []byte("file-not-dir"), 0o644); err != nil {
-				t.Fatalf("WriteFile: %v", err)
-			}
+	case "dir_is_file":
+		path := filepath.Join(aerialDir, "common")
+		_ = os.RemoveAll(path)
+		if err := os.WriteFile(path, []byte("file-not-dir"), 0o644); err != nil {
+			t.Fatalf("WriteFile: %v", err)
+		}
+	case "user_sub_is_file":
+		path := filepath.Join(configDir, "discord")
+		_ = os.RemoveAll(path)
+		if err := os.WriteFile(path, []byte("file-not-dir"), 0o644); err != nil {
+			t.Fatalf("WriteFile: %v", err)
+		}
+	case "aerial_persona_is_file":
+		path := filepath.Join(aerialDir, "persona")
+		_ = os.RemoveAll(path)
+		if err := os.WriteFile(path, []byte("file-not-dir"), 0o644); err != nil {
+			t.Fatalf("WriteFile: %v", err)
+		}
+	case "config_persona_is_file":
+		path := filepath.Join(configDir, "persona")
+		_ = os.RemoveAll(path)
+		if err := os.WriteFile(path, []byte("file-not-dir"), 0o644); err != nil {
+			t.Fatalf("WriteFile: %v", err)
 		}
 	}
 }
@@ -198,9 +194,10 @@ func assertCompileDiscoveryOutput(t *testing.T, tc compileAndDiscoverRulesCase, 
 func runCompileAndDiscoverRulesCase(t *testing.T, tc compileAndDiscoverRulesCase) {
 	t.Helper()
 	content := "Standard rule body"
-	if tc.fileSizeLimit {
+	switch tc.fault {
+	case "file_size_limit":
 		content = strings.Repeat("A", MaxSourceRuleFileSizeBytes+100)
-	} else if tc.tornZeroByte {
+	case "torn_zero_byte":
 		content = ""
 	}
 
@@ -242,12 +239,12 @@ func TestCompileAndDiscoverRules(t *testing.T) {
 		{name: "discord target with custom prompt", target: TargetDiscord, prompt: "Do not compromise invariants", wantPromptMD: true, wantPersona: true},
 		{name: "voice target includes persona and target rules", target: TargetVoice, wantPersona: true},
 		{name: "ephemeral target compiles isolated rules and filters out persona", target: TargetEphemeral, wantPersona: false},
-		{name: "rule file exceeding size limit triggers error", target: TargetDiscord, fileSizeLimit: true, wantErr: true},
-		{name: "torn zero byte rule file triggers discovery error", target: TargetDiscord, tornZeroByte: true, wantErr: true},
-		{name: "aerial common subfolder is regular file triggers discovery error", target: TargetDiscord, dirIsFile: true, wantErr: true},
-		{name: "user target subfolder is regular file triggers discovery error", target: TargetDiscord, userSubIsFile: true, wantErr: true},
-		{name: "aerial persona subfolder is regular file triggers error", target: TargetDiscord, aerialPersonaIsFile: true, wantErr: true},
-		{name: "config persona subfolder is regular file triggers error", target: TargetDiscord, configPersonaIsFile: true, wantErr: true},
+		{name: "rule file exceeding size limit triggers error", target: TargetDiscord, fault: "file_size_limit", wantErr: true},
+		{name: "torn zero byte rule file triggers discovery error", target: TargetDiscord, fault: "torn_zero_byte", wantErr: true},
+		{name: "aerial common subfolder is regular file triggers discovery error", target: TargetDiscord, fault: "dir_is_file", wantErr: true},
+		{name: "user target subfolder is regular file triggers discovery error", target: TargetDiscord, fault: "user_sub_is_file", wantErr: true},
+		{name: "aerial persona subfolder is regular file triggers error", target: TargetDiscord, fault: "aerial_persona_is_file", wantErr: true},
+		{name: "config persona subfolder is regular file triggers error", target: TargetDiscord, fault: "config_persona_is_file", wantErr: true},
 		{
 			name:               "discord target with claude engine compiles engine rules in prefix order",
 			target:             TargetDiscord,
@@ -279,32 +276,32 @@ func TestCompileAndDiscoverRules(t *testing.T) {
 			wantExcludedPrefix: "25_aerial_discord_claude_",
 		},
 		{
-			name:               "aerial engine subfolder is regular file triggers discovery error",
-			target:             TargetDiscord,
-			engine:             config.EngineClaude,
-			aerialEngineIsFile: true,
-			wantErr:            true,
+			name:    "aerial engine subfolder is regular file triggers discovery error",
+			target:  TargetDiscord,
+			engine:  config.EngineClaude,
+			fault:   "aerial_engine_is_file",
+			wantErr: true,
 		},
 		{
-			name:             "user engine subfolder is regular file triggers discovery error",
-			target:           TargetDiscord,
-			engine:           config.EngineClaude,
-			userEngineIsFile: true,
-			wantErr:          true,
+			name:    "user engine subfolder is regular file triggers discovery error",
+			target:  TargetDiscord,
+			engine:  config.EngineClaude,
+			fault:   "user_engine_is_file",
+			wantErr: true,
 		},
 		{
-			name:             "aerial engine torn zero byte file triggers error",
-			target:           TargetDiscord,
-			engine:           config.EngineClaude,
-			aerialEngineTorn: true,
-			wantErr:          true,
+			name:    "aerial engine torn zero byte file triggers error",
+			target:  TargetDiscord,
+			engine:  config.EngineClaude,
+			fault:   "aerial_engine_torn",
+			wantErr: true,
 		},
 		{
-			name:                "user engine oversized rule file triggers error",
-			target:              TargetDiscord,
-			engine:              config.EngineClaude,
-			userEngineOversized: true,
-			wantErr:             true,
+			name:    "user engine oversized rule file triggers error",
+			target:  TargetDiscord,
+			engine:  config.EngineClaude,
+			fault:   "user_engine_oversized",
+			wantErr: true,
 		},
 	}
 
