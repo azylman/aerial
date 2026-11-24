@@ -148,7 +148,27 @@ jobs:
           set -euo pipefail
           . scripts/lib/hermetic-go-env.sh
           ensure_bazel_build_files "$GITHUB_WORKSPACE"
-          LINT_MODULES=$(discover_go_services)
+          GO_MODULES=$(discover_go_services)
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            git fetch origin +refs/heads/main:refs/remotes/origin/main 2>/dev/null || true
+            CHANGED_FILES=$(git diff --name-only origin/main...HEAD 2>/dev/null || git diff --name-only HEAD^1 HEAD 2>/dev/null || true)
+          else
+            CHANGED_FILES=$(git diff --name-only HEAD^1 HEAD 2>/dev/null || true)
+          fi
+          if [ "${FORCE_ALL:-}" = "true" ] || [ -z "$CHANGED_FILES" ] || echo "$CHANGED_FILES" | grep -q -E '(^pkg/|^\.golangci\.ya?ml|^scripts/)'; then
+            LINT_MODULES="$GO_MODULES"
+          else
+            LINT_MODULES=""
+            for mod in $GO_MODULES; do
+              if echo "$CHANGED_FILES" | grep -q "^$mod/"; then
+                LINT_MODULES="$LINT_MODULES $mod"
+              fi
+            done
+            if [ -z "$LINT_MODULES" ]; then
+              echo "No Go module changes detected for linting; skipping."
+              exit 0
+            fi
+          fi
           for svc in $LINT_MODULES; do
             echo "=== Linting & checking deadcode in $svc ==="
             (

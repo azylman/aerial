@@ -24,7 +24,9 @@ if [ "$MODE" = "full" ]; then run_ch="true"; else
 fi
 [ "$run_ch" = "true" ] && (cd scripts/code-health && go run . -root ../.. -baseline ../../.code-health-baseline.json)
 MODS=""
-if [ "$MODE" = "full" ]; then MODS=$(discover_go_services); else
+if [ "$MODE" = "full" ] || echo "$CHANGED_FILES" | grep -q -E '(^pkg/|^\.golangci\.ya?ml|^scripts/)'; then
+    MODS=$(discover_go_services)
+else
     for m in $(discover_go_services); do echo "$CHANGED_FILES" | grep -q "^$m/" && MODS="$MODS $m"; done
 fi
 if [ -n "$MODS" ] && { [ "${CI:-}" = "true" ] || [ "${GITHUB_ACTIONS:-}" = "true" ]; }; then

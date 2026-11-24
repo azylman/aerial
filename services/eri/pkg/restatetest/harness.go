@@ -40,25 +40,16 @@ func resolveRestateServerBin() string {
 		for _, cand := range []string{
 			filepath.Join(root, "restate_server_linux_amd64+/restate-server"),
 			filepath.Join(root, "restate_server_linux_amd64/restate-server"),
+			filepath.Join(root, "restate_server_linux_arm64+/restate-server"),
+			filepath.Join(root, "restate_server_linux_arm64/restate-server"),
 			filepath.Join(root, "_main/external/restate_server_linux_amd64+/restate-server"),
+			filepath.Join(root, "_main/external/restate_server_linux_arm64+/restate-server"),
+			filepath.Join(root, "+http_archive+restate_server_linux_amd64/restate-server"),
+			filepath.Join(root, "+http_archive+restate_server_linux_arm64/restate-server"),
 		} {
 			if fi, err := os.Stat(cand); err == nil && !fi.IsDir() && (fi.Mode()&0o111 != 0) {
 				return cand
 			}
-		}
-		var found string
-		_ = filepath.Walk(root, func(path string, info os.FileInfo, err error) error {
-			if err != nil {
-				return err
-			}
-			if !info.IsDir() && filepath.Base(path) == "restate-server" && (info.Mode()&0o111 != 0) {
-				found = path
-				return filepath.SkipAll
-			}
-			return nil
-		})
-		if found != "" {
-			return found
 		}
 	}
 	if path, err := exec.LookPath("restate-server"); err == nil {

@@ -30,6 +30,7 @@ for f in "${CHANGED_FILES[@]}"; do
         services/*|mcp/*) sd=$(echo "$f" | cut -d/ -f2); [ -n "${AFF[$sd]+_}" ] && AFF["$sd"]="true" ;;
     esac
 done
+[ "$PKG_CHANGED" = "true" ] && for s in "${OCI_SVCS[@]}"; do AFF["$s"]="true"; done
 CAND_OCI=()
 if [ "$FORCE_ALL" = "true" ]; then CAND_OCI=("${OCI_SVCS[@]}"); else
     filtered=()
@@ -39,7 +40,8 @@ if [ "$FORCE_ALL" = "true" ]; then CAND_OCI=("${OCI_SVCS[@]}"); else
         f_set=$(printf '%s ' "${filtered[@]}")
         q_out=$(bazel query "kind(oci_image, rdeps(//images:all, same_pkg_direct_rdeps(set($f_set))))" 2>/dev/null) || CAND_OCI=("${OCI_SVCS[@]}")
         if [ ${#CAND_OCI[@]} -eq 0 ]; then
-            while IFS= read -r m || [ -n "$m" ]; do c="${m#//images:}"; [ -n "$c" ] && CAND_OCI+=("$c"); done <<< "$q_out"
+            while IFS= read -r m || [ -n "$m" ]; do c="${m#//images:}"; [ -n "$c" ] && { CAND_OCI+=("$c"); AFF["$c"]="true"; }; done <<< "$q_out"
+            [ ${#CAND_OCI[@]} -eq 0 ] && CAND_OCI=("${OCI_SVCS[@]}")
         fi
     fi
 fi

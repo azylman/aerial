@@ -55,8 +55,8 @@ senc=$("$SCRIPT" init --repo aerial | jq -r .scratch_dir)
 git -C "$senc" checkout -b "feat/test+branch" -q; echo "enc" > "$senc/enc.txt"
 assert echo "$("$SCRIPT" submit "$senc" "feat: enc" -b "enc")" | jq -e '.status == "submitted"' && [ -f "$TMPD/seen_encoded_branch" ]
 s_beh=$("$SCRIPT" init --repo aerial --branch "$br" | jq -r .scratch_dir)
-git -C "$TMPD/repo" checkout "$br" -q && echo "rem" > "$TMPD/repo/r.txt" && git -C "$TMPD/repo" add r.txt && git -C "$TMPD/repo" commit -m "rem" -q && git -C "$TMPD/repo" push origin "$br" -q
-echo "loc" > "$s_beh/l.txt" && assert echo "$("$SCRIPT" submit "$s_beh" "feat: stacked")" | jq -e '.status == "submitted"'
+git -C "$TMPD/repo" fetch origin "$br" -q && git -C "$TMPD/repo" checkout -b "$br" FETCH_HEAD -q && echo "rem" > "$TMPD/repo/r.txt" && git -C "$TMPD/repo" add r.txt && git -C "$TMPD/repo" commit -m "rem" -q && git -C "$TMPD/repo" push origin "$br" -q && rem_sha=$(git -C "$TMPD/repo" rev-parse HEAD)
+echo "loc" > "$s_beh/l.txt" && assert echo "$("$SCRIPT" submit "$s_beh" "feat: stacked")" | jq -e '.status == "submitted"' && assert git -C "$TMPD/origin.git" merge-base --is-ancestor "$rem_sha" "$br"
 
 s422=$("$SCRIPT" init --repo aerial --vanadis-chunk chunk-422 | jq -r .scratch_dir)
 echo "w" > "$s422/w.txt"; echo "d" > "$s422/PR_DESCRIPTION.md"

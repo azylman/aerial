@@ -55,3 +55,11 @@ http_archive(
     strip_prefix = "restate-server-x86_64-unknown-linux-musl",
     urls = ["https://github.com/restatedev/restate/releases/download/v1.8.1-hotfix.2/restate-server-x86_64-unknown-linux-musl.tar.xz"],
 )
+
+http_archive(
+    name = "restate_server_linux_arm64",
+    build_file_content = 'exports_files(["restate-server"], visibility = ["//visibility:public"])',
+    sha256 = "192ccc91466b59b02a5e30130eb277778fc7ee586d64588480c5971b618e358c",
+    strip_prefix = "restate-server-aarch64-unknown-linux-musl",
+    urls = ["https://github.com/restatedev/restate/releases/download/v1.8.1-hotfix.2/restate-server-aarch64-unknown-linux-musl.tar.xz"],
+)

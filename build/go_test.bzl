@@ -35,7 +35,10 @@ def go_test(name, data = [], **kwargs):
 
     # Restate server binary for integration tests
     if pkg in ("services/eri/pkg/restatetest", "services/eri/pkg/queue"):
-        extra_data.append("@restate_server_linux_amd64//:restate-server")
+        extra_data.append(select({
+            "@rules_go//go/platform:linux_arm64": "@restate_server_linux_arm64//:restate-server",
+            "//conditions:default": "@restate_server_linux_amd64//:restate-server",
+        }))
 
     # Schema.sql only for packages running database tests with pgtest
     if (
