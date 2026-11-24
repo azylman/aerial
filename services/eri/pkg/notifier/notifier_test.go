@@ -39,6 +39,22 @@ func TestStaticFallback(t *testing.T) {
 		t.Errorf("Expected session reset fallback message, got: %q", msgReset)
 	}
 
+	sessionTests := []struct {
+		name  string
+		input string
+		want  string
+	}{
+		{"draining pool", "queue: failed to acquire session lease for thread 123: unified process pool is draining", "I was mid-restart onto a new version and couldn't take this message. Please send it again in a moment."},
+		{"session corrupt", "Resetting session due to conversation corrupted", "The conversation context became corrupted and has been reset. Please try sending your message again."},
+	}
+	for _, tc := range sessionTests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := StaticFallback(tc.input); got != tc.want {
+				t.Errorf("StaticFallback(%q) = %q, want %q", tc.input, got, tc.want)
+			}
+		})
+	}
+
 	// Poison pill
 	msgPoison := StaticFallback("poison pill: dropped crashed message")
 	if !strings.Contains(msgPoison, "repeated process crashes") {

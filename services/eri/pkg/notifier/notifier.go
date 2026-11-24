@@ -90,6 +90,10 @@ var staticFallbackRules = []staticFallbackRule{
 		response: "The message caused repeated process crashes and was skipped to restore normal operation. Please try rephrasing or simplifying the request.",
 	},
 	{
+		keywords: []string{"draining"},
+		response: "I was mid-restart onto a new version and couldn't take this message. Please send it again in a moment.",
+	},
+	{
 		keywords: []string{"reset", "corrupt", "session"},
 		response: "The conversation context became corrupted and has been reset. Please try sending your message again.",
 	},
