@@ -50,7 +50,7 @@ elif [ "$CMD" = "submit" ]; then
   trap 'rc=$?; if [ $rc -ne 0 ]; then [ -n "$s_desc" ] && printf "%s\n" "$s_cont" > "$s_desc"; else rm -rf "$s_dir"; fi' EXIT INT TERM
   cd "$s_dir"; git config user.name "Aerial"; git config user.email "aerial@noreply.github.com"; parse_remote; git_auth
   cur_b=$(git rev-parse --abbrev-ref HEAD); ex_pr=""; [ -n "$cur_b" ] && [ "$cur_b" != "$DEFAULT_BRANCH" ] && ex_pr=$(gh_call -X GET "$GITHUB_API/repos/$REPO_OWNER/$REPO_NAME/pulls?state=open&head=$REPO_OWNER:$cur_b" | sed '$d' | jq -c '.[0] // empty' 2>/dev/null || true); [ -n "$ex_pr" ] && { [ -z "$BODY" ] && BODY=$(echo "$ex_pr" | jq -r '.body // .title // "Automated update"'); [ -z "$msg" ] && msg=$(echo "$ex_pr" | jq -r '.title // empty'); }
-  BODY="${BODY:0:60000}"; [ -z "${BODY//[[:space:]]/}" ] && { echo "ERROR: PR description mandatory" >&2; exit 1; }
+  [ "${#BODY}" -gt 60000 ] && BODY="${BODY:0:60000}"$'\n\n> ⚠️ **[Aerial Notice]**: PR description was truncated because it exceeded 60,000 characters.'; [ -z "${BODY//[[:space:]]/}" ] && { echo "ERROR: PR description mandatory" >&2; exit 1; }
   for rf in GEMINI.md AGENTS.md; do [ -f "$rf" ] && [ $(wc -c < "$rf") -gt 23040 ] && { echo "ERROR: $rf exceeds 22.5 KB ceiling" >&2; exit 1; }; done
   git add -A && git rm --cached -f PR_DESCRIPTION.md .pr_description.md 2>/dev/null || true
   git fetch origin "+refs/heads/$DEFAULT_BRANCH:refs/remotes/origin/$DEFAULT_BRANCH" "+refs/heads/$cur_b:refs/remotes/origin/$cur_b" >/dev/null 2>&1 || true
@@ -62,10 +62,10 @@ elif [ "$CMD" = "submit" ]; then
     [ -n "$t_sha" ] && ! git merge-base --is-ancestor "$t_sha" HEAD 2>/dev/null && { git merge --no-edit -q "$t_sha" >/dev/null 2>&1 || { git merge --abort >/dev/null 2>&1 || true; git reset --hard "${temp_sha:-$o_head}" >/dev/null 2>&1; git reset --soft "$o_head" >/dev/null 2>&1; echo "ERROR: Merge conflict with origin/$DEFAULT_BRANCH" >&2; exit 1; }; }
     [ -n "$temp_sha" ] && { git cherry-pick -n "$temp_sha" >/dev/null 2>&1 || { git cherry-pick --abort >/dev/null 2>&1 || true; git reset --hard "$temp_sha" >/dev/null 2>&1; git reset --soft "$o_head" >/dev/null 2>&1; echo "ERROR: Merge conflict applying staged changes" >&2; exit 1; }; }
   fi
-  has_c=0; [ "$(git rev-parse HEAD 2>/dev/null)" != "$(git rev-parse origin/$DEFAULT_BRANCH 2>/dev/null || true)" ] && has_c=1; git diff --cached --quiet && [ "$has_c" -eq 0 ] && { jq -n --arg s "no_changes" --arg m "No modifications detected in scratch directory." '{status:$s,message:$m}'; exit 0; }
+  has_c=0; [ -n "$t_sha" ] && ! git diff --quiet "$t_sha" HEAD 2>/dev/null && has_c=1; [ -z "$t_sha" ] && [ "$(git rev-parse HEAD 2>/dev/null)" != "$(git rev-parse "$DEFAULT_BRANCH" 2>/dev/null || true)" ] && has_c=1; git diff --cached --quiet && [ "$has_c" -eq 0 ] && { jq -n --arg s "no_changes" --arg m "No modifications detected in scratch directory." '{status:$s,message:$m}'; exit 0; }
   if [ -f .git/.aerial-verified-tree ] && [ "$(git write-tree 2>/dev/null)" = "$(cat .git/.aerial-verified-tree 2>/dev/null)" ]; then echo "⚡ Skipping duplicate pre-flight verification (staged tree already verified)." >&2; elif [ -f scripts/verify.sh ]; then chmod +x scripts/verify.sh && ./scripts/verify.sh --staged >&2 || { [ -n "$temp_sha" ] && { git reset --hard "$temp_sha" >/dev/null 2>&1; git reset --soft "$o_head" >/dev/null 2>&1; } || { [ "$(git rev-parse HEAD)" != "$o_head" ] && git reset --hard "$o_head" >/dev/null 2>&1 || true; }; echo "ERROR: Pre-flight verification failed" >&2; exit 1; }; fi
   title="${msg:-feat($REPO_NAME): automated update by Aerial}"; title=$(printf "%s\n" "$title" | awk 'NF{print;exit}' | cut -c 1-256); ! git diff --cached --quiet && git commit -m "$(printf "%s\n\n%s" "$title" "$BODY")" >/dev/null
-  [ -n "$r_sha" ] && ! git merge-base --is-ancestor "$r_sha" HEAD 2>/dev/null && { echo "ERROR: Remote branch has commits not in local HEAD" >&2; exit 1; }; git push -u origin "$cur_b" >/dev/null 2>&1 || { echo "ERROR: push failed" >&2; exit 1; }
+  [ -n "$r_sha" ] && ! git merge-base --is-ancestor "$r_sha" HEAD 2>/dev/null && { echo "ERROR: Remote branch has commits not in local HEAD" >&2; exit 1; }; if ! p_err=$(git push -u origin "$cur_b" 2>&1); then echo "ERROR: push failed: $p_err" >&2; exit 1; fi
   if [ -z "$ex_pr" ]; then
     raw=$(gh_call -X POST "$GITHUB_API/repos/$REPO_OWNER/$REPO_NAME/pulls" -d "$(jq -n --arg t "$title" --arg h "$cur_b" --arg b "$DEFAULT_BRANCH" --arg bd "$BODY" '{title:$t,head:$h,base:$b,body:$bd}')")
     p_code=$(echo "$raw" | tail -n1); p_resp=$(echo "$raw" | sed '$d')
@@ -75,7 +75,7 @@ elif [ "$CMD" = "submit" ]; then
   p_num=$(echo "$ex_pr" | jq -r '.number // empty'); p_url=$(echo "$ex_pr" | jq -r '.html_url // empty'); c_sha=$(git rev-parse HEAD); [ -z "$p_num" ] && { echo "ERROR: Failed PR: $ex_pr" >&2; exit 1; }
   jq -n --arg s "submitted" --arg u "$p_url" --argjson n "$p_num" --arg b "$cur_b" --arg c "$c_sha" --arg r "$REPO_NAME" --arg m "PR #$p_num submitted on $REPO_OWNER/$REPO_NAME. Continuous delivery automated via push events. End active turn now." '{status:$s,pr_url:$u,pr_number:$n,branch:$b,commit_sha:$c,async:true,repo:$r,turn_action:"end_turn",message:$m}'
 elif [ "$CMD" = "override-roborev" ] || [ "$CMD" = "dispute-roborev" ]; then
-  pr="${ARGS[0]:-}"; [ -z "$REB" ] && REB="${ARGS[1]:-}"; [ -n "$RFILE" ] && [ -f "$RFILE" ] && REB="$(cat "$RFILE")"
+  pr="${ARGS[0]:-}"; [ -z "$REB" ] && REB="${ARGS[1]:-}"; [ -n "$RFILE" ] && { [ -f "$RFILE" ] || { echo "ERROR: rebuttal file not found: $RFILE" >&2; exit 1; }; REB="$(cat "$RFILE")"; }
   [[ "$pr" =~ ^[0-9]+$ ]] && [ -n "${REB//[[:space:]]/}" ] || { echo "ERROR: numeric PR number and rebuttal required" >&2; exit 1; }
   parse_remote; raw=$(gh_call -X GET "$GITHUB_API/repos/$REPO_OWNER/$REPO_NAME/pulls/$pr"); code=$(echo "$raw" | tail -n1); resp=$(echo "$raw" | sed '$d')
   is_ok "$code" || { echo "ERROR: Query PR failed (HTTP $code)" >&2; exit 1; }
