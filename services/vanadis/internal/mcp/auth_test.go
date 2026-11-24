@@ -27,6 +27,8 @@ func TestMCP_AuthRBAC(t *testing.T) {
 		failArgs     = `{"chunk_id":"chunk-4-0","reason":"failure"}`
 		completeArgs = `{"chunk_id":"chunk-1","dispatch_id":"vanadis-chunk-1-turn-0","summary":"ok"}`
 		retryArgs    = `{"build_id":"build-mcp-1","chunk_id":"chunk-1","expected_dispatch_id":"d1","reason":"retry"}`
+		createArgs   = `{"agent":"aerial","thread_id":"1234567890","objective":"test obj","chunks":[{"repo":"aerial","title":"c1","instructions":"i1","depends_on":[]}]}`
+		cancelArgs   = `{"build_id":"build-mcp-1"}`
 	)
 	tests := []struct {
 		name, tool, args  string
@@ -66,6 +68,13 @@ func TestMCP_AuthRBAC(t *testing.T) {
 		{"retry action missing caller", "retry_action_chunk", retryArgs, false, true, true, "unauthorized"},
 		{"retry action build not found", "retry_action_chunk", `{"build_id":"b-missing","chunk_id":"chunk-1","expected_dispatch_id":"d1","reason":"retry"}`, true, true, true, "not found"},
 		{"retry action forbidden", "retry_action_chunk", retryArgs, true, false, true, "access denied"},
+		{"create build missing caller", "create_build", createArgs, false, true, true, "unauthorized"},
+		{"create build forbidden", "create_build", createArgs, true, false, true, "access denied"},
+		{"create build allowed", "create_build", createArgs, true, true, false, `"status":"accepted"`},
+		{"cancel build missing caller", "cancel_build", cancelArgs, false, true, true, "unauthorized"},
+		{"cancel build not found", "cancel_build", `{"build_id":"b-missing"}`, true, true, true, "not found"},
+		{"cancel build forbidden", "cancel_build", cancelArgs, true, false, true, "access denied"},
+		{"cancel build allowed", "cancel_build", cancelArgs, true, true, false, `"status":"cancelled"`},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
