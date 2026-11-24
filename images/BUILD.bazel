@@ -253,6 +253,186 @@ oci_push(
     repository = "ghcr.io/azylman/aerial-migrator",
 )
 
+# Two-Phase OCI Base + App Layer Services (4)
+
+# eri-restate
+go_cover_binary(
+    name = "eri_restate_hook_guard_cover_bin",
+    actual = "//services/eri/cmd/hook-guard:hook-guard",
+)
+
+go_cover_binary(
+    name = "eri_restate_transcript_search_cover_bin",
+    actual = "//services/eri/cmd/transcript-search:transcript-search",
+)
+
+pkg_tar(
+    name = "eri_restate_aux_bins_layer",
+    files = {
+        ":eri_restate_hook_guard_cover_bin": "usr/local/bin/hook-guard",
+        ":eri_restate_transcript_search_cover_bin": "usr/local/bin/transcript-search",
+    },
+    mode = "0755",
+)
+
+pkg_tar(
+    name = "eri_restate_scripts_layer",
+    srcs = ["//:runtime_scripts"],
+    mode = "0755",
+    package_dir = "/usr/local/bin",
+    strip_prefix = "/scripts",
+)
+
+pkg_tar(
+    name = "eri_restate_rules_layer",
+    srcs = ["//:runtime_rules"],
+    package_dir = "/app/rules",
+    strip_prefix = "/rules",
+)
+
+pkg_tar(
+    name = "eri_restate_agents_layer",
+    srcs = ["//:runtime_agents"],
+    package_dir = "/app/.agents",
+    strip_prefix = "/.agents",
+)
+
+aerial_go_image(
+    name = "eri-restate",
+    base = "@eri_restate_base",
+    bin_path = "/app/eri-restate",
+    binary = "//services/eri-restate/cmd/eri-restate:eri-restate",
+    exposed_ports = [
+        "4028/tcp",
+        "9080/tcp",
+    ],
+    extra_tars = [
+        ":eri_restate_aux_bins_layer",
+        ":eri_restate_scripts_layer",
+        ":eri_restate_rules_layer",
+        ":eri_restate_agents_layer",
+    ],
+    user = "0:0",
+    workdir = "/app",
+)
+
+# github-runner
+pkg_tar(
+    name = "github_runner_bins_layer",
+    files = {
+        "//:services/github-runner/roborev-wrapper.sh": "usr/local/bin/roborev",
+        "//:services/github-runner/entrypoint.sh": "entrypoint.sh",
+    },
+    mode = "0755",
+)
+
+pkg_tar(
+    name = "github_runner_configs_layer",
+    files = {
+        "//:services/github-runner/roborev-config.toml": "etc/roborev/config.toml",
+        "//:services/github-runner/claude-settings.json": "etc/claude-settings.json",
+    },
+    mode = "0644",
+)
+
+oci_image(
+    name = "github-runner",
+    base = "@github_runner_base",
+    entrypoint = ["/entrypoint.sh"],
+    tars = [
+        ":github_runner_bins_layer",
+        ":github_runner_configs_layer",
+    ],
+    workdir = "/actions-runner",
+)
+
+oci_load(
+    name = "load_github-runner",
+    image = ":github-runner",
+    repo_tags = ["ghcr.io/azylman/aerial-github-runner:local"],
+)
+
+oci_push(
+    name = "push_github-runner",
+    image = ":github-runner",
+    repository = "ghcr.io/azylman/aerial-github-runner",
+)
+
+# infisical-mcp
+pkg_tar(
+    name = "infisical_mcp_entrypoint_layer",
+    files = {
+        "//:mcp/infisical-mcp/entrypoint.sh": "usr/local/bin/entrypoint.sh",
+    },
+    mode = "0755",
+)
+
+pkg_tar(
+    name = "infisical_mcp_standby_layer",
+    files = {
+        "//:mcp/infisical-mcp/standby.js": "usr/local/bin/standby.js",
+    },
+    mode = "0644",
+)
+
+oci_image(
+    name = "infisical-mcp",
+    base = "@infisical_mcp_base",
+    cmd = ["/usr/local/bin/entrypoint.sh"],
+    entrypoint = [
+        "/sbin/tini",
+        "--",
+    ],
+    env = {"PORT": "4007"},
+    exposed_ports = ["4007/tcp"],
+    tars = [
+        ":infisical_mcp_entrypoint_layer",
+        ":infisical_mcp_standby_layer",
+    ],
+    workdir = "/app",
+)
+
+oci_load(
+    name = "load_infisical-mcp",
+    image = ":infisical-mcp",
+    repo_tags = ["ghcr.io/azylman/aerial-infisical-mcp:local"],
+)
+
+oci_push(
+    name = "push_infisical-mcp",
+    image = ":infisical-mcp",
+    repository = "ghcr.io/azylman/aerial-infisical-mcp",
+)
+
+# discord-mcp
+oci_image(
+    name = "discord-mcp",
+    base = "@discord_mcp_base",
+    cmd = [
+        "node",
+        "build/app.js",
+        "--transport",
+        "http",
+        "--port",
+        "8080",
+    ],
+    env = {"PORT": "8080"},
+    exposed_ports = ["8080/tcp"],
+    workdir = "/app",
+)
+
+oci_load(
+    name = "load_discord-mcp",
+    image = ":discord-mcp",
+    repo_tags = ["ghcr.io/azylman/aerial-discord-mcp:local"],
+)
+
+oci_push(
+    name = "push_discord-mcp",
+    image = ":discord-mcp",
+    repository = "ghcr.io/azylman/aerial-discord-mcp",
+)
+
 # Verification test targets
 go_cover_binary(
     name = "cover_sample_cover_bin",
@@ -267,6 +447,7 @@ go_test(
         ":covdata_bin",
         ":cover_sample_cover_bin",
         ":coverage_ingest_tools_layer",
+        ":eri_restate_scripts_layer",
         ":go_wrapper_named",
     ],  # keep
 )

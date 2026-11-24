@@ -3,7 +3,7 @@
 **Date:** 2026-11-23  
 **Task:** 271 (Monorepo Build, Test & Container Image Pipeline Modernization)  
 **Status:** Implemented  
-**Scope:** Unified Bazel 9.3.3 (Bzlmod) build, test, and container image pipeline: LAN `bazel-remote` action/repository cache on `quiet-zero`, single-module `go.mod` consolidation in `azylman/aerial`, ephemeral `gazelle` `BUILD.bazel` generation, and `rules_oci` daemonless container image publishing across `azylman/aerial` (16 `rules_oci` images + 4 retained `Dockerfile`s + 6 non-Go `sh_test` targets), `azylman/aerial-config` (Bazel 9.3.3 + ephemeral `gazelle` for `//scripts/validate/...`), and `azylman/aerial-sidecars` (5 `rules_oci` images + 5 `Dockerfile` images unified under `scripts/bazel-select-images.sh` + 3 non-Go `sh_test` targets), with `azylman/mirrormere` intentionally left on its native open-source `Dockerfile` and `go test` workflow per user directive.
+**Scope:** Unified Bazel 9.3.3 (Bzlmod) build, test, and container image pipeline: LAN `bazel-remote` action/repository cache on `quiet-zero`, single-module `go.mod` consolidation in `azylman/aerial`, ephemeral `gazelle` `BUILD.bazel` generation, and two-phase `rules_oci` daemonless container image publishing across all 20 images in `azylman/aerial` (20 `rules_oci` images with base `Dockerfile` fallback + 6 non-Go `sh_test` targets), `azylman/aerial-config` (Bazel 9.3.3 + ephemeral `gazelle` for `//scripts/validate/...`), and all 11 images in `azylman/aerial-sidecars` (11 `rules_oci` images with base `Dockerfile` fallback unified under `scripts/bazel-select-images.sh` + 3 non-Go `sh_test` targets), with `azylman/mirrormere` intentionally left on its native open-source `Dockerfile` and `go test` workflow per user directive.
 
 ---
 
@@ -220,26 +220,25 @@ To guarantee `rules_oci` binaries include Go's `-cover` instrumentation (support
 ### 5.6 Image Build Matrix Across the Repositories
 
 #### 1. `azylman/aerial` (20 Images Total + 6 Non-Go `sh_test` Targets)
-- **16 Images Migrated to `rules_oci` in Checked-In `images/BUILD.bazel` (16 `Dockerfile`s Deleted):**
+- **All 20 Images Unified on `rules_oci` in Checked-In `images/BUILD.bazel` (Two-Phase `oci.pull` Base + `rules_oci` Application Layers):**
   - **Pure Go Services with `cover = True` (12):** `eri`, `haro`, `coven`, `docket-mcp`, `kernel-mcp`, `synapse`, `transcripts`, `vanadis`, `vanadis-restate`, `vanadis-nats`, `prospera`, plus `console` (Go binary + Vite UI dist tar + static/theme tars).
   - **Pure Go Services with `cover = False` (2):** `redact-pattern` (`bin_path = "/usr/local/bin/redact-pattern"`), `coverage-ingest` (`cover = False` + bundled `covdata` binary).
   - **Static / Migration Images (2):**
     - `docs` (`@nginx_base` + `services/docs-service` nginx config & Docsify app tar + `//web/theme` tar -> `/usr/share/nginx/html/assets`).
     - `migrator` (`@atlas_base` + `//services/eri/pkg/db:migrations_tar` -> `/migrations`).
-- **4 Images Retained on `Dockerfile`s:**
-  - `eri-restate` (`services/eri-restate/Dockerfile` — heavy Ubuntu 24.04 runtime image; before `docker build`, CI runs `bazel build` for `//services/eri-restate/cmd/eri-restate`, `//services/eri/cmd/hook-guard`, and `//services/eri/cmd/transcript-search` and copies them with `cp -L` into `.bazel-stage/` inside the build context so BuildKit never runs `go build` and never encounters external `bazel-bin` symlinks).
-  - `github-runner` (`services/github-runner/Dockerfile`).
-  - `discord-mcp` (`mcp/discord-mcp/Dockerfile`).
-  - `infisical-mcp` (`mcp/infisical-mcp/Dockerfile`).
+  - **Two-Phase Base Images with `rules_oci` Application Layers (4):**
+    - `eri-restate` (`@eri_restate_base` + Go covered binary + aux binaries layer `hook-guard`/`transcript-search` + scripts layer + rules layer + agents layer). Retained `services/eri-restate/Dockerfile` serves as base fallback on `Dockerfile` changes.
+    - `github-runner` (`@github_runner_base` + `github_runner_bins_layer` `0755` + `github_runner_configs_layer` `0644`). Retained `services/github-runner/Dockerfile` serves as base fallback on `Dockerfile` changes.
+    - `discord-mcp` (`@discord_mcp_base`). Retained `mcp/discord-mcp/Dockerfile` serves as base fallback on `Dockerfile` changes.
+    - `infisical-mcp` (`@infisical_mcp_base` + `entrypoint.sh` `0755` + `standby.js` `0644`). Retained `mcp/infisical-mcp/Dockerfile` serves as base fallback on `Dockerfile` changes.
 - **6 Non-Go `sh_test` Targets:** Repo-level test targets covering shell scripts, verification invariants, and schema validation.
 
 #### 2. `azylman/aerial-config` (Validation Pipeline)
 - Runs Bazel 9.3.3 + ephemeral `gazelle` for `//scripts/validate/...` (validating rules, channels, services, crons, and YAML configurations against cluster schemas).
 
-#### 3. `azylman/aerial-sidecars` (10 Images Total + 3 Non-Go `sh_test` Targets)
+#### 3. `azylman/aerial-sidecars` (11 Images Total + 3 Non-Go `sh_test` Targets)
 - Add root `MODULE.bazel` (`rules_go` + `rules_python` + `rules_oci`), `.bazelrc` pointing to `bazel-remote.aerial:9092`, and ephemeral `gazelle`.
-- **5 Images Migrated to `rules_oci`:** Pure Go and Python sidecars.
-- **5 Images Retained on `Dockerfile`s:** Hardware and CUDA/C++ sidecars (e.g. `senses` and `pjev`).
+- **All 11 Images Unified on Two-Phase `rules_oci`:** All sidecars build via `rules_oci` with base `Dockerfile` fallback when base Dockerfile or heavy source files are modified.
 - Unified under `scripts/bazel-select-images.sh` for change detection and image selection alongside 3 non-Go `sh_test` targets.
 
 #### 4. `azylman/mirrormere` (Native Open-Source Preservation)
