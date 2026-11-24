@@ -122,12 +122,19 @@ func TestDecideDrain_Suite(t *testing.T) {
 	full := drainTestFullSuletta
 	self := drainDepSpec{id: "dep-self", host: drainTestSelf, created: older, services: full}
 	selfNewest := drainDepSpec{id: "dep-self", host: drainTestSelf, created: newer, services: full}
+	selfReregistered := drainDepSpec{id: "dep-self-fresh", host: drainTestSelf, created: newer, services: full}
+	tied := drainDepSpec{id: "dep-tied", host: drainTestNext, created: older, services: full}
+	ghost := drainDepSpec{id: "dep-ghost", created: newer, services: full}
 	prev := drainDepSpec{id: "dep-prev", host: drainTestPrev, created: older, services: full}
 	next := drainDepSpec{id: "dep-next", host: drainTestNext, created: newer, services: full}
 	tests := []decideDrainCase{
 		{name: "single deployment is healthy primary", selfName: drainTestSelf, want: full, deps: []drainDepSpec{self}, wantConfirmations: 0, wantDrain: false},
 		{name: "regression: self not registered yet, only previous version listed", selfName: drainTestSelf, want: full, deps: []drainDepSpec{prev}, prior: 1, wantConfirmations: 0, wantDrain: false},
 		{name: "regression: self registered as newest never drains", selfName: drainTestSelf, want: full, deps: []drainDepSpec{prev, selfNewest}, prior: 1, wantConfirmations: 0, wantDrain: false},
+		{name: "regression: same replicaset listed twice first sighting resets", selfName: drainTestSelf, want: full, deps: []drainDepSpec{self, selfReregistered}, wantConfirmations: 0, wantDrain: false},
+		{name: "regression: same replicaset listed twice second sighting still resets", selfName: drainTestSelf, want: full, deps: []drainDepSpec{self, selfReregistered}, prior: 1, wantConfirmations: 0, wantDrain: false},
+		{name: "equal created_at with other deployment resets", selfName: drainTestSelf, want: full, deps: []drainDepSpec{self, tied}, prior: 1, wantConfirmations: 0, wantDrain: false},
+		{name: "newer full-set deployment without uri never drains", selfName: drainTestSelf, want: full, deps: []drainDepSpec{self, ghost}, prior: 1, wantConfirmations: 0, wantDrain: false},
 		{name: "genuine supersede first sighting", selfName: drainTestSelf, want: full, deps: []drainDepSpec{self, next}, prior: 0, wantConfirmations: 1, wantDrain: false},
 		{name: "genuine supersede second poll latches", selfName: drainTestSelf, want: full, deps: []drainDepSpec{self, next}, prior: 1, wantConfirmations: 2, wantDrain: true},
 		{name: "third consecutive poll stays latched", selfName: drainTestSelf, want: full, deps: []drainDepSpec{self, next}, prior: 2, wantConfirmations: 3, wantDrain: true},
