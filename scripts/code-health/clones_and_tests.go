@@ -401,7 +401,7 @@ func inspectTestNodeStructs(n ast.Node, fset *token.FileSet, rel string, r rules
 	if ts, ok := n.(*ast.TypeSpec); ok {
 		if st, ok := ts.Type.(*ast.StructType); ok && st.Fields != nil {
 			if tableStructs[ts.Name.Name] {
-				checkTestTableStructFields(st, fset, rel, violations)
+				checkTestTableStructFields(st, fset, rel, r, violations)
 				return false
 			}
 			checkTestStructFields(st, fset, rel, r, violations)
@@ -410,7 +410,7 @@ func inspectTestNodeStructs(n ast.Node, fset *token.FileSet, rel string, r rules
 	}
 	if arr, ok := n.(*ast.ArrayType); ok && arr.Len == nil {
 		if st, ok := arr.Elt.(*ast.StructType); ok {
-			checkTestTableStructFields(st, fset, rel, violations)
+			checkTestTableStructFields(st, fset, rel, r, violations)
 			return false
 		}
 	}
@@ -420,9 +420,13 @@ func inspectTestNodeStructs(n ast.Node, fset *token.FileSet, rel string, r rules
 	return true
 }
 
-func checkTestTableStructFields(st *ast.StructType, fset *token.FileSet, rel string, violations *[]string) {
+func checkTestTableStructFields(st *ast.StructType, fset *token.FileSet, rel string, r rules, violations *[]string) {
 	if st == nil || st.Fields == nil {
 		return
+	}
+	if numFields := st.Fields.NumFields(); r.maxTestTableFields > 0 && numFields > r.maxTestTableFields {
+		line := fset.Position(st.Pos()).Line
+		*violations = append(*violations, fmt.Sprintf("%s:%d: test table struct has %d fields, exceeds limit %d; split heterogeneous modes or guard cases into separate behavior-scoped test tables", rel, line, numFields, r.maxTestTableFields))
 	}
 	for _, field := range st.Fields.List {
 		if _, isFunc := field.Type.(*ast.FuncType); !isFunc {

@@ -307,6 +307,49 @@ func TestTableWithFunc(t *testing.T) {
 				`test struct field "hook" uses a banned closure func type; use declarative expectation fields instead`,
 			},
 		},
+		{
+			name: "test table struct with 16 fields passes",
+			content: `package pkg
+
+import "testing"
+
+func TestTableSixteenFields(t *testing.T) {
+	tests := []struct {
+		f1, f2, f3 string
+		f4, f5, f6 int
+		f7, f8, f9 bool
+		f10, f11, f12 float64
+		f13, f14, f15, f16 any
+	}{
+		{},
+	}
+	_ = tests
+}
+`,
+		},
+		{
+			name: "test table struct with 17 fields triggers violation",
+			content: `package pkg
+
+import "testing"
+
+func TestTableSeventeenFields(t *testing.T) {
+	tests := []struct {
+		f1, f2, f3 string
+		f4, f5, f6 int
+		f7, f8, f9 bool
+		f10, f11, f12 float64
+		f13, f14, f15, f16, f17 any
+	}{
+		{},
+	}
+	_ = tests
+}
+`,
+			wantViolations: []string{
+				"sample_test.go:6: test table struct has 17 fields, exceeds limit 16; split heterogeneous modes or guard cases into separate behavior-scoped test tables",
+			},
+		},
 	}
 }
 

@@ -42,6 +42,7 @@ var defaultBannedTestFilenameSuffixes = []string{"_extra_test.go", "_more_test.g
 type fileConfig struct {
 	MaxFileLines               int       `json:"max_file_lines"`
 	MaxDepth                   int       `json:"max_depth"`
+	MaxTestTableFields         int       `json:"max_test_table_fields"`
 	BannedTestFilenameSuffixes *[]string `json:"banned_test_filename_suffixes"`
 	BannedClosureFieldPrefixes []string  `json:"banned_closure_field_prefixes"`
 	DisabledTestRules          []string  `json:"disabled_test_rules"`
@@ -54,6 +55,7 @@ type fileConfig struct {
 type rules struct {
 	maxFileLines               int
 	maxDepth                   int
+	maxTestTableFields         int
 	bannedTestFilenameSuffixes []string
 	bannedClosureFieldPrefixes []string
 	disabledTestRules          map[string]bool
@@ -65,6 +67,7 @@ func defaultRules() rules {
 	return rules{
 		maxFileLines:               maxFileLines,
 		maxDepth:                   maxDepth,
+		maxTestTableFields:         maxTestTableFields,
 		bannedTestFilenameSuffixes: defaultBannedTestFilenameSuffixes,
 		disabledTestRules:          map[string]bool{},
 	}
@@ -87,7 +90,7 @@ func loadRules(p string) (rules, error) {
 	if err := dec.Decode(&fc); err != nil {
 		return r, fmt.Errorf("parse %s: %w", p, err)
 	}
-	if fc.MaxFileLines < 0 || fc.MaxDepth < 0 {
+	if fc.MaxFileLines < 0 || fc.MaxDepth < 0 || fc.MaxTestTableFields < 0 {
 		return r, fmt.Errorf("parse %s: thresholds must not be negative", p)
 	}
 	if fc.MaxFileLines > 0 {
@@ -95,6 +98,9 @@ func loadRules(p string) (rules, error) {
 	}
 	if fc.MaxDepth > 0 {
 		r.maxDepth = fc.MaxDepth
+	}
+	if fc.MaxTestTableFields > 0 {
+		r.maxTestTableFields = fc.MaxTestTableFields
 	}
 	if fc.BannedTestFilenameSuffixes != nil {
 		r.bannedTestFilenameSuffixes = *fc.BannedTestFilenameSuffixes
