@@ -247,6 +247,10 @@ func runVoiceGuardCase(t *testing.T, tc voiceGuardCase) {
 	_, _, err := pool.ExecuteVoiceTurn(ctx, "hello", tc.sessionID, nil, nil)
 	caller.End()
 
+	if _, ok := h.registry.SoleDaemonInTarget(voiceTestTarget); ok {
+		t.Errorf("voice daemon still registered after the turn")
+	}
+
 	switch {
 	case tc.wantErrIs != nil:
 		if !errors.Is(err, tc.wantErrIs) {
@@ -299,6 +303,9 @@ type voiceHookTurnCase struct {
 	wantReply          string
 	wantConvID         string
 	wantErrSub         string
+	wantStatusSub      string
+	wantSentenceSub    string
+	wantPrompt         string
 }
 
 func buildVoiceHookPool(tc voiceHookTurnCase, h *voiceTraceHarness, onRecordPrompt func(string)) *WorkerPool {
@@ -352,22 +359,14 @@ func assertVoiceHookOutputs(t *testing.T, tc voiceHookTurnCase, reply, convID, s
 	if tc.wantConvID != "" && convID != tc.wantConvID {
 		t.Errorf("convID = %q, want %q", convID, tc.wantConvID)
 	}
-	if tc.name == "ForwardCleanPrompt" && recordedPrompt != tc.prompt {
-		t.Errorf("recorded prompt = %q, want %q", recordedPrompt, tc.prompt)
+	if tc.wantPrompt != "" && recordedPrompt != tc.wantPrompt {
+		t.Errorf("recorded prompt = %q, want %q", recordedPrompt, tc.wantPrompt)
 	}
-	if tc.name == "VoiceRunnerHook" && !strings.Contains(statusReceived, "⚡ Custom hook") {
-		t.Errorf("status = %q, want substring %q", statusReceived, "⚡ Custom hook")
+	if tc.wantStatusSub != "" && !strings.Contains(statusReceived, tc.wantStatusSub) {
+		t.Errorf("status = %q, want substring %q", statusReceived, tc.wantStatusSub)
 	}
-	if tc.name == "VoiceStreamRunnerHook" {
-		if !strings.Contains(statusReceived, "⚡ Streaming hook") {
-			t.Errorf("status = %q, want substring %q", statusReceived, "⚡ Streaming hook")
-		}
-		if sentenceReceived != "Streaming sentence." {
-			t.Errorf("sentence = %q, want %q", sentenceReceived, "Streaming sentence.")
-		}
-	}
-	if tc.name == "SuccessTurn" && !strings.Contains(statusReceived, "⚡") {
-		t.Errorf("status = %q, want substring %q", statusReceived, "⚡")
+	if tc.wantSentenceSub != "" && sentenceReceived != tc.wantSentenceSub {
+		t.Errorf("sentence = %q, want %q", sentenceReceived, tc.wantSentenceSub)
 	}
 }
 
@@ -395,6 +394,9 @@ func runVoiceHookTurnCase(t *testing.T, tc voiceHookTurnCase) {
 			}
 		}
 	}
+	if _, ok := h.registry.SoleDaemonInTarget(voiceTestTarget); ok {
+		t.Errorf("voice daemon still registered after the turn")
+	}
 
 	if tc.wantErrSub != "" {
 		if err == nil || !strings.Contains(err.Error(), tc.wantErrSub) {
@@ -412,11 +414,11 @@ func runVoiceHookTurnCase(t *testing.T, tc voiceHookTurnCase) {
 func TestWorkerPool_ExecuteVoiceTurn_RunnerHooks(t *testing.T) {
 	t.Parallel()
 	tests := []voiceHookTurnCase{
-		{name: "VoiceRunnerHook", prompt: "hello", sessionID: "sess-hook-1", useVoiceHook: true, wantReply: "voice hook reply", wantConvID: "sess-hook-1"},
-		{name: "ForwardCleanPrompt", prompt: "what is the cluster node status?", sessionID: "dev-voice-1", useVoiceHook: true, wantReply: "All three nodes are online.", wantConvID: "dev-voice-1"},
-		{name: "VoiceStreamRunnerHook", prompt: "hello", sessionID: "sess-stream-1", useVoiceStreamHook: true, wantReply: "voice stream reply", wantConvID: "sess-stream-1"},
+		{name: "VoiceRunnerHook", prompt: "hello", sessionID: "sess-hook-1", useVoiceHook: true, wantReply: "voice hook reply", wantConvID: "sess-hook-1", wantStatusSub: "⚡ Custom hook"},
+		{name: "ForwardCleanPrompt", prompt: "what is the cluster node status?", sessionID: "dev-voice-1", useVoiceHook: true, wantReply: "All three nodes are online.", wantConvID: "dev-voice-1", wantPrompt: "what is the cluster node status?"},
+		{name: "VoiceStreamRunnerHook", prompt: "hello", sessionID: "sess-stream-1", useVoiceStreamHook: true, wantReply: "voice stream reply", wantConvID: "sess-stream-1", wantStatusSub: "⚡ Streaming hook", wantSentenceSub: "Streaming sentence."},
 		{name: "VoiceStreamRunnerHookError", prompt: "hello", sessionID: "sess-err", useVoiceStreamHook: true, hookErr: errors.New("simulated stream failure"), wantErrSub: "simulated stream failure"},
-		{name: "SuccessTurn", prompt: "turn off fan", sessionID: "sess-custom-1", runnerOut: "{\"event\":\"result\",\"result\":{\"status\":\"SUCCESS\",\"response\":\"turned off fan\"}}", wantReply: "turned off fan", wantConvID: "sess-custom-1"},
+		{name: "SuccessTurn", prompt: "turn off fan", sessionID: "sess-custom-1", runnerOut: "{\"event\":\"result\",\"result\":{\"status\":\"SUCCESS\",\"response\":\"turned off fan\"}}", wantReply: "turned off fan", wantConvID: "sess-custom-1", wantStatusSub: "⚡"},
 		{name: "RunnerError", prompt: "turn off fan", sessionID: "sess-custom-1", runnerErrOut: "exec error", runnerCode: 1, runnerErr: errors.New("exec failed"), wantErrSub: "exec failed"},
 		{name: "ExitCodeNonZero", prompt: "turn off fan", sessionID: "sess-custom-1", runnerErrOut: "process died", runnerCode: 42, wantErrSub: "exit code 42"},
 		{name: "PlainTextFallback", prompt: "turn off fan", sessionID: "sess-custom-1", runnerOut: "plain text response", wantReply: "plain text response", wantConvID: "sess-custom-1"},
@@ -446,6 +448,7 @@ type voiceDaemonTurnCase struct {
 	wantReply            string
 	wantErrSub           string
 	wantTurnStatus       string
+	wantChatSpan         bool
 }
 
 func assertVoiceDaemonTurnSpan(t *testing.T, tc voiceDaemonTurnCase, h *voiceTraceHarness, callerSpanID trace.SpanID) {
@@ -496,8 +499,7 @@ func assertVoiceDaemonTurnSpan(t *testing.T, tc voiceDaemonTurnCase, h *voiceTra
 		t.Errorf("invoke_agent span status = %v, want error=%v", turn.Status().Code, wantErr)
 	}
 
-	wantChatSpan := tc.wantTurnStatus == "success" || tc.name == "DaemonExecutionError"
-	assertVoiceTurnChatSpan(t, h.rec.Ended(), turn.SpanContext().SpanID(), wantChatSpan)
+	assertVoiceTurnChatSpan(t, h.rec.Ended(), turn.SpanContext().SpanID(), tc.wantChatSpan)
 }
 
 func runVoiceDaemonTurnCase(t *testing.T, tc voiceDaemonTurnCase) {
@@ -542,10 +544,7 @@ func runVoiceDaemonTurnCase(t *testing.T, tc voiceDaemonTurnCase) {
 	pool.Start()
 	defer pool.Stop()
 
-	var statusReceived, sentenceReceived string
-	reply, _, err := pool.ExecuteVoiceTurn(ctx, "test", tc.sessionID, func(s string) { statusReceived = s }, func(s string) { sentenceReceived = s })
-	_ = statusReceived
-	_ = sentenceReceived
+	reply, _, err := pool.ExecuteVoiceTurn(ctx, "test", tc.sessionID, nil, nil)
 	caller.End()
 	pool.MarkDirty()
 
@@ -577,13 +576,13 @@ func TestWorkerPool_ExecuteVoiceTurn_DaemonPool(t *testing.T) {
 	t.Parallel()
 	tests := []voiceDaemonTurnCase{
 		{name: "AcquisitionFailure", sessionID: "sess-acq-fail", spawnerErr: errors.New("spawner failed to start"), wantErrSub: "failed to acquire voice daemon", wantTurnStatus: "failed"},
-		{name: "DaemonExecutionError", sessionID: "sess-daemon-err", resultStatus: "ERROR", resultError: "simulated failure in daemon", wantErrSub: "simulated failure in daemon", wantTurnStatus: "failed"},
-		{name: "DaemonTurnTraced", sessionID: "sess-daemon-ok", resultStatus: "SUCCESS", resultResponse: "lights on", wantReply: "lights on", wantTurnStatus: "success"},
+		{name: "DaemonExecutionError", sessionID: "sess-daemon-err", resultStatus: "ERROR", resultError: "simulated failure in daemon", wantErrSub: "simulated failure in daemon", wantTurnStatus: "failed", wantChatSpan: true},
+		{name: "DaemonTurnTraced", sessionID: "sess-daemon-ok", resultStatus: "SUCCESS", resultResponse: "lights on", wantReply: "lights on", wantTurnStatus: "success", wantChatSpan: true},
 		{name: "SendFailureBrokenPipe", sessionID: "sess-pipe-err", closePipeImmediately: true, wantErrSub: "failed sending turn to voice daemon"},
 		{name: "ContextCanceledWaitingForResult", sessionID: "sess-ctx-cancel", cancelCallerOnScan: true, wantErrSub: "context canceled", wantTurnStatus: "cancelled"},
 		{name: "ExitCodeNonZeroAndEmptySessionFallback", sessionID: "sess-exit-fallback", resultStatus: "SUCCESS", resultExitCode: 1, wantErrSub: "empty response"},
-		{name: "VoiceModelSet", sessionID: "sess-voice-model", appVoiceModel: "haiku", appLowModel: "opus-low", resultStatus: "SUCCESS", resultResponse: "lights on", wantReply: "lights on", wantTurnStatus: "success"},
-		{name: "VoiceModelEmptyFallbackLow", sessionID: "sess-voice-empty", appVoiceModel: "", appLowModel: "opus-low", resultStatus: "SUCCESS", resultResponse: "lights on", wantReply: "lights on", wantTurnStatus: "success"},
+		{name: "VoiceModelSet", sessionID: "sess-voice-model", appVoiceModel: "haiku", appLowModel: "opus-low", resultStatus: "SUCCESS", resultResponse: "lights on", wantReply: "lights on", wantTurnStatus: "success", wantChatSpan: true},
+		{name: "VoiceModelEmptyFallbackLow", sessionID: "sess-voice-empty", appVoiceModel: "", appLowModel: "opus-low", resultStatus: "SUCCESS", resultResponse: "lights on", wantReply: "lights on", wantTurnStatus: "success", wantChatSpan: true},
 	}
 
 	for _, tc := range tests {

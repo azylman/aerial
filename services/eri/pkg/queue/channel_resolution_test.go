@@ -129,7 +129,6 @@ type resolveTargetThreadGuardCase struct {
 	policyMode     string
 	noBuildUpdates bool
 	systemChannel  string
-	omitPolicyFn   bool
 	expected       string
 }
 
@@ -141,10 +140,8 @@ func runResolveTargetThreadGuardCase(t *testing.T, tc resolveTargetThreadGuardCa
 	var pool *WorkerPool
 	if !tc.isNilPool {
 		pool = &WorkerPool{}
-		if !tc.omitPolicyFn {
-			pool.cfg.ResolveChannelPolicy = func(channelID, channelName string) config.ChannelPolicy {
-				return config.ChannelPolicy{Mode: tc.policyMode, NoBuildUpdates: tc.noBuildUpdates}
-			}
+		pool.cfg.ResolveChannelPolicy = func(channelID, channelName string) config.ChannelPolicy {
+			return config.ChannelPolicy{Mode: tc.policyMode, NoBuildUpdates: tc.noBuildUpdates}
 		}
 		if tc.systemChannel != "" {
 			pool.appCfg = config.NewFromData(&config.ConfigData{SystemChannel: tc.systemChannel})
@@ -192,17 +189,6 @@ func TestResolveTargetThread_GuardsAndPolicyBypass(t *testing.T) {
 			expected:   "55667788",
 		},
 		{
-			name:      "omitted policy resolver uses active config default",
-			channelID: "44332211",
-			cachedChannel: &discordgo.Channel{
-				ID:   "44332211",
-				Type: discordgo.ChannelTypeGuildText,
-				Name: "alerts",
-			},
-			omitPolicyFn: true,
-			expected:     "44332211",
-		},
-		{
 			name:           "continuous delivery prompt redirects to system channel when no_build_updates enabled",
 			channelID:      "44332211",
 			prompt:         "Continuous Delivery deployment completed for job git-sync on azylman/aerial-config",
@@ -243,6 +229,7 @@ type resolveTargetThreadCreationCase struct {
 	channelID       string
 	cachedChannel   *discordgo.Channel
 	policyMode      string
+	omitPolicyFn    bool
 	hasHook         bool
 	hookThreadID    string
 	hookErr         error
@@ -258,8 +245,10 @@ func runResolveTargetThreadCreationCase(t *testing.T, tc resolveTargetThreadCrea
 		CacheDiscordChannel(tc.cachedChannel)
 	}
 	pool := &WorkerPool{}
-	pool.cfg.ResolveChannelPolicy = func(channelID, channelName string) config.ChannelPolicy {
-		return config.ChannelPolicy{Mode: tc.policyMode}
+	if !tc.omitPolicyFn {
+		pool.cfg.ResolveChannelPolicy = func(channelID, channelName string) config.ChannelPolicy {
+			return config.ChannelPolicy{Mode: tc.policyMode}
+		}
 	}
 	if tc.withDiscordSess {
 		dg, err := discordgo.New("Bot test-token")
@@ -340,6 +329,19 @@ func TestResolveTargetThread_ThreadCreation(t *testing.T) {
 				Name: "alerts",
 			},
 			policyMode:      "threads",
+			withDiscordSess: true,
+			discordThreadID: "88990011",
+			expected:        "88990011",
+		},
+		{
+			name:      "default policy resolver and discord session thread start success",
+			channelID: "44332211",
+			cachedChannel: &discordgo.Channel{
+				ID:   "44332211",
+				Type: discordgo.ChannelTypeGuildText,
+				Name: "alerts",
+			},
+			omitPolicyFn:    true,
 			withDiscordSess: true,
 			discordThreadID: "88990011",
 			expected:        "88990011",
