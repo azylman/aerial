@@ -13,6 +13,7 @@ test --sandbox_tmpfs_path=/dev/shm
 test --test_output=errors
 test --test_summary=short_uncached
 test --incompatible_exclusive_test_sandboxed
+test --build_tests_only
 coverage --test_env=PATH
 coverage --@rules_go//go/config:cover_format=go_cover
 coverage --remote_download_regex=.*coverage\.dat$

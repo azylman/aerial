@@ -16,6 +16,7 @@ fi
 OCI_SVCS=("eri" "haro" "coven" "docket-mcp" "kernel-mcp" "synapse" "transcripts" "vanadis" "vanadis-restate" "vanadis-nats" "prospera" "console" "redact-pattern" "coverage-ingest" "docs" "migrator" "eri-restate" "github-runner" "discord-mcp" "infisical-mcp")
 DOCKER_CFG=("eri-restate:.:./services/eri-restate/Dockerfile:services/eri-restate/Dockerfile:eri_restate_base" "github-runner:.:./services/github-runner/Dockerfile:services/github-runner/Dockerfile:github_runner_base" "discord-mcp:.:./mcp/discord-mcp/Dockerfile:mcp/discord-mcp/Dockerfile:discord_mcp_base" "infisical-mcp:./mcp/infisical-mcp:./mcp/infisical-mcp/Dockerfile:mcp/infisical-mcp/Dockerfile:infisical_mcp_base")
 PKG_CHANGED="false"; for f in "${CHANGED_FILES[@]}"; do [[ "$f" == pkg/* ]] && { PKG_CHANGED="true"; break; }; done
+is_test_file() { case "$1" in *_test.go|*.test.[tj]s|*.test.[tj]sx|scripts/test-*.sh|build/tests/*) return 0;; *) return 1;; esac; }
 declare -A AFF SEL D_TRIG; for s in "${OCI_SVCS[@]}"; do AFF["$s"]="false"; SEL["$s"]="false"; D_TRIG["$s"]="false"; done
 . "$REPO_ROOT/scripts/lib/hermetic-go-env.sh" && ensure_bazel_build_files "$REPO_ROOT"
 for f in "${CHANGED_FILES[@]}"; do
@@ -43,6 +44,7 @@ CAND_OCI=()
 if [ "$FORCE_ALL" = "true" ]; then CAND_OCI=("${OCI_SVCS[@]}"); else
     b_pkgs=(); chk_all="false"; [ ${#CHANGED_FILES[@]} -eq 0 ] && chk_all="true"
     for f in "${CHANGED_FILES[@]}"; do
+        is_test_file "$f" && continue
         case "$f" in
             images/BUILD.bazel|build/BUILD.bazel|build/oci.bzl|MODULE.bazel*|BUILD.bazel|go.mod|go.sum) chk_all="true" ;;
             scripts/*|rules/*|.agents/*) b_pkgs+=("//:all") ;;

@@ -57,5 +57,6 @@ PR_DESCRIPTION.md
 !/services/eri/pkg/db/migrations/BUILD.bazel
 !/services/console/static/BUILD.bazel
 !/services/console/ui/BUILD.bazel
+!/services/console/BUILD.bazel
 !/services/synapse/testdata/BUILD.bazel
 

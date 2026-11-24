@@ -1,0 +1,52 @@
+load("@rules_go//go:def.bzl", "go_binary", "go_library")
+load("@rules_shell//shell:sh_test.bzl", "sh_test")
+load("//build:go_test.bzl", "go_test")
+
+go_library(
+    name = "console_lib",
+    srcs = ["main.go"],
+    importpath = "github.com/azylman/aerial/services/console",
+    visibility = ["//visibility:private"],
+    deps = [
+        "//pkg/httpkit",
+        "//pkg/tracing",
+        "//services/console/internal/config",
+        "//services/console/internal/server",
+    ],
+)
+
+go_binary(
+    name = "console",
+    embed = [":console_lib"],
+    visibility = ["//visibility:public"],
+)
+
+go_test(
+    name = "console_test",
+    srcs = [
+        "goleak_test.go",
+        "main_test.go",
+    ],
+    embed = [":console_lib"],
+    deps = [
+        "//pkg/hermetictest",
+        "//services/console/internal/config",
+        "@io_opentelemetry_go_otel//:go_default_library",
+        "@io_opentelemetry_go_otel//propagation:go_default_library",
+        "@io_opentelemetry_go_otel_sdk//trace:go_default_library",
+        "@io_opentelemetry_go_otel_sdk//trace/tracetest:go_default_library",
+    ],
+)
+
+sh_test(
+    name = "ui_test",
+    srcs = ["//build:tests/console_ui_test.sh"],
+    data = [
+        "//services/console/ui:ui_srcs",
+        "//web/theme",
+    ],
+    tags = [
+        "no-sandbox",
+        "requires-network",
+    ],
+)
