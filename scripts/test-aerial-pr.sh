@@ -303,6 +303,156 @@ assert_eq "rerun-failed-jobs-called" "$(cat "$COMPLETED_CALLED" 2>/dev/null || e
 assert_match "## roborev-override \(\`fedcba9\`\)" "$(jq -r '.body' "$COMMENT_BODY_FILE" 2>/dev/null || echo "")" "override comment includes formatted markdown header"
 rm -f "$COMPLETED_CALLED" "$COMMENT_BODY_FILE"
 
+# 6. rebase_staged_changes & push_scratch_branch: ancestor-preserving stacked commits for stateful RoboRev
+ANCESTRY_CHECK=$(bash -c "
+    REPO_TEST_MODE=1; source \"${AERIAL_PR}\" --source-only 2>/dev/null || true
+    REMOTE_DIR=\$(mktemp -d /tmp/aerial-pr-anc-remote.XXXXXX)
+    WORK_DIR=\$(mktemp -d /tmp/aerial-pr-anc-work.XXXXXX)
+    UPSTREAM_DIR=\$(mktemp -d /tmp/aerial-pr-anc-up.XXXXXX)
+    trap 'rm -rf \"\$REMOTE_DIR\" \"\$WORK_DIR\" \"\$UPSTREAM_DIR\"' EXIT
+
+    git init -q --bare \"\$REMOTE_DIR\"
+    git clone -q \"\$REMOTE_DIR\" \"\$UPSTREAM_DIR\"
+    git -C \"\$UPSTREAM_DIR\" config user.name 'Tester'
+    git -C \"\$UPSTREAM_DIR\" config user.email 'tester@example.com'
+    git -C \"\$UPSTREAM_DIR\" checkout -q -b main
+    echo 'base' > \"\$UPSTREAM_DIR/base.txt\"
+    git -C \"\$UPSTREAM_DIR\" add . && git -C \"\$UPSTREAM_DIR\" commit -q -m 'initial'
+    git -C \"\$UPSTREAM_DIR\" push -q -u origin main
+
+    git clone -q -b main \"\$REMOTE_DIR\" \"\$WORK_DIR\"
+    git -C \"\$WORK_DIR\" config user.name 'Tester'
+    git -C \"\$WORK_DIR\" config user.email 'tester@example.com'
+    git -C \"\$WORK_DIR\" checkout -q -b feat/stateful-pr
+    echo 'v1' > \"\$WORK_DIR/feat.txt\"
+    git -C \"\$WORK_DIR\" add . && git -C \"\$WORK_DIR\" commit -q -m 'feat v1'
+    git -C \"\$WORK_DIR\" push -q -u origin feat/stateful-pr
+    V1_SHA=\$(git -C \"\$WORK_DIR\" rev-parse HEAD)
+
+    # Round 2 WITHOUT upstream main advancing: V1_SHA must remain ancestor of V2_SHA
+    cd \"\$WORK_DIR\"
+    echo 'v2' > feat.txt
+    git add feat.txt
+    rebase_staged_changes main 'fix: round 2' 2>/dev/null
+    git commit -q -m 'fix: round 2'
+    V2_SHA=\$(git rev-parse HEAD)
+    if push_scratch_branch feat/stateful-pr 2>/dev/null && git merge-base --is-ancestor \"\$V1_SHA\" \"\$V2_SHA\" && [ \"\$V1_SHA\" != \"\$V2_SHA\" ]; then
+        echo 'stack_same_main:ok'
+    else
+        echo 'stack_same_main:fail'
+    fi
+
+    # Round 3 WITH upstream main advancing: both V2_SHA and UP_SHA must be ancestors of V3_SHA
+    echo 'upstream-v2' > \"\$UPSTREAM_DIR/up.txt\"
+    git -C \"\$UPSTREAM_DIR\" add . && git -C \"\$UPSTREAM_DIR\" commit -q -m 'upstream v2'
+    git -C \"\$UPSTREAM_DIR\" push -q origin main
+    UP_SHA=\$(git -C \"\$UPSTREAM_DIR\" rev-parse HEAD)
+
+    echo 'v3' > feat.txt
+    git add feat.txt
+    rebase_staged_changes main 'fix: round 3' 2>/dev/null
+    git commit -q -m 'fix: round 3'
+    V3_SHA=\$(git rev-parse HEAD)
+    if push_scratch_branch feat/stateful-pr 2>/dev/null && git merge-base --is-ancestor \"\$V2_SHA\" \"\$V3_SHA\" && git merge-base --is-ancestor \"\$UP_SHA\" \"\$V3_SHA\"; then
+        echo 'stack_advanced_main:ok'
+    else
+        echo 'stack_advanced_main:fail'
+    fi
+
+    # Round 4: Remote branch advances independently while local checkout has diverged changes
+    SINGLE_DIR=\$(mktemp -d /tmp/aerial-pr-anc-single.XXXXXX)
+    git clone -q -b feat/stateful-pr \"\$REMOTE_DIR\" \"\$SINGLE_DIR\"
+    git -C \"\$SINGLE_DIR\" config user.name 'Tester'
+    git -C \"\$SINGLE_DIR\" config user.email 'tester@example.com'
+
+    echo 'remote-c4' > \"\$WORK_DIR/remote4.txt\"
+    git -C \"\$WORK_DIR\" add . && git -C \"\$WORK_DIR\" commit -q -m 'remote c4'
+    git -C \"\$WORK_DIR\" push -q origin feat/stateful-pr
+    V4_REMOTE_SHA=\$(git -C \"\$WORK_DIR\" rev-parse HEAD)
+
+    cd \"\$SINGLE_DIR\"
+    echo 'local-c5' > local5.txt
+    git add local5.txt && git commit -q -m 'local c5'
+    rebase_staged_changes main 'fix: round 5' 2>/dev/null
+    git commit -q -m 'fix: round 5'
+    V5_SHA=\$(git rev-parse HEAD)
+    if push_scratch_branch feat/stateful-pr 2>/dev/null && git merge-base --is-ancestor \"\$V4_REMOTE_SHA\" \"\$V5_SHA\" && [ -f remote4.txt ]; then
+        echo 'stack_diverged_remote:ok'
+    else
+        echo 'stack_diverged_remote:fail'
+    fi
+
+    # Un-incorporated remote advance is rejected by push_scratch_branch
+    echo 'remote-c6' > \"\$WORK_DIR/remote6.txt\"
+    git -C \"\$WORK_DIR\" pull -q origin feat/stateful-pr
+    git -C \"\$WORK_DIR\" add . && git -C \"\$WORK_DIR\" commit -q -m 'remote c6'
+    git -C \"\$WORK_DIR\" push -q origin feat/stateful-pr
+
+    echo 'local-c7' > local7.txt
+    git add local7.txt && git commit -q -m 'local c7 diverged'
+    if ! push_scratch_branch feat/stateful-pr 2>/dev/null; then
+        echo 'reject_unincorporated:ok'
+    else
+        echo 'reject_unincorporated:fail'
+    fi
+    rm -rf \"\$SINGLE_DIR\"
+")
+assert_eq "true" "$(echo "$ANCESTRY_CHECK" | grep -q 'stack_same_main:ok' && echo true || echo false)" "rebase_staged_changes stacks commit on existing remote branch when main has not advanced"
+assert_eq "true" "$(echo "$ANCESTRY_CHECK" | grep -q 'stack_advanced_main:ok' && echo true || echo false)" "rebase_staged_changes merges advanced main while keeping remote branch SHA as ancestor"
+assert_eq "true" "$(echo "$ANCESTRY_CHECK" | grep -q 'stack_diverged_remote:ok' && echo true || echo false)" "rebase_staged_changes preserves intermediate remote commits when remote branch advances"
+assert_eq "true" "$(echo "$ANCESTRY_CHECK" | grep -q 'reject_unincorporated:ok' && echo true || echo false)" "push_scratch_branch rejects pushing over un-incorporated remote advances"
+
+# 7. submit_scratch remediation commit on existing open PR preserves ancestry and clean commit message
+REMED_SUBMIT_CHECK=$(bash -c "
+    REMOTE_DIR=\$(mktemp -d /tmp/aerial-pr-rem-remote.XXXXXX)
+    WORK_DIR=\$(mktemp -d /tmp/aerial-pr-rem-work.XXXXXX)
+    trap 'rm -rf \"\$REMOTE_DIR\" \"\$WORK_DIR\"' EXIT
+
+    git init -q --bare \"\$REMOTE_DIR\"
+    git clone -q \"\$REMOTE_DIR\" \"\$WORK_DIR\"
+    git -C \"\$WORK_DIR\" config user.name 'Tester'
+    git -C \"\$WORK_DIR\" config user.email 'tester@example.com'
+    git -C \"\$WORK_DIR\" checkout -q -b main
+    echo 'base' > \"\$WORK_DIR/file.txt\"
+    git -C \"\$WORK_DIR\" add . && git -C \"\$WORK_DIR\" commit -q -m 'init'
+    git -C \"\$WORK_DIR\" push -q -u origin main
+
+    git -C \"\$WORK_DIR\" checkout -q -b feat/remed-branch
+    echo 'round 1' > \"\$WORK_DIR/file.txt\"
+    git -C \"\$WORK_DIR\" add . && git -C \"\$WORK_DIR\" commit -q -m 'feat: round 1'
+    git -C \"\$WORK_DIR\" push -q -u origin feat/remed-branch
+    R1_SHA=\$(git -C \"\$WORK_DIR\" rev-parse HEAD)
+
+    echo 'round 2 fix' > \"\$WORK_DIR/file.txt\"
+    export GITHUB_PAT=mock_pat
+    curl() {
+        local url=''
+        while [ \$# -gt 0 ]; do
+            case \"\$1\" in
+                http://*|https://*) url=\"\$1\"; shift ;;
+                *) shift ;;
+            esac
+        done
+        if [[ \"\$url\" =~ /pulls\? ]]; then
+            echo '[{\"number\":789,\"html_url\":\"https://github.com/azylman/aerial/pull/789\",\"title\":\"feat: round 1\",\"body\":\"Original Round 1 PR Description\"}]'
+        fi
+    }
+    export -f curl
+    bash \"${AERIAL_PR}\" submit \"\$WORK_DIR\" 'fix: round 2 remediation' >/dev/null 2>&1
+    R2_SHA=\$(git -C \"\$REMOTE_DIR\" rev-parse refs/heads/feat/remed-branch)
+    R2_MSG=\$(git -C \"\$REMOTE_DIR\" log -1 --format=%B \"\$R2_SHA\")
+    if git -C \"\$REMOTE_DIR\" merge-base --is-ancestor \"\$R1_SHA\" \"\$R2_SHA\" && [ \"\$R1_SHA\" != \"\$R2_SHA\" ]; then
+        echo 'remed_ancestor:ok'
+    fi
+    if [ \"\$R2_MSG\" = 'fix: round 2 remediation' ]; then
+        echo 'remed_clean_msg:ok'
+    else
+        echo \"remed_clean_msg:fail:\$R2_MSG\"
+    fi
+")
+assert_eq "true" "$(echo "$REMED_SUBMIT_CHECK" | grep -q 'remed_ancestor:ok' && echo true || echo false)" "submit_scratch stacks remediation commit onto existing remote PR branch"
+assert_eq "true" "$(echo "$REMED_SUBMIT_CHECK" | grep -q 'remed_clean_msg:ok' && echo true || echo false)" "submit_scratch does not pollute remediation commit message with original PR body"
+
 echo "--------------------------------------------------------"
 echo "Test results: $PASSED passed, $FAILED failed"
 if [ "$FAILED" -gt 0 ]; then
