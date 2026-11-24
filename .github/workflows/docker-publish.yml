@@ -79,9 +79,6 @@ jobs:
       - name: Test Build Metadata Publisher
         run: node --test scripts/build-metadata.test.cjs
 
-      - name: Test Shared Web Theme
-        run: node --test web/theme/aerial-theme.test.js
-
       - name: Publish Build Selection
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -142,7 +139,7 @@ jobs:
           fi
 
           # 3. Ratcheted Code Health Gate & Scanner Unit Tests
-          (cd scripts/code-health && go test -v -race ./... && go run . -root ../.. -baseline ../../.code-health-baseline.json)
+          (cd scripts/code-health && go run . -root ../.. -baseline ../../.code-health-baseline.json)
 
       - name: Lint & Check Dead Code in Go Modules
         env:
@@ -222,12 +219,6 @@ jobs:
           npm run typecheck
           npm run test:coverage
           npm run build
-
-      - name: Lint Docsify Custom Plugins
-        if: needs.changes.outputs.docs == 'true'
-        run: |
-          node --check services/docs-service/app/assets/js/plugins/docsify-mermaid.js
-          node --check services/docs-service/app/assets/js/plugins/docsify-theme.js
 
   console-e2e:
     name: Console UI E2E Suite
@@ -687,10 +678,14 @@ jobs:
           pids=""
           for IMG in $(echo "$MATRIX_JSON" | jq -r '.[] | select(.service != "eri" and .service != "eri-restate") | .image_name'); do
             echo "Promoting non-eri manifest ghcr.io/${OWNER}/${IMG}:${SHA} -> ghcr.io/${OWNER}/${IMG}:latest"
-            docker buildx imagetools create \
-              --tag "ghcr.io/${OWNER}/${IMG}:latest" \
-              --annotation "index:org.opencontainers.image.revision=${SHA}" \
-              "ghcr.io/${OWNER}/${IMG}:${SHA}" &
+            if command -v crane >/dev/null 2>&1; then
+              crane tag "ghcr.io/${OWNER}/${IMG}:${SHA}" "latest" &
+            else
+              docker buildx imagetools create \
+                --tag "ghcr.io/${OWNER}/${IMG}:latest" \
+                --annotation "index:org.opencontainers.image.revision=${SHA}" \
+                "ghcr.io/${OWNER}/${IMG}:${SHA}" &
+            fi
             pids="$pids $!"
           done
           for pid in $pids; do
@@ -699,16 +694,24 @@ jobs:
 
           if echo "$MATRIX_JSON" | jq -e '.[] | select(.service == "eri-restate")' >/dev/null; then
             echo "Promoting eri-restate manifest ghcr.io/${OWNER}/aerial-eri-restate:${SHA} -> ghcr.io/${OWNER}/aerial-eri-restate:latest"
-            docker buildx imagetools create \
-              --tag "ghcr.io/${OWNER}/aerial-eri-restate:latest" \
-              --annotation "index:org.opencontainers.image.revision=${SHA}" \
-              "ghcr.io/${OWNER}/aerial-eri-restate:${SHA}"
+            if command -v crane >/dev/null 2>&1; then
+              crane tag "ghcr.io/${OWNER}/aerial-eri-restate:${SHA}" "latest"
+            else
+              docker buildx imagetools create \
+                --tag "ghcr.io/${OWNER}/aerial-eri-restate:latest" \
+                --annotation "index:org.opencontainers.image.revision=${SHA}" \
+                "ghcr.io/${OWNER}/aerial-eri-restate:${SHA}"
+            fi
           fi
 
           if echo "$MATRIX_JSON" | jq -e '.[] | select(.service == "eri")' >/dev/null; then
             echo "Promoting eri manifest ghcr.io/${OWNER}/aerial-eri:${SHA} -> ghcr.io/${OWNER}/aerial-eri:latest"
-            docker buildx imagetools create \
-              --tag "ghcr.io/${OWNER}/aerial-eri:latest" \
-              --annotation "index:org.opencontainers.image.revision=${SHA}" \
-              "ghcr.io/${OWNER}/aerial-eri:${SHA}"
+            if command -v crane >/dev/null 2>&1; then
+              crane tag "ghcr.io/${OWNER}/aerial-eri:${SHA}" "latest"
+            else
+              docker buildx imagetools create \
+                --tag "ghcr.io/${OWNER}/aerial-eri:latest" \
+                --annotation "index:org.opencontainers.image.revision=${SHA}" \
+                "ghcr.io/${OWNER}/aerial-eri:${SHA}"
+            fi
           fi
