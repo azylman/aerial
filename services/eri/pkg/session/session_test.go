@@ -707,49 +707,41 @@ func TestExtractResponseSince(t *testing.T) {
 }
 
 type sessionStorageMetricsCase struct {
-	name        string
-	isNilMgr    bool
-	sessionID   string
-	dbSize      int
-	pbSize      int
-	transSize   int
-	fullSize    int
-	stepCount   int
-	turnCount   int
-	rtDir       bool
-	statErrFile bool
-	// zeroByteFiles writes empty .db, .pb and transcript files.
+	name       string
+	sessionID  string
+	dbSize     int
+	pbSize     int
+	transSize  int
+	fullSize   int
+	stepCount  int
+	turnCount  int
+	rtDir      bool
+	wantDBSize int64
+	wantTrSize int64
+	wantSteps  int
+	wantTurns  int
+	wantExists bool
+}
+
+type sessionStorageGuardCase struct {
+	name          string
+	sessionID     string
+	isNilMgr      bool
 	zeroByteFiles bool
-	wantDBSize    int64
-	wantTrSize    int64
-	wantSteps     int
-	wantTurns     int
-	wantExists    bool
+	statErrFile   bool
 }
 
 func setupSessionStorageMetrics(t *testing.T, mgr *Manager, tc sessionStorageMetricsCase, tmp string) {
 	t.Helper()
 	convDir := filepath.Join(tmp, "conversations")
-	if tc.statErrFile {
-		if err := os.WriteFile(convDir, []byte("file"), 0o644); err != nil {
-			t.Fatalf("WriteFile: %v", err)
-		}
-		sessDir := filepath.Join(tmp, "brain", tc.sessionID)
-		if err := os.MkdirAll(sessDir, 0o755); err != nil {
-			t.Fatalf("MkdirAll: %v", err)
-		}
-		if err := os.WriteFile(filepath.Join(sessDir, ".system_generated"), []byte("file"), 0o644); err != nil {
-			t.Fatalf("WriteFile: %v", err)
-		}
-	}
 	if tc.rtDir {
 		rtDir := filepath.Join(tmp, "runtimes", "discord", ".gemini", "antigravity-cli", "conversations")
 		writeConversationFile(t, rtDir, tc.sessionID, ".db", 200)
 	}
-	if tc.dbSize > 0 || tc.zeroByteFiles {
+	if tc.dbSize > 0 {
 		writeConversationFile(t, convDir, tc.sessionID, ".db", tc.dbSize)
 	}
-	if tc.pbSize > 0 || tc.zeroByteFiles {
+	if tc.pbSize > 0 {
 		writeConversationFile(t, convDir, tc.sessionID, ".pb", tc.pbSize)
 	}
 	setupSessionStorageTranscript(t, mgr, tc)
@@ -777,7 +769,7 @@ func buildTranscriptContent(stepCount, turnCount, transSize int) string {
 
 func setupSessionStorageTranscript(t *testing.T, mgr *Manager, tc sessionStorageMetricsCase) {
 	t.Helper()
-	if tc.transSize > 0 || tc.zeroByteFiles {
+	if tc.transSize > 0 {
 		sessDir := ensureTestSessionDir(t, mgr, tc.sessionID)
 		content := buildTranscriptContent(tc.stepCount, tc.turnCount, tc.transSize)
 		if err := os.WriteFile(filepath.Join(sessDir, ".system_generated", "logs", "transcript.jsonl"), []byte(content), 0o644); err != nil {
@@ -814,19 +806,90 @@ func assertSessionStorageMetrics(t *testing.T, mgr *Manager, tc sessionStorageMe
 func runSessionStorageMetricsCase(t *testing.T, tc sessionStorageMetricsCase) {
 	t.Helper()
 	tmp := t.TempDir()
-	var mgr *Manager
-	if !tc.isNilMgr {
-		mgr = New(tmp, tmp)
-		setupSessionStorageMetrics(t, mgr, tc, tmp)
-	}
+	mgr := New(tmp, tmp)
+	setupSessionStorageMetrics(t, mgr, tc, tmp)
 	assertSessionStorageMetrics(t, mgr, tc)
+}
+
+func setupSessionStorageStatErr(t *testing.T, tmp, sessionID string) {
+	t.Helper()
+	convDir := filepath.Join(tmp, "conversations")
+	if err := os.WriteFile(convDir, []byte("file"), 0o644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+	sessDir := filepath.Join(tmp, "brain", sessionID)
+	if err := os.MkdirAll(sessDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(sessDir, ".system_generated"), []byte("file"), 0o644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+}
+
+func setupSessionStorageZeroByte(t *testing.T, mgr *Manager, tmp, sessionID string) {
+	t.Helper()
+	convDir := filepath.Join(tmp, "conversations")
+	writeConversationFile(t, convDir, sessionID, ".db", 0)
+	writeConversationFile(t, convDir, sessionID, ".pb", 0)
+	sessDir := ensureTestSessionDir(t, mgr, sessionID)
+	if err := os.WriteFile(filepath.Join(sessDir, ".system_generated", "logs", "transcript.jsonl"), []byte{}, 0o644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+}
+
+func setupSessionStorageGuard(t *testing.T, tc sessionStorageGuardCase) *Manager {
+	t.Helper()
+	if tc.isNilMgr {
+		return nil
+	}
+	tmp := t.TempDir()
+	mgr := New(tmp, tmp)
+	if tc.statErrFile {
+		setupSessionStorageStatErr(t, tmp, tc.sessionID)
+	}
+	if tc.zeroByteFiles {
+		setupSessionStorageZeroByte(t, mgr, tmp, tc.sessionID)
+	}
+	return mgr
+}
+
+func assertSessionStorageZeroMetrics(t *testing.T, mgr *Manager, sessionID string) {
+	t.Helper()
+	if mgr.SessionExistsOnDisk(sessionID) {
+		t.Fatalf("expected SessionExistsOnDisk to be false")
+	}
+	if mgr.GetSessionDBSize(sessionID) != 0 {
+		t.Fatalf("expected GetSessionDBSize to be 0")
+	}
+	if mgr.GetTranscriptSize(sessionID) != 0 {
+		t.Fatalf("expected GetTranscriptSize to be 0")
+	}
+	if mgr.CountTranscriptSteps(sessionID) != 0 {
+		t.Fatalf("expected CountTranscriptSteps to be 0")
+	}
+	if mgr.CountTranscriptTurns(sessionID) != 0 {
+		t.Fatalf("expected CountTranscriptTurns to be 0")
+	}
+}
+
+func TestSessionStorageAndRotationMetrics_Guards(t *testing.T) {
+	tests := []sessionStorageGuardCase{
+		{name: "nil manager", isNilMgr: true, sessionID: "s1"},
+		{name: "empty session ID", sessionID: ""},
+		{name: "path traversal", sessionID: "../bad"},
+		{name: "0-byte files do not exist", sessionID: "s-zero-byte", zeroByteFiles: true},
+		{name: "stat non-not-exist error when candidate dir is a file", sessionID: "s-stat-err", statErrFile: true},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			mgr := setupSessionStorageGuard(t, tc)
+			assertSessionStorageZeroMetrics(t, mgr, tc.sessionID)
+		})
+	}
 }
 
 func TestSessionStorageAndRotationMetrics(t *testing.T) {
 	tests := []sessionStorageMetricsCase{
-		{name: "nil manager", isNilMgr: true, sessionID: "s1", wantExists: false},
-		{name: "empty session ID", sessionID: "", wantExists: false},
-		{name: "path traversal", sessionID: "../bad", wantExists: false},
 		{
 			name:       "db and pb and transcript metrics",
 			sessionID:  "s-metrics",
@@ -845,8 +908,6 @@ func TestSessionStorageAndRotationMetrics(t *testing.T) {
 		{name: "pb only exists", sessionID: "s-pb-only", pbSize: 350, wantDBSize: 350, wantExists: true},
 		{name: "transcript only exists", sessionID: "s-tr-only", transSize: 200, wantTrSize: 200, wantExists: true},
 		{name: "runtime candidate directory match", sessionID: "s-runtime", rtDir: true, wantDBSize: 200, wantExists: true},
-		{name: "0-byte files do not exist", sessionID: "s-zero-byte", zeroByteFiles: true, wantExists: false},
-		{name: "stat non-not-exist error when candidate dir is a file", sessionID: "s-stat-err", statErrFile: true, wantExists: false},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {

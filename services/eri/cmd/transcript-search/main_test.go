@@ -25,17 +25,7 @@ type parseCLIArgsCase struct {
 	args             []string
 	envEriURL        string
 	envTranscriptURL string
-	wantCmd          string
-	wantQuery        string
-	wantMode         string
-	wantTool         string
-	wantSession      string
-	wantLimit        int
-	wantStep         int
-	wantContext      int
-	wantJSON         bool
-	wantStack        string
-	wantURL          string
+	want             CLIConfig
 	wantErrSub       string
 	wantErrIs        error
 }
@@ -62,12 +52,12 @@ func assertParseCLIArgsCase(t *testing.T, tc parseCLIArgsCase) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if cfg.Command != tc.wantCmd || cfg.Query != tc.wantQuery || cfg.Mode != tc.wantMode ||
-		cfg.Tool != tc.wantTool || cfg.Session != tc.wantSession || cfg.Limit != tc.wantLimit ||
-		cfg.Step != tc.wantStep || cfg.Context != tc.wantContext || cfg.JSON != tc.wantJSON ||
-		cfg.Stack != tc.wantStack || (tc.wantURL != "" && cfg.BaseURL != tc.wantURL) {
-		t.Errorf("unexpected cfg: %+v, want cmd=%q query=%q mode=%q tool=%q session=%q limit=%d step=%d ctx=%d json=%v stack=%q url=%q",
-			cfg, tc.wantCmd, tc.wantQuery, tc.wantMode, tc.wantTool, tc.wantSession, tc.wantLimit, tc.wantStep, tc.wantContext, tc.wantJSON, tc.wantStack, tc.wantURL)
+	want := tc.want
+	if want.BaseURL == "" {
+		want.BaseURL = "http://localhost:8080"
+	}
+	if cfg != want {
+		t.Errorf("unexpected cfg: %+v, want %+v", cfg, want)
 	}
 }
 
@@ -81,25 +71,29 @@ func parseCLIArgsTestCases() []parseCLIArgsCase {
 			wantErrSub: "no arguments provided",
 		},
 		{
-			name:        "BareQuery",
-			args:        []string{"docker compose"},
-			wantCmd:     "search",
-			wantQuery:   "docker compose",
-			wantMode:    "auto",
-			wantLimit:   10,
-			wantStep:    -1,
-			wantContext: 2,
+			name: "BareQuery",
+			args: []string{"docker compose"},
+			want: CLIConfig{
+				Command: "search",
+				Query:   "docker compose",
+				Mode:    "auto",
+				Limit:   10,
+				Step:    -1,
+				Context: 2,
+			},
 		},
 		{
-			name:        "SubcommandStats",
-			args:        []string{"stats", "--json", "--url", "http://test:8080"},
-			wantCmd:     "stats",
-			wantMode:    "auto",
-			wantLimit:   10,
-			wantStep:    -1,
-			wantContext: 2,
-			wantJSON:    true,
-			wantURL:     "http://test:8080",
+			name: "SubcommandStats",
+			args: []string{"stats", "--json", "--url", "http://test:8080"},
+			want: CLIConfig{
+				Command: "stats",
+				Mode:    "auto",
+				Limit:   10,
+				Step:    -1,
+				Context: 2,
+				JSON:    true,
+				BaseURL: "http://test:8080",
+			},
 		},
 		{
 			name: "SubcommandSearchWithFlags",
@@ -113,16 +107,18 @@ func parseCLIArgsTestCases() []parseCLIArgsCase {
 				"--limit", "25",
 				"--json",
 			},
-			wantCmd:     "search",
-			wantQuery:   "memory leak",
-			wantMode:    "steps",
-			wantTool:    "shell",
-			wantStack:   "stack-b",
-			wantSession: "sess-123",
-			wantLimit:   25,
-			wantStep:    -1,
-			wantContext: 2,
-			wantJSON:    true,
+			want: CLIConfig{
+				Command: "search",
+				Query:   "memory leak",
+				Mode:    "steps",
+				Tool:    "shell",
+				Stack:   "stack-b",
+				Session: "sess-123",
+				Limit:   25,
+				Step:    -1,
+				Context: 2,
+				JSON:    true,
+			},
 		},
 		{
 			name: "SubcommandGetWithFlags",
@@ -134,34 +130,40 @@ func parseCLIArgsTestCases() []parseCLIArgsCase {
 				"--stack=stack-a",
 				"--json",
 			},
-			wantCmd:     "get",
-			wantMode:    "auto",
-			wantSession: "sess-123",
-			wantStack:   "stack-a",
-			wantLimit:   10,
-			wantStep:    4,
-			wantContext: 5,
-			wantJSON:    true,
+			want: CLIConfig{
+				Command: "get",
+				Mode:    "auto",
+				Session: "sess-123",
+				Stack:   "stack-a",
+				Limit:   10,
+				Step:    4,
+				Context: 5,
+				JSON:    true,
+			},
 		},
 		{
-			name:        "SubcommandGetShorthandAndPositional",
-			args:        []string{"get", "-s", "sess-abc", "-i", "2", "-C", "1"},
-			wantCmd:     "get",
-			wantMode:    "auto",
-			wantSession: "sess-abc",
-			wantLimit:   10,
-			wantStep:    2,
-			wantContext: 1,
+			name: "SubcommandGetShorthandAndPositional",
+			args: []string{"get", "-s", "sess-abc", "-i", "2", "-C", "1"},
+			want: CLIConfig{
+				Command: "get",
+				Mode:    "auto",
+				Session: "sess-abc",
+				Limit:   10,
+				Step:    2,
+				Context: 1,
+			},
 		},
 		{
-			name:        "SubcommandGetPositionalSession",
-			args:        []string{"get", "sess-xyz", "-i", "3"},
-			wantCmd:     "get",
-			wantMode:    "auto",
-			wantSession: "sess-xyz",
-			wantLimit:   10,
-			wantStep:    3,
-			wantContext: 2,
+			name: "SubcommandGetPositionalSession",
+			args: []string{"get", "sess-xyz", "-i", "3"},
+			want: CLIConfig{
+				Command: "get",
+				Mode:    "auto",
+				Session: "sess-xyz",
+				Limit:   10,
+				Step:    3,
+				Context: 2,
+			},
 		},
 		{
 			name:       "SubcommandGetMissingSession",
@@ -194,47 +196,55 @@ func parseCLIArgsExtraCases() []parseCLIArgsCase {
 				"-n", "5",
 				"OOM error",
 			},
-			wantCmd:     "search",
-			wantQuery:   "OOM error",
-			wantMode:    "sessions",
-			wantTool:    "view_file",
-			wantSession: "sess-abc",
-			wantLimit:   5,
-			wantStep:    -1,
-			wantContext: 2,
+			want: CLIConfig{
+				Command: "search",
+				Query:   "OOM error",
+				Mode:    "sessions",
+				Tool:    "view_file",
+				Session: "sess-abc",
+				Limit:   5,
+				Step:    -1,
+				Context: 2,
+			},
 		},
 		{
-			name:        "FlagPrefixWithoutSubcommand",
-			args:        []string{"-q", "quick test"},
-			wantCmd:     "search",
-			wantQuery:   "quick test",
-			wantMode:    "auto",
-			wantLimit:   10,
-			wantStep:    -1,
-			wantContext: 2,
+			name: "FlagPrefixWithoutSubcommand",
+			args: []string{"-q", "quick test"},
+			want: CLIConfig{
+				Command: "search",
+				Query:   "quick test",
+				Mode:    "auto",
+				Limit:   10,
+				Step:    -1,
+				Context: 2,
+			},
 		},
 		{
-			name:        "EriURLEnvOverride",
-			args:        []string{"stats"},
-			envEriURL:   "http://eri-host:9090/",
-			wantCmd:     "stats",
-			wantMode:    "auto",
-			wantLimit:   10,
-			wantStep:    -1,
-			wantContext: 2,
-			wantURL:     "http://eri-host:9090",
+			name:      "EriURLEnvOverride",
+			args:      []string{"stats"},
+			envEriURL: "http://eri-host:9090/",
+			want: CLIConfig{
+				Command: "stats",
+				Mode:    "auto",
+				Limit:   10,
+				Step:    -1,
+				Context: 2,
+				BaseURL: "http://eri-host:9090",
+			},
 		},
 		{
 			name:             "TranscriptsURLPrecedenceOverEriURL",
 			args:             []string{"stats"},
 			envTranscriptURL: "http://transcripts-host:4060/",
 			envEriURL:        "http://eri-host:9090/",
-			wantCmd:          "stats",
-			wantMode:         "auto",
-			wantLimit:        10,
-			wantStep:         -1,
-			wantContext:      2,
-			wantURL:          "http://transcripts-host:4060",
+			want: CLIConfig{
+				Command: "stats",
+				Mode:    "auto",
+				Limit:   10,
+				Step:    -1,
+				Context: 2,
+				BaseURL: "http://transcripts-host:4060",
+			},
 		},
 		{
 			name:       "InvalidFlag",
@@ -252,14 +262,16 @@ func parseCLIArgsExtraCases() []parseCLIArgsCase {
 			wantErrIs: flag.ErrHelp,
 		},
 		{
-			name:        "BareHelpQuery",
-			args:        []string{"help"},
-			wantCmd:     "search",
-			wantQuery:   "help",
-			wantMode:    "auto",
-			wantLimit:   10,
-			wantStep:    -1,
-			wantContext: 2,
+			name: "BareHelpQuery",
+			args: []string{"help"},
+			want: CLIConfig{
+				Command: "search",
+				Query:   "help",
+				Mode:    "auto",
+				Limit:   10,
+				Step:    -1,
+				Context: 2,
+			},
 		},
 		{
 			name:       "NegativeLimit",

@@ -55,44 +55,33 @@ func mapLookup(kv map[string]string) func(string) string {
 }
 
 type loadConfigIngestionCase struct {
-	name           string
-	content        string
-	envMap         map[string]string
-	wantModel      string
-	wantTZ         string
-	wantSysChan    string
-	wantBotID      string
-	wantSynapseURL string
-	wantVanadisURL string
-	wantHaroURL    string
-	wantCovenURL   string
-	wantNATSURL    string
-	wantEngine     string
-	wantCodexBin   string
-	wantTx         TranscriptsConfig
-	wantErr        bool
-	errContains    string
+	name        string
+	content     string
+	envMap      map[string]string
+	wantStrings map[string]string
+	wantTx      TranscriptsConfig
+	wantErr     bool
+	errContains string
 }
 
 func assertLoadConfigIngestionStrings(t *testing.T, cur *ConfigData, tc loadConfigIngestionCase) {
 	t.Helper()
-	for _, check := range []struct {
-		field, got, want string
-	}{
-		{"Model", cur.Model, tc.wantModel},
-		{"Timezone", cur.Timezone, tc.wantTZ},
-		{"SystemChannel", cur.SystemChannel, tc.wantSysChan},
-		{"BotID", cur.BotID, tc.wantBotID},
-		{"SynapseURL", cur.SynapseURL, tc.wantSynapseURL},
-		{"VanadisURL", cur.VanadisURL, tc.wantVanadisURL},
-		{"HaroURL", cur.HaroURL, tc.wantHaroURL},
-		{"CovenURL", cur.CovenURL, tc.wantCovenURL},
-		{"NATSURL", cur.NATSURL, tc.wantNATSURL},
-		{"Engine", cur.Engine, tc.wantEngine},
-		{"CodexBin", cur.CodexBin, tc.wantCodexBin},
-	} {
-		if check.want != "" && check.got != check.want {
-			t.Errorf("%s = %q, want %q", check.field, check.got, check.want)
+	gotMap := map[string]string{
+		"Model":         cur.Model,
+		"Timezone":      cur.Timezone,
+		"SystemChannel": cur.SystemChannel,
+		"BotID":         cur.BotID,
+		"SynapseURL":    cur.SynapseURL,
+		"VanadisURL":    cur.VanadisURL,
+		"HaroURL":       cur.HaroURL,
+		"CovenURL":      cur.CovenURL,
+		"NATSURL":       cur.NATSURL,
+		"Engine":        cur.Engine,
+		"CodexBin":      cur.CodexBin,
+	}
+	for field, want := range tc.wantStrings {
+		if got := gotMap[field]; got != want {
+			t.Errorf("%s = %q, want %q", field, got, want)
 		}
 	}
 }
@@ -145,9 +134,7 @@ mcp_servers:
     weather:
       serverUrl: "http://weather:8080/mcp"
 `,
-			wantModel:   "gemini-1.5-pro",
-			wantTZ:      "America/New_York",
-			wantSysChan: "my-alerts",
+			wantStrings: map[string]string{"Model": "gemini-1.5-pro", "Timezone": "America/New_York", "SystemChannel": "my-alerts"},
 		},
 		{
 			name: "env interpolation",
@@ -164,8 +151,7 @@ channels:
 				"TEST_EXPAND_CHAN":  "interpolated-channel",
 				"TEST_EXPAND_PORT":  "9090",
 			},
-			wantModel:   "interpolated-gemini-model",
-			wantSysChan: "interpolated-channel",
+			wantStrings: map[string]string{"Model": "interpolated-gemini-model", "SystemChannel": "interpolated-channel"},
 		},
 		{
 			name: "legacy and unknown keys unmarshal safely",
@@ -182,9 +168,7 @@ channels:
   default:
     mode: "threads"
 `,
-			wantModel:   "gemini-3.7-flash",
-			wantTZ:      "America/Los_Angeles",
-			wantSysChan: "aerial-dev",
+			wantStrings: map[string]string{"Model": "gemini-3.7-flash", "Timezone": "America/Los_Angeles", "SystemChannel": "aerial-dev"},
 		},
 		{
 			name: "hashed default channel normalization",
@@ -193,7 +177,7 @@ channels:
   "#default":
     mode: "channel"
 `,
-			wantModel: DefaultConfigData().Model,
+			wantStrings: map[string]string{"Model": DefaultConfigData().Model},
 		},
 		{name: "invalid yaml syntax", content: `model: [invalid {::`, wantErr: true, errContains: "failed to parse"},
 		{name: "missing channels section", content: `model: "gemini-flash"`, wantErr: true, errContains: "channels.default is required"},
@@ -204,7 +188,7 @@ channels:
   default:
     mode: "threads"
 `,
-			wantModel: DefaultConfigData().Model,
+			wantStrings: map[string]string{"Model": DefaultConfigData().Model},
 		},
 		{
 			name: "isolated config with prompt",
@@ -215,8 +199,8 @@ channels:
   default:
     mode: "threads"
 `,
-			envMap:    map[string]string{"SYSTEM_PROMPT": "prompt from lookup"},
-			wantModel: "isolated-model-123",
+			envMap:      map[string]string{"SYSTEM_PROMPT": "prompt from lookup"},
+			wantStrings: map[string]string{"Model": "isolated-model-123"},
 		},
 	}
 }
@@ -231,7 +215,7 @@ channels:
     mode: "threads"
 mcp_config: '{"mcpServers":{"s1":{"serverUrl":"http://s1:1000"}}}'
 `,
-			wantModel: DefaultConfigData().Model,
+			wantStrings: map[string]string{"Model": DefaultConfigData().Model},
 		},
 		{
 			name: "polymorphic mcp_config mapping",
@@ -244,7 +228,7 @@ mcp_config:
     s2:
       serverUrl: "http://s2:2000"
 `,
-			wantModel: DefaultConfigData().Model,
+			wantStrings: map[string]string{"Model": DefaultConfigData().Model},
 		},
 		{
 			name: "stray turn_queue key ignored",
@@ -255,7 +239,7 @@ channels:
     mode: "threads"
 turn_queue: coordinator
 `,
-			wantModel: "gemini-1.5-pro",
+			wantStrings: map[string]string{"Model": "gemini-1.5-pro"},
 		},
 		{
 			name: "service urls trimming and bot id",
@@ -273,14 +257,16 @@ channels:
   default:
     mode: "threads"
 `,
-			wantModel:      "gemini-1.5-pro",
-			wantBotID:      "aerial-prime",
-			wantSynapseURL: "http://synapse.internal:4020",
-			wantVanadisURL: "http://vanadis.internal:4025",
-			wantHaroURL:    "http://haro.internal:4026",
-			wantCovenURL:   "http://coven.internal:4027",
-			wantNATSURL:    "nats://nats-cluster:4222",
-			wantTx:         TranscriptsConfig{Stack: "stack-b"},
+			wantStrings: map[string]string{
+				"Model":      "gemini-1.5-pro",
+				"BotID":      "aerial-prime",
+				"SynapseURL": "http://synapse.internal:4020",
+				"VanadisURL": "http://vanadis.internal:4025",
+				"HaroURL":    "http://haro.internal:4026",
+				"CovenURL":   "http://coven.internal:4027",
+				"NATSURL":    "nats://nats-cluster:4222",
+			},
+			wantTx: TranscriptsConfig{Stack: "stack-b"},
 		},
 		{
 			name: "nats url env override",
@@ -290,10 +276,8 @@ channels:
     mode: "threads"
 nats_url: "nats://file-nats:4222"
 `,
-			envMap: map[string]string{
-				"NATS_URL": "nats://env-nats:4222",
-			},
-			wantNATSURL: "nats://env-nats:4222",
+			envMap:      map[string]string{"NATS_URL": "nats://env-nats:4222"},
+			wantStrings: map[string]string{"NATSURL": "nats://env-nats:4222"},
 		},
 		{
 			name: "codex engine and codex_bin unmarshaling",
@@ -304,8 +288,10 @@ channels:
   default:
     mode: "threads"
 `,
-			wantEngine:   "codex",
-			wantCodexBin: "/opt/codex/bin/codex",
+			wantStrings: map[string]string{
+				"Engine":   "codex",
+				"CodexBin": "/opt/codex/bin/codex",
+			},
 		},
 		{
 			name: "transcripts indexer url and batch budget",
