@@ -93,7 +93,7 @@ Scale review rigor and subagent orchestration dynamically by blast radius:
      - **MANDATORY HUMAN ESCALATION CHECKPOINT (STOP BEFORE AUTO-MERGE)**: Do NOT submit with auto-merge armed. Pause, report the scope escalation and diff metrics to Discord with the panel's review synthesis, and await explicit user authorization.
 
 ### Stage 6–7: Pre-Flight Verification & Asynchronous PR Submission
-1. Run `./scripts/verify.sh --staged` (which auto-runs `ensure_bazel_build_files` and batched `bazel coverage` / `bazel test`) and targeted package tests (`bazel test //<pkg>:all` or `go test -race ./pkg/...`). If coverage is below 95%, run `./scripts/check-coverage.sh --service <svc> --check --gaps` and fold missing branch cases into canonical test tables in a single pass.
+1. Run `./scripts/verify.sh --staged` (which auto-runs `ensure_bazel_build_files` and batched `bazel coverage` / `bazel test`) and targeted package tests (`bazel test //<pkg>:all` or `go test -race ./pkg/...`). If coverage is below 95%, run `bazel coverage --instrumentation_filter="^//<pkg>[:/]" //<pkg>:all` (or `./scripts/verify.sh`) and inspect `bazel-testlogs/<pkg>/.../coverage.dat` or the per-package report from `coverage-gate.awk` to fold missing branch cases into canonical test tables in a single pass.
 2. Audit `git diff` holistically against the objective (per final escalated tier).
 3. Write `PR_DESCRIPTION.md` in the scratch root and submit:
    ```bash

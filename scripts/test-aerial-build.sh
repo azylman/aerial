@@ -13,7 +13,7 @@ for ((i=1; i<=$#; i++)); do
   [ "$a" = "-H" ] && { j=$((i+1)); [[ "${!j}" =~ Authorization ]] && auth="${!j}"; }
 done
 echo "$auth" > "$TMPD/last_auth"
-[ "$method" = "POST" ] && [ ! -t 0 ] && { cat >/dev/null || true; }
+[ "$method" = "POST" ] && [ ! -t 0 ] && cat > "$TMPD/last_body"
 [[ "$url" =~ fail7 ]] && exit 7
 [[ "$url" =~ unreachable ]] && exit 7
 if [ "$method" = "POST" ] && [[ "$url" =~ /builds$ ]]; then
@@ -70,4 +70,5 @@ assert echo "$err_out" | grep -q "Failed to connect; acceptance unknown"
 echo "other_key: 1" > "$TMPD/cfg1.yaml"; echo "vanadis_url: http://127.0.0.1:4025" > "$TMPD/cfg2.yaml"
 assert_fail env -u VANADIS_URL CONFIG_PATH="$TMPD/cfg1.yaml" AERIAL_LOCAL_CONFIG_PATH="$TMPD/none" AERIAL_SHARED_CONFIG_PATH="$TMPD/none" "$SCRIPT" status b1
 assert [ "$(env -u VANADIS_URL CONFIG_PATH="$TMPD/cfg1.yaml" AERIAL_LOCAL_CONFIG_PATH="$TMPD/cfg2.yaml" "$SCRIPT" status b1 | jq -r .status)" = "running" ]
+bash "$DIR/test-aerial-build-edge.sh"
 echo "ok - aerial-build hermetic tests passed"

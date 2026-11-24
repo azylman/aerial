@@ -12,20 +12,12 @@ for a in "$@"; do case "$a" in --staged) MODE="staged";; --full) MODE="full";; e
 CHANGED_FILES=""
 if [ "$MODE" = "staged" ]; then
     CHANGED_FILES=$(git diff --cached --name-only 2>/dev/null || true)
-    if [ -z "$CHANGED_FILES" ]; then
-        echo "✅ [Aerial Verify] Nothing staged."
-        exit 0
-    fi
+    [ -z "$CHANGED_FILES" ] && { echo "✅ [Aerial Verify] Nothing staged."; exit 0; }
     unf=$(gofmt -l $CHANGED_FILES 2>/dev/null | grep -v -E '(^|/)vendor/' || true)
-    if [ -n "$unf" ]; then
-        for f in $unf; do gofmt -w "$f" && git add "$f"; done
-    fi
+    [ -n "$unf" ] && for f in $unf; do gofmt -w "$f" && git add "$f"; done
 else
     unf=$(gofmt -l . 2>/dev/null | grep -v -E '(^|/)vendor/' || true)
-    if [ -n "$unf" ]; then
-        echo "🚨 [Aerial Verify] Unformatted Go files: $unf" >&2
-        exit 1
-    fi
+    [ -z "$unf" ] || { echo "🚨 [Aerial Verify] Unformatted Go files: $unf" >&2; exit 1; }
 fi
 
 if command -v buildifier >/dev/null 2>&1; then
@@ -53,9 +45,15 @@ fi
 for m in $MODS; do (cd "$m" && golangci-lint run ./...); done
 [ -x scripts/check-deadcode.sh ] && ./scripts/check-deadcode.sh $MODS
 
-command -v kubectl >/dev/null 2>&1 || { echo "🚨 [Aerial Verify] kubectl is required" >&2; exit 1; }
-command -v atlas >/dev/null 2>&1 || { echo "🚨 [Aerial Verify] atlas is required" >&2; exit 1; }
-bazel test //k8s:manifests_test //web/theme:theme_test //services/docs-service:syntax_test //services/homepage:homepage_test //services/grafana:dashboards_test //services/eri/pkg/db/migrations:atlas_validate_test
+M_TESTS="//web/theme:theme_test //services/docs-service:syntax_test //services/homepage:homepage_test //services/grafana:dashboards_test"
+if command -v kubectl >/dev/null 2>&1 && command -v atlas >/dev/null 2>&1; then
+    bazel test //k8s:manifests_test //services/eri/pkg/db/migrations:atlas_validate_test $M_TESTS
+elif [ -n "${CI:-}" ]; then
+    echo "🚨 [Aerial Verify] kubectl and atlas are required in CI" >&2; exit 1
+else
+    echo "⚠️  [Aerial Verify] kubectl or atlas missing; skipping manifest and atlas tests outside CI." >&2
+    bazel test $M_TESTS
+fi
 
 TEST_TARGETS=""; TARGET_PKGS=""
 if [ "$MODE" = "full" ]; then

@@ -49,7 +49,7 @@ Classify each item as:
 Item line: `- [class] path: Symbol (~N LOC, +M test LOC) — evidence: prod 0% since <date> / deadcode / no refs — note`
 
 ### 2b. Test compaction signals
-- Per-package headroom: covered statements above the floor (`scripts/check-coverage.sh`). Most packages sit right on the floor, so compaction usually means merging tests into tables, not deleting them.
+- Per-package headroom: covered statements above the floor (`./scripts/verify.sh` or `bazel coverage //...` via `coverage-gate.awk`). Most packages sit right on the floor, so compaction usually means merging tests into tables, not deleting them.
 - **Per-test coverage**: build each package's test binary once (`go test -c -cover -covermode=set`) and run every top-level `Test*` alone with `-test.coverprofile`. Check that the union reproduces package coverage. Then compute tests with zero unique statements, and a greedy set of tests removable together with zero statement loss (remove the largest first). This is only a candidate list: hand-check that each test's assertions exist elsewhere, and keep concurrency, ordering, idempotency and drain tests.
 - Rule violations that compaction must fix anyway (enforced by `scripts/code-health`): closure fields in tables, mode-switch union tables, sequential literal `t.Run` blocks, catch-all `*Coverage*` / `*_extra_test.go` tests, test-only hooks on prod structs.
 - Mechanical wins: multi-line table rows that fit on one line under gofmt, duplicated fakes across packages (one shared fake package per boundary), duplicated hermetic TestMain harnesses.
