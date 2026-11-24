@@ -154,6 +154,7 @@ COPY --link --from=go-builder /usr/local/go /usr/local/go
 COPY --link --from=roborev-builder /out/bin/* /usr/local/bin/
 COPY --link --chmod=0755 services/github-runner/roborev-wrapper.sh /usr/local/bin/roborev
 COPY --link --chmod=0644 services/github-runner/roborev-config.toml /etc/roborev/config.toml
+COPY --link --chmod=0644 services/github-runner/claude-settings.json /etc/claude-settings.json
 COPY --link --from=rust-builder /usr/local/rustup /usr/local/rustup
 COPY --link --chown=1000:1000 --from=rust-builder /usr/local/cargo /usr/local/cargo
 COPY --link --from=golangci/golangci-lint:v2.15.0 /usr/bin/golangci-lint /usr/local/bin/golangci-lint
@@ -174,6 +175,14 @@ COPY --link --chown=1000:1000 --from=cli-tools /out/actions-runner /actions-runn
 ENV BAZELISK_HOME=/opt/bazel-cache \
     RUSTUP_HOME="/usr/local/rustup" \
     CARGO_HOME="/usr/local/cargo" \
+    GOCACHE=/data/cache/go-build \
+    GOPATH=/data/cache/go \
+    GOMODCACHE=/data/cache/go/pkg/mod \
+    GOLANGCI_LINT_CACHE=/data/cache/golangci-lint \
+    GOFLAGS=-trimpath \
+    PIP_CACHE_DIR=/cache/pip \
+    CARGO_TARGET_DIR=/cache/cargo-target \
+    NPM_CONFIG_CACHE=/cache/npm \
     PATH="/opt/npm-global/bin:/usr/local/cargo/bin:/usr/local/go/bin:/data/cache/go/bin:/home/ubuntu/go/bin:/root/go/bin:${PATH}"
 
 RUN BAZELISK_HOME=/opt/bazel-cache USE_BAZEL_VERSION=9.3.3 /usr/local/bin/bazelisk version && \
@@ -182,7 +191,14 @@ RUN BAZELISK_HOME=/opt/bazel-cache USE_BAZEL_VERSION=9.3.3 /usr/local/bin/bazeli
     chmod 0644 /etc/bazel.bazelrc
 
 RUN (useradd -m -u 1000 runner 2>/dev/null || true) && \
-    mkdir -p /data && \
+    mkdir -p /data /root/.roborev /root/.claude/projects /root/.config/muse/sessions /root/.local/share /root/.docker/buildx/instances /home/ubuntu/.config /home/ubuntu/.local/share && \
+    ln -sfn /root/.roborev /home/ubuntu/.roborev && \
+    ln -sfn /root/.claude /home/ubuntu/.claude && \
+    ln -sfn /root/.claude.json /home/ubuntu/.claude.json && \
+    ln -sfn /root/.docker /home/ubuntu/.docker && \
+    ln -sfn /root/.config/muse /home/ubuntu/.config/muse && \
+    ln -sfn /root/.config/muse /root/.local/share/muse && \
+    ln -sfn /root/.config/muse /home/ubuntu/.local/share/muse && \
     chown -R 1000:1000 /data
 
 COPY services/github-runner/entrypoint.sh /entrypoint.sh
