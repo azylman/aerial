@@ -126,22 +126,6 @@ func TestWorkerPool_EffortModelResolution(t *testing.T) {
 	}
 }
 
-type voiceTurnTestCase struct {
-	name, prompt, sessionID, runnerOut, runnerErrOut, wantReply, wantConvID, wantErrSub, wantStatusSub, wantSentenceSub string
-	runnerCode, resultExitCode                                                                                          int
-	runnerErr, spawnerErr, wantErrIs, hookErr                                                                           error
-	poolNil, poolStopped, poolDeadCtx, cancelCaller, nilProcessPool, useVoiceHook, useVoiceStreamHook                   bool
-	closePipeImmediately, cancelCallerOnScan                                                                            bool
-	resultStatus, resultError, resultResponse                                                                           string
-	// wantTurnStatus is the aerial.turn.status of the invoke_agent span parented to the caller's
-	// span; "" leaves the turn's trace unchecked. wantChatSpan expects a chat child under it, and
-	// wantRegistered expects the daemon's registry entry during Execute (it must be gone after).
-	wantTurnStatus                             string
-	wantChatSpan, wantRegistered, wantUntraced bool
-	appVoiceModel, appLowModel                 string
-	wantModel, wantProvider                    string
-}
-
 // voiceTraceHarness is the tracing side of a voice test pool: the recorder its spans land in,
 // the active-turn registry it registers daemons in, and whether the daemon saw its turn
 // registered (with tool spans attached) while executing.
@@ -170,182 +154,16 @@ func (h *voiceTraceHarness) observeRegistration() {
 // voiceTestTarget names the voice test pool's runtime home, so its daemons register under it.
 const voiceTestTarget = "voice"
 
-func buildVoiceTestAppConfig(tt *voiceTurnTestCase) *config.Config {
-	if tt.appVoiceModel == "" && tt.appLowModel == "" {
+func buildVoiceTestAppConfig(appVoiceModel, appLowModel string) *config.Config {
+	if appVoiceModel == "" && appLowModel == "" {
 		return nil
 	}
 	return newTestConfig(func(d *config.ConfigData) {
-		if tt.appLowModel != "" {
-			d.LowEffortModel = tt.appLowModel
+		if appLowModel != "" {
+			d.LowEffortModel = appLowModel
 		}
-		d.Voice.Model = tt.appVoiceModel
+		d.Voice.Model = appVoiceModel
 	})
-}
-
-func setupVoiceTestPool(t *testing.T, tt *voiceTurnTestCase, h *voiceTraceHarness, cancelCaller context.CancelFunc, onRecordPrompt func(string)) (*WorkerPool, *runner.UnifiedProcessPool, bool) {
-	t.Helper()
-	if tt.poolNil {
-		return nil, nil, false
-	}
-	if tt.poolDeadCtx {
-		deadCtx, deadCancel := context.WithCancel(context.Background())
-		deadCancel()
-		return &WorkerPool{ctx: deadCtx}, nil, false
-	}
-	if tt.poolStopped {
-		return &WorkerPool{stopped: true}, nil, false
-	}
-	if tt.nilProcessPool {
-		p := New(nil, WorkerPoolConfig{TracerProvider: h.tp, ActiveTurns: h.registry})
-		p.pools = nil
-		return p, nil, false
-	}
-	appCfg := buildVoiceTestAppConfig(tt)
-	if tt.useVoiceHook {
-		p := New(appCfg, WorkerPoolConfig{
-			TracerProvider: h.tp, ActiveTurns: h.registry,
-			VoiceRunnerFunc: func(ctx context.Context, prompt, sessionID string, onStatus func(string)) (string, string, error) {
-				onRecordPrompt(prompt)
-				if onStatus != nil {
-					onStatus("⚡ Custom hook running...")
-				}
-				reply := "voice hook reply"
-				if prompt == "what is the cluster node status?" {
-					reply = "All three nodes are online."
-				}
-				return reply, sessionID, nil
-			},
-		})
-		p.Start()
-		return p, nil, true
-	}
-	if tt.useVoiceStreamHook {
-		p := New(appCfg, WorkerPoolConfig{
-			TracerProvider: h.tp, ActiveTurns: h.registry,
-			VoiceStreamRunnerFunc: func(ctx context.Context, prompt, sessionID string, onStatus func(string), onSentence func(string)) (string, string, error) {
-				if tt.hookErr != nil {
-					return "", sessionID, tt.hookErr
-				}
-				if onStatus != nil {
-					onStatus("⚡ Streaming hook running...")
-				}
-				if onSentence != nil {
-					onSentence("Streaming sentence.")
-				}
-				return "voice stream reply", sessionID, nil
-			},
-		})
-		p.Start()
-		return p, nil, true
-	}
-	if tt.runnerOut != "" || tt.runnerErr != nil || tt.runnerCode != 0 {
-		p := New(appCfg, WorkerPoolConfig{
-			LowEffortModel: "low-effort-fast-model", TracerProvider: h.tp, ActiveTurns: h.registry,
-			RunnerWithOptionsFunc: func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, opts runner.WatchdogOptions) (string, string, int, error) {
-				return tt.runnerOut, tt.runnerErrOut, tt.runnerCode, tt.runnerErr
-			},
-		})
-		p.Start()
-		return p, nil, true
-	}
-	var blockCh chan struct{}
-	onScan := h.observeRegistration
-	if tt.cancelCallerOnScan {
-		blockCh = make(chan struct{})
-		t.Cleanup(func() { close(blockCh) })
-		onScan = func() { h.observeRegistration(); cancelCaller() }
-	}
-	spawner := newEventDrivenVoiceDaemonSpawner(voiceProcessPoolSpawnerConfig{
-		spawnerErr: tt.spawnerErr, closeInRPipeImmediately: tt.closePipeImmediately,
-		resultStatus: tt.resultStatus, resultError: tt.resultError, resultResponse: tt.resultResponse, resultExitCode: tt.resultExitCode,
-		cancelCallerOnScan: onScan, blockUntilDone: blockCh,
-	})
-	procPool := runner.NewUnifiedProcessPool(runner.PoolConfig{DefaultModel: "gemini-2.5-flash", GeminiHomeDir: filepath.Join(t.TempDir(), voiceTestTarget)}, spawner)
-	p := New(appCfg, WorkerPoolConfig{ProcessPool: procPool, VoiceProcessPool: procPool, TracerProvider: h.tp, ActiveTurns: h.registry})
-	p.Start()
-	return p, procPool, true
-}
-
-func assertVoiceTurnOutputs(t *testing.T, tt voiceTurnTestCase, reply, convID, statusReceived, sentenceReceived, recordedPrompt string) {
-	t.Helper()
-	if tt.wantReply != "" && reply != tt.wantReply {
-		t.Errorf("reply = %q, want %q", reply, tt.wantReply)
-	}
-	if tt.wantConvID != "" && convID != tt.wantConvID {
-		t.Errorf("convID = %q, want %q", convID, tt.wantConvID)
-	}
-	if tt.wantStatusSub != "" && !strings.Contains(statusReceived, tt.wantStatusSub) {
-		t.Errorf("status = %q, want substring %q", statusReceived, tt.wantStatusSub)
-	}
-	if tt.wantSentenceSub != "" && sentenceReceived != tt.wantSentenceSub {
-		t.Errorf("sentence = %q, want %q", sentenceReceived, tt.wantSentenceSub)
-	}
-	if tt.name == "ForwardCleanPrompt" && recordedPrompt != tt.prompt {
-		t.Errorf("recorded prompt = %q, want %q", recordedPrompt, tt.prompt)
-	}
-}
-
-func assertVoiceTurnError(t *testing.T, tt voiceTurnTestCase, err error) bool {
-	t.Helper()
-	if tt.wantErrIs != nil {
-		if !errors.Is(err, tt.wantErrIs) {
-			t.Fatalf("expected error %v, got %v", tt.wantErrIs, err)
-		}
-		return true
-	}
-	if tt.wantErrSub != "" {
-		if err == nil || !strings.Contains(err.Error(), tt.wantErrSub) {
-			t.Fatalf("expected error containing %q, got: %v", tt.wantErrSub, err)
-		}
-		return true
-	}
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	return false
-}
-
-func runVoiceTurnCase(t *testing.T, tt voiceTurnTestCase) {
-	t.Helper()
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	if tt.cancelCaller {
-		cancel()
-	}
-
-	var recordedPrompt, statusReceived, sentenceReceived string
-	h := newVoiceTraceHarness()
-	ctx, caller := h.tp.Tracer("test").Start(ctx, "POST /voice/ask")
-	pool, procPool, shouldStop := setupVoiceTestPool(t, &tt, h, cancel, func(p string) { recordedPrompt = p })
-	if shouldStop && pool != nil {
-		defer pool.Stop()
-	}
-	if procPool != nil {
-		defer procPool.Close()
-	}
-
-	targetSess := tt.sessionID
-
-	reply, convID, err := pool.ExecuteVoiceTurn(ctx, tt.prompt, targetSess, func(s string) { statusReceived = s }, func(s string) { sentenceReceived = s })
-	caller.End()
-	if pool != nil {
-		pool.MarkDirty()
-	}
-	assertVoiceTurnTrace(t, tt, h, caller.SpanContext().SpanID())
-	if assertVoiceTurnError(t, tt, err) {
-		return
-	}
-	assertVoiceTurnOutputs(t, tt, reply, convID, statusReceived, sentenceReceived, recordedPrompt)
-}
-
-func assertVoiceTurnModelAndProvider(t *testing.T, tt voiceTurnTestCase, attrs map[string]string) {
-	t.Helper()
-	if tt.wantModel != "" && attrs["gen_ai.request.model"] != tt.wantModel {
-		t.Errorf("invoke_agent model = %q, want %q", attrs["gen_ai.request.model"], tt.wantModel)
-	}
-	if tt.wantProvider != "" && attrs["gen_ai.provider.name"] != tt.wantProvider {
-		t.Errorf("invoke_agent provider = %q, want %q", attrs["gen_ai.provider.name"], tt.wantProvider)
-	}
 }
 
 func assertVoiceTurnChatSpan(t *testing.T, ended []sdktrace.ReadOnlySpan, parentSpanID trace.SpanID, wantChatSpan bool) {
@@ -361,81 +179,416 @@ func assertVoiceTurnChatSpan(t *testing.T, ended []sdktrace.ReadOnlySpan, parent
 	}
 }
 
-// assertVoiceTurnTrace checks the turn's invoke_agent span (parented to the caller's span), its
-// chat child, and that the daemon was registered only while the turn executed.
-func assertVoiceTurnTrace(t *testing.T, tt voiceTurnTestCase, h *voiceTraceHarness, callerID trace.SpanID) {
+type voiceGuardCase struct {
+	name           string
+	sessionID      string
+	cancelCaller   bool
+	poolDeadCtx    bool
+	poolNil        bool
+	poolStopped    bool
+	nilProcessPool bool
+	wantErrSub     string
+	wantErrIs      error
+	wantTurnStatus string
+}
+
+func assertVoiceGuardTurnStatus(t *testing.T, h *voiceTraceHarness, callerSpanID trace.SpanID, wantStatus string) {
 	t.Helper()
 	var turn sdktrace.ReadOnlySpan
 	for _, s := range h.rec.Ended() {
-		if s.Name() == "invoke_agent" && s.Parent().SpanID() == callerID {
+		if s.Name() == "invoke_agent" && s.Parent().SpanID() == callerSpanID {
 			turn = s
 		}
 	}
-	if tt.wantUntraced && turn != nil {
-		t.Errorf("custom voice runner opened an invoke_agent span")
+	if turn == nil {
+		t.Fatalf("no invoke_agent span parented to caller span")
 	}
-	if tt.wantRegistered != h.registered.Load() {
-		t.Errorf("registered during Execute = %v, want %v", h.registered.Load(), tt.wantRegistered)
+	attrs := map[string]string{}
+	for _, kv := range turn.Attributes() {
+		val := kv.Value.AsString()
+		if val == "" {
+			val = kv.Value.String()
+		}
+		attrs[string(kv.Key)] = val
+	}
+	if attrs["aerial.turn.status"] != wantStatus {
+		t.Errorf("invoke_agent status = %q, want %q", attrs["aerial.turn.status"], wantStatus)
+	}
+}
+
+func runVoiceGuardCase(t *testing.T, tc voiceGuardCase) {
+	t.Helper()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	if tc.cancelCaller {
+		cancel()
+	}
+
+	h := newVoiceTraceHarness()
+	ctx, caller := h.tp.Tracer("test").Start(ctx, "POST /voice/ask")
+
+	var pool *WorkerPool
+	if !tc.poolNil {
+		switch {
+		case tc.poolDeadCtx:
+			deadCtx, deadCancel := context.WithCancel(context.Background())
+			deadCancel()
+			pool = &WorkerPool{ctx: deadCtx}
+		case tc.poolStopped:
+			pool = &WorkerPool{stopped: true}
+		case tc.nilProcessPool:
+			pool = New(nil, WorkerPoolConfig{TracerProvider: h.tp, ActiveTurns: h.registry})
+			pool.pools = nil
+		default:
+			pool = &WorkerPool{ctx: context.Background()}
+		}
+	}
+
+	_, _, err := pool.ExecuteVoiceTurn(ctx, "hello", tc.sessionID, nil, nil)
+	caller.End()
+
+	if _, ok := h.registry.SoleDaemonInTarget(voiceTestTarget); ok {
+		t.Errorf("voice daemon still registered after the turn")
+	}
+
+	switch {
+	case tc.wantErrIs != nil:
+		if !errors.Is(err, tc.wantErrIs) {
+			t.Fatalf("expected error %v, got %v", tc.wantErrIs, err)
+		}
+	case tc.wantErrSub != "":
+		if err == nil || !strings.Contains(err.Error(), tc.wantErrSub) {
+			t.Fatalf("expected error containing %q, got: %v", tc.wantErrSub, err)
+		}
+	case err != nil:
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if tc.wantTurnStatus != "" {
+		assertVoiceGuardTurnStatus(t, h, caller.SpanContext().SpanID(), tc.wantTurnStatus)
+	}
+}
+
+func TestWorkerPool_ExecuteVoiceTurn_Guards(t *testing.T) {
+	t.Parallel()
+	tests := []voiceGuardCase{
+		{name: "emptySession", sessionID: "", wantErrSub: "session_id is required"},
+		{name: "whitespaceSession", sessionID: "   ", wantErrSub: "session_id is required"},
+		{name: "canceledCallerCtx", sessionID: "sess-cancel", cancelCaller: true, wantErrIs: context.Canceled},
+		{name: "deadPoolCtx", sessionID: "sess-dead", poolDeadCtx: true, wantErrSub: "brain is shutting down"},
+		{name: "nilPool", sessionID: "sess-nil", poolNil: true, wantErrSub: "worker pool is uninitialized"},
+		{name: "stoppedPool", sessionID: "sess-stopped", poolStopped: true, wantErrSub: "brain is shutting down"},
+		{name: "nilProcessPool", sessionID: "sess-1", nilProcessPool: true, wantErrSub: "voice daemon pool unavailable", wantTurnStatus: "failed"},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			runVoiceGuardCase(t, tc)
+		})
+	}
+}
+
+type voiceHookTurnCase struct {
+	name               string
+	prompt             string
+	sessionID          string
+	useVoiceHook       bool
+	useVoiceStreamHook bool
+	hookErr            error
+	runnerOut          string
+	runnerErrOut       string
+	runnerCode         int
+	runnerErr          error
+	wantReply          string
+	wantConvID         string
+	wantErrSub         string
+	wantStatusSub      string
+	wantSentenceSub    string
+	wantPrompt         string
+}
+
+func buildVoiceHookPool(tc voiceHookTurnCase, h *voiceTraceHarness, onRecordPrompt func(string)) *WorkerPool {
+	switch {
+	case tc.useVoiceHook:
+		return New(nil, WorkerPoolConfig{
+			TracerProvider: h.tp, ActiveTurns: h.registry,
+			VoiceRunnerFunc: func(ctx context.Context, prompt, sessionID string, onStatus func(string)) (string, string, error) {
+				onRecordPrompt(prompt)
+				if onStatus != nil {
+					onStatus("⚡ Custom hook running...")
+				}
+				reply := "voice hook reply"
+				if prompt == "what is the cluster node status?" {
+					reply = "All three nodes are online."
+				}
+				return reply, sessionID, nil
+			},
+		})
+	case tc.useVoiceStreamHook:
+		return New(nil, WorkerPoolConfig{
+			TracerProvider: h.tp, ActiveTurns: h.registry,
+			VoiceStreamRunnerFunc: func(ctx context.Context, prompt, sessionID string, onStatus func(string), onSentence func(string)) (string, string, error) {
+				if tc.hookErr != nil {
+					return "", sessionID, tc.hookErr
+				}
+				if onStatus != nil {
+					onStatus("⚡ Streaming hook running...")
+				}
+				if onSentence != nil {
+					onSentence("Streaming sentence.")
+				}
+				return "voice stream reply", sessionID, nil
+			},
+		})
+	default:
+		return New(nil, WorkerPoolConfig{
+			LowEffortModel: "low-effort-fast-model", TracerProvider: h.tp, ActiveTurns: h.registry,
+			RunnerWithOptionsFunc: func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, opts runner.WatchdogOptions) (string, string, int, error) {
+				return tc.runnerOut, tc.runnerErrOut, tc.runnerCode, tc.runnerErr
+			},
+		})
+	}
+}
+
+func assertVoiceHookOutputs(t *testing.T, tc voiceHookTurnCase, reply, convID, statusReceived, sentenceReceived, recordedPrompt string) {
+	t.Helper()
+	if tc.wantReply != "" && reply != tc.wantReply {
+		t.Errorf("reply = %q, want %q", reply, tc.wantReply)
+	}
+	if tc.wantConvID != "" && convID != tc.wantConvID {
+		t.Errorf("convID = %q, want %q", convID, tc.wantConvID)
+	}
+	if tc.wantPrompt != "" && recordedPrompt != tc.wantPrompt {
+		t.Errorf("recorded prompt = %q, want %q", recordedPrompt, tc.wantPrompt)
+	}
+	if tc.wantStatusSub != "" && !strings.Contains(statusReceived, tc.wantStatusSub) {
+		t.Errorf("status = %q, want substring %q", statusReceived, tc.wantStatusSub)
+	}
+	if tc.wantSentenceSub != "" && sentenceReceived != tc.wantSentenceSub {
+		t.Errorf("sentence = %q, want %q", sentenceReceived, tc.wantSentenceSub)
+	}
+}
+
+func runVoiceHookTurnCase(t *testing.T, tc voiceHookTurnCase) {
+	t.Helper()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	h := newVoiceTraceHarness()
+	ctx, caller := h.tp.Tracer("test").Start(ctx, "POST /voice/ask")
+
+	var recordedPrompt, statusReceived, sentenceReceived string
+	pool := buildVoiceHookPool(tc, h, func(p string) { recordedPrompt = p })
+	pool.Start()
+	defer pool.Stop()
+
+	reply, convID, err := pool.ExecuteVoiceTurn(ctx, tc.prompt, tc.sessionID, func(s string) { statusReceived = s }, func(s string) { sentenceReceived = s })
+	caller.End()
+	pool.MarkDirty()
+
+	if tc.useVoiceHook {
+		for _, s := range h.rec.Ended() {
+			if s.Name() == "invoke_agent" && s.Parent().SpanID() == caller.SpanContext().SpanID() {
+				t.Errorf("custom voice runner opened an invoke_agent span")
+			}
+		}
 	}
 	if _, ok := h.registry.SoleDaemonInTarget(voiceTestTarget); ok {
 		t.Errorf("voice daemon still registered after the turn")
 	}
-	if tt.wantTurnStatus == "" {
+
+	if tc.wantErrSub != "" {
+		if err == nil || !strings.Contains(err.Error(), tc.wantErrSub) {
+			t.Fatalf("expected error containing %q, got: %v", tc.wantErrSub, err)
+		}
 		return
+	}
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	assertVoiceHookOutputs(t, tc, reply, convID, statusReceived, sentenceReceived, recordedPrompt)
+}
+
+func TestWorkerPool_ExecuteVoiceTurn_RunnerHooks(t *testing.T) {
+	t.Parallel()
+	tests := []voiceHookTurnCase{
+		{name: "VoiceRunnerHook", prompt: "hello", sessionID: "sess-hook-1", useVoiceHook: true, wantReply: "voice hook reply", wantConvID: "sess-hook-1", wantStatusSub: "⚡ Custom hook"},
+		{name: "ForwardCleanPrompt", prompt: "what is the cluster node status?", sessionID: "dev-voice-1", useVoiceHook: true, wantReply: "All three nodes are online.", wantConvID: "dev-voice-1", wantPrompt: "what is the cluster node status?"},
+		{name: "VoiceStreamRunnerHook", prompt: "hello", sessionID: "sess-stream-1", useVoiceStreamHook: true, wantReply: "voice stream reply", wantConvID: "sess-stream-1", wantStatusSub: "⚡ Streaming hook", wantSentenceSub: "Streaming sentence."},
+		{name: "VoiceStreamRunnerHookError", prompt: "hello", sessionID: "sess-err", useVoiceStreamHook: true, hookErr: errors.New("simulated stream failure"), wantErrSub: "simulated stream failure"},
+		{name: "SuccessTurn", prompt: "turn off fan", sessionID: "sess-custom-1", runnerOut: "{\"event\":\"result\",\"result\":{\"status\":\"SUCCESS\",\"response\":\"turned off fan\"}}", wantReply: "turned off fan", wantConvID: "sess-custom-1", wantStatusSub: "⚡"},
+		{name: "RunnerError", prompt: "turn off fan", sessionID: "sess-custom-1", runnerErrOut: "exec error", runnerCode: 1, runnerErr: errors.New("exec failed"), wantErrSub: "exec failed"},
+		{name: "ExitCodeNonZero", prompt: "turn off fan", sessionID: "sess-custom-1", runnerErrOut: "process died", runnerCode: 42, wantErrSub: "exit code 42"},
+		{name: "PlainTextFallback", prompt: "turn off fan", sessionID: "sess-custom-1", runnerOut: "plain text response", wantReply: "plain text response", wantConvID: "sess-custom-1"},
+		{name: "EmptyResponseField", prompt: "turn off fan", sessionID: "sess-custom-1", runnerOut: "{\"event\":\"result\",\"result\":{\"status\":\"SUCCESS\",\"response\":\"\"}}", wantErrSub: "empty response"},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			runVoiceHookTurnCase(t, tc)
+		})
+	}
+}
+
+type voiceDaemonTurnCase struct {
+	name                 string
+	sessionID            string
+	spawnerErr           error
+	closePipeImmediately bool
+	cancelCallerOnScan   bool
+	resultStatus         string
+	resultError          string
+	resultResponse       string
+	resultExitCode       int
+	appVoiceModel        string
+	appLowModel          string
+	wantReply            string
+	wantErrSub           string
+	wantTurnStatus       string
+	wantChatSpan         bool
+}
+
+func assertVoiceDaemonTurnSpan(t *testing.T, tc voiceDaemonTurnCase, h *voiceTraceHarness, callerSpanID trace.SpanID) {
+	t.Helper()
+	if tc.wantTurnStatus == "" {
+		return
+	}
+	var turn sdktrace.ReadOnlySpan
+	for _, s := range h.rec.Ended() {
+		if s.Name() == "invoke_agent" && s.Parent().SpanID() == callerSpanID {
+			turn = s
+		}
 	}
 	if turn == nil {
 		t.Fatalf("no invoke_agent span parented to the caller span")
 	}
 	attrs := map[string]string{}
 	for _, kv := range turn.Attributes() {
-		attrs[string(kv.Key)] = kv.Value.AsString()
-		if attrs[string(kv.Key)] == "" {
-			attrs[string(kv.Key)] = kv.Value.String()
+		val := kv.Value.AsString()
+		if val == "" {
+			val = kv.Value.String()
+		}
+		attrs[string(kv.Key)] = val
+	}
+	if attrs["aerial.turn.trigger"] != "voice" || attrs["aerial.turn.status"] != tc.wantTurnStatus {
+		t.Errorf("invoke_agent trigger=%q status=%q, want voice/%q", attrs["aerial.turn.trigger"], attrs["aerial.turn.status"], tc.wantTurnStatus)
+	}
+
+	wantModel := "gemini-2.5-flash"
+	wantProvider := "gcp.gemini"
+	if tc.appVoiceModel != "" {
+		wantModel = tc.appVoiceModel
+		wantProvider = "anthropic"
+	} else if tc.appLowModel != "" {
+		wantModel = tc.appLowModel
+		wantProvider = "anthropic"
+	}
+	if tc.wantTurnStatus == "success" {
+		if attrs["gen_ai.request.model"] != wantModel {
+			t.Errorf("invoke_agent model = %q, want %q", attrs["gen_ai.request.model"], wantModel)
+		}
+		if attrs["gen_ai.provider.name"] != wantProvider {
+			t.Errorf("invoke_agent provider = %q, want %q", attrs["gen_ai.provider.name"], wantProvider)
 		}
 	}
-	if attrs["aerial.turn.trigger"] != "voice" || attrs["aerial.turn.status"] != tt.wantTurnStatus {
-		t.Errorf("invoke_agent trigger=%q status=%q, want voice/%q", attrs["aerial.turn.trigger"], attrs["aerial.turn.status"], tt.wantTurnStatus)
-	}
-	assertVoiceTurnModelAndProvider(t, tt, attrs)
-	if wantErr := tt.wantTurnStatus != "success"; wantErr != (turn.Status().Code == codes.Error) {
+
+	if wantErr := tc.wantTurnStatus != "success"; wantErr != (turn.Status().Code == codes.Error) {
 		t.Errorf("invoke_agent span status = %v, want error=%v", turn.Status().Code, wantErr)
 	}
-	assertVoiceTurnChatSpan(t, h.rec.Ended(), turn.SpanContext().SpanID(), tt.wantChatSpan)
+
+	assertVoiceTurnChatSpan(t, h.rec.Ended(), turn.SpanContext().SpanID(), tc.wantChatSpan)
 }
 
-func TestWorkerPool_ExecuteVoiceTurn_TableDriven(t *testing.T) {
-	t.Parallel()
-	tests := []voiceTurnTestCase{
-		{name: "emptySession", prompt: "hello", sessionID: "", wantErrSub: "session_id is required"},
-		{name: "whitespaceSession", prompt: "hello", sessionID: "   ", wantErrSub: "session_id is required"},
-		{name: "canceledCallerCtx", prompt: "hello", sessionID: "sess-cancel", cancelCaller: true, wantErrIs: context.Canceled},
-		{name: "deadPoolCtx", prompt: "hello", sessionID: "sess-dead", poolDeadCtx: true, wantErrSub: "brain is shutting down"},
-		{name: "nilPool", prompt: "hello", sessionID: "sess-nil", poolNil: true, wantErrSub: "worker pool is uninitialized"},
-		{name: "stoppedPool", prompt: "hello", sessionID: "sess-stopped", poolStopped: true, wantErrSub: "brain is shutting down"},
-		{name: "nilProcessPool", prompt: "hello", sessionID: "sess-1", nilProcessPool: true, wantErrSub: "voice daemon pool unavailable", wantTurnStatus: "failed"},
-		{name: "SuccessTurn", prompt: "turn off fan", sessionID: "sess-custom-1", runnerOut: `{"event":"result","result":{"status":"SUCCESS","response":"turned off fan"}}`, wantReply: "turned off fan", wantConvID: "sess-custom-1", wantStatusSub: "⚡"},
-		{name: "RunnerError", prompt: "turn off fan", sessionID: "sess-custom-1", runnerErrOut: "exec error", runnerCode: 1, runnerErr: errors.New("exec failed"), wantErrSub: "exec failed"},
-		{name: "ExitCodeNonZero", prompt: "turn off fan", sessionID: "sess-custom-1", runnerErrOut: "process died", runnerCode: 42, wantErrSub: "exit code 42"},
-		{name: "PlainTextFallback", prompt: "turn off fan", sessionID: "sess-custom-1", runnerOut: "plain text response", wantReply: "plain text response", wantConvID: "sess-custom-1"},
-		{name: "EmptyResponseField", prompt: "turn off fan", sessionID: "sess-custom-1", runnerOut: `{"event":"result","result":{"status":"SUCCESS","response":""}}`, wantErrSub: "empty response"},
-		{name: "VoiceRunnerHook", prompt: "hello", sessionID: "sess-hook-1", useVoiceHook: true, wantReply: "voice hook reply", wantConvID: "sess-hook-1", wantStatusSub: "⚡ Custom hook", wantUntraced: true},
-		{name: "VoiceStreamRunnerHook", prompt: "hello", sessionID: "sess-stream-1", useVoiceStreamHook: true, wantReply: "voice stream reply", wantConvID: "sess-stream-1", wantStatusSub: "⚡ Streaming hook", wantSentenceSub: "Streaming sentence."},
-		{name: "VoiceStreamRunnerHookError", prompt: "hello", sessionID: "sess-err", useVoiceStreamHook: true, hookErr: errors.New("simulated stream failure"), wantErrSub: "simulated stream failure"},
-		{name: "ForwardCleanPrompt", prompt: "what is the cluster node status?", sessionID: "dev-voice-1", useVoiceHook: true, wantReply: "All three nodes are online.", wantConvID: "dev-voice-1"},
-		{name: "AcquisitionFailure", prompt: "test", sessionID: "sess-acq-fail", spawnerErr: errors.New("spawner failed to start"), wantErrSub: "failed to acquire voice daemon", wantTurnStatus: "failed"},
-		{name: "DaemonExecutionError", prompt: "test", sessionID: "sess-daemon-err", resultStatus: "ERROR", resultError: "simulated failure in daemon", wantErrSub: "simulated failure in daemon", wantTurnStatus: "failed", wantChatSpan: true, wantRegistered: true},
-		{name: "DaemonTurnTraced", prompt: "test", sessionID: "sess-daemon-ok", resultStatus: "SUCCESS", resultResponse: "lights on", wantReply: "lights on", wantTurnStatus: "success", wantChatSpan: true, wantRegistered: true, wantModel: "gemini-2.5-flash", wantProvider: "gcp.gemini"},
-		{name: "SendFailureBrokenPipe", prompt: "test", sessionID: "sess-pipe-err", closePipeImmediately: true, wantErrSub: "failed sending turn to voice daemon"},
-		{name: "ContextCanceledWaitingForResult", prompt: "test", sessionID: "sess-ctx-cancel", cancelCallerOnScan: true, wantErrSub: "context canceled", wantTurnStatus: "cancelled", wantRegistered: true},
-		{name: "ExitCodeNonZeroAndEmptySessionFallback", prompt: "test", sessionID: "sess-exit-fallback", resultStatus: "SUCCESS", resultExitCode: 1, wantErrSub: "empty response", wantRegistered: true},
-		{name: "VoiceModelSet", prompt: "test", sessionID: "sess-voice-model", appVoiceModel: "haiku", appLowModel: "opus-low", resultStatus: "SUCCESS", resultResponse: "lights on", wantReply: "lights on", wantTurnStatus: "success", wantChatSpan: true, wantRegistered: true, wantModel: "haiku", wantProvider: "anthropic"},
-		{name: "VoiceModelEmptyFallbackLow", prompt: "test", sessionID: "sess-voice-empty", appVoiceModel: "", appLowModel: "opus-low", resultStatus: "SUCCESS", resultResponse: "lights on", wantReply: "lights on", wantTurnStatus: "success", wantChatSpan: true, wantRegistered: true, wantModel: "opus-low", wantProvider: "anthropic"},
+func runVoiceDaemonTurnCase(t *testing.T, tc voiceDaemonTurnCase) {
+	t.Helper()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	h := newVoiceTraceHarness()
+	ctx, caller := h.tp.Tracer("test").Start(ctx, "POST /voice/ask")
+
+	var blockCh chan struct{}
+	onScan := h.observeRegistration
+	if tc.cancelCallerOnScan {
+		blockCh = make(chan struct{})
+		t.Cleanup(func() { close(blockCh) })
+		onScan = func() { h.observeRegistration(); cancel() }
 	}
 
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
+	spawner := newEventDrivenVoiceDaemonSpawner(voiceProcessPoolSpawnerConfig{
+		spawnerErr:              tc.spawnerErr,
+		closeInRPipeImmediately: tc.closePipeImmediately,
+		resultStatus:            tc.resultStatus,
+		resultError:             tc.resultError,
+		resultResponse:          tc.resultResponse,
+		resultExitCode:          tc.resultExitCode,
+		cancelCallerOnScan:      onScan,
+		blockUntilDone:          blockCh,
+	})
+	procPool := runner.NewUnifiedProcessPool(runner.PoolConfig{
+		DefaultModel:  "gemini-2.5-flash",
+		GeminiHomeDir: filepath.Join(t.TempDir(), voiceTestTarget),
+	}, spawner)
+	defer procPool.Close()
+
+	appCfg := buildVoiceTestAppConfig(tc.appVoiceModel, tc.appLowModel)
+	pool := New(appCfg, WorkerPoolConfig{
+		ProcessPool:      procPool,
+		VoiceProcessPool: procPool,
+		TracerProvider:   h.tp,
+		ActiveTurns:      h.registry,
+	})
+	pool.Start()
+	defer pool.Stop()
+
+	reply, _, err := pool.ExecuteVoiceTurn(ctx, "test", tc.sessionID, nil, nil)
+	caller.End()
+	pool.MarkDirty()
+
+	wantRegistered := tc.spawnerErr == nil && !tc.closePipeImmediately
+	if wantRegistered != h.registered.Load() {
+		t.Errorf("registered during Execute = %v, want %v", h.registered.Load(), wantRegistered)
+	}
+	if _, ok := h.registry.SoleDaemonInTarget(voiceTestTarget); ok {
+		t.Errorf("voice daemon still registered after the turn")
+	}
+
+	assertVoiceDaemonTurnSpan(t, tc, h, caller.SpanContext().SpanID())
+
+	if tc.wantErrSub != "" {
+		if err == nil || !strings.Contains(err.Error(), tc.wantErrSub) {
+			t.Fatalf("expected error containing %q, got: %v", tc.wantErrSub, err)
+		}
+		return
+	}
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if tc.wantReply != "" && reply != tc.wantReply {
+		t.Errorf("reply = %q, want %q", reply, tc.wantReply)
+	}
+}
+
+func TestWorkerPool_ExecuteVoiceTurn_DaemonPool(t *testing.T) {
+	t.Parallel()
+	tests := []voiceDaemonTurnCase{
+		{name: "AcquisitionFailure", sessionID: "sess-acq-fail", spawnerErr: errors.New("spawner failed to start"), wantErrSub: "failed to acquire voice daemon", wantTurnStatus: "failed"},
+		{name: "DaemonExecutionError", sessionID: "sess-daemon-err", resultStatus: "ERROR", resultError: "simulated failure in daemon", wantErrSub: "simulated failure in daemon", wantTurnStatus: "failed", wantChatSpan: true},
+		{name: "DaemonTurnTraced", sessionID: "sess-daemon-ok", resultStatus: "SUCCESS", resultResponse: "lights on", wantReply: "lights on", wantTurnStatus: "success", wantChatSpan: true},
+		{name: "SendFailureBrokenPipe", sessionID: "sess-pipe-err", closePipeImmediately: true, wantErrSub: "failed sending turn to voice daemon"},
+		{name: "ContextCanceledWaitingForResult", sessionID: "sess-ctx-cancel", cancelCallerOnScan: true, wantErrSub: "context canceled", wantTurnStatus: "cancelled"},
+		{name: "ExitCodeNonZeroAndEmptySessionFallback", sessionID: "sess-exit-fallback", resultStatus: "SUCCESS", resultExitCode: 1, wantErrSub: "empty response"},
+		{name: "VoiceModelSet", sessionID: "sess-voice-model", appVoiceModel: "haiku", appLowModel: "opus-low", resultStatus: "SUCCESS", resultResponse: "lights on", wantReply: "lights on", wantTurnStatus: "success", wantChatSpan: true},
+		{name: "VoiceModelEmptyFallbackLow", sessionID: "sess-voice-empty", appVoiceModel: "", appLowModel: "opus-low", resultStatus: "SUCCESS", resultResponse: "lights on", wantReply: "lights on", wantTurnStatus: "success", wantChatSpan: true},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			runVoiceTurnCase(t, tt)
+			runVoiceDaemonTurnCase(t, tc)
 		})
 	}
 }
