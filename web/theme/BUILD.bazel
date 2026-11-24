@@ -1,3 +1,5 @@
+load("@rules_shell//shell:sh_test.bzl", "sh_test")
+
 exports_files(
     [
         "aerial-tokens.css",
@@ -13,4 +15,13 @@ filegroup(
         "aerial-tokens.css",
     ],
     visibility = ["//visibility:public"],
+)
+
+sh_test(
+    name = "theme_test",
+    srcs = ["//build:tests/theme_test.sh"],
+    data = glob([
+        "*.css",
+        "*.js",
+    ]),
 )

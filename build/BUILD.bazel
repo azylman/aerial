@@ -1,4 +1,13 @@
-exports_files([
-    "go_test.bzl",
-    "oci.bzl",
-])
+exports_files(
+    [
+        "go_test.bzl",
+        "oci.bzl",
+        "tests/atlas_validate_test.sh",
+        "tests/dashboards_test.sh",
+        "tests/docs_syntax_test.sh",
+        "tests/homepage_test.sh",
+        "tests/k8s_manifests_test.sh",
+        "tests/theme_test.sh",
+    ],
+    visibility = ["//visibility:public"],
+)

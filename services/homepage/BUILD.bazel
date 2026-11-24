@@ -1,0 +1,20 @@
+load("@rules_shell//shell:sh_test.bzl", "sh_test")
+
+filegroup(
+    name = "configmap_sources",
+    srcs = [
+        "entrypoint.sh",
+        "lib/merge.js",
+        "prepare-config.js",
+    ] + glob(["config/*"]),
+    visibility = ["//visibility:public"],
+)
+
+sh_test(
+    name = "homepage_test",
+    srcs = ["//build:tests/homepage_test.sh"],
+    data = [
+        "lib/merge.js",
+        "prepare-config.js",
+    ] + glob(["test/*.test.js"]),
+)

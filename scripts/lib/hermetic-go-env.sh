@@ -175,10 +175,57 @@ ensure_bazel_build_files() {
         (cd "$root" && bazel run //:gazelle) || return $?
     fi
 
-    # services/eri/pkg/db/BUILD.bazel: schema.sql and migrations/**
+    local tool_bin_dir="${GOPATH:-$HOME/go}/bin"
+    if ! command -v atlas >/dev/null 2>&1; then
+        if [ -x /usr/local/bin/atlas ]; then
+            export PATH="/usr/local/bin:$PATH"
+        elif [ -x "$tool_bin_dir/atlas" ]; then
+            export PATH="$tool_bin_dir:$PATH"
+        elif command -v crane >/dev/null 2>&1; then
+            mkdir -p "$tool_bin_dir"
+            local tmp_atlas="${tool_bin_dir}/.atlas.tmp.$$"
+            local atlas_ref="index.docker.io/arigaio/atlas@sha256:3cd6883d5ec2703741f750fd5f9efed3a61f8e164b9dcea93ab7a7be429a1b5b"
+            if crane export "$atlas_ref" - 2>/dev/null | tar -xO atlas > "$tmp_atlas" 2>/dev/null && [ -s "$tmp_atlas" ]; then
+                chmod 0755 "$tmp_atlas"
+                mv -f "$tmp_atlas" "$tool_bin_dir/atlas"
+                export PATH="$tool_bin_dir:$PATH"
+            else
+                rm -f "$tmp_atlas"
+            fi
+        fi
+    fi
+
+    if ! command -v kubectl >/dev/null 2>&1; then
+        if [ -x "$tool_bin_dir/kubectl" ]; then
+            export PATH="$tool_bin_dir:$PATH"
+        elif command -v curl >/dev/null 2>&1 && command -v sha256sum >/dev/null 2>&1; then
+            mkdir -p "$tool_bin_dir"
+            local tmp_kubectl="${tool_bin_dir}/.kubectl.tmp.$$"
+            local kubectl_sha="4f6a959dcc5b702135f8354cc7109b542a2933c46b808b248a214c1f69f817ea"
+            if curl -fsSL --retry 3 "https://dl.k8s.io/release/v1.32.2/bin/linux/amd64/kubectl" -o "$tmp_kubectl" && \
+               echo "${kubectl_sha}  ${tmp_kubectl}" | sha256sum -c - >/dev/null 2>&1; then
+                chmod 0755 "$tmp_kubectl"
+                mv -f "$tmp_kubectl" "$tool_bin_dir/kubectl"
+                export PATH="$tool_bin_dir:$PATH"
+            else
+                rm -f "$tmp_kubectl"
+                echo "🚨 [Aerial] Error: failed to bootstrap SHA256-verified kubectl v1.32.2" >&2
+                return 1
+            fi
+        fi
+    fi
+
+    # services/eri/pkg/db/BUILD.bazel: schema.sql, migrations/**, and atlas_validate_test
     if [ -d "$root/services/eri/pkg/db" ]; then
         local db_build="$root/services/eri/pkg/db/BUILD.bazel"
-        if [ ! -f "$db_build" ] || ! grep -q 'name = "schema"' "$db_build" 2>/dev/null; then
+        if [ -f "$db_build" ] && ! grep -q 'sh_test.bzl' "$db_build" 2>/dev/null; then
+            local tmp_db="${db_build}.tmp.$$"
+            {
+                echo 'load("@rules_shell//shell:sh_test.bzl", "sh_test")'
+                cat "$db_build"
+            } > "$tmp_db" && mv "$tmp_db" "$db_build"
+        fi
+        if [ ! -f "$db_build" ] || ! grep -q 'name = "migrations"' "$db_build" 2>/dev/null; then
             cat >> "$db_build" <<'EOF'
 
 exports_files(
@@ -196,6 +243,19 @@ filegroup(
     name = "migrations",
     srcs = glob(["migrations/**"]),
     visibility = ["//visibility:public"],
+)
+EOF
+        fi
+        if ! grep -q 'name = "atlas_validate_test"' "$db_build" 2>/dev/null; then
+            cat >> "$db_build" <<'EOF'
+
+sh_test(
+    name = "atlas_validate_test",
+    srcs = ["//build:tests/atlas_validate_test.sh"],
+    data = [
+        "schema.sql",
+        ":migrations",
+    ],
 )
 EOF
         fi

@@ -57,8 +57,13 @@ ARG BUILDIFIER_VERSION=v10.2.0
 ARG BUILDIFIER_SHA256=470844069d710d0b7740e55007071c63e4d00be89a833dce5d1a91790e84dc28
 ARG CRANE_VERSION=v0.22.1
 ARG CRANE_SHA256=0ab7a1d6932a213aed964ce97666c3077fe691c8606413674a8b3e0b9ec4cda0
+ARG KUBECTL_VERSION=v1.32.2
+ARG KUBECTL_SHA256=4f6a959dcc5b702135f8354cc7109b542a2933c46b808b248a214c1f69f817ea
 
 RUN mkdir -p /out/usr/local/bin /out/actions-runner && \
+    curl -fsSL https://dl.k8s.io/release/${KUBECTL_VERSION}/bin/linux/amd64/kubectl -o /out/usr/local/bin/kubectl && \
+    echo "${KUBECTL_SHA256}  /out/usr/local/bin/kubectl" | sha256sum -c - && \
+    chmod 0755 /out/usr/local/bin/kubectl && \
     curl -fsSL --retry 5 --retry-all-errors --retry-delay 5 "https://lookaside.facebook.com/lookaside/muse/download/?channel=muse&version=${MUSE_VERSION}&file=muse-x86-linux" -o /out/usr/local/bin/muse && \
     echo "${MUSE_SHA256}  /out/usr/local/bin/muse" | sha256sum -c - && \
     chmod 0755 /out/usr/local/bin/muse && \
@@ -160,6 +165,7 @@ RUN ln -s ../lib/node_modules/npm/bin/npm-cli.js /usr/local/bin/npm && \
     node --version && \
     npm --version
 COPY --link --from=npm-tools /opt/npm-global /opt/npm-global
+COPY --link --chmod=0755 --from=arigaio/atlas:1.3.4 /atlas /usr/local/bin/atlas
 COPY --link --from=docker:27-cli /usr/local/bin/docker /usr/local/bin/docker
 COPY --link --from=docker:27-cli /usr/local/libexec/docker/cli-plugins/ /usr/local/libexec/docker/cli-plugins/
 COPY --link --from=cli-tools /out/usr/local/bin/ /usr/local/bin/
