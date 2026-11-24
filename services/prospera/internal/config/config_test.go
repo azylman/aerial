@@ -88,42 +88,18 @@ func TestResolveConfigPath(t *testing.T) {
 	}
 }
 
-type loadConfigFileTestCase struct {
-	name                    string
-	path                    string
-	env                     map[string]string
-	nilEnv                  bool
-	wantErr                 bool
-	wantPort                string
-	wantDatabaseURL         string
-	wantTwilioAccountSID    string
-	wantTwilioAuthToken     string
-	wantTwilioFromNumber    string
-	wantPublicWebhookBase   string
-	wantGeminiAPIKey        string
-	wantGeminiLiveModel     string
-	wantGeminiFallback      string
-	wantGeminiVoiceName     string
-	wantBrainURL            string
-	wantGoogleMCPURL        string
-	wantCovenURL            string
-	wantWhisperURL          string
-	wantDiscordChannel      string
-	wantCallbackWindowMins  int
-	wantMaxConcurrent       int
-	wantAllowFromLen        int
-	wantFirstAllowFrom      string
-	wantNATSURL             string
-	wantRestatePort         string
-	wantRestateIngressURL   string
-	wantRestateAdminURL     string
-	wantRestateAdvertiseURL string
+type loadConfigFileValidCase struct {
+	name   string
+	path   string
+	env    map[string]string
+	nilEnv bool
+	want   Config
 }
 
 func TestLoadConfigFile_TableDriven(t *testing.T) {
 	tmpDir := t.TempDir()
 	paths := setupLoadConfigFileFixtures(t, tmpDir)
-	tests := loadConfigFileTestCases(paths, tmpDir)
+	tests := append(loadConfigValidBaseCases(paths), loadConfigValidOverrideCases(paths)...)
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -186,16 +162,8 @@ restate_advertise_url: "http://prospera-custom:9080"
 	return paths
 }
 
-func loadConfigFileTestCases(paths map[string]string, tmpDir string) []loadConfigFileTestCase {
-	return append(loadConfigValidCases(paths), loadConfigErrorCases(paths, tmpDir)...)
-}
-
-func loadConfigValidCases(paths map[string]string) []loadConfigFileTestCase {
-	return append(loadConfigValidBaseCases(paths), loadConfigValidOverrideCases(paths)...)
-}
-
-func loadConfigValidBaseCases(paths map[string]string) []loadConfigFileTestCase {
-	return []loadConfigFileTestCase{
+func loadConfigValidBaseCases(paths map[string]string) []loadConfigFileValidCase {
+	return []loadConfigFileValidCase{
 		{
 			name: "valid complete configuration",
 			path: paths["valid"],
@@ -207,30 +175,31 @@ func loadConfigValidBaseCases(paths map[string]string) []loadConfigFileTestCase 
 				"TWILIO_FROM_NUMBER":     "(510) 555-0100",
 				"ALLOW_FROM":             "+15105550101, +15105550102",
 			},
-			wantErr:                 false,
-			wantPort:                "4019",
-			wantDatabaseURL:         "postgres://user:pass@localhost:5432/testdb",
-			wantTwilioAccountSID:    "AC123",
-			wantTwilioAuthToken:     "tok-123",
-			wantTwilioFromNumber:    "+15105550100",
-			wantPublicWebhookBase:   "https://webhooks.example.com",
-			wantGeminiAPIKey:        "key-123",
-			wantGeminiLiveModel:     "gemini-3.8-live",
-			wantGeminiFallback:      "gemini-3.1-flash-live-preview",
-			wantGeminiVoiceName:     "Kore",
-			wantBrainURL:            "http://eri.aerial",
-			wantGoogleMCPURL:        "http://google-mcp.aerial/mcp",
-			wantCovenURL:            "http://coven.aerial",
-			wantWhisperURL:          "http://voice.aerial",
-			wantDiscordChannel:      "prospera",
-			wantCallbackWindowMins:  10080,
-			wantMaxConcurrent:       2,
-			wantAllowFromLen:        2,
-			wantFirstAllowFrom:      "+15105550101",
-			wantRestatePort:         "9080",
-			wantRestateIngressURL:   "http://restate.aerial:8080",
-			wantRestateAdminURL:     "http://restate.aerial:9070",
-			wantRestateAdvertiseURL: "http://prospera.default.svc.cluster.local:9080",
+			want: Config{
+				Port:                  "4019",
+				DatabaseURL:           "postgres://user:pass@localhost:5432/testdb",
+				TwilioAccountSID:      "AC123",
+				TwilioAuthToken:       "tok-123",
+				TwilioFromNumber:      "+15105550100",
+				PublicWebhookBaseURL:  "https://webhooks.example.com",
+				GeminiAPIKey:          "key-123",
+				GeminiLiveModel:       "gemini-3.8-live",
+				GeminiFallbackModel:   "gemini-3.1-flash-live-preview",
+				GeminiVoiceName:       "Kore",
+				BrainURL:              "http://eri.aerial",
+				EriURL:                "http://eri.aerial",
+				GoogleMCPURL:          "http://google-mcp.aerial/mcp",
+				CovenURL:              "http://coven.aerial",
+				WhisperURL:            "http://voice.aerial",
+				DefaultDiscordChannel: "prospera",
+				CallbackWindowMinutes: 10080,
+				MaxConcurrentCalls:    2,
+				AllowFrom:             []string{"+15105550101", "+15105550102"},
+				RestatePort:           "9080",
+				RestateIngressURL:     "http://restate.aerial:8080",
+				RestateAdminURL:       "http://restate.aerial:9070",
+				RestateAdvertiseURL:   "http://prospera.default.svc.cluster.local:9080",
+			},
 		},
 		{
 			name: "gemini harness fallback and allow_from with spaces",
@@ -240,12 +209,11 @@ func loadConfigValidBaseCases(paths map[string]string) []loadConfigFileTestCase 
 				"GEMINI_HARNESS_API_KEY": "harness-key-456",
 				"ALLOW_FROM":             " , +15105550199 , ",
 			},
-			wantErr:              false,
-			wantPort:             "4019",
-			wantGeminiAPIKey:     "harness-key-456",
-			wantAllowFromLen:     1,
-			wantFirstAllowFrom:   "+15105550199",
-			wantTwilioFromNumber: "",
+			want: Config{
+				Port:         "4019",
+				GeminiAPIKey: "harness-key-456",
+				AllowFrom:    []string{"+15105550199"},
+			},
 		},
 		{
 			name:   "nil getenv falls back to process env",
@@ -254,8 +222,9 @@ func loadConfigValidBaseCases(paths map[string]string) []loadConfigFileTestCase 
 			env: map[string]string{
 				"DATABASE_URL": "postgres://user:pass@localhost:5432/testdb",
 			},
-			wantErr:  false,
-			wantPort: "4019",
+			want: Config{
+				Port: "4019",
+			},
 		},
 		{
 			name: "eri_url in yaml",
@@ -263,9 +232,11 @@ func loadConfigValidBaseCases(paths map[string]string) []loadConfigFileTestCase 
 			env: map[string]string{
 				"DATABASE_URL": "postgres://user:pass@localhost:5432/testdb",
 			},
-			wantErr:      false,
-			wantPort:     "4019",
-			wantBrainURL: "http://eri-prospera.aerial",
+			want: Config{
+				Port:     "4019",
+				BrainURL: "http://eri-prospera.aerial",
+				EriURL:   "http://eri-prospera.aerial",
+			},
 		},
 		{
 			name: "decomposed POSTGRES_PASSWORD resolution",
@@ -273,9 +244,10 @@ func loadConfigValidBaseCases(paths map[string]string) []loadConfigFileTestCase 
 			env: map[string]string{
 				"POSTGRES_PASSWORD": "secretpassword",
 			},
-			wantErr:         false,
-			wantPort:        "4019",
-			wantDatabaseURL: "postgres://aerial:secretpassword@postgres:5432/aerial?sslmode=disable",
+			want: Config{
+				Port:        "4019",
+				DatabaseURL: "postgres://aerial:secretpassword@postgres:5432/aerial?sslmode=disable",
+			},
 		},
 		{
 			name: "ERI_URL env fallback when absent from yaml",
@@ -284,25 +256,28 @@ func loadConfigValidBaseCases(paths map[string]string) []loadConfigFileTestCase 
 				"DATABASE_URL": "postgres://user:pass@localhost:5432/testdb",
 				"ERI_URL":      "http://env-eri.aerial:8088",
 			},
-			wantErr:      false,
-			wantPort:     "4019",
-			wantBrainURL: "http://env-eri.aerial:8088",
+			want: Config{
+				Port:     "4019",
+				BrainURL: "http://env-eri.aerial:8088",
+				EriURL:   "http://env-eri.aerial:8088",
+			},
 		},
 	}
 }
 
-func loadConfigValidOverrideCases(paths map[string]string) []loadConfigFileTestCase {
-	return []loadConfigFileTestCase{
+func loadConfigValidOverrideCases(paths map[string]string) []loadConfigFileValidCase {
+	return []loadConfigFileValidCase{
 		{
 			name: "twilio fields loaded from yaml when env unset",
 			path: paths["twilio"],
 			env: map[string]string{
 				"DATABASE_URL": "postgres://user:pass@localhost:5432/testdb",
 			},
-			wantErr:              false,
-			wantPort:             "4019",
-			wantTwilioAccountSID: "AC_from_yaml",
-			wantTwilioFromNumber: "+15105550999",
+			want: Config{
+				Port:             "4019",
+				TwilioAccountSID: "AC_from_yaml",
+				TwilioFromNumber: "+15105550999",
+			},
 		},
 		{
 			name: "twilio fields in env override yaml",
@@ -312,10 +287,11 @@ func loadConfigValidOverrideCases(paths map[string]string) []loadConfigFileTestC
 				"TWILIO_ACCOUNT_SID": "AC_override_env",
 				"TWILIO_FROM_NUMBER": "+15105550111",
 			},
-			wantErr:              false,
-			wantPort:             "4019",
-			wantTwilioAccountSID: "AC_override_env",
-			wantTwilioFromNumber: "+15105550111",
+			want: Config{
+				Port:             "4019",
+				TwilioAccountSID: "AC_override_env",
+				TwilioFromNumber: "+15105550111",
+			},
 		},
 		{
 			name: "nats_url loaded from yaml",
@@ -323,9 +299,10 @@ func loadConfigValidOverrideCases(paths map[string]string) []loadConfigFileTestC
 			env: map[string]string{
 				"DATABASE_URL": "postgres://user:pass@localhost:5432/testdb",
 			},
-			wantErr:     false,
-			wantPort:    "4019",
-			wantNATSURL: "nats://nats.aerial:4222",
+			want: Config{
+				Port:    "4019",
+				NATSURL: "nats://nats.aerial:4222",
+			},
 		},
 		{
 			name: "nats_url in env overrides yaml",
@@ -334,9 +311,10 @@ func loadConfigValidOverrideCases(paths map[string]string) []loadConfigFileTestC
 				"DATABASE_URL": "postgres://user:pass@localhost:5432/testdb",
 				"NATS_URL":     "nats://override.aerial:4222",
 			},
-			wantErr:     false,
-			wantPort:    "4019",
-			wantNATSURL: "nats://override.aerial:4222",
+			want: Config{
+				Port:    "4019",
+				NATSURL: "nats://override.aerial:4222",
+			},
 		},
 		{
 			name: "restate settings loaded from yaml",
@@ -344,12 +322,13 @@ func loadConfigValidOverrideCases(paths map[string]string) []loadConfigFileTestC
 			env: map[string]string{
 				"DATABASE_URL": "postgres://user:pass@localhost:5432/testdb",
 			},
-			wantErr:                 false,
-			wantPort:                "4019",
-			wantRestatePort:         "9081",
-			wantRestateIngressURL:   "http://restate-custom.aerial:8080",
-			wantRestateAdminURL:     "http://restate-custom.aerial:9070",
-			wantRestateAdvertiseURL: "http://prospera-custom:9080",
+			want: Config{
+				Port:                "4019",
+				RestatePort:         "9081",
+				RestateIngressURL:   "http://restate-custom.aerial:8080",
+				RestateAdminURL:     "http://restate-custom.aerial:9070",
+				RestateAdvertiseURL: "http://prospera-custom:9080",
+			},
 		},
 		{
 			name: "restate settings in env override yaml",
@@ -361,18 +340,27 @@ func loadConfigValidOverrideCases(paths map[string]string) []loadConfigFileTestC
 				"RESTATE_ADMIN_URL":     "http://restate-env.aerial:9070/",
 				"RESTATE_ADVERTISE_URL": "http://prospera-env:9080/",
 			},
-			wantErr:                 false,
-			wantPort:                "4019",
-			wantRestatePort:         "9082",
-			wantRestateIngressURL:   "http://restate-env.aerial:8080",
-			wantRestateAdminURL:     "http://restate-env.aerial:9070",
-			wantRestateAdvertiseURL: "http://prospera-env:9080",
+			want: Config{
+				Port:                "4019",
+				RestatePort:         "9082",
+				RestateIngressURL:   "http://restate-env.aerial:8080",
+				RestateAdminURL:     "http://restate-env.aerial:9070",
+				RestateAdvertiseURL: "http://prospera-env:9080",
+			},
 		},
 	}
 }
 
-func loadConfigErrorCases(paths map[string]string, tmpDir string) []loadConfigFileTestCase {
-	return []loadConfigFileTestCase{
+func TestLoadConfigFile_Errors(t *testing.T) {
+	t.Parallel()
+	tmpDir := t.TempDir()
+	paths := setupLoadConfigFileFixtures(t, tmpDir)
+	tests := []struct {
+		name    string
+		path    string
+		env     map[string]string
+		wantErr bool
+	}{
 		{
 			name:    "empty path error",
 			path:    "",
@@ -468,9 +456,25 @@ func loadConfigErrorCases(paths map[string]string, tmpDir string) []loadConfigFi
 			wantErr: true,
 		},
 	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			getenv := func(key string) string {
+				if tc.env == nil {
+					return ""
+				}
+				return tc.env[key]
+			}
+			_, err := LoadConfigFile(tc.path, getenv)
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("LoadConfigFile() error = %v, wantErr = %v", err, tc.wantErr)
+			}
+		})
+	}
 }
 
-func runLoadConfigFileCase(t *testing.T, tc loadConfigFileTestCase) {
+func runLoadConfigFileCase(t *testing.T, tc loadConfigFileValidCase) {
 	t.Helper()
 	var getenv func(string) string
 	if tc.nilEnv {
@@ -487,59 +491,60 @@ func runLoadConfigFileCase(t *testing.T, tc loadConfigFileTestCase) {
 	}
 
 	cfg, err := LoadConfigFile(tc.path, getenv)
-	if (err != nil) != tc.wantErr {
-		t.Fatalf("LoadConfigFile() error = %v, wantErr = %v", err, tc.wantErr)
+	if err != nil {
+		t.Fatalf("LoadConfigFile() unexpected error = %v", err)
 	}
-	if tc.wantErr {
-		return
-	}
-	assertLoadedConfig(t, tc, cfg)
+	assertLoadedConfig(t, tc.want, cfg)
 }
 
-func assertLoadedConfig(t *testing.T, tc loadConfigFileTestCase, cfg *Config) {
+func assertLoadedConfig(t *testing.T, want Config, cfg *Config) {
 	t.Helper()
 	strChecks := []struct {
 		got, want, field string
 	}{
-		{cfg.Port, tc.wantPort, "Port"},
-		{cfg.DatabaseURL, tc.wantDatabaseURL, "DatabaseURL"},
-		{cfg.TwilioAccountSID, tc.wantTwilioAccountSID, "TwilioAccountSID"},
-		{cfg.TwilioAuthToken, tc.wantTwilioAuthToken, "TwilioAuthToken"},
-		{cfg.TwilioFromNumber, tc.wantTwilioFromNumber, "TwilioFromNumber"},
-		{cfg.PublicWebhookBaseURL, tc.wantPublicWebhookBase, "PublicWebhookBaseURL"},
-		{cfg.GeminiAPIKey, tc.wantGeminiAPIKey, "GeminiAPIKey"},
-		{cfg.GeminiLiveModel, tc.wantGeminiLiveModel, "GeminiLiveModel"},
-		{cfg.GeminiFallbackModel, tc.wantGeminiFallback, "GeminiFallbackModel"},
-		{cfg.GeminiVoiceName, tc.wantGeminiVoiceName, "GeminiVoiceName"},
-		{cfg.GoogleMCPURL, tc.wantGoogleMCPURL, "GoogleMCPURL"},
-		{cfg.CovenURL, tc.wantCovenURL, "CovenURL"},
-		{cfg.WhisperURL, tc.wantWhisperURL, "WhisperURL"},
-		{cfg.DefaultDiscordChannel, tc.wantDiscordChannel, "DefaultDiscordChannel"},
-		{cfg.NATSURL, tc.wantNATSURL, "NATSURL"},
-		{cfg.RestatePort, tc.wantRestatePort, "RestatePort"},
-		{cfg.RestateIngressURL, tc.wantRestateIngressURL, "RestateIngressURL"},
-		{cfg.RestateAdminURL, tc.wantRestateAdminURL, "RestateAdminURL"},
-		{cfg.RestateAdvertiseURL, tc.wantRestateAdvertiseURL, "RestateAdvertiseURL"},
+		{cfg.Port, want.Port, "Port"},
+		{cfg.DatabaseURL, want.DatabaseURL, "DatabaseURL"},
+		{cfg.TwilioAccountSID, want.TwilioAccountSID, "TwilioAccountSID"},
+		{cfg.TwilioAuthToken, want.TwilioAuthToken, "TwilioAuthToken"},
+		{cfg.TwilioFromNumber, want.TwilioFromNumber, "TwilioFromNumber"},
+		{cfg.PublicWebhookBaseURL, want.PublicWebhookBaseURL, "PublicWebhookBaseURL"},
+		{cfg.GeminiAPIKey, want.GeminiAPIKey, "GeminiAPIKey"},
+		{cfg.GeminiLiveModel, want.GeminiLiveModel, "GeminiLiveModel"},
+		{cfg.GeminiFallbackModel, want.GeminiFallbackModel, "GeminiFallbackModel"},
+		{cfg.GeminiVoiceName, want.GeminiVoiceName, "GeminiVoiceName"},
+		{cfg.GoogleMCPURL, want.GoogleMCPURL, "GoogleMCPURL"},
+		{cfg.CovenURL, want.CovenURL, "CovenURL"},
+		{cfg.WhisperURL, want.WhisperURL, "WhisperURL"},
+		{cfg.DefaultDiscordChannel, want.DefaultDiscordChannel, "DefaultDiscordChannel"},
+		{cfg.NATSURL, want.NATSURL, "NATSURL"},
+		{cfg.RestatePort, want.RestatePort, "RestatePort"},
+		{cfg.RestateIngressURL, want.RestateIngressURL, "RestateIngressURL"},
+		{cfg.RestateAdminURL, want.RestateAdminURL, "RestateAdminURL"},
+		{cfg.RestateAdvertiseURL, want.RestateAdvertiseURL, "RestateAdvertiseURL"},
 	}
 	for _, c := range strChecks {
 		if c.want != "" && c.got != c.want {
 			t.Errorf("cfg.%s = %q, want %q", c.field, c.got, c.want)
 		}
 	}
-	if tc.wantBrainURL != "" && (cfg.BrainURL != tc.wantBrainURL || cfg.EriURL != tc.wantBrainURL) {
-		t.Errorf("cfg.BrainURL = %q, cfg.EriURL = %q, want %q", cfg.BrainURL, cfg.EriURL, tc.wantBrainURL)
+	if want.BrainURL != "" && (cfg.BrainURL != want.BrainURL || cfg.EriURL != want.BrainURL) {
+		t.Errorf("cfg.BrainURL = %q, cfg.EriURL = %q, want %q", cfg.BrainURL, cfg.EriURL, want.BrainURL)
 	}
-	if tc.wantCallbackWindowMins != 0 && cfg.CallbackWindowMinutes != tc.wantCallbackWindowMins {
-		t.Errorf("cfg.CallbackWindowMinutes = %d, want %d", cfg.CallbackWindowMinutes, tc.wantCallbackWindowMins)
+	if want.CallbackWindowMinutes != 0 && cfg.CallbackWindowMinutes != want.CallbackWindowMinutes {
+		t.Errorf("cfg.CallbackWindowMinutes = %d, want %d", cfg.CallbackWindowMinutes, want.CallbackWindowMinutes)
 	}
-	if tc.wantMaxConcurrent != 0 && cfg.MaxConcurrentCalls != tc.wantMaxConcurrent {
-		t.Errorf("cfg.MaxConcurrentCalls = %d, want %d", cfg.MaxConcurrentCalls, tc.wantMaxConcurrent)
+	if want.MaxConcurrentCalls != 0 && cfg.MaxConcurrentCalls != want.MaxConcurrentCalls {
+		t.Errorf("cfg.MaxConcurrentCalls = %d, want %d", cfg.MaxConcurrentCalls, want.MaxConcurrentCalls)
 	}
-	if len(cfg.AllowFrom) != tc.wantAllowFromLen {
-		t.Errorf("len(cfg.AllowFrom) = %d, want %d", len(cfg.AllowFrom), tc.wantAllowFromLen)
-	}
-	if tc.wantFirstAllowFrom != "" && len(cfg.AllowFrom) > 0 && cfg.AllowFrom[0] != tc.wantFirstAllowFrom {
-		t.Errorf("cfg.AllowFrom[0] = %q, want %q", cfg.AllowFrom[0], tc.wantFirstAllowFrom)
+	if want.AllowFrom != nil {
+		if len(cfg.AllowFrom) != len(want.AllowFrom) {
+			t.Errorf("len(cfg.AllowFrom) = %d, want %d", len(cfg.AllowFrom), len(want.AllowFrom))
+		}
+		for i := 0; i < len(cfg.AllowFrom) && i < len(want.AllowFrom); i++ {
+			if cfg.AllowFrom[i] != want.AllowFrom[i] {
+				t.Errorf("cfg.AllowFrom[%d] = %q, want %q", i, cfg.AllowFrom[i], want.AllowFrom[i])
+			}
+		}
 	}
 }
 

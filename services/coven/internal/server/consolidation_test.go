@@ -107,10 +107,99 @@ func (s *sequenceOllamaClient) GenerateEmbedding(ctx context.Context, text strin
 	return emb, nil
 }
 
-type processThreadFactsContextCase struct {
+type processThreadFactsGuardCase struct {
 	name          string
 	nilStore      bool
 	sabotage      string
+	indexerStatus int
+	llmResp       string
+	llmErr        string
+	ollamaErr     string
+	facts         []string
+	wantFacts     []string
+}
+
+func processThreadFactsGuardCases() []processThreadFactsGuardCase {
+	return []processThreadFactsGuardCase{
+		{name: "NilStoreError", nilStore: true},
+		{name: "UnextractedTurnsError", sabotage: sabotageTurnReads},
+		{name: "ContextQueryErrorFails", sabotage: sabotageSessions},
+		{name: "LLMErrorFails", llmErr: "llm error"},
+		{name: "ParseErrorFails", llmResp: "invalid json response"},
+		{
+			name:      "TrajectoryReinforceStoreErrorFails",
+			sabotage:  sabotageReinforceFact,
+			facts:     []string{"User likes matcha"},
+			llmResp:   `{"facts":[],"reinforced_ids":[1]}`,
+			wantFacts: []string{"User likes matcha:1"},
+		},
+		{name: "TrajectoryQueryErrorFails", indexerStatus: http.StatusInternalServerError},
+		{name: "CandidateFactInsertStoreErrorFails", sabotage: sabotageInsertFact},
+		{name: "CandidateFactEmbeddingErrorFails", ollamaErr: "embed fail"},
+	}
+}
+
+func runProcessThreadFactsGuardCase(t *testing.T, tc processThreadFactsGuardCase) {
+	t.Helper()
+	const thread = "th-test"
+	db := newTestDB(t)
+	sqlStore := store.NewSQLStore(db)
+	seedTurns(t, db, adminTurn(thread, 10, "He likes matcha tea", "Understood"))
+	seedFacts(t, sqlStore, tc.facts, [][]float32{testEmbeddingAt(100, 1)})
+	if tc.indexerStatus != 0 {
+		sqlStore.SetIndexerClient(newIndexerServer(t, tc.indexerStatus, nil, nil))
+	}
+	execSQL(t, db, tc.sabotage)
+
+	var s store.Store = sqlStore
+	if tc.nilStore {
+		s = nil
+	}
+	client := &sequenceOllamaClient{}
+	if tc.ollamaErr != "" {
+		client.err = errors.New(tc.ollamaErr)
+	}
+	llm := func(_ context.Context, _ string) (string, error) {
+		if tc.llmErr != "" {
+			return "", errors.New(tc.llmErr)
+		}
+		if tc.llmResp != "" {
+			return tc.llmResp, nil
+		}
+		return `{"facts":[{"fact_text":"Bob likes matcha tea in the afternoon"}]}`, nil
+	}
+
+	err := processThreadFacts(context.Background(), s, client, llm, thread)
+	if err == nil {
+		t.Fatalf("processThreadFacts() err = nil, want error")
+	}
+	if !tc.nilStore {
+		if got := factRows(t, db); !equalStrings(got, tc.wantFacts) {
+			t.Errorf("facts = %q, want %q", got, tc.wantFacts)
+		}
+		if got := watermarkRow(t, db, thread); got != "0" {
+			t.Errorf("watermark = %s, want 0", got)
+		}
+	}
+}
+
+func TestProcessThreadFacts_GuardsAndErrors(t *testing.T) {
+	t.Parallel()
+	for _, tc := range processThreadFactsGuardCases() {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			runProcessThreadFactsGuardCase(t, tc)
+		})
+	}
+}
+
+type parentTraceInfo struct {
+	traceID string
+	spanID  string
+}
+
+type processThreadFactsContextCase struct {
+	name          string
 	turns         []testTurn
 	watermark     int64
 	summary       string
@@ -119,14 +208,10 @@ type processThreadFactsContextCase struct {
 	retrieved     []string
 	toolCalls     []string
 	llmResp       string
-	llmErr        string
-	ollamaErr     string
-	parentTraceID string
-	parentSpanID  string
+	parentTrace   parentTraceInfo
 	wantPrompt    []string
 	wantFacts     []string
 	wantWatermark string
-	wantErr       bool
 }
 
 func processThreadFactsContextCases() []processThreadFactsContextCase {
@@ -137,14 +222,11 @@ func processThreadFactsContextCases() []processThreadFactsContextCase {
 		{
 			name:          "LinksToTriggerWhenIncomingContextValid",
 			turns:         newTurn,
-			parentTraceID: "0af7651916cd43dd8448eb211c80319c",
-			parentSpanID:  "b7ad6b7169203331",
+			parentTrace:   parentTraceInfo{traceID: "0af7651916cd43dd8448eb211c80319c", spanID: "b7ad6b7169203331"},
 			wantPrompt:    []string{"\nNEW UNEXTRACTED TURNS:\nUser: He likes matcha tea\nAssistant: Understood\n"},
 			wantFacts:     matchaFact,
 			wantWatermark: "10",
 		},
-		{name: "NilStoreError", nilStore: true, turns: newTurn, wantWatermark: "0", wantErr: true},
-		{name: "UnextractedTurnsError", sabotage: sabotageTurnReads, turns: newTurn, wantWatermark: "0", wantErr: true},
 		{
 			name:          "EmptyTurnsMarksWatermarkAtMaxRow",
 			turns:         []testTurn{{thread: thread, rowID: 7, content: "hi", response: "hello", status: "COMPLETED"}},
@@ -162,9 +244,6 @@ func processThreadFactsContextCases() []processThreadFactsContextCase {
 			wantFacts:     matchaFact,
 			wantWatermark: "10",
 		},
-		{name: "ContextQueryErrorFails", sabotage: sabotageSessions, turns: newTurn, wantWatermark: "0", wantErr: true},
-		{name: "LLMErrorFails", turns: newTurn, llmErr: "llm error", wantWatermark: "0", wantErr: true},
-		{name: "ParseErrorFails", turns: newTurn, llmResp: "invalid json response", wantWatermark: "0", wantErr: true},
 		{
 			name:  "ManyCandidatesCappedAt5",
 			turns: newTurn,
@@ -201,19 +280,6 @@ func processThreadFactsContextCases() []processThreadFactsContextCase {
 			wantFacts:     []string{"User likes matcha:2"},
 			wantWatermark: "10",
 		},
-		{
-			name:          "TrajectoryReinforceStoreErrorFails",
-			sabotage:      sabotageReinforceFact,
-			turns:         newTurn,
-			facts:         []string{"User likes matcha"},
-			llmResp:       `{"facts":[],"reinforced_ids":[1]}`,
-			wantFacts:     []string{"User likes matcha:1"},
-			wantWatermark: "0",
-			wantErr:       true,
-		},
-		{name: "TrajectoryQueryErrorFails", turns: newTurn, indexerStatus: http.StatusInternalServerError, wantWatermark: "0", wantErr: true},
-		{name: "CandidateFactInsertStoreErrorFails", sabotage: sabotageInsertFact, turns: newTurn, wantWatermark: "0", wantErr: true},
-		{name: "CandidateFactEmbeddingErrorFails", turns: newTurn, ollamaErr: "embed fail", wantWatermark: "0", wantErr: true},
 	}
 }
 
@@ -241,14 +307,14 @@ func assertExtractLinks(t *testing.T, tc processThreadFactsContextCase, id trace
 		return
 	}
 	links := s.Links()
-	if tc.parentTraceID == "" {
+	if tc.parentTrace.traceID == "" {
 		if len(links) != 0 {
 			t.Errorf("links = %v, want none", links)
 		}
 		return
 	}
-	if len(links) != 1 || links[0].SpanContext.TraceID().String() != tc.parentTraceID || links[0].SpanContext.SpanID().String() != tc.parentSpanID {
-		t.Errorf("links = %v, want one to %s/%s", links, tc.parentTraceID, tc.parentSpanID)
+	if len(links) != 1 || links[0].SpanContext.TraceID().String() != tc.parentTrace.traceID || links[0].SpanContext.SpanID().String() != tc.parentTrace.spanID {
+		t.Errorf("links = %v, want one to %s/%s", links, tc.parentTrace.traceID, tc.parentTrace.spanID)
 	}
 }
 
@@ -268,25 +334,13 @@ func runProcessThreadFactsContextCase(t *testing.T, tc processThreadFactsContext
 	if tc.indexerStatus != 0 {
 		sqlStore.SetIndexerClient(newIndexerServer(t, tc.indexerStatus, tc.retrieved, tc.toolCalls))
 	}
-	execSQL(t, db, tc.sabotage)
 
-	var s store.Store = sqlStore
-	if tc.nilStore {
-		s = nil
-	}
 	client := &sequenceOllamaClient{}
-	if tc.ollamaErr != "" {
-		client.err = errors.New(tc.ollamaErr)
-	}
-
 	var capturedPrompt string
 	var llmSpanID trace.SpanID
 	llm := func(c context.Context, prompt string) (string, error) {
 		capturedPrompt = prompt
 		llmSpanID = trace.SpanContextFromContext(c).SpanID()
-		if tc.llmErr != "" {
-			return "", errors.New(tc.llmErr)
-		}
 		if tc.llmResp != "" {
 			return tc.llmResp, nil
 		}
@@ -294,20 +348,20 @@ func runProcessThreadFactsContextCase(t *testing.T, tc processThreadFactsContext
 	}
 
 	ctx := context.Background()
-	if tc.parentTraceID != "" {
-		tid, err := trace.TraceIDFromHex(tc.parentTraceID)
+	if tc.parentTrace.traceID != "" {
+		tid, err := trace.TraceIDFromHex(tc.parentTrace.traceID)
 		if err != nil {
-			t.Fatalf("TraceIDFromHex(%q): %v", tc.parentTraceID, err)
+			t.Fatalf("TraceIDFromHex(%q): %v", tc.parentTrace.traceID, err)
 		}
-		sid, err := trace.SpanIDFromHex(tc.parentSpanID)
+		sid, err := trace.SpanIDFromHex(tc.parentTrace.spanID)
 		if err != nil {
-			t.Fatalf("SpanIDFromHex(%q): %v", tc.parentSpanID, err)
+			t.Fatalf("SpanIDFromHex(%q): %v", tc.parentTrace.spanID, err)
 		}
 		ctx = trace.ContextWithSpanContext(ctx, trace.NewSpanContext(trace.SpanContextConfig{TraceID: tid, SpanID: sid, TraceFlags: trace.FlagsSampled}))
 	}
-	err := processThreadFacts(ctx, s, client, llm, thread)
-	if (err != nil) != tc.wantErr {
-		t.Fatalf("processThreadFacts() err = %v, wantErr = %v", err, tc.wantErr)
+	err := processThreadFacts(ctx, sqlStore, client, llm, thread)
+	if err != nil {
+		t.Fatalf("processThreadFacts() err = %v", err)
 	}
 	assertProcessThreadFactsPrompt(t, tc, capturedPrompt, llmSpanID)
 	if got := factRows(t, db); !equalStrings(got, tc.wantFacts) {
@@ -318,7 +372,7 @@ func runProcessThreadFactsContextCase(t *testing.T, tc processThreadFactsContext
 	}
 }
 
-func TestProcessThreadFacts_ContextAndCoreference(t *testing.T) {
+func TestProcessThreadFacts_ContextAndTrajectory(t *testing.T) {
 	t.Parallel()
 	for _, tc := range processThreadFactsContextCases() {
 		t.Run(tc.name, func(t *testing.T) {

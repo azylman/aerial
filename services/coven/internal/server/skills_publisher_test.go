@@ -832,22 +832,14 @@ func (m *mockSkillPublisher) NotifyShortFriction(ctx context.Context, content st
 	return m.alertErr
 }
 
-type consolidateProceduralSkillsCase struct {
+type proceduralGuardsAndAlertsCase struct {
 	name            string
-	nilStore        bool
-	nilPublisher    bool
-	nilLLM          bool
+	nilKind         string
 	sabotage        string
 	cands           []store.ProceduralCandidate
 	customSkillsDir string
-	llmResp         string
-	llmErr          error
-	pubPR           int
-	pubErr          error
 	alertErr        error
-	wantPR          int
 	wantErr         bool
-	wantChangesLen  int
 	wantAlertsLen   int
 	wantRows        []string
 }
@@ -866,17 +858,14 @@ func unscopedCandPair(firstID int64) []store.ProceduralCandidate {
 	}
 }
 
-func consolidateProceduralSkillsCases(validSkillMD, validNewSkillMD string) []consolidateProceduralSkillsCase {
-	createResp := fmt.Sprintf(`{"action":"CREATE","name":"new-flow","domain":"discord","commit_summary":"add new flow","markdown":%q}`, validNewSkillMD)
-	editResp := fmt.Sprintf(`{"action":"EDIT","name":"ha-ops","domain":"discord","commit_summary":"update ha-ops","markdown":%q}`, validSkillMD)
+func proceduralGuardsAndAlertsCases() []proceduralGuardsAndAlertsCase {
 	onePending := []string{"1:pending:-"}
-	twoPending := []string{"1:pending:-", "2:pending:-"}
 	fiveSkipped := []string{"1:skipped:-", "2:skipped:-", "3:skipped:-", "4:skipped:-", "5:skipped:-"}
 	fivePending := []string{"1:pending:-", "2:pending:-", "3:pending:-", "4:pending:-", "5:pending:-"}
-	return []consolidateProceduralSkillsCase{
-		{name: "NilStoreFails", nilStore: true, wantErr: true},
-		{name: "NilPublisherFails", nilPublisher: true, wantErr: true},
-		{name: "NilLLMFails", nilLLM: true, wantErr: true},
+	return []proceduralGuardsAndAlertsCase{
+		{name: "NilStoreFails", nilKind: "store", wantErr: true},
+		{name: "NilPublisherFails", nilKind: "publisher", wantErr: true},
+		{name: "NilLLMFails", nilKind: "llm", wantErr: true},
 		// The candidates table is gone, so its rows are not asserted.
 		{name: "GetPendingCandidatesStoreError", sabotage: sabotageProcedural, wantErr: true},
 		{name: "NoPendingCandidatesReturnsZero"},
@@ -887,6 +876,102 @@ func consolidateProceduralSkillsCases(validSkillMD, validNewSkillMD string) []co
 			wantErr:         true,
 			wantRows:        onePending,
 		},
+		{name: "ShortFrictionAlertBatchNotifiedAndMarkedSkipped", cands: makeProceduralCandidateBatch(81, 5), wantAlertsLen: 1, wantRows: fiveSkipped},
+		{name: "ShortFrictionAlertMarkSkippedErrorLogged", sabotage: sabotageProceduralUpdate, cands: makeProceduralCandidateBatch(81, 5), wantAlertsLen: 1, wantRows: fivePending},
+		{
+			name:          "ShortFrictionAlertErrorRetainsPending",
+			cands:         makeProceduralCandidateBatch(91, 5),
+			alertErr:      errors.New("alert post failed"),
+			wantAlertsLen: 1,
+			wantRows:      fivePending,
+		},
+	}
+}
+
+func runConsolidateProceduralSkillsGuardsAndAlertsCase(t *testing.T, validSkillMD string, tc proceduralGuardsAndAlertsCase) {
+	t.Helper()
+	targetSkillsDir := setupConsolidateProceduralSkillsDir(t, validSkillMD, tc.customSkillsDir)
+	sqlStore := newTestStore(t)
+	db := sqlStore.DB()
+	seedProceduralCandidates(t, sqlStore, tc.cands)
+	execSQL(t, db, tc.sabotage)
+
+	var s store.Store = sqlStore
+	if tc.nilKind == "store" {
+		s = nil
+	}
+
+	pub := &mockSkillPublisher{
+		alertErr: tc.alertErr,
+	}
+	var publisher SkillPublisher = pub
+	if tc.nilKind == "publisher" {
+		publisher = nil
+	}
+
+	var llm LLMClientFunc = func(c context.Context, prompt string) (string, error) {
+		return "", nil
+	}
+	if tc.nilKind == "llm" {
+		llm = nil
+	}
+
+	ollama := &MockOllamaClient{embedding: testEmbeddingAt(0, 1.0)}
+
+	prNum, err := ConsolidateProceduralSkills(context.Background(), s, ollama, llm, publisher, targetSkillsDir)
+	if (err != nil) != tc.wantErr {
+		t.Fatalf("ConsolidateProceduralSkills() err = %v, wantErr = %v", err, tc.wantErr)
+	}
+	if prNum != 0 {
+		t.Errorf("prNum = %d, want 0", prNum)
+	}
+	if len(pub.alerts) != tc.wantAlertsLen {
+		t.Errorf("alerts len = %d, want %d", len(pub.alerts), tc.wantAlertsLen)
+	}
+	if tc.sabotage != sabotageProcedural {
+		if got := procStatusRows(t, db); !equalStrings(got, tc.wantRows) {
+			t.Errorf("candidate rows = %q, want %q", got, tc.wantRows)
+		}
+	}
+}
+
+// TestConsolidateProceduralSkills_GuardsAndAlerts is serial: ConsolidateProceduralSkills
+// single-flights on the package-global extractionMutex.
+func TestConsolidateProceduralSkills_GuardsAndAlerts(t *testing.T) {
+	validSkillMD := `---
+name: ha-ops
+description: Home assistant operations workflow and automation routines.
+---
+# Home Assistant Operations
+Procedure steps for configuring automations and entities properly.
+`
+	for _, tc := range proceduralGuardsAndAlertsCases() {
+		t.Run(tc.name, func(t *testing.T) {
+			runConsolidateProceduralSkillsGuardsAndAlertsCase(t, validSkillMD, tc)
+		})
+	}
+}
+
+type consolidateProceduralSkillsCase struct {
+	name           string
+	sabotage       string
+	cands          []store.ProceduralCandidate
+	llmResp        string
+	llmErr         error
+	pubPR          int
+	pubErr         error
+	wantPR         int
+	wantErr        bool
+	wantChangesLen int
+	wantRows       []string
+}
+
+func consolidateProceduralSkillsCases(validSkillMD, validNewSkillMD string) []consolidateProceduralSkillsCase {
+	createResp := fmt.Sprintf(`{"action":"CREATE","name":"new-flow","domain":"discord","commit_summary":"add new flow","markdown":%q}`, validNewSkillMD)
+	editResp := fmt.Sprintf(`{"action":"EDIT","name":"ha-ops","domain":"discord","commit_summary":"update ha-ops","markdown":%q}`, validSkillMD)
+	onePending := []string{"1:pending:-"}
+	twoPending := []string{"1:pending:-", "2:pending:-"}
+	return []consolidateProceduralSkillsCase{
 		{
 			name: "PlanYieldsNoBatchesUnmatchedBlockedCoreSkillsRemainPending",
 			cands: []store.ProceduralCandidate{
@@ -918,15 +1003,6 @@ func consolidateProceduralSkillsCases(validSkillMD, validNewSkillMD string) []co
 			wantChangesLen: 1,
 			wantRows:       []string{"1:consolidated:95", "2:pending:-"},
 		},
-		{name: "ShortFrictionAlertBatchNotifiedAndMarkedSkipped", cands: makeProceduralCandidateBatch(81, 5), wantAlertsLen: 1, wantRows: fiveSkipped},
-		{name: "ShortFrictionAlertMarkSkippedErrorLogged", sabotage: sabotageProceduralUpdate, cands: makeProceduralCandidateBatch(81, 5), wantAlertsLen: 1, wantRows: fivePending},
-		{
-			name:          "ShortFrictionAlertErrorRetainsPending",
-			cands:         makeProceduralCandidateBatch(91, 5),
-			alertErr:      errors.New("alert post failed"),
-			wantAlertsLen: 1,
-			wantRows:      fivePending,
-		},
 	}
 }
 
@@ -957,25 +1033,15 @@ func setupConsolidateProceduralSkillsDir(t *testing.T, validSkillMD, customSkill
 
 func runConsolidateProceduralSkillsCase(t *testing.T, validSkillMD string, tc consolidateProceduralSkillsCase) {
 	t.Helper()
-	targetSkillsDir := setupConsolidateProceduralSkillsDir(t, validSkillMD, tc.customSkillsDir)
+	targetSkillsDir := setupConsolidateProceduralSkillsDir(t, validSkillMD, "")
 	sqlStore := newTestStore(t)
 	db := sqlStore.DB()
 	seedProceduralCandidates(t, sqlStore, tc.cands)
 	execSQL(t, db, tc.sabotage)
 
-	var s store.Store = sqlStore
-	if tc.nilStore {
-		s = nil
-	}
-
 	pub := &mockSkillPublisher{
-		prNum:    tc.pubPR,
-		err:      tc.pubErr,
-		alertErr: tc.alertErr,
-	}
-	var publisher SkillPublisher = pub
-	if tc.nilPublisher {
-		publisher = nil
+		prNum: tc.pubPR,
+		err:   tc.pubErr,
 	}
 
 	var llm LLMClientFunc = func(c context.Context, prompt string) (string, error) {
@@ -984,13 +1050,10 @@ func runConsolidateProceduralSkillsCase(t *testing.T, validSkillMD string, tc co
 		}
 		return tc.llmResp, nil
 	}
-	if tc.nilLLM {
-		llm = nil
-	}
 
 	ollama := &MockOllamaClient{embedding: testEmbeddingAt(0, 1.0)}
 
-	prNum, err := ConsolidateProceduralSkills(context.Background(), s, ollama, llm, publisher, targetSkillsDir)
+	prNum, err := ConsolidateProceduralSkills(context.Background(), sqlStore, ollama, llm, pub, targetSkillsDir)
 	if (err != nil) != tc.wantErr {
 		t.Fatalf("ConsolidateProceduralSkills() err = %v, wantErr = %v", err, tc.wantErr)
 	}
@@ -999,9 +1062,6 @@ func runConsolidateProceduralSkillsCase(t *testing.T, validSkillMD string, tc co
 	}
 	if len(pub.changes) != tc.wantChangesLen {
 		t.Errorf("published changes len = %d, want %d", len(pub.changes), tc.wantChangesLen)
-	}
-	if len(pub.alerts) != tc.wantAlertsLen {
-		t.Errorf("alerts len = %d, want %d", len(pub.alerts), tc.wantAlertsLen)
 	}
 	if tc.sabotage != sabotageProcedural {
 		if got := procStatusRows(t, db); !equalStrings(got, tc.wantRows) {
