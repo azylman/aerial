@@ -41,16 +41,17 @@ if [ "$RULES_OCI_ALL" != "true" ]; then
         for f in "${CHANGED_FILES[@]}"; do
             case "$f" in
                 services/*|mcp/*|pkg/*)
-                    cur_d=$(dirname "$f")
+                    cur_d=$(dirname "$f") f_pkg=""
                     while [ -n "$cur_d" ] && [ "$cur_d" != "." ] && [ "$cur_d" != "/" ]; do
-                        [ -f "$REPO_ROOT/$cur_d/BUILD.bazel" ] && { bazel_targets+=("//${cur_d}:all"); break; }
+                        [ -f "$REPO_ROOT/$cur_d/BUILD.bazel" ] && { f_pkg="$cur_d"; break; }
                         cur_d=$(dirname "$cur_d")
-                    done ;;
+                    done
+                    [ -n "$f_pkg" ] && bazel_targets+=("//${f_pkg}:all") || { RULES_OCI_ALL="true"; break; } ;;
                 web/theme/*) [ -f "$REPO_ROOT/web/theme/BUILD.bazel" ] && bazel_targets+=("//web/theme:all") ;;
                 images/*) [ -f "$REPO_ROOT/images/BUILD.bazel" ] && bazel_targets+=("//images:all") ;;
             esac
         done
-        if [ ${#bazel_targets[@]} -gt 0 ]; then
+        if [ "$RULES_OCI_ALL" != "true" ] && [ ${#bazel_targets[@]} -gt 0 ]; then
             t_set=$(printf '%s ' "${bazel_targets[@]}") q_out=$(mktemp /tmp/aerial-bazel-query.XXXXXX)
             if bazel query "kind(oci_image, rdeps(//images:all, set($t_set)))" >"$q_out" 2>/dev/null; then
                 while IFS= read -r m || [ -n "$m" ]; do
