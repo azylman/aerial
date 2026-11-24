@@ -14,6 +14,12 @@ Restate provides three core execution primitives. Choose the correct primitive b
 | **`Virtual Object`** | Keyed K/V state per object key | **Single-writer exclusive lock** per key by default (`ObjectContext`); **concurrent shared** access via `ObjectSharedContext` | State machines, entity lifecycles, session workers (e.g. `BuildObject` keyed by `build_id`, `ThreadSessionObject` keyed by `thread_id`). |
 | **`Workflow`** | Keyed exactly-once run-to-completion workflow | Single `Run` execution with external signal and query handlers (`WorkflowContext`, `WorkflowSharedContext`) | Multi-step human-in-the-loop workflows, linear orchestrations with explicit completion promises. |
 
+### 1.1 Dedicated `*-restate` Worker Service Separation Invariant
+Restate Virtual Objects and durable workflows must run in a dedicated `*-restate` `RestateDeployment` service (e.g. `eri-restate`, `vanadis-restate`, `vision-restate`) separate from the public HTTP/UI/MCP server (`eri`, `vanadis`, `vision`).
+- **Separation of Concerns**: The HTTP/UI/MCP server handles edge ingress, webhooks, user interfaces, and MCP tools statelessly. It validates incoming payloads and forwards events directly to Restate ingress (`http://restate.aerial:8080`) with deterministic `Idempotency-Key` headers.
+- **Zero Pre-Ingress Postgres Tracking Writes**: The edge ingress service must never insert provisional or "pending" tracking rows into Postgres before posting to Restate ingress. All in-flight tracking, queue state, and workflow execution lifecycles live strictly in Restate K/V state and journals.
+- **Postgres as Read-Model / Historical Archive**: Postgres rows are created or updated exclusively inside journaled `restate.Run` steps executed by the `*-restate` worker for querying, indexing, or archival purposes—never as the workflow's source of truth or concurrency coordinator.
+
 ### Keying Strategy
 - Virtual Objects and Workflows are partitioned by key: `restate.Key(ctx)`.
 - Use natural, cluster-unique, deterministic identifiers (e.g. `build_id`, `thread_id`, or `session_key`).
@@ -380,3 +386,6 @@ Each was hand-rolled in this repo and replaced; do not reintroduce them.
 - **Postgres as source of truth for workflow state**.
   - Why: two stores drift; replay cannot see Postgres.
   - Instead: Restate state and journal own the workflow; Postgres holds records written by journaled steps (section 5.1).
+- **Pre-ingress Postgres tracking rows before calling Restate ingress**.
+  - Why: writing "pending" or provisional tracking rows in an HTTP webhook or handler before posting to Restate ingress causes dual-write synchronization drift, database connection contention, and redundant coordination queries.
+  - Instead: forward incoming payloads directly to Restate ingress with deterministic `Idempotency-Key` headers and track active/in-flight items directly in a Virtual Object's Restate K/V state.
