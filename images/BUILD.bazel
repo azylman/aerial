@@ -1,7 +1,7 @@
 load("@rules_oci//oci:defs.bzl", "oci_image", "oci_load", "oci_push")
 load("@rules_pkg//pkg:tar.bzl", "pkg_tar")
 load("//build:go_test.bzl", "go_test")
-load("//build:oci.bzl", "aerial_go_image", "build_covdata", "go_cover_binary", "go_pure_binary")
+load("//build:oci.bzl", "aerial_go_image", "build_covdata", "go_cover_binary")
 
 # Helper tools for coverage-ingest
 build_covdata(

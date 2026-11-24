@@ -1,7 +1,9 @@
+"""Rules and macros for building and transitioning Aerial OCI container images."""
+
 load("@rules_oci//oci:defs.bzl", "oci_image", "oci_load", "oci_push")
 load("@rules_pkg//pkg:tar.bzl", "pkg_tar")
 
-def _go_prod_cover_transition_impl(settings, attr):
+def _go_prod_cover_transition_impl(_settings, _attr):
     return {
         "//command_line_option:collect_code_coverage": True,
         "//command_line_option:instrumentation_filter": "^//(pkg|services|mcp|images)[/:]",
@@ -27,14 +29,11 @@ _go_prod_cover_transition = transition(
 def _go_cover_binary_impl(ctx):
     actual = ctx.attr.actual[0]
     orig_exe = actual[DefaultInfo].files.to_list()[0]
-    out_name = ctx.attr.out_name if ctx.attr.out_name else orig_exe.basename
-    out_exe = ctx.actions.declare_file(ctx.label.name + "/" + out_name)
-    ctx.actions.run_shell(
-        inputs = [orig_exe],
-        outputs = [out_exe],
-        command = "cp -L \"$1\" \"$2\"",
-        arguments = [orig_exe.path, out_exe.path],
-        mnemonic = "CopyCoverBin",
+    out_exe = ctx.actions.declare_file(ctx.label.name)
+    ctx.actions.symlink(
+        output = out_exe,
+        target_file = orig_exe,
+        is_executable = True,
     )
     return [
         DefaultInfo(
@@ -51,12 +50,11 @@ go_cover_binary = rule(
             cfg = _go_prod_cover_transition,
             mandatory = True,
         ),
-        "out_name": attr.string(),
     },
     executable = True,
 )
 
-def _go_pure_binary_transition_impl(settings, attr):
+def _go_pure_binary_transition_impl(_settings, _attr):
     return {
         "//command_line_option:strip": "always",
         "@rules_go//go/config:pure": True,
@@ -134,6 +132,24 @@ def aerial_go_image(
         exposed_ports = ["8080/tcp"],
         image_prefix = "aerial",
         **kwargs):
+    """Builds an OCI container image for an Aerial Go service binary.
+
+    Args:
+        name: Target image name.
+        binary: Build target of the binary to package.
+        bin_path: Absolute destination path inside the container.
+        workdir: Working directory inside the container.
+        base: Base OCI image reference.
+        user: UID:GID pair for container user.
+        cover: Whether to build with coverage instrumentation.
+        extra_tars: Additional tar layer targets.
+        entrypoint: Container entrypoint list.
+        cmd: Container default command list.
+        env: Environment variables map.
+        exposed_ports: List of exposed network ports.
+        image_prefix: Image repository prefix.
+        **kwargs: Additional arguments passed to oci_image.
+    """
     if binary == None:
         if name in ["docket-mcp", "kernel-mcp"]:
             binary = "//mcp/" + name + ":" + name
@@ -143,47 +159,26 @@ def aerial_go_image(
     if bin_path == None:
         bin_path = "/app/" + name
 
-    parts = bin_path.strip("/").split("/")
-    bin_name = parts[-1]
-    if len(parts) > 1:
-        bin_dir = "/" + "/".join(parts[:-1])
-    else:
-        bin_dir = "/app"
-
-    bin_target = binary
-    strip_prefix = None
     if cover:
         cover_bin_name = name + "_cover_bin"
         go_cover_binary(
             name = cover_bin_name,
             actual = binary,
-            out_name = bin_name,
         )
         bin_target = ":" + cover_bin_name
-        strip_prefix = cover_bin_name
     else:
         pure_bin_name = name + "_pure_bin"
         go_pure_binary(
             name = pure_bin_name,
             actual = binary,
         )
-        named_bin_target = name + "_bin_named"
-        native.genrule(
-            name = named_bin_target,
-            srcs = [":" + pure_bin_name],
-            outs = [name + "_bin/" + bin_name],
-            cmd = "cp -L $< $@",
-            executable = True,
-        )
-        bin_target = ":" + named_bin_target
-        strip_prefix = name + "_bin"
+        bin_target = ":" + pure_bin_name
 
     layer_target = name + "_bin_tar"
     pkg_tar(
         name = layer_target,
-        srcs = [bin_target],
-        package_dir = bin_dir,
-        strip_prefix = strip_prefix,
+        files = {bin_target: bin_path.lstrip("/")},
+        mode = "0755",
     )
     native.alias(
         name = name + "_layer",

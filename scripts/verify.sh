@@ -94,6 +94,18 @@ check_gofmt() {
     fi
 }
 
+check_buildifier() {
+    if command -v buildifier >/dev/null 2>&1 && command -v git >/dev/null 2>&1; then
+        bzl_files=""
+        for f in $(git ls-files '*.bazel' '*.bzl' 2>/dev/null || true); do
+            if [ -f "$f" ]; then bzl_files="${bzl_files:+$bzl_files }$f"; fi
+        done
+        if [ -n "$bzl_files" ]; then
+            buildifier -mode=check -lint=warn $bzl_files
+        fi
+    fi
+}
+
 # Check that tests never execute main() directly
 check_no_main_in_tests() {
     if has_cmd git; then
@@ -688,6 +700,7 @@ if [ "$MODE" = "staged" ]; then
 
     check_utf8_bom
     check_gofmt
+    check_buildifier
     check_no_main_in_tests
     check_rule_file_sizes
     check_dependabot_coverage
@@ -806,6 +819,7 @@ fi
 echo "=== 0. Encoding & BOM Hygiene ==="
 check_utf8_bom
 check_gofmt
+check_buildifier
 check_no_main_in_tests
 check_rule_file_sizes
 check_dependabot_coverage

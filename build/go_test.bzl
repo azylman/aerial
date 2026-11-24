@@ -1,6 +1,15 @@
+"""Macro wrapping rules_go go_test to inject standard Aerial testdata fixtures."""
+
 load("@rules_go//go:def.bzl", _go_test = "go_test")
 
 def go_test(name, data = [], **kwargs):
+    """Defines a Go test target with standard repository fixtures and testdata.
+
+    Args:
+        name: Name of the test target.
+        data: Additional runtime data files or targets.
+        **kwargs: Additional arguments forwarded to rules_go go_test.
+    """
     pkg = native.package_name()
     extra_data = []
 
