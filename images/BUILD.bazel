@@ -1,3 +1,4 @@
+load("@rules_multirun//:defs.bzl", "multirun")
 load("@rules_oci//oci:defs.bzl", "oci_image", "oci_load", "oci_push")
 load("@rules_pkg//pkg:tar.bzl", "pkg_tar")
 load("//build:go_test.bzl", "go_test")
@@ -126,6 +127,7 @@ genrule(
     outs = ["console_ui_dist.tar"],
     cmd = """
         set -e
+        export PATH="$$(cd "$$(dirname "$(execpath @nodejs_linux_amd64//:node_bin)")" && pwd):$$PATH"
         WORK=$$(mktemp -d)
         trap 'rm -rf "$$WORK"' EXIT
         mkdir -p "$$WORK/src/services/console/ui" "$$WORK/src/web/theme"
@@ -139,6 +141,11 @@ genrule(
     tags = [
         "no-sandbox",
         "requires-network",
+    ],
+    tools = [
+        "@nodejs_linux_amd64//:node_bin",
+        "@nodejs_linux_amd64//:node_files",
+        "@nodejs_linux_amd64//:npm_files",
     ],
 )
 
@@ -454,4 +461,58 @@ go_test(
         ":infisical_mcp_entrypoint_layer",
         ":infisical_mcp_standby_layer",
     ],  # keep
+)
+
+multirun(
+    name = "push_all",
+    commands = [
+        ":push_console",
+        ":push_coven",
+        ":push_coverage-ingest",
+        ":push_discord-mcp",
+        ":push_docs",
+        ":push_docket-mcp",
+        ":push_eri",
+        ":push_eri-restate",
+        ":push_github-runner",
+        ":push_haro",
+        ":push_infisical-mcp",
+        ":push_kernel-mcp",
+        ":push_migrator",
+        ":push_prospera",
+        ":push_redact-pattern",
+        ":push_synapse",
+        ":push_transcripts",
+        ":push_vanadis",
+        ":push_vanadis-nats",
+        ":push_vanadis-restate",
+    ],
+    jobs = 0,
+)
+
+multirun(
+    name = "load_all",
+    commands = [
+        ":load_console",
+        ":load_coven",
+        ":load_coverage-ingest",
+        ":load_discord-mcp",
+        ":load_docs",
+        ":load_docket-mcp",
+        ":load_eri",
+        ":load_eri-restate",
+        ":load_github-runner",
+        ":load_haro",
+        ":load_infisical-mcp",
+        ":load_kernel-mcp",
+        ":load_migrator",
+        ":load_prospera",
+        ":load_redact-pattern",
+        ":load_synapse",
+        ":load_transcripts",
+        ":load_vanadis",
+        ":load_vanadis-nats",
+        ":load_vanadis-restate",
+    ],
+    jobs = 0,
 )

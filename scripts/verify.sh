@@ -61,9 +61,6 @@ fi
 [ -n "$LINT_ARGS" ] && GOTOOLCHAIN="${GOTOOLCHAIN:-go1.27.3}" golangci-lint run --concurrency "${AERIAL_LINT_CONCURRENCY:-4}" --allow-parallel-runners --config "$REPO_ROOT/.golangci.yml" $LINT_ARGS
 [ -x scripts/check-deadcode.sh ] && [ -n "$MODS" ] && ./scripts/check-deadcode.sh $MODS
 
-if [ -z "${CI:-}" ] && (! command -v kubectl >/dev/null 2>&1 || ! command -v atlas >/dev/null 2>&1); then
-    SH_TESTS=$(echo "$SH_TESTS" | grep -v -E '^(//k8s:manifests_test|//services/eri/pkg/db/migrations:atlas_validate_test)$' || true)
-fi
 # shellcheck disable=SC2086
 [ -n "$SH_TESTS" ] && bazel test $SH_TESTS
 

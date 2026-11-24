@@ -14,5 +14,11 @@ filegroup(
 sh_test(
     name = "syntax_test",
     srcs = ["//build:tests/docs_syntax_test.sh"],
-    data = [":app"],
+    data = [
+        ":app",
+        "@nodejs_linux_amd64//:node_bin",
+        "@nodejs_linux_amd64//:node_files",
+        "@nodejs_linux_amd64//:npm_files",
+    ],
+    env = {"NODE_BIN": "$(rootpath @nodejs_linux_amd64//:node_bin)"},
 )

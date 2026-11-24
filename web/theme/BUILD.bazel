@@ -23,5 +23,10 @@ sh_test(
     data = glob([
         "*.css",
         "*.js",
-    ]),
+    ]) + [
+        "@nodejs_linux_amd64//:node_bin",
+        "@nodejs_linux_amd64//:node_files",
+        "@nodejs_linux_amd64//:npm_files",
+    ],
+    env = {"NODE_BIN": "$(rootpath @nodejs_linux_amd64//:node_bin)"},
 )

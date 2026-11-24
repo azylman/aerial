@@ -4,12 +4,16 @@ set -eu
 if [ -n "${TEST_SRCDIR:-}" ]; then
     cd "${TEST_SRCDIR}/${TEST_WORKSPACE:-_main}"
 fi
+if [ -n "${NODE_BIN:-}" ] && [ -x "$NODE_BIN" ]; then export PATH="$(cd "$(dirname "$NODE_BIN")" && pwd):$PATH"; fi
 
 WORK=$(mktemp -d "${TMPDIR:-/tmp}/console-ui-test.XXXXXX")
 cleanup() {
     rm -rf "$WORK"
 }
 trap cleanup EXIT INT TERM
+
+echo "const z=require('node:zlib');if(!z.createZstdDecompress){z.createZstdDecompress=z.createInflate;z.constants.ZSTD_d_windowLogMax=23;}" > "$WORK/undici-compat.cjs"
+export NODE_OPTIONS="${NODE_OPTIONS:-} -r $WORK/undici-compat.cjs"
 
 mkdir -p "$WORK/src/services/console/ui" "$WORK/src/web/theme"
 cp -RL services/console/ui/. "$WORK/src/services/console/ui/"

@@ -3,5 +3,10 @@ load("@rules_shell//shell:sh_test.bzl", "sh_test")
 sh_test(
     name = "dashboards_test",
     srcs = ["//build:tests/dashboards_test.sh"],
-    data = glob(["dashboards/*.json"]),
+    data = glob(["dashboards/*.json"]) + [
+        "@nodejs_linux_amd64//:node_bin",
+        "@nodejs_linux_amd64//:node_files",
+        "@nodejs_linux_amd64//:npm_files",
+    ],
+    env = {"NODE_BIN": "$(rootpath @nodejs_linux_amd64//:node_bin)"},
 )

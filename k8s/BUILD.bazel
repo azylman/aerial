@@ -10,5 +10,7 @@ sh_test(
     data = glob(["*.yaml"]) + [
         "//services/homepage:configmap_sources",
         "//web/theme",
+        "@kubectl_linux_amd64//file",
     ],
+    env = {"KUBECTL_BIN": "$(rootpath @kubectl_linux_amd64//file)"},
 )
