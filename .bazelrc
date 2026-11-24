@@ -1,15 +1,18 @@
 startup --experimental_remote_repo_contents_cache
 
 common --enable_bzlmod
+common --incompatible_allow_tags_propagation
 
 build --remote_download_minimal
 build --rewind_lost_inputs
 build --incompatible_strict_action_env
+build --modify_execution_info=PackageTar=+no-remote
 
 test --test_env=PATH
 test --sandbox_tmpfs_path=/dev/shm
 test --test_output=errors
-test --test_summary=short
+test --test_summary=short_uncached
+test --incompatible_exclusive_test_sandboxed
 coverage --test_env=PATH
 coverage --@rules_go//go/config:cover_format=go_cover
 coverage --remote_download_regex=.*coverage\.dat$
