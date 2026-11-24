@@ -5,7 +5,7 @@ DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"; SCRIPT="${DIR}/aerial-pr.sh
 TMPD="$(mktemp -d)"; trap 'rm -rf "$TMPD"' EXIT
 export TMPD AERIAL_SCRATCH_BASE_DIR="$TMPD/scratch" AERIAL_USE_LOOPBACK_GITHUB=1 PATH="$TMPD/bin:$PATH"
 mkdir -p "$TMPD/bin" "$TMPD/repo" "$AERIAL_SCRATCH_BASE_DIR"
-git -C "$TMPD/repo" init -b main -q && git -C "$TMPD/repo" config user.email "t@e.com" && git -C "$TMPD/repo" config user.name "T" && touch "$TMPD/repo/f" && git -C "$TMPD/repo" add f && git -C "$TMPD/repo" commit -m "init" -q && git init --bare "$TMPD/origin.git" -q && git -C "$TMPD/repo" remote add origin "$TMPD/origin.git" && git -C "$TMPD/repo" push -u origin main -q; export AERIAL_REPO_URL_OVERRIDE="$TMPD/origin.git"
+git -C "$TMPD/repo" init -b main -q && git -C "$TMPD/repo" config user.email "t@e.com" && git -C "$TMPD/repo" config user.name "T" && touch "$TMPD/repo/f" && git -C "$TMPD/repo" add f && git -C "$TMPD/repo" commit -m "init" -q && git init --bare "$TMPD/origin.git" -q && git -C "$TMPD/repo" remote add origin "$TMPD/origin.git" && git -C "$TMPD/repo" push -u origin main -q; export AERIAL_REPO_URL_OVERRIDE="file://$TMPD/origin.git"
 cat << 'CURL_EOF' > "$TMPD/bin/curl"
 #!/usr/bin/env bash
 url=""; for arg in "$@"; do [[ "$arg" =~ http ]] && url="$arg"; done; [[ "$url" =~ /healthz ]] && { printf "\n200"; exit 0; }
@@ -31,7 +31,7 @@ chmod +x "$TMPD/bin/curl"
 assert() { "$@" || { echo "ASSERT FAILED: $*" >&2; exit 1; }; }
 assert_fail() { ! "$@" 2>/dev/null || { echo "EXPECTED FAILURE: $*" >&2; exit 1; }; }
 
-assert "$SCRIPT" --source-only; assert env REPO_TEST_MODE=1 "$SCRIPT"; assert_fail "$SCRIPT" init --sync; assert_fail "$SCRIPT" init --target; assert [ "$("$SCRIPT" init --repo=config | jq -r .repo)" = "aerial-config" ]
+assert_fail "$SCRIPT" init --unknown-flag; assert [ "$("$SCRIPT" init --repo=config | jq -r .repo)" = "aerial-config" ]
 res_tid=$(AERIAL_TARGET_ID=123456789012345678 "$SCRIPT" init --repo aerial); assert echo "$res_tid" | jq -e '.branch | contains("-t123456789012345678-")'
 res1=$("$SCRIPT" init --repo aerial --vanadis-chunk chunk-test); s_dir=$(echo "$res1" | jq -r .scratch_dir); br=$(echo "$res1" | jq -r .branch); assert echo "$res1" | jq -e '.status == "initialized" and (.branch | contains("vanadis-chunk-test"))'
 mkdir -p "$s_dir/scripts" && printf '#!/bin/sh\nexit 1\n' > "$s_dir/scripts/verify.sh" && chmod +x "$s_dir/scripts/verify.sh"

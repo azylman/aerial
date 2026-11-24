@@ -9,6 +9,7 @@ gh_call() { local h=(); [ -n "${GITHUB_PAT:-}" ] && h=(-H "Authorization: token 
 git_auth() { export GIT_TERMINAL_PROMPT=0 GIT_CONFIG_COUNT=2 GIT_CONFIG_KEY_0="http.extraHeader" GIT_CONFIG_VALUE_0="AUTHORIZATION: basic $(auth_hdr)" GIT_CONFIG_KEY_1="http.version" GIT_CONFIG_VALUE_1="HTTP/1.1"; }
 get_v() { if [ "$1" = "$2" ]; then [ $3 -ge 2 ] || { echo "ERROR: $1 requires value" >&2; exit 1; }; echo "$4"; else echo "${1#*=}"; fi; }
 is_ok() { [[ "${1:-}" =~ ^[0-9]+$ ]] && [ "$1" -ge 200 ] && [ "$1" -lt 300 ]; }
+anc() { git merge-base --is-ancestor "$1" "$2" 2>/dev/null || { [ -f .git/shallow ] && git fetch --unshallow origin >/dev/null 2>&1 && git merge-base --is-ancestor "$1" "$2" 2>/dev/null; }; }
 if [ "${1:-}" = "--source-only" ] || [ "${REPO_TEST_MODE:-0}" = "1" ]; then return 0 2>/dev/null || exit 0; fi
 CMD=""; BR=""; BODY=""; BFILE=""; RFILE=""; REB=""; CHUNK="${AERIAL_VANADIS_CHUNK_ID:-${VANADIS_CHUNK_ID:-}}"; ARGS=()
 [ "${AERIAL_NO_VANADIS_CHUNK:-0}" = "1" ] && CHUNK=""
@@ -56,17 +57,17 @@ elif [ "$CMD" = "submit" ]; then
   git add -A && git rm --cached -f PR_DESCRIPTION.md .pr_description.md 2>/dev/null || true
   git fetch origin "+refs/heads/$DEFAULT_BRANCH:refs/remotes/origin/$DEFAULT_BRANCH" >/dev/null 2>&1 || true; git fetch origin "+refs/heads/$cur_b:refs/remotes/origin/$cur_b" >/dev/null 2>&1 || true
   r_sha=$(git rev-parse --verify -q "refs/remotes/origin/$cur_b" 2>/dev/null || echo ""); t_sha=$(git rev-parse --verify -q "refs/remotes/origin/$DEFAULT_BRANCH" 2>/dev/null || echo ""); o_head=$(git rev-parse HEAD); temp_sha=""; r_base=""
-  [ -n "$r_sha" ] && [ "$r_sha" != "$o_head" ] && { git merge-base --is-ancestor "$r_sha" "$o_head" 2>/dev/null || { git merge-base --is-ancestor "$o_head" "$r_sha" 2>/dev/null && r_base="$r_sha" || { echo "ERROR: Remote branch has diverged from local HEAD" >&2; exit 1; }; }; }
-  if [ -n "$r_base" ] || { [ -n "$t_sha" ] && ! git merge-base --is-ancestor "$t_sha" "$o_head" 2>/dev/null; }; then
+  [ -n "$r_sha" ] && [ "$r_sha" != "$o_head" ] && { anc "$r_sha" "$o_head" || { anc "$o_head" "$r_sha" && r_base="$r_sha" || { echo "ERROR: Remote branch has diverged from local HEAD" >&2; exit 1; }; }; }
+  if [ -n "$r_base" ] || { [ -n "$t_sha" ] && ! anc "$t_sha" "$o_head"; }; then
     ! git diff --cached --quiet && { git commit -q -m "chore: temp" >/dev/null 2>&1 || { echo "ERROR: temp commit failed" >&2; exit 1; }; temp_sha=$(git rev-parse HEAD); }
     git reset --hard "${r_base:-$o_head}" >/dev/null 2>&1
-    [ -n "$t_sha" ] && ! git merge-base --is-ancestor "$t_sha" HEAD 2>/dev/null && { git merge --no-edit -q "$t_sha" >/dev/null 2>&1 || { git merge --abort >/dev/null 2>&1 || true; git reset --hard "${temp_sha:-$o_head}" >/dev/null 2>&1; git reset --soft "$o_head" >/dev/null 2>&1; echo "ERROR: Merge conflict with origin/$DEFAULT_BRANCH" >&2; exit 1; }; }
+    [ -n "$t_sha" ] && ! anc "$t_sha" HEAD && { git merge --no-edit -q "$t_sha" >/dev/null 2>&1 || { git merge --abort >/dev/null 2>&1 || true; git reset --hard "${temp_sha:-$o_head}" >/dev/null 2>&1; git reset --soft "$o_head" >/dev/null 2>&1; echo "ERROR: Merge conflict with origin/$DEFAULT_BRANCH" >&2; exit 1; }; }
     [ -n "$temp_sha" ] && { git cherry-pick -n "$temp_sha" >/dev/null 2>&1 || { git cherry-pick --abort >/dev/null 2>&1 || true; git reset --hard "$temp_sha" >/dev/null 2>&1; git reset --soft "$o_head" >/dev/null 2>&1; echo "ERROR: Merge conflict applying staged changes" >&2; exit 1; }; }
   fi
   has_c=0; [ -n "$t_sha" ] && ! git diff --quiet "$t_sha" HEAD 2>/dev/null && has_c=1; [ -z "$t_sha" ] && [ "$(git rev-parse HEAD 2>/dev/null)" != "$(git rev-parse "$DEFAULT_BRANCH" 2>/dev/null || true)" ] && has_c=1; git diff --cached --quiet && [ "$has_c" -eq 0 ] && { jq -n --arg s "no_changes" --arg m "No modifications detected in scratch directory." '{status:$s,message:$m}'; exit 0; }
   if [ -f .git/.aerial-verified-tree ] && [ "$(git write-tree 2>/dev/null)" = "$(cat .git/.aerial-verified-tree 2>/dev/null)" ]; then echo "⚡ Skipping duplicate pre-flight verification (staged tree already verified)." >&2; elif [ -f scripts/verify.sh ]; then chmod +x scripts/verify.sh && ./scripts/verify.sh --staged >&2 || { [ -n "$temp_sha" ] && { git reset --hard "$temp_sha" >/dev/null 2>&1; git reset --soft "$o_head" >/dev/null 2>&1; } || { [ "$(git rev-parse HEAD)" != "$o_head" ] && git reset --hard "$o_head" >/dev/null 2>&1 || true; }; echo "ERROR: Pre-flight verification failed" >&2; exit 1; }; fi
   title="${msg:-feat($REPO_NAME): automated update by Aerial}"; title=$(printf "%s\n" "$title" | awk 'NF{print;exit}' | cut -c 1-256); ! git diff --cached --quiet && git commit -m "$(printf "%s\n\n%s" "$title" "$BODY")" >/dev/null
-  [ -n "$r_sha" ] && ! git merge-base --is-ancestor "$r_sha" HEAD 2>/dev/null && { echo "ERROR: Remote branch has commits not in local HEAD" >&2; exit 1; }; if ! p_err=$(git push -u origin "$cur_b" 2>&1); then echo "ERROR: push failed: $p_err" >&2; exit 1; fi
+  [ -n "$r_sha" ] && ! anc "$r_sha" HEAD && { echo "ERROR: Remote branch has commits not in local HEAD" >&2; exit 1; }; if ! p_err=$(git push -u origin "$cur_b" 2>&1); then echo "ERROR: push failed: $p_err" >&2; exit 1; fi
   if [ -z "$ex_pr" ]; then
     raw=$(gh_call -X POST "$GITHUB_API/repos/$REPO_OWNER/$REPO_NAME/pulls" -d "$(jq -n --arg t "$title" --arg h "$cur_b" --arg b "$DEFAULT_BRANCH" --arg bd "$BODY" '{title:$t,head:$h,base:$b,body:$bd}')")
     p_code=$(echo "$raw" | tail -n1); p_resp=$(echo "$raw" | sed '$d')
