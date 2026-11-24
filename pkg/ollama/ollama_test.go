@@ -62,21 +62,86 @@ func TestNewDynamicClient_TableDriven(t *testing.T) {
 	}
 }
 
+type embeddingGuardCase struct {
+	name          string
+	text          string
+	emptyBaseURL  bool
+	nilHTTPClient bool
+	rt            http.RoundTripper
+	cancelCtx     bool
+	wantErrSubstr string
+	wantEmbedding []float32
+}
+
+func TestGenerateEmbedding_GuardsAndTransport(t *testing.T) {
+	t.Parallel()
+
+	tests := []embeddingGuardCase{
+		{name: "empty text validation error", text: "   ", wantErrSubstr: "text cannot be empty"},
+		{name: "unconfigured base URL fails fast with zero network IO", text: "test prompt", emptyBaseURL: true, wantErrSubstr: "ollama base URL is not configured"},
+		{name: "default http client fallback when nil", text: "default client check", nilHTTPClient: true, wantEmbedding: []float32{0.77}},
+		{name: "transport error surfaces as request error", text: "test prompt", rt: errRoundTripper{}, wantErrSubstr: "request error"},
+		{name: "canceled context aborts immediately before call", text: "context cancellation", cancelCtx: true, wantErrSubstr: "context canceled"},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			if tc.cancelCtx {
+				cancel()
+			}
+
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.WriteHeader(http.StatusOK)
+				_, _ = w.Write([]byte(`{"embedding": [0.77]}`))
+			}))
+			defer server.Close()
+
+			baseURL := server.URL
+			if tc.emptyBaseURL {
+				baseURL = ""
+			}
+			client := NewDynamicClient(func() Config {
+				return Config{BaseURL: baseURL}
+			})
+			switch {
+			case tc.rt != nil:
+				client.SetHTTPClient(&http.Client{Transport: tc.rt})
+			case tc.nilHTTPClient:
+				client.SetHTTPClient(nil)
+			default:
+				client.SetHTTPClient(server.Client())
+			}
+
+			emb, err := client.GenerateEmbedding(ctx, tc.text, false, 1)
+			if tc.wantErrSubstr != "" {
+				if err == nil || !strings.Contains(err.Error(), tc.wantErrSubstr) {
+					t.Fatalf("GenerateEmbedding() error = %v, want substring %q", err, tc.wantErrSubstr)
+				}
+			} else {
+				if err != nil {
+					t.Fatalf("GenerateEmbedding() unexpected error = %v", err)
+				}
+				if !reflect.DeepEqual(emb, tc.wantEmbedding) {
+					t.Errorf("GenerateEmbedding() got = %v, want = %v", emb, tc.wantEmbedding)
+				}
+			}
+		})
+	}
+}
+
 type generateEmbeddingTestCase struct {
 	name          string
 	text          string
 	isQuery       bool
-	queryPrefix   string
 	maxRetries    int
 	retryDelay    time.Duration
-	emptyBaseURL  bool
-	nilHTTPClient bool
-	rt            http.RoundTripper
 	cancelInDelay bool
 	handlerStatus int
 	handlerBody   string
 	failAttempts  int
-	cancelCtx     bool
 	wantErrSubstr string
 	wantEmbedding []float32
 	wantAttempts  int
@@ -87,22 +152,18 @@ func runGenerateEmbeddingCase(t *testing.T, tc generateEmbeddingTestCase) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	if tc.cancelCtx {
-		cancel()
-	}
-
 	var attemptCount int64
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		idx := atomic.AddInt64(&attemptCount, 1)
 
-		if tc.isQuery && tc.queryPrefix != "" {
+		if tc.isQuery {
 			var req embeddingRequest
 			if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 				http.Error(w, err.Error(), http.StatusBadRequest)
 				return
 			}
-			if !strings.HasPrefix(req.Prompt, tc.queryPrefix) {
-				http.Error(w, fmt.Sprintf("expected prompt to have prefix %q", tc.queryPrefix), http.StatusBadRequest)
+			if !strings.HasPrefix(req.Prompt, "query: ") {
+				http.Error(w, `expected prompt to have prefix "query: "`, http.StatusBadRequest)
 				return
 			}
 		}
@@ -125,24 +186,13 @@ func runGenerateEmbeddingCase(t *testing.T, tc generateEmbeddingTestCase) {
 	}))
 	defer server.Close()
 
-	baseURL := server.URL
-	if tc.emptyBaseURL {
-		baseURL = ""
-	}
 	client := NewDynamicClient(func() Config {
 		return Config{
-			BaseURL:     baseURL,
-			QueryPrefix: tc.queryPrefix,
+			BaseURL:     server.URL,
+			QueryPrefix: "query: ",
 		}
 	})
-	switch {
-	case tc.rt != nil:
-		client.SetHTTPClient(&http.Client{Transport: tc.rt})
-	case tc.nilHTTPClient:
-		client.SetHTTPClient(nil)
-	default:
-		client.SetHTTPClient(server.Client())
-	}
+	client.SetHTTPClient(server.Client())
 	client.SetRetryDelay(tc.retryDelay)
 
 	emb, err := client.GenerateEmbedding(ctx, tc.text, tc.isQuery, tc.maxRetries)
@@ -173,13 +223,12 @@ func TestGenerateEmbedding_TableDriven(t *testing.T) {
 	t.Parallel()
 
 	tests := []generateEmbeddingTestCase{
-		{name: "empty text validation error", text: "   ", wantErrSubstr: "text cannot be empty"},
 		{
 			name: "successful embedding standard text", text: "search document query", maxRetries: 1, handlerBody: `{"embedding": [0.1, 0.2, 0.3]}`,
 			wantEmbedding: []float32{0.1, 0.2, 0.3}, wantAttempts: 1,
 		},
 		{
-			name: "successful embedding query prefix", text: "semantic search target", isQuery: true, queryPrefix: "query: ", maxRetries: 1,
+			name: "successful embedding query prefix", text: "semantic search target", isQuery: true, maxRetries: 1,
 			handlerBody: `{"embedding": [0.5, 0.6]}`, wantEmbedding: []float32{0.5, 0.6}, wantAttempts: 1,
 		},
 		{
@@ -204,19 +253,9 @@ func TestGenerateEmbedding_TableDriven(t *testing.T) {
 		},
 		{name: "malformed json response", text: "garbage response", maxRetries: 1, handlerBody: `not-valid-json`, wantErrSubstr: "failed to parse JSON", wantAttempts: 2},
 		{
-			name: "canceled context aborts immediately before call", text: "context cancellation", cancelCtx: true, maxRetries: 2,
-			handlerStatus: http.StatusInternalServerError, handlerBody: `{"error":"temporary error"}`, wantErrSubstr: "context canceled",
-		},
-		{
 			name: "cancel during retry delay", text: "cancel in retry delay", maxRetries: 2, retryDelay: 200 * time.Millisecond, cancelInDelay: true,
 			failAttempts: 2, handlerStatus: http.StatusInternalServerError, handlerBody: `{"error":"fail"}`, wantErrSubstr: "context canceled", wantAttempts: 1,
 		},
-		{
-			name: "default http client fallback when nil", text: "default client check", maxRetries: 1, nilHTTPClient: true, handlerBody: `{"embedding": [0.77]}`,
-			wantEmbedding: []float32{0.77}, wantAttempts: 1,
-		},
-		{name: "transport error surfaces as request error", text: "test prompt", maxRetries: 1, rt: errRoundTripper{}, wantErrSubstr: "request error"},
-		{name: "unconfigured base URL fails fast with zero network IO", text: "test prompt", emptyBaseURL: true, wantErrSubstr: "ollama base URL is not configured"},
 	}
 
 	for _, tc := range tests {

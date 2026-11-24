@@ -26,16 +26,76 @@ import (
 	"github.com/azylman/aerial/pkg/httpkittest"
 )
 
-func TestStatusHandler(t *testing.T) {
+func TestStatusHandler_TasksAndAgents(t *testing.T) {
 	mockServer := newStatusMockServer(t)
 	defer mockServer.Close()
-	k8sAPI := newFakeK8sAPI(t)
 
-	tests := append(statusHandlerPrimaryCases(), statusHandlerSecondaryCases()...)
+	tests := []statusTasksTestCase{
+		{name: "ActiveTasks_Success", brainPath: "/brain/ok", wantCode: http.StatusOK, wantTasks: 2, wantConfiguredAgents: []string{"aerial", "agent-alpha"}},
+		{
+			name: "ActiveTasks_FilterAgent_Aerial", brainPath: "/brain/ok", target: "/api/status?agent=aerial",
+			wantCode: http.StatusOK, wantTasks: 1, wantTaskID: "task-abc", wantConfiguredAgents: []string{"aerial", "agent-alpha"},
+		},
+		{
+			name: "ActiveTasks_FilterAgent_Other", brainPath: "/brain/ok", target: "/api/status?agent=agent-alpha",
+			wantCode: http.StatusOK, wantTasks: 1, wantTaskID: "task-def", wantConfiguredAgents: []string{"aerial", "agent-alpha"},
+		},
+		{
+			name: "ActiveTasks_FilterAgent_All", brainPath: "/brain/ok", target: "/api/status?agent=all",
+			wantCode: http.StatusOK, wantTasks: 2, wantConfiguredAgents: []string{"aerial", "agent-alpha"},
+		},
+		{
+			name: "ActiveTasks_EmptyTasks_UpstreamSchedulesAndBuildsDiscovery", brainPath: "/brain/empty", haroPath: "/haro/ok", vanadisPath: "/vanadis/ok",
+			useMux: true, wantCode: http.StatusOK, wantTasks: 0, wantConfiguredAgents: []string{"aerial", "agent-beta", "agent-gamma"},
+		},
+		{name: "ActiveTasks_Degraded", brainPath: "/brain/offline", wantCode: http.StatusOK, wantTasks: 0},
+		{
+			name: "EnrichedFields", yamlContent: "console:\n  repos:\n    - \"example/aerial\"\n",
+			wantCode: http.StatusOK,
+		},
+	}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			runStatusHandlerCase(t, tc, mockServer.URL, k8sAPI.URL)
+			runStatusTasksCase(t, tc, mockServer.URL)
+		})
+	}
+}
+
+func TestStatusHandler_ClusterAndDeploys(t *testing.T) {
+	k8sAPI := newFakeK8sAPI(t)
+
+	tests := []statusClusterTestCase{
+		{name: "Basic_NoClusterStateFallback", wantCode: http.StatusOK, wantMinServices: 1, wantOngoingDeploy: "idle"},
+		{name: "DegradedClusterStatus", k8sPath: "/degraded", wantCode: http.StatusOK, wantClusterStatus: "degraded"},
+		{
+			name: "PollerRunBuilding",
+			pollerRuns: []GitHubRun{
+				{
+					ID:        999,
+					HeadSHA:   "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+					Status:    "in_progress",
+					CreatedAt: time.Now().UTC().Add(-2 * time.Minute),
+					UpdatedAt: time.Now().UTC().Add(-1 * time.Minute),
+				},
+			},
+			pollerJobs: map[int64][]GitHubJob{
+				999: {{ID: 1, Name: "Build Dashboard", Status: "in_progress"}},
+			},
+			yamlContent:       "console: {}\n",
+			wantCode:          http.StatusOK,
+			wantDeploys:       1,
+			wantOngoingDeploy: "building",
+			wantIsDeploying:   true,
+		},
+		{name: "MethodNotAllowed", method: http.MethodPost, wantCode: http.StatusMethodNotAllowed},
+		{name: "K8s_State_Success", k8sPath: "/ok", wantCode: http.StatusOK, wantServiceName: "k8s-brain"},
+		{name: "K8s_Error_FallbackServices", k8sPath: "/dep500", wantCode: http.StatusOK, wantMinServices: 1},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			runStatusClusterCase(t, tc, k8sAPI.URL)
 		})
 	}
 }
@@ -107,87 +167,34 @@ func newStatusMockServer(t *testing.T) *httptest.Server {
 	}))
 }
 
-func statusHandlerPrimaryCases() []statusTestCase {
-	return []statusTestCase{
-		{name: "Basic_NoClusterStateFallback", wantCode: http.StatusOK, wantMinServices: 1, wantOngoingDeploy: "idle"},
-		{name: "ActiveTasks_Success", brainPath: "/brain/ok", wantCode: http.StatusOK, wantTasks: 2, wantConfiguredAgents: []string{"aerial", "agent-alpha"}},
-		{
-			name: "ActiveTasks_FilterAgent_Aerial", brainPath: "/brain/ok", target: "/api/status?agent=aerial",
-			wantCode: http.StatusOK, wantTasks: 1, wantTaskID: "task-abc", wantConfiguredAgents: []string{"aerial", "agent-alpha"},
-		},
-		{
-			name: "ActiveTasks_FilterAgent_Other", brainPath: "/brain/ok", target: "/api/status?agent=agent-alpha",
-			wantCode: http.StatusOK, wantTasks: 1, wantTaskID: "task-def", wantConfiguredAgents: []string{"aerial", "agent-alpha"},
-		},
-		{
-			name: "ActiveTasks_FilterAgent_All", brainPath: "/brain/ok", target: "/api/status?agent=all",
-			wantCode: http.StatusOK, wantTasks: 2, wantConfiguredAgents: []string{"aerial", "agent-alpha"},
-		},
-		{
-			name: "ActiveTasks_EmptyTasks_UpstreamSchedulesAndBuildsDiscovery", brainPath: "/brain/empty", haroPath: "/haro/ok", vanadisPath: "/vanadis/ok",
-			useMux: true, wantCode: http.StatusOK, wantTasks: 0, wantConfiguredAgents: []string{"aerial", "agent-beta", "agent-gamma"},
-		},
-		{name: "ActiveTasks_Degraded", brainPath: "/brain/offline", wantCode: http.StatusOK, wantTasks: 0},
-		{
-			name: "EnrichedFields", yamlContent: "console:\n  repos:\n    - \"example/aerial\"\n",
-			wantCode: http.StatusOK,
-		},
-		{name: "DegradedClusterStatus", k8sPath: "/degraded", wantCode: http.StatusOK, wantClusterStatus: "degraded"},
-	}
-}
-
-func statusHandlerSecondaryCases() []statusTestCase {
-	return []statusTestCase{
-		{
-			name: "PollerRunBuilding",
-			pollerRuns: []GitHubRun{
-				{
-					ID:        999,
-					HeadSHA:   "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
-					Status:    "in_progress",
-					CreatedAt: time.Now().UTC().Add(-2 * time.Minute),
-					UpdatedAt: time.Now().UTC().Add(-1 * time.Minute),
-				},
-			},
-			pollerJobs: map[int64][]GitHubJob{
-				999: {{ID: 1, Name: "Build Dashboard", Status: "in_progress"}},
-			},
-			yamlContent:       "console: {}\n",
-			wantCode:          http.StatusOK,
-			wantDeploys:       1,
-			wantOngoingDeploy: "building",
-			wantIsDeploying:   true,
-		},
-		{name: "MethodNotAllowed", method: http.MethodPost, wantCode: http.StatusMethodNotAllowed},
-		{name: "K8s_State_Success", k8sPath: "/ok", wantCode: http.StatusOK, wantServiceName: "k8s-brain"},
-		{name: "K8s_Error_FallbackServices", k8sPath: "/dep500", wantCode: http.StatusOK, wantMinServices: 1},
-	}
-}
-
-// statusTestCase routes each upstream to the shared mock server (k8sPath: the fake k8s API)
-// by path suffix; an empty suffix leaves that upstream unconfigured.
-type statusTestCase struct {
+type statusTasksTestCase struct {
 	name                 string
-	method               string
-	target               string
-	useMux               bool
 	brainPath            string
-	k8sPath              string
 	haroPath             string
 	vanadisPath          string
-	pollerRuns           []GitHubRun
-	pollerJobs           map[int64][]GitHubJob
+	target               string
+	useMux               bool
 	yamlContent          string
 	wantCode             int
-	wantClusterStatus    string
-	wantOngoingDeploy    string
-	wantIsDeploying      bool
 	wantTasks            int
-	wantDeploys          int
-	wantMinServices      int
-	wantServiceName      string
-	wantConfiguredAgents []string
 	wantTaskID           string
+	wantConfiguredAgents []string
+}
+
+type statusClusterTestCase struct {
+	name              string
+	method            string
+	k8sPath           string
+	pollerRuns        []GitHubRun
+	pollerJobs        map[int64][]GitHubJob
+	yamlContent       string
+	wantCode          int
+	wantClusterStatus string
+	wantOngoingDeploy string
+	wantIsDeploying   bool
+	wantDeploys       int
+	wantMinServices   int
+	wantServiceName   string
 }
 
 func statusMockURL(mockServerURL, path string) string {
@@ -197,28 +204,17 @@ func statusMockURL(mockServerURL, path string) string {
 	return mockServerURL + path
 }
 
-func runStatusHandlerCase(t *testing.T, tc statusTestCase, mockServerURL, k8sURL string) {
+func runStatusTasksCase(t *testing.T, tc statusTasksTestCase, mockServerURL string) {
 	t.Helper()
-	if tc.pollerRuns != nil {
-		oldPoller := globalGHPoller
-		defer func() { globalGHPoller = oldPoller }()
-		globalGHPoller = &GitHubPoller{
-			cachedRuns: tc.pollerRuns,
-			cachedJobs: tc.pollerJobs,
-		}
-	}
-
 	cfgFile := ""
 	if tc.yamlContent != "" {
-		tempDir := t.TempDir()
-		cfgFile = filepath.Join(tempDir, "config.yaml")
+		cfgFile = filepath.Join(t.TempDir(), "config.yaml")
 		if err := os.WriteFile(cfgFile, []byte(tc.yamlContent), 0o644); err != nil {
 			t.Fatal(err)
 		}
 	}
 
 	brainURL := statusMockURL(mockServerURL, tc.brainPath)
-	kubeAPIServer := statusMockURL(k8sURL, tc.k8sPath)
 	haroURL := statusMockURL(mockServerURL, tc.haroPath)
 	vanadisURL := statusMockURL(mockServerURL, tc.vanadisPath)
 
@@ -227,28 +223,23 @@ func runStatusHandlerCase(t *testing.T, tc statusTestCase, mockServerURL, k8sURL
 	var h http.Handler
 	if tc.useMux {
 		cfg := ConsoleConfig{
-			Port:          "8080",
-			BrainURL:      brainURL,
-			ConfigPath:    cfgFile,
-			GitCommit:     "testcommit",
-			KubeAPIServer: kubeAPIServer,
-			HaroURL:       haroURL,
-			VanadisURL:    vanadisURL,
+			Port:       "8080",
+			BrainURL:   brainURL,
+			ConfigPath: cfgFile,
+			GitCommit:  "testcommit",
+			HaroURL:    haroURL,
+			VanadisURL: vanadisURL,
 		}
 		h = SetupConsoleMux(cfg, nil)
 	} else {
-		h = statusHandler(brainURL, "testcommit", kubeAPIServer, haroURL, vanadisURL)
+		h = statusHandler(brainURL, "testcommit", "", haroURL, vanadisURL)
 	}
 
-	method := tc.method
-	if method == "" {
-		method = http.MethodGet
-	}
 	target := tc.target
 	if target == "" {
 		target = "/api/status"
 	}
-	req := httptest.NewRequest(method, target, http.NoBody)
+	req := httptest.NewRequest(http.MethodGet, target, http.NoBody)
 	rr := httptest.NewRecorder()
 	h.ServeHTTP(rr, req)
 
@@ -264,26 +255,11 @@ func runStatusHandlerCase(t *testing.T, tc statusTestCase, mockServerURL, k8sURL
 		t.Fatalf("failed to decode response: %v", err)
 	}
 
-	assertStatusResponse(t, tc, resp)
+	assertTasksResponse(t, tc, resp)
 }
 
-func assertStatusResponse(t *testing.T, tc statusTestCase, resp ClusterResponse) {
+func assertTasksResponse(t *testing.T, tc statusTasksTestCase, resp ClusterResponse) {
 	t.Helper()
-	assertStatusBasic(t, tc, resp)
-	assertStatusServices(t, tc, resp)
-}
-
-func assertStatusBasic(t *testing.T, tc statusTestCase, resp ClusterResponse) {
-	t.Helper()
-	if tc.wantClusterStatus != "" && resp.ClusterStatus != tc.wantClusterStatus {
-		t.Errorf("expected ClusterStatus %q, got %q", tc.wantClusterStatus, resp.ClusterStatus)
-	}
-	if tc.wantOngoingDeploy != "" && resp.OngoingDeploy != tc.wantOngoingDeploy {
-		t.Errorf("expected OngoingDeploy %q, got %q", tc.wantOngoingDeploy, resp.OngoingDeploy)
-	}
-	if tc.wantIsDeploying != resp.IsDeploying {
-		t.Errorf("expected IsDeploying %v, got %v", tc.wantIsDeploying, resp.IsDeploying)
-	}
 	if len(tc.wantConfiguredAgents) > 0 {
 		if len(resp.ConfiguredAgents) != len(tc.wantConfiguredAgents) {
 			t.Fatalf("expected %d configured agents, got %d: %+v", len(tc.wantConfiguredAgents), len(resp.ConfiguredAgents), resp.ConfiguredAgents)
@@ -294,12 +270,6 @@ func assertStatusBasic(t *testing.T, tc statusTestCase, resp ClusterResponse) {
 			}
 		}
 	}
-	assertStatusActiveTasks(t, tc, resp)
-	assertStatusDeployments(t, tc, resp)
-}
-
-func assertStatusActiveTasks(t *testing.T, tc statusTestCase, resp ClusterResponse) {
-	t.Helper()
 	if resp.ActiveTasks == nil {
 		t.Fatalf("expected non-nil ActiveTasks, got null")
 	}
@@ -319,8 +289,62 @@ func assertStatusActiveTasks(t *testing.T, tc statusTestCase, resp ClusterRespon
 	}
 }
 
-func assertStatusDeployments(t *testing.T, tc statusTestCase, resp ClusterResponse) {
+func runStatusClusterCase(t *testing.T, tc statusClusterTestCase, k8sURL string) {
 	t.Helper()
+	if tc.pollerRuns != nil {
+		oldPoller := globalGHPoller
+		defer func() { globalGHPoller = oldPoller }()
+		globalGHPoller = &GitHubPoller{
+			cachedRuns: tc.pollerRuns,
+			cachedJobs: tc.pollerJobs,
+		}
+	}
+
+	if tc.yamlContent != "" {
+		if err := os.WriteFile(filepath.Join(t.TempDir(), "config.yaml"), []byte(tc.yamlContent), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	kubeAPIServer := statusMockURL(k8sURL, tc.k8sPath)
+	discoveredAgentsCache.reset()
+
+	h := statusHandler("", "testcommit", kubeAPIServer, "", "")
+
+	method := tc.method
+	if method == "" {
+		method = http.MethodGet
+	}
+	req := httptest.NewRequest(method, "/api/status", http.NoBody)
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, req)
+
+	if rr.Code != tc.wantCode {
+		t.Fatalf("expected status %d, got %d", tc.wantCode, rr.Code)
+	}
+	if tc.wantCode != http.StatusOK {
+		return
+	}
+
+	var resp ClusterResponse
+	if err := json.NewDecoder(rr.Body).Decode(&resp); err != nil {
+		t.Fatalf("failed to decode response: %v", err)
+	}
+
+	assertClusterResponse(t, tc, resp)
+}
+
+func assertClusterResponse(t *testing.T, tc statusClusterTestCase, resp ClusterResponse) {
+	t.Helper()
+	if tc.wantClusterStatus != "" && resp.ClusterStatus != tc.wantClusterStatus {
+		t.Errorf("expected ClusterStatus %q, got %q", tc.wantClusterStatus, resp.ClusterStatus)
+	}
+	if tc.wantOngoingDeploy != "" && resp.OngoingDeploy != tc.wantOngoingDeploy {
+		t.Errorf("expected OngoingDeploy %q, got %q", tc.wantOngoingDeploy, resp.OngoingDeploy)
+	}
+	if tc.wantIsDeploying != resp.IsDeploying {
+		t.Errorf("expected IsDeploying %v, got %v", tc.wantIsDeploying, resp.IsDeploying)
+	}
 	if tc.wantDeploys > 0 {
 		if len(resp.Deployments) != tc.wantDeploys {
 			t.Fatalf("expected %d deployments, got %d", tc.wantDeploys, len(resp.Deployments))
@@ -333,10 +357,6 @@ func assertStatusDeployments(t *testing.T, tc statusTestCase, resp ClusterRespon
 			t.Errorf("expected commit bbbbbbb building, got %q", stages["bbbbbbb"])
 		}
 	}
-}
-
-func assertStatusServices(t *testing.T, tc statusTestCase, resp ClusterResponse) {
-	t.Helper()
 	if tc.wantMinServices > 0 && len(resp.Services) < tc.wantMinServices {
 		t.Errorf("expected at least %d services, got %d", tc.wantMinServices, len(resp.Services))
 	}
