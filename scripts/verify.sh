@@ -465,17 +465,6 @@ run_go_pkgs_coverage() {
     done
 }
 
-run_go_pkg_coverage() {
-    svc="$1"
-    targetPkg="${2:-.}"
-    rel_pkg="$svc"
-    if [ "$targetPkg" != "." ]; then
-        rel_pkg="$svc/${targetPkg#./}"
-    fi
-    rel_pkg="${rel_pkg%/}"
-    run_go_pkgs_coverage "$rel_pkg"
-}
-
 # React console UI (services/console/ui): install when node_modules is missing or stale, then
 # typecheck, run Vitest with its 95% coverage thresholds, and production-build with Vite.
 run_console_ui() {
