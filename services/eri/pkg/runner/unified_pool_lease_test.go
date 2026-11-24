@@ -279,7 +279,7 @@ func TestUnifiedProcessPool_AcquireLease_ValidationAndLocking(t *testing.T) {
 
 func TestUnifiedProcessPool_AcquireLease_Suite(t *testing.T) {
 	tests := []acquireLeaseSuiteCase{
-		{name: "BasicExecution", customExistingSessID: "550e8400-e29b-41d4-a716-446655440001", expectPrevSess: "550e8400-e29b-41d4-a716-446655440000", respPayload: "lease reply", expectTurnCount: 1, expectSubstantive: "lease reply"},
+		{name: "BasicExecution", customExistingSessID: "550e8400-e29b-41d4-a716-446655440001", expectPrevSess: "550e8400-e29b-41d4-a716-446655440000", respPayload: "lease reply", expectTurnCount: 1, expectSubstantive: "lease reply", expectCold: true},
 		{name: "RotationAndPersistence", maxTurns: 1, respPayload: "ok", expectRotated: true},
 		{name: "PersistenceFailureRollback", maxTurns: 1, respPayload: "ok", onRotatedErr: errors.New("simulated DB latch timeout"), expectReleaseErr: true},
 		{name: "CancelRotationOnQuotaExhausted", maxTurns: 1, respErr: "RESOURCE_EXHAUSTED: quota exceeded. Resets in 30s.", respStatus: "ERROR", expectExecErr: true, expectRotated: false},
