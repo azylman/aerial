@@ -269,6 +269,21 @@ func TestHydrateTask(t *testing.T) {
 			status: "open",
 			want:   HydratedTask{ID: 5, Title: "Lone", Status: "open", CreatedAt: created, UpdatedAt: created},
 		},
+		{
+			name: "cross project neighbor falls back to embedded id and does not collide with same-index neighbor",
+			task: VikunjaTask{
+				ID: 10, Title: "Root", Created: created, Updated: created, ProjectID: 1,
+				RelatedTasks: map[string][]VikunjaTask{
+					"related": {{ID: 999, Index: 1, Title: "Foreign", ProjectID: 2}},
+				},
+			},
+			status:    "open",
+			neighbors: map[int64]TaskNode{1: {ID: 1, Title: "Local Task 1", Status: "completed"}},
+			want: HydratedTask{
+				ID: 10, Title: "Root", Status: "open", CreatedAt: created, UpdatedAt: created,
+				Related: []TaskSummary{{ID: 999, Title: "Foreign", Status: "open"}},
+			},
+		},
 	}
 
 	for _, tc := range tests {
@@ -696,6 +711,36 @@ func TestParseTaskID(t *testing.T) {
 			}
 			if got != tc.want {
 				t.Fatalf("got %d, want %d", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestVikunjaTaskDisplayMapping(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name       string
+		task       VikunjaTask
+		wantID     int64
+		wantParent int64
+	}{
+		{name: "global id with per-project index exposes index", task: VikunjaTask{ID: 1000349, Index: 317, Title: "Million", RelatedTasks: map[string][]VikunjaTask{"parenttask": {{ID: 1000348, Index: 316}}}}, wantID: 317, wantParent: 316},
+		{name: "missing index falls back to global id", task: VikunjaTask{ID: 42, Title: "Legacy", RelatedTasks: map[string][]VikunjaTask{"parenttask": {{ID: 9}}}}, wantID: 42, wantParent: 9},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got := tc.task.DisplayID(); got != tc.wantID {
+				t.Fatalf("DisplayID() = %d, want %d", got, tc.wantID)
+			}
+			node := TaskToNode(tc.task, "open")
+			if node.ID != tc.wantID || node.ParentID == nil || *node.ParentID != tc.wantParent {
+				t.Fatalf("TaskToNode() = %+v, want id %d parent %d", node, tc.wantID, tc.wantParent)
+			}
+			if got := HydrateTask(tc.task, "open", nil, nil); got.ID != tc.wantID {
+				t.Fatalf("HydrateTask().ID = %d, want %d", got.ID, tc.wantID)
 			}
 		})
 	}
