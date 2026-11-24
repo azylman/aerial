@@ -113,22 +113,30 @@ func drainHostLabel(rawURI string) string {
 // decideDrain is the pure drain decision: given the pod's self name, the agent's
 // wanted service set, the listed deployments, and the prior consecutive-confirmation
 // count, it returns the updated count and whether to latch drain. Self is the
-// deployment whose HostLabel equals selfName exactly. Any inconclusive input (empty
-// or unregistered self, self without the full set, malformed timestamps, a partial
-// set anywhere, or a newest that is not strictly newer than self) resets to zero
-// and never drains.
+// single deployment whose HostLabel equals selfName exactly: zero matches or more
+// than one match (for example a stale plus a fresh registration of the same
+// ReplicaSet) leaves self unidentified and resets. Any other inconclusive input
+// (empty self name or wanted set, self without the full set, malformed timestamps,
+// a partial set anywhere, a full-set deployment with no host label, or no other
+// full-set deployment strictly newer than self) resets to zero and never drains.
+// A deployment only counts as newer when it carries a different host label and a
+// created_at strictly after self's, so the pod's own (re)registration can never
+// supersede it.
 func decideDrain(selfName string, want []string, deps []deploymentInfo, prior int) (int, bool) {
 	if strings.TrimSpace(selfName) == "" || len(want) == 0 {
 		return 0, false
 	}
 	var self *deploymentInfo
+	selfMatches := 0
 	for i := range deps {
 		if deps[i].HostLabel == selfName {
-			self = &deps[i]
-			break
+			selfMatches++
+			if self == nil {
+				self = &deps[i]
+			}
 		}
 	}
-	if self == nil || self.CreatedAt.IsZero() || !hasFullServiceSet(self.Services, want) {
+	if selfMatches != 1 || self == nil || self.CreatedAt.IsZero() || !hasFullServiceSet(self.Services, want) {
 		return 0, false
 	}
 	var newest *deploymentInfo
@@ -143,11 +151,17 @@ func decideDrain(selfName string, want []string, deps []deploymentInfo, prior in
 			}
 			continue
 		}
+		if d.HostLabel == selfName {
+			continue
+		}
+		if d.HostLabel == "" {
+			return 0, false
+		}
 		if newest == nil || d.CreatedAt.After(newest.CreatedAt) {
 			newest = d
 		}
 	}
-	if newest == nil || newest.ID == self.ID || !newest.CreatedAt.After(self.CreatedAt) {
+	if newest == nil || !newest.CreatedAt.After(self.CreatedAt) {
 		return 0, false
 	}
 	next := prior + 1
