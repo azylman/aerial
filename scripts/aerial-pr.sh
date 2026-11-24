@@ -57,18 +57,16 @@ elif [ "$CMD" = "submit" ]; then
   [ -f scripts/verify.sh ] && { chmod +x scripts/verify.sh && ./scripts/verify.sh --staged >&2 || { echo "ERROR: Pre-flight verification failed" >&2; exit 1; }; }
   title="${msg:-feat($REPO_NAME): automated update by Aerial}"; title=$(printf "%s\n" "$title" | awk 'NF{print;exit}' | cut -c 1-256)
   ! git diff --cached --quiet && git commit -m "$(printf "%s\n\n%s" "$title" "$BODY")" >/dev/null
-  git fetch origin "+refs/heads/$DEFAULT_BRANCH:refs/remotes/origin/$DEFAULT_BRANCH" >/dev/null 2>&1 || true
-  if git rev-parse --verify "refs/remotes/origin/$DEFAULT_BRANCH" >/dev/null 2>&1 && ! git merge-base --is-ancestor "origin/$DEFAULT_BRANCH" HEAD 2>/dev/null; then
-    git merge --no-edit -q "origin/$DEFAULT_BRANCH" >/dev/null 2>&1 || { git merge --abort >/dev/null 2>&1 || true; echo "ERROR: Merge conflict with origin/$DEFAULT_BRANCH" >&2; exit 1; }
-  fi
-  git fetch origin "+refs/heads/$cur_b:refs/remotes/origin/$cur_b" >/dev/null 2>&1 || true; r_sha=$(git rev-parse --verify -q "refs/remotes/origin/$cur_b" 2>/dev/null || echo "")
-  [ -n "$r_sha" ] && ! git merge-base --is-ancestor "$r_sha" HEAD 2>/dev/null && { echo "ERROR: Remote branch has commits not in local HEAD" >&2; exit 1; }
-  git_auth; if ! git push -u origin "$cur_b" >/dev/null 2>&1; then
-    [ -n "$r_sha" ] && git push "--force-with-lease=refs/heads/$cur_b:$r_sha" -u origin "$cur_b" >/dev/null 2>&1 || { echo "ERROR: push failed" >&2; exit 1; }
-  fi
+  git fetch origin "+refs/heads/$DEFAULT_BRANCH:refs/remotes/origin/$DEFAULT_BRANCH" "+refs/heads/$cur_b:refs/remotes/origin/$cur_b" >/dev/null 2>&1 || true
+  r_sha=$(git rev-parse --verify -q "refs/remotes/origin/$cur_b" 2>/dev/null || echo "")
+  [ -n "$r_sha" ] && ! git merge-base --is-ancestor "$r_sha" HEAD 2>/dev/null && { git merge --no-edit -q "$r_sha" >/dev/null 2>&1 || { git merge --abort >/dev/null 2>&1 || true; echo "ERROR: Merge conflict with origin/$cur_b" >&2; exit 1; }; }
+  git rev-parse --verify "refs/remotes/origin/$DEFAULT_BRANCH" >/dev/null 2>&1 && ! git merge-base --is-ancestor "origin/$DEFAULT_BRANCH" HEAD 2>/dev/null && { git merge --no-edit -q "origin/$DEFAULT_BRANCH" >/dev/null 2>&1 || { git merge --abort >/dev/null 2>&1 || true; echo "ERROR: Merge conflict with origin/$DEFAULT_BRANCH" >&2; exit 1; }; }
+  git_auth; if ! git push -u origin "$cur_b" >/dev/null 2>&1; then [ -n "$r_sha" ] && git push "--force-with-lease=refs/heads/$cur_b:$r_sha" -u origin "$cur_b" >/dev/null 2>&1 || { echo "ERROR: push failed" >&2; exit 1; }; fi
   if [ -z "$ex_pr" ]; then
     raw=$(gh_call -X POST "$GITHUB_API/repos/$REPO_OWNER/$REPO_NAME/pulls" -d "$(jq -n --arg t "$title" --arg h "$cur_b" --arg b "$DEFAULT_BRANCH" --arg bd "$BODY" '{title:$t,head:$h,base:$b,body:$bd}')")
-    [ "$(echo "$raw" | tail -n1)" = "422" ] && ex_pr=$(gh_call -X GET "$GITHUB_API/repos/$REPO_OWNER/$REPO_NAME/pulls?state=open&head=$REPO_OWNER:$cur_b" | sed '$d' | jq -c '.[0] // empty' 2>/dev/null || true) || ex_pr=$(echo "$raw" | sed '$d')
+    p_code=$(echo "$raw" | tail -n1); p_resp=$(echo "$raw" | sed '$d')
+    if is_ok "$p_code"; then ex_pr="$p_resp"; elif [ "$p_code" = "422" ]; then ex_pr=$(gh_call -X GET "$GITHUB_API/repos/$REPO_OWNER/$REPO_NAME/pulls?state=open&head=$REPO_OWNER:$cur_b" | sed '$d' | jq -c '.[0] // empty' 2>/dev/null || true); fi
+    [ -z "$ex_pr" ] && { [ -z "$r_sha" ] && gh_call -X DELETE "$GITHUB_API/repos/$REPO_OWNER/$REPO_NAME/git/refs/heads/$cur_b" >/dev/null 2>&1 || true; echo "ERROR: Failed to create Pull Request (HTTP $p_code): $p_resp" >&2; exit 1; }
   fi
   p_num=$(echo "$ex_pr" | jq -r '.number // empty'); p_url=$(echo "$ex_pr" | jq -r '.html_url // empty'); c_sha=$(git rev-parse HEAD); [ -z "$p_num" ] && { echo "ERROR: Failed PR: $ex_pr" >&2; exit 1; }
   jq -n --arg s "submitted" --arg u "$p_url" --argjson n "$p_num" --arg b "$cur_b" --arg c "$c_sha" --arg r "$REPO_NAME" --arg m "PR #$p_num submitted on $REPO_OWNER/$REPO_NAME. Continuous delivery automated via push events. End active turn now." '{status:$s,pr_url:$u,pr_number:$n,branch:$b,commit_sha:$c,async:true,repo:$r,turn_action:"end_turn",message:$m}'
@@ -83,7 +81,7 @@ elif [ "$CMD" = "override-roborev" ] || [ "$CMD" = "dispute-roborev" ]; then
     raw=$(gh_call -H "Content-Type: application/json" -X POST -d "$(jq -n --arg b "$(printf '## roborev-override (`%s`)\n\n**Commit:** `%s`\n**Technical Rebuttal:**\n%s\n' "$short_sha" "$h_sha" "$REB")" '{body: $b}')" "$GITHUB_API/repos/$REPO_OWNER/$REPO_NAME/issues/$pr/comments")
     is_ok "$(echo "$raw" | tail -n1)" || { echo "ERROR: Comment failed" >&2; exit 1; }
   fi
-  runs=$(gh_call -X GET "$GITHUB_API/repos/$REPO_OWNER/$REPO_NAME/actions/runs?head_sha=$h_sha" | sed '$d'); target_run=$(echo "$runs" | jq -c '[.workflow_runs[]? | select(.name == "RoboRev Code Review" or (.name | test("Continuous Delivery|Validate Configuration")) or (.path // "" | test("roborev|docker-publish|ci|validate")))] | first // empty'); run_id=$(echo "$target_run" | jq -r '.id // empty'); run_stat=$(echo "$target_run" | jq -r '.status // empty'); [ -n "$run_id" ] || { echo "ERROR: No workflow run found" >&2; exit 1; }
+  runs=$(gh_call -X GET "$GITHUB_API/repos/$REPO_OWNER/$REPO_NAME/actions/runs?head_sha=$h_sha" | sed '$d'); target_run=$(echo "$runs" | jq -c '([.workflow_runs[]? | select((.name // "") == "RoboRev Code Review" or (.path // "" | endswith("roborev.yml")))] | first) // ([.workflow_runs[]? | select((.name // "") == "Continuous Delivery" or (.name // "") == "Validate Configuration" or (.path // "" | test("(docker-publish|ci|validate)\\.yml$")))] | first) // empty'); run_id=$(echo "$target_run" | jq -r '.id // empty'); run_stat=$(echo "$target_run" | jq -r '.status // empty'); [ -n "$run_id" ] || { echo "ERROR: No workflow run found" >&2; exit 1; }
   rerun_call() { local c; c=$(gh_call -X POST "$GITHUB_API/repos/$REPO_OWNER/$REPO_NAME/actions/runs/$run_id/$1" | tail -n1); [ "$c" = "403" ] || [ "$c" = "409" ] || is_ok "$c"; }
   [ "$run_stat" = "completed" ] && { rerun_call rerun-failed-jobs || rerun_call rerun || { echo "ERROR: Rerun failed" >&2; exit 1; }; }
   jq -n --arg pr_url "$pr_url" --argjson pr_number "$pr" --arg commit_sha "$h_sha" --argjson run_id "$run_id" --arg repo "$REPO_NAME" --arg message "RoboRev gate overridden for PR #$pr ($short_sha) on $REPO_OWNER/$REPO_NAME. Re-run triggered." \
