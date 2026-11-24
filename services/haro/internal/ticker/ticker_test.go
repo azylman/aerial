@@ -96,6 +96,7 @@ type dispatchOutcomeTestCase struct {
 	wantDurationMs      int64
 	wantWatermarkTime   *time.Time
 	wantCheckCalculated bool
+	wantNaked           bool
 }
 
 func seedOutcomeHeartbeat(ctx context.Context, t *testing.T, db *sql.DB, scheduleType, scheduleID string, now time.Time) {
@@ -187,10 +188,8 @@ func runDispatchOutcomeCase(t *testing.T, tc dispatchOutcomeTestCase, now time.T
 	if err != nil {
 		t.Fatalf("HandleDispatchOutcome() error = %v", err)
 	}
-	if tc.name == "dispatch id equal only to run row id is not resolved and naks" {
-		if _, got := om.NakDelay(); !got {
-			t.Errorf("msg naked = %v, want true", got)
-		}
+	if _, got := om.NakDelay(); got != tc.wantNaked {
+		t.Errorf("msg naked = %v, want %v (calls %v)", got, tc.wantNaked, om.Calls())
 	}
 
 	assertOutcomeRun(ctx, t, db, tc)
@@ -354,7 +353,7 @@ func TestHandleDispatchOutcome(t *testing.T) {
 			name:             "dispatch id equal only to run row id is not resolved and naks",
 			seedScheduleType: "heartbeat", seedScheduleID: "hb-id-only", seedRunID: "run-hb-id-only", seedDispatchID: "heartbeat:hb-id-only:2026-11-14T01:00:00Z",
 			event:         &pubsub.DispatchOutcomeEvent{DispatchID: "run-hb-id-only", Source: "heartbeat", Status: "completed", StartedAt: now},
-			wantRunStatus: "running", wantDurationMs: -1,
+			wantRunStatus: "running", wantDurationMs: -1, wantNaked: true,
 		},
 		{name: "empty dispatch id returns nil", event: &pubsub.DispatchOutcomeEvent{DispatchID: "   "}, wantDurationMs: -1},
 		{
