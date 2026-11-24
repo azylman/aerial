@@ -894,6 +894,7 @@ spec:
                   - vmsingle
                   - victoriametrics
                   - gatus
+                  - eri-restate
         - namespaceSelector: {}
           podSelector:
             matchLabels:
