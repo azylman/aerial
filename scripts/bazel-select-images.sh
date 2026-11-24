@@ -13,12 +13,12 @@ if [ ${#CHANGED_FILES[@]} -eq 0 ] && git rev-parse --git-dir >/dev/null 2>&1; th
     [ "$cur_b" != "main" ] && git rev-parse --verify origin/main >/dev/null 2>&1 && mapfile -t CHANGED_FILES < <(git diff --name-only origin/main...HEAD 2>/dev/null || true)
     [ ${#CHANGED_FILES[@]} -eq 0 ] && mapfile -t CHANGED_FILES < <(git diff --name-only HEAD~1 2>/dev/null || git diff --name-only HEAD 2>/dev/null || git status --porcelain | awk '{print $NF}')
 fi
-OCI_SVCS=("eri" "haro" "coven" "docket-mcp" "kernel-mcp" "synapse" "transcripts" "vanadis" "vanadis-restate" "vanadis-nats" "prospera" "console" "redact-pattern" "coverage-ingest" "docs" "migrator" "eri-restate" "github-runner" "discord-mcp" "infisical-mcp")
+. "$REPO_ROOT/scripts/lib/hermetic-go-env.sh" && ensure_bazel_build_files "$REPO_ROOT"
+mapfile -t OCI_SVCS < <(bazel query "kind(oci_image, //images:all)" 2>/dev/null | sed 's#^//images:##' | sort -u)
 DOCKER_CFG=("eri-restate:.:./services/eri-restate/Dockerfile:services/eri-restate/Dockerfile:eri_restate_base" "github-runner:.:./services/github-runner/Dockerfile:services/github-runner/Dockerfile:github_runner_base" "discord-mcp:.:./mcp/discord-mcp/Dockerfile:mcp/discord-mcp/Dockerfile:discord_mcp_base" "infisical-mcp:./mcp/infisical-mcp:./mcp/infisical-mcp/Dockerfile:mcp/infisical-mcp/Dockerfile:infisical_mcp_base")
 PKG_CHANGED="false"; for f in "${CHANGED_FILES[@]}"; do [[ "$f" == pkg/* ]] && { PKG_CHANGED="true"; break; }; done
 is_test_file() { case "$1" in *_test.go|*.test.[tj]s|*.test.[tj]sx|scripts/test-*.sh|build/tests/*) return 0;; *) return 1;; esac; }
 declare -A AFF SEL D_TRIG; for s in "${OCI_SVCS[@]}"; do AFF["$s"]="false"; SEL["$s"]="false"; D_TRIG["$s"]="false"; done
-. "$REPO_ROOT/scripts/lib/hermetic-go-env.sh" && ensure_bazel_build_files "$REPO_ROOT"
 for f in "${CHANGED_FILES[@]}"; do
     case "$f" in
         .github/workflows/docker-publish.yml|.dockerignore) FORCE_ALL="true" ;;
