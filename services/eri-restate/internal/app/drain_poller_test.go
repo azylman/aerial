@@ -31,38 +31,64 @@ func drainTestServices(names []string) string {
 	return strings.Join(quoted, ",")
 }
 
-func drainTestDeployment(id, created string, services []string) string {
-	return `{"id":` + fmt.Sprintf("%q", id) + `,"created_at":` + fmt.Sprintf("%q", created) + `,"services":[` + drainTestServices(services) + `]}`
+var drainTestFullAerial = []string{
+	"ThreadSession",
+	"DispatchSession",
+	"VoiceSession",
+	"SessionManager",
+	"TurnRunner",
+	"LLM",
+}
+
+const (
+	drainTestSelf = "eri-suletta-restate-45977f4fb5"
+	drainTestPrev = "eri-suletta-restate-7c975b8446"
+	drainTestNext = "eri-suletta-restate-9d1e2f3a4b"
+)
+
+func drainTestURI(host string) string {
+	return "http://" + host + ".default.svc.cluster.local:9080/"
+}
+
+// drainTestDeployment renders one admin deployment whose uri host label is host
+// (the deployment ID is "dep-" + host).
+func drainTestDeployment(host, created string, services []string) string {
+	return `{"id":` + fmt.Sprintf("%q", "dep-"+host) + `,"uri":` + fmt.Sprintf("%q", drainTestURI(host)) + `,"created_at":` + fmt.Sprintf("%q", created) + `,"services":[` + drainTestServices(services) + `]}`
 }
 
 func drainTestPayload(deps ...string) string {
 	return `{"deployments":[` + strings.Join(deps, ",") + `]}`
 }
 
+type drainDepSpec struct {
+	id       string
+	host     string
+	created  string
+	services []string
+}
+
 type decideDrainCase struct {
 	name              string
-	selfID            string
-	omitSelf          bool
-	selfCreated       string
-	selfServices      []string
-	otherID           string
-	otherCreated      string
-	otherServices     []string
+	selfName          string
+	want              []string
+	deps              []drainDepSpec
 	prior             int
 	wantConfirmations int
 	wantDrain         bool
 }
 
+func drainTestDeps(t *testing.T, specs []drainDepSpec) []deploymentInfo {
+	t.Helper()
+	deps := make([]deploymentInfo, 0, len(specs))
+	for _, spec := range specs {
+		deps = append(deps, deploymentInfo{ID: spec.id, HostLabel: spec.host, CreatedAt: drainTestTime(t, spec.created), Services: drainTestSet(spec.services)})
+	}
+	return deps
+}
+
 func runDecideDrainCase(t *testing.T, tc decideDrainCase) {
 	t.Helper()
-	var deps []deploymentInfo
-	if !tc.omitSelf && tc.selfID != "" {
-		deps = append(deps, deploymentInfo{ID: tc.selfID, CreatedAt: drainTestTime(t, tc.selfCreated), Services: drainTestSet(tc.selfServices)})
-	}
-	if tc.otherID != "" {
-		deps = append(deps, deploymentInfo{ID: tc.otherID, CreatedAt: drainTestTime(t, tc.otherCreated), Services: drainTestSet(tc.otherServices)})
-	}
-	gotConfirmations, gotDrain := decideDrain(tc.selfID, deps, tc.prior)
+	gotConfirmations, gotDrain := decideDrain(tc.selfName, tc.want, drainTestDeps(t, tc.deps), tc.prior)
 	if gotConfirmations != tc.wantConfirmations || gotDrain != tc.wantDrain {
 		t.Errorf("decideDrain() = (%d, %v), want (%d, %v)",
 			gotConfirmations, gotDrain, tc.wantConfirmations, tc.wantDrain)
@@ -91,28 +117,84 @@ func drainTestSet(names []string) map[string]bool {
 
 func TestDecideDrain_Suite(t *testing.T) {
 	t.Parallel()
-	self := "dep-self"
 	older := "2026-01-01T00:00:00Z"
 	newer := "2026-06-01T00:00:00Z"
+	full := drainTestFullSuletta
+	self := drainDepSpec{id: "dep-self", host: drainTestSelf, created: older, services: full}
+	selfNewest := drainDepSpec{id: "dep-self", host: drainTestSelf, created: newer, services: full}
+	prev := drainDepSpec{id: "dep-prev", host: drainTestPrev, created: older, services: full}
+	next := drainDepSpec{id: "dep-next", host: drainTestNext, created: newer, services: full}
 	tests := []decideDrainCase{
-		{name: "single deployment is healthy primary", selfID: self, selfCreated: older, selfServices: drainTestFullSuletta, prior: 0, wantConfirmations: 0, wantDrain: false},
-		{name: "newer superseding deployment first sighting", selfID: self, selfCreated: older, selfServices: drainTestFullSuletta, otherID: "dep-new", otherCreated: newer, otherServices: drainTestFullSuletta, prior: 0, wantConfirmations: 1, wantDrain: false},
-		{name: "two consecutive newer polls latch", selfID: self, selfCreated: older, selfServices: drainTestFullSuletta, otherID: "dep-new", otherCreated: newer, otherServices: drainTestFullSuletta, prior: 1, wantConfirmations: 2, wantDrain: true},
-		{name: "third consecutive poll stays latched", selfID: self, selfCreated: older, selfServices: drainTestFullSuletta, otherID: "dep-new", otherCreated: newer, otherServices: drainTestFullSuletta, prior: 2, wantConfirmations: 3, wantDrain: true},
-		{name: "older deployment never drains", selfID: "dep-new", selfCreated: newer, selfServices: drainTestFullSuletta, otherID: self, otherCreated: older, otherServices: drainTestFullSuletta, prior: 0, wantConfirmations: 0, wantDrain: false},
-		{name: "missing self resets", selfID: "dep-ghost", omitSelf: true, otherID: self, otherCreated: older, otherServices: drainTestFullSuletta, prior: 1, wantConfirmations: 0, wantDrain: false},
-		{name: "empty self resets", selfID: "", otherID: self, otherCreated: older, otherServices: drainTestFullSuletta, prior: 1, wantConfirmations: 0, wantDrain: false},
-		{name: "partial newer set resets", selfID: self, selfCreated: older, selfServices: drainTestFullSuletta, otherID: "dep-new", otherCreated: newer, otherServices: drainTestFullSuletta[:5], prior: 1, wantConfirmations: 0, wantDrain: false},
-		{name: "empty listing resets", selfID: self, omitSelf: true, prior: 1, wantConfirmations: 0, wantDrain: false},
-		{name: "self with partial set is inconclusive", selfID: self, selfCreated: older, selfServices: drainTestFullSuletta[:5], otherID: "dep-new", otherCreated: newer, otherServices: drainTestFullSuletta, prior: 1, wantConfirmations: 0, wantDrain: false},
-		{name: "zero timestamp resets", selfID: self, selfCreated: older, selfServices: drainTestFullSuletta, otherID: "dep-new", otherServices: drainTestFullSuletta, prior: 1, wantConfirmations: 0, wantDrain: false},
-		{name: "unrelated deployments skipped", selfID: self, selfCreated: older, selfServices: drainTestFullSuletta, otherID: "dep-other", otherCreated: newer, otherServices: []string{"OtherStack-svc"}, wantConfirmations: 0, wantDrain: false},
+		{name: "single deployment is healthy primary", selfName: drainTestSelf, want: full, deps: []drainDepSpec{self}, wantConfirmations: 0, wantDrain: false},
+		{name: "regression: self not registered yet, only previous version listed", selfName: drainTestSelf, want: full, deps: []drainDepSpec{prev}, prior: 1, wantConfirmations: 0, wantDrain: false},
+		{name: "regression: self registered as newest never drains", selfName: drainTestSelf, want: full, deps: []drainDepSpec{prev, selfNewest}, prior: 1, wantConfirmations: 0, wantDrain: false},
+		{name: "genuine supersede first sighting", selfName: drainTestSelf, want: full, deps: []drainDepSpec{self, next}, prior: 0, wantConfirmations: 1, wantDrain: false},
+		{name: "genuine supersede second poll latches", selfName: drainTestSelf, want: full, deps: []drainDepSpec{self, next}, prior: 1, wantConfirmations: 2, wantDrain: true},
+		{name: "third consecutive poll stays latched", selfName: drainTestSelf, want: full, deps: []drainDepSpec{self, next}, prior: 2, wantConfirmations: 3, wantDrain: true},
+		{name: "self name prefix is not an exact match", selfName: "eri-suletta-restate", want: full, deps: []drainDepSpec{self, next}, prior: 1, wantConfirmations: 0, wantDrain: false},
+		{name: "deployment without uri host is never self", selfName: drainTestSelf, want: full, deps: []drainDepSpec{{id: "dep-self", created: older, services: full}, next}, prior: 1, wantConfirmations: 0, wantDrain: false},
+		{name: "empty self name resets", selfName: "", want: full, deps: []drainDepSpec{self, next}, prior: 1, wantConfirmations: 0, wantDrain: false},
+		{name: "empty wanted set resets", selfName: drainTestSelf, deps: []drainDepSpec{self, next}, prior: 1, wantConfirmations: 0, wantDrain: false},
+		{name: "partial newer set resets", selfName: drainTestSelf, want: full, deps: []drainDepSpec{self, {id: "dep-next", host: drainTestNext, created: newer, services: full[:5]}}, prior: 1, wantConfirmations: 0, wantDrain: false},
+		{name: "empty listing resets", selfName: drainTestSelf, want: full, prior: 1, wantConfirmations: 0, wantDrain: false},
+		{name: "self with partial set is inconclusive", selfName: drainTestSelf, want: full, deps: []drainDepSpec{{id: "dep-self", host: drainTestSelf, created: older, services: full[:5]}, next}, prior: 1, wantConfirmations: 0, wantDrain: false},
+		{name: "zero self timestamp resets", selfName: drainTestSelf, want: full, deps: []drainDepSpec{{id: "dep-self", host: drainTestSelf, services: full}, next}, prior: 1, wantConfirmations: 0, wantDrain: false},
+		{name: "zero other timestamp resets", selfName: drainTestSelf, want: full, deps: []drainDepSpec{self, {id: "dep-next", host: drainTestNext, services: full}}, prior: 1, wantConfirmations: 0, wantDrain: false},
+		{name: "unrelated deployments skipped", selfName: drainTestSelf, want: full, deps: []drainDepSpec{self, {id: "dep-other", host: "other-svc", created: newer, services: []string{"OtherStack-svc"}}}, wantConfirmations: 0, wantDrain: false},
+		{name: "aerial default agent uses unscoped names", selfName: "eri-restate-1a2b3c4d5e", want: drainTestFullAerial, deps: []drainDepSpec{{id: "dep-a", host: "eri-restate-1a2b3c4d5e", created: older, services: drainTestFullAerial}, {id: "dep-b", host: "eri-restate-6f7a8b9c0d", created: newer, services: drainTestFullAerial}}, prior: 1, wantConfirmations: 2, wantDrain: true},
+		{name: "aerial default agent ignores newer suletta stack", selfName: "eri-restate-1a2b3c4d5e", want: drainTestFullAerial, deps: []drainDepSpec{{id: "dep-a", host: "eri-restate-1a2b3c4d5e", created: older, services: drainTestFullAerial}, next}, prior: 1, wantConfirmations: 0, wantDrain: false},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			runDecideDrainCase(t, tc)
+		})
+	}
+}
+
+func TestDrainSelfName_Suite(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name     string
+		hostname string
+		want     string
+	}{
+		{name: "pod name strips suffix", hostname: "eri-suletta-restate-45977f4fb5-24mgs", want: "eri-suletta-restate-45977f4fb5"},
+		{name: "surrounding space trimmed", hostname: "  eri-restate-1a2b3c4d5e-abcde\n", want: "eri-restate-1a2b3c4d5e"},
+		{name: "single dash", hostname: "pod-x", want: "pod"},
+		{name: "no dash", hostname: "localhost", want: ""},
+		{name: "trailing dash", hostname: "eri-restate-", want: ""},
+		{name: "leading dash only", hostname: "-abc", want: ""},
+		{name: "empty", hostname: "", want: ""},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got := drainSelfName(tc.hostname); got != tc.want {
+				t.Errorf("drainSelfName(%q) = %q, want %q", tc.hostname, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestDrainServiceNames_Suite(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name      string
+		agentName string
+		want      string
+	}{
+		{name: "suletta scoped", agentName: "suletta", want: "ThreadSession-suletta,DispatchSession-suletta,VoiceSession-suletta,SessionManager-suletta,TurnRunner-suletta,LLM-suletta"},
+		{name: "aerial default unscoped", agentName: "aerial", want: "ThreadSession,DispatchSession,VoiceSession,SessionManager,TurnRunner,LLM"},
+		{name: "empty agent unscoped", agentName: "", want: "ThreadSession,DispatchSession,VoiceSession,SessionManager,TurnRunner,LLM"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got := strings.Join(drainServiceNames(tc.agentName), ","); got != tc.want {
+				t.Errorf("drainServiceNames(%q) = %q, want %q", tc.agentName, got, tc.want)
+			}
 		})
 	}
 }
@@ -156,14 +238,14 @@ func runDrainStepCase(t *testing.T, tc drainStepCase) {
 	}))
 	defer srv.Close()
 
-	state := newDrainPollState()
+	state := newDrainPollState(drainTestSelf, drainTestFullSuletta)
 	fakes := []*fakeDrainTarget{{}, {}}
 	targets := []drainTarget{fakes[0], fakes[1]}
 	for range tc.steps {
 		state.step(context.Background(), srv.URL, 5*time.Second, targets)
 	}
 	if state.latched != tc.wantLatched {
-		t.Errorf("latched = %v, want %v (confirmations=%d self=%q)", state.latched, tc.wantLatched, state.confirmations, state.selfID)
+		t.Errorf("latched = %v, want %v (confirmations=%d self=%q)", state.latched, tc.wantLatched, state.confirmations, state.selfName)
 	}
 	for i, fake := range fakes {
 		if got := int(fake.calls.Load()); got != tc.wantDrains {
@@ -176,23 +258,29 @@ func TestDrainPollState_Step_Suite(t *testing.T) {
 	t.Parallel()
 	older := "2026-01-01T00:00:00Z"
 	newer := "2026-06-01T00:00:00Z"
-	selfOnly := drainTestPayload(drainTestDeployment("dep-self", older, drainTestFullSuletta))
+	selfOnly := drainTestPayload(drainTestDeployment(drainTestSelf, older, drainTestFullSuletta))
+	prevOnly := drainTestPayload(drainTestDeployment(drainTestPrev, older, drainTestFullSuletta))
+	prevThenSelf := drainTestPayload(
+		drainTestDeployment(drainTestPrev, older, drainTestFullSuletta),
+		drainTestDeployment(drainTestSelf, newer, drainTestFullSuletta),
+	)
 	both := drainTestPayload(
-		drainTestDeployment("dep-self", older, drainTestFullSuletta),
-		drainTestDeployment("dep-new", newer, drainTestFullSuletta),
+		drainTestDeployment(drainTestSelf, older, drainTestFullSuletta),
+		drainTestDeployment(drainTestNext, newer, drainTestFullSuletta),
 	)
 	partial := drainTestPayload(
-		drainTestDeployment("dep-self", older, drainTestFullSuletta),
-		drainTestDeployment("dep-new", newer, drainTestFullSuletta[:5]),
+		drainTestDeployment(drainTestSelf, older, drainTestFullSuletta),
+		drainTestDeployment(drainTestNext, newer, drainTestFullSuletta[:5]),
 	)
 	tests := []drainStepCase{
 		{name: "healthy primary never latches", payloads: []string{selfOnly, selfOnly}, steps: 2, wantLatched: false, wantDrains: 0},
-		{name: "latches after two consecutive newer polls", payloads: []string{selfOnly, both, both}, steps: 3, wantLatched: true, wantDrains: 1},
+		{name: "rollout race: self registers after first poll never latches", payloads: []string{prevOnly, prevThenSelf, prevThenSelf, prevThenSelf}, steps: 4, wantLatched: false, wantDrains: 0},
+		{name: "latches after two consecutive newer polls", payloads: []string{both, both}, steps: 2, wantLatched: true, wantDrains: 1},
 		{name: "single newer sighting does not latch", payloads: []string{selfOnly, both}, steps: 2, wantLatched: false, wantDrains: 0},
-		{name: "error resets confirmations", payloads: []string{selfOnly, both, "ERR500", both, both}, steps: 5, wantLatched: true, wantDrains: 1},
+		{name: "error resets confirmations", payloads: []string{both, "ERR500", both, both}, steps: 4, wantLatched: true, wantDrains: 1},
 		{name: "partial set never latches", payloads: []string{selfOnly, partial, partial, partial}, steps: 4, wantLatched: false, wantDrains: 0},
 		{name: "unreachable admin never latches", payloads: []string{"ERR500", "ERR500"}, steps: 2, wantLatched: false, wantDrains: 0},
-		{name: "empty listing leaves baseline unresolved", payloads: []string{`{"deployments":[]}`}, steps: 1, wantLatched: false, wantDrains: 0},
+		{name: "empty listing never latches", payloads: []string{`{"deployments":[]}`}, steps: 1, wantLatched: false, wantDrains: 0},
 	}
 
 	for _, tc := range tests {
@@ -204,10 +292,11 @@ func TestDrainPollState_Step_Suite(t *testing.T) {
 }
 
 type parseDrainCase struct {
-	name    string
-	body    string
-	wantIDs string
-	wantErr bool
+	name       string
+	body       string
+	wantIDs    string
+	wantLabels string
+	wantErr    bool
 }
 
 func runParseDrainCase(t *testing.T, tc parseDrainCase) {
@@ -222,12 +311,16 @@ func runParseDrainCase(t *testing.T, tc parseDrainCase) {
 	if err != nil {
 		t.Fatalf("unexpected decode error: %v", err)
 	}
-	var ids []string
+	var ids, labels []string
 	for _, d := range deps {
 		ids = append(ids, d.ID)
+		labels = append(labels, d.HostLabel)
 	}
 	if got := strings.Join(ids, ","); got != tc.wantIDs {
 		t.Errorf("deployment ids = %q, want %q", got, tc.wantIDs)
+	}
+	if got := strings.Join(labels, ","); got != tc.wantLabels {
+		t.Errorf("deployment host labels = %q, want %q", got, tc.wantLabels)
 	}
 }
 
@@ -236,10 +329,14 @@ func TestParseDrainDeployments_Suite(t *testing.T) {
 	older := "2026-01-01T00:00:00Z"
 	newer := "2026-06-01T00:00:00Z"
 	tests := []parseDrainCase{
-		{name: "wrapped shape", body: drainTestPayload(drainTestDeployment("dep-a", older, drainTestFullSuletta), drainTestDeployment("dep-b", newer, drainTestFullSuletta)), wantIDs: "dep-a,dep-b"},
-		{name: "bare array shape", body: `[` + drainTestDeployment("dep-a", older, drainTestFullSuletta) + `]`, wantIDs: "dep-a"},
-		{name: "empty wrapped list", body: `{"deployments":[]}`, wantIDs: ""},
-		{name: "empty bare array", body: `[]`, wantIDs: ""},
+		{name: "wrapped shape", body: drainTestPayload(drainTestDeployment("eri-suletta-restate-aaa", older, drainTestFullSuletta), drainTestDeployment("eri-suletta-restate-bbb", newer, drainTestFullSuletta)), wantIDs: "dep-eri-suletta-restate-aaa,dep-eri-suletta-restate-bbb", wantLabels: "eri-suletta-restate-aaa,eri-suletta-restate-bbb"},
+		{name: "bare array shape", body: `[` + drainTestDeployment("eri-restate-aaa", older, drainTestFullSuletta) + `]`, wantIDs: "dep-eri-restate-aaa", wantLabels: "eri-restate-aaa"},
+		{name: "live uri shape", body: `[{"id":"dp_1","uri":"http://eri-suletta-restate-45977f4fb5.default.svc.cluster.local:9080/","created_at":"` + older + `","services":[]}]`, wantIDs: "dp_1", wantLabels: "eri-suletta-restate-45977f4fb5"},
+		{name: "bare host uri", body: `[{"id":"dp_1","uri":"http://eri-restate:9080","created_at":"` + older + `","services":[]}]`, wantIDs: "dp_1", wantLabels: "eri-restate"},
+		{name: "missing uri has empty label", body: `[{"id":"dp_1","created_at":"` + older + `","services":[]}]`, wantIDs: "dp_1", wantLabels: ""},
+		{name: "unparseable uri has empty label", body: `[{"id":"dp_1","uri":"http://[::1","created_at":"` + older + `","services":[]}]`, wantIDs: "dp_1", wantLabels: ""},
+		{name: "empty wrapped list", body: `{"deployments":[]}`, wantIDs: "", wantLabels: ""},
+		{name: "empty bare array", body: `[]`, wantIDs: "", wantLabels: ""},
 		{name: "invalid json errors", body: `not json`, wantErr: true},
 		{name: "missing id errors", body: drainTestPayload(`{"created_at":"` + older + `","services":[]}`), wantErr: true},
 		{name: "empty object errors", body: `{}`, wantErr: true},
@@ -250,50 +347,6 @@ func TestParseDrainDeployments_Suite(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			runParseDrainCase(t, tc)
-		})
-	}
-}
-
-type drainDepSpec struct {
-	id       string
-	created  string
-	services []string
-}
-
-type resolveBaselineCase struct {
-	name string
-	deps []drainDepSpec
-	want string
-}
-
-func runResolveBaselineCase(t *testing.T, tc resolveBaselineCase) {
-	t.Helper()
-	deps := make([]deploymentInfo, 0, len(tc.deps))
-	for _, spec := range tc.deps {
-		deps = append(deps, deploymentInfo{ID: spec.id, CreatedAt: drainTestTime(t, spec.created), Services: drainTestSet(spec.services)})
-	}
-	if got := resolveDrainBaseline(deps); got != tc.want {
-		t.Errorf("resolveDrainBaseline() = %q, want %q", got, tc.want)
-	}
-}
-
-func TestResolveDrainBaseline_Suite(t *testing.T) {
-	t.Parallel()
-	older := "2026-01-01T00:00:00Z"
-	newer := "2026-06-01T00:00:00Z"
-	tests := []resolveBaselineCase{
-		{name: "empty listing has no baseline", want: ""},
-		{name: "single full set is baseline", deps: []drainDepSpec{{id: "dep-a", created: older, services: drainTestFullSuletta}}, want: "dep-a"},
-		{name: "newest full set wins", deps: []drainDepSpec{{id: "dep-a", created: older, services: drainTestFullSuletta}, {id: "dep-b", created: newer, services: drainTestFullSuletta}}, want: "dep-b"},
-		{name: "zero timestamp skipped", deps: []drainDepSpec{{id: "dep-a", created: "", services: drainTestFullSuletta}, {id: "dep-b", created: older, services: drainTestFullSuletta}}, want: "dep-b"},
-		{name: "partial set skipped", deps: []drainDepSpec{{id: "dep-a", created: newer, services: drainTestFullSuletta[:5]}, {id: "dep-b", created: older, services: drainTestFullSuletta}}, want: "dep-b"},
-		{name: "no full set has no baseline", deps: []drainDepSpec{{id: "dep-a", created: newer, services: drainTestFullSuletta[:5]}}, want: ""},
-	}
-
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			runResolveBaselineCase(t, tc)
 		})
 	}
 }
@@ -362,13 +415,13 @@ func (f *signalDrainTarget) BeginDrain() {
 
 func TestDrainPollState_Step_Guards(t *testing.T) {
 	t.Parallel()
-	empty := newDrainPollState()
+	empty := newDrainPollState(drainTestSelf, drainTestFullSuletta)
 	empty.step(context.Background(), "   ", time.Second, nil)
-	if empty.selfID != "" || empty.confirmations != 0 || empty.latched {
+	if empty.confirmations != 0 || empty.latched {
 		t.Errorf("empty admin URL must be a no-op, got %+v", empty)
 	}
 
-	latched := newDrainPollState()
+	latched := newDrainPollState(drainTestSelf, drainTestFullSuletta)
 	latched.latched = true
 	fake := newSignalDrainTarget()
 	latched.step(context.Background(), "http://127.0.0.1:1", time.Second, []drainTarget{fake})
@@ -401,7 +454,7 @@ func runDrainPollerRunCase(t *testing.T, tc drainPollerRunCase) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	fake := newSignalDrainTarget()
-	startDrainPollerWithInterval(ctx, appCfg, []drainTarget{fake}, tc.interval, tc.timeout)
+	startDrainPollerWithInterval(ctx, appCfg, drainTestSelf, drainTestFullSuletta, []drainTarget{fake}, tc.interval, tc.timeout)
 
 	select {
 	case <-fake.done:
@@ -417,10 +470,10 @@ func TestStartDrainPoller_Run_Suite(t *testing.T) {
 	t.Parallel()
 	older := "2026-01-01T00:00:00Z"
 	newer := "2026-06-01T00:00:00Z"
-	selfOnly := drainTestPayload(drainTestDeployment("dep-self", older, drainTestFullSuletta))
+	selfOnly := drainTestPayload(drainTestDeployment(drainTestSelf, older, drainTestFullSuletta))
 	superseded := drainTestPayload(
-		drainTestDeployment("dep-self", older, drainTestFullSuletta),
-		drainTestDeployment("dep-new", newer, drainTestFullSuletta),
+		drainTestDeployment(drainTestSelf, older, drainTestFullSuletta),
+		drainTestDeployment(drainTestNext, newer, drainTestFullSuletta),
 	)
 	tests := []drainPollerRunCase{
 		{name: "superseded primary latches drain", bodies: []string{selfOnly, superseded}, interval: 10 * time.Millisecond, timeout: 2 * time.Second},

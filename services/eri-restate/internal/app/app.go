@@ -454,10 +454,10 @@ func RunApp(ctx context.Context, cfg Config, opts ...AppOption) error {
 	workerPool.Start()
 	defer workerPool.Stop()
 
-	// Edge-triggered drain: when a newer eri-suletta-restate deployment becomes primary,
-	// the superseded pod refuses new leases and evicts idle daemons so the new primary
-	// resumes the same sessions. Polls outside Restate handlers; never drains on
-	// inconclusive polls.
+	// Edge-triggered drain: when a newer deployment of this agent's eri-restate becomes
+	// primary, the superseded pod refuses new leases and evicts idle daemons so the new
+	// primary resumes the same sessions. Self is matched exactly by pod hostname; polls
+	// run outside Restate handlers and never drain on inconclusive polls.
 	var drainTargets []drainTarget
 	for _, p := range pools.discordPools {
 		if dt, ok := p.(drainTarget); ok {
@@ -465,7 +465,7 @@ func RunApp(ctx context.Context, cfg Config, opts ...AppOption) error {
 		}
 	}
 	drainTargets = append(drainTargets, pools.ephemeralPool, pools.voicePool)
-	startDrainPoller(ctx, appCfg, drainTargets)
+	startDrainPoller(ctx, appCfg, cfg.AgentName, drainTargets)
 
 	reloadTrigger := bootstrap.NewReloadTrigger(ctx, bootstrap.CreateReloadConfigFunc(appCfg,
 		bootstrap.WithDiscordSession(dgSession),
