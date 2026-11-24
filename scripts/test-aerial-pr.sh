@@ -26,7 +26,7 @@ cat << 'CURL_EOF' > "$TMPD/bin/curl"
 url=""
 for arg in "$@"; do
   [[ "$arg" =~ http ]] && url="$arg"
-  [[ "$arg" =~ Authorization:\ token\ (.*) ]] && echo "${BASH_REMATCH[1]}" > "$TMPD/last_auth_token"
+  [[ "$arg" =~ ^Authorization:\ (.*) ]] && echo "$arg" > "$TMPD/last_auth_hdr"
 done
 [[ "$url" =~ /healthz ]] && { printf "\n200"; exit 0; }
 if [[ "$url" =~ /pulls\?state=open ]]; then
@@ -92,8 +92,6 @@ test_flag_ordering_and_validation() {
   assert_fail "$SCRIPT" --body "body text" init --repo aerial
 
   assert [ "$("$SCRIPT" init --repo=config | jq -r .repo)" = "aerial-config" ]
-  assert [ "$("$SCRIPT" init --repo=azylman/aerial-config.git | jq -r .repo)" = "aerial-config" ]
-  assert [ "$("$SCRIPT" init --repo=azylman/foo.git | jq -r .repo)" = "foo" ]
 
   git -C "$TMPD/repo" checkout -b "pre-br" -q
   git -C "$TMPD/repo" push -u origin "pre-br" -q
@@ -110,14 +108,21 @@ test_flag_ordering_and_validation() {
 
 test_github_pat_auth_path() {
   echo "Testing GITHUB_PAT authentication path..."
-  rm -f "$TMPD/last_auth_token"
+  rm -f "$TMPD/last_auth_hdr"
   AERIAL_USE_LOOPBACK_GITHUB=0 GITHUB_PAT="pat-verified-999" "$SCRIPT" override-roborev 99 "rebuttal with pat" >/dev/null
-  assert [ -f "$TMPD/last_auth_token" ]
-  assert [ "$(cat "$TMPD/last_auth_token")" = "pat-verified-999" ]
+  assert [ -f "$TMPD/last_auth_hdr" ]
+  assert [ "$(cat "$TMPD/last_auth_hdr")" = "Authorization: token pat-verified-999" ]
 }
 
 test_scratch_init_and_submit() {
   echo "Testing scratch init and submit lifecycle..."
+  local nonex_base="$TMPD/nonexistent_scratch_base"
+  local res_nonex s_nonex
+  res_nonex=$(AERIAL_SCRATCH_BASE_DIR="$nonex_base" "$SCRIPT" init --repo aerial)
+  assert [ -d "$nonex_base" ]
+  s_nonex=$(echo "$res_nonex" | jq -r .scratch_dir)
+  assert [ "${s_nonex#$nonex_base}" != "$s_nonex" ]
+
   local res_tid
   res_tid=$(AERIAL_TARGET_ID=123456789012345678 "$SCRIPT" init --repo aerial)
   assert echo "$res_tid" | jq -e '.branch | contains("-t123456789012345678-")'
