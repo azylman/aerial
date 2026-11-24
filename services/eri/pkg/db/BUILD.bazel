@@ -1,0 +1,55 @@
+load("@rules_go//go:def.bzl", "go_library")
+load("//build:go_test.bzl", "go_test")
+
+exports_files(
+    ["schema.sql"],
+    visibility = ["//visibility:public"],
+)
+
+go_library(
+    name = "db",
+    srcs = [
+        "db.go",
+        "dispatches.go",
+        "interfaces.go",
+        "messages.go",
+        "records.go",
+        "sessions.go",
+        "sql_store.go",
+        "tasks.go",
+        "transcripts.go",
+    ],
+    importpath = "github.com/azylman/aerial/services/eri/pkg/db",
+    visibility = ["//visibility:public"],
+    deps = [
+        "//pkg/httpkit",
+        "//pkg/pgutil",
+        "//pkg/sanitizer",
+        "//services/eri/pkg/config",
+        "//services/eri/pkg/metrics",
+        "@com_github_jackc_pgx_v5//stdlib:go_default_library",
+    ],
+)
+
+go_test(
+    name = "db_test",
+    srcs = [
+        "db_test.go",
+        "dispatches_test.go",
+        "goleak_test.go",
+        "messages_structured_test.go",
+        "records_test.go",
+        "sql_store_test.go",
+        "store_fixture_test.go",
+        "store_test.go",
+        "transcript_stacks_test.go",
+        "transcripts_test.go",
+    ],
+    embed = [":db"],
+    deps = [
+        "//pkg/pgtest",
+        "//pkg/pgutil",
+        "//services/eri/pkg/config",
+        "@org_uber_go_goleak//:go_default_library",
+    ],
+)

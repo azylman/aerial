@@ -15,6 +15,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -31,21 +32,33 @@ func resolveRestateServerBin() string {
 		return *restateServerBin
 	}
 	if env := os.Getenv("RESTATE_SERVER_BIN"); env != "" {
-		return env
+		if filepath.IsAbs(env) {
+			if fi, err := os.Stat(env); err == nil && !fi.IsDir() && (fi.Mode()&0o111 != 0) {
+				return env
+			}
+		}
+		for _, root := range []string{"", os.Getenv("RUNFILES_DIR"), os.Getenv("TEST_SRCDIR")} {
+			cand := env
+			if root != "" {
+				cand = filepath.Join(root, env)
+			}
+			if fi, err := os.Stat(cand); err == nil && !fi.IsDir() && (fi.Mode()&0o111 != 0) {
+				return cand
+			}
+		}
 	}
+	arch := runtime.GOARCH
+	repo := "restate_server_linux_" + arch
 	for _, root := range []string{os.Getenv("RUNFILES_DIR"), os.Getenv("TEST_SRCDIR")} {
 		if root == "" {
 			continue
 		}
 		for _, cand := range []string{
-			filepath.Join(root, "restate_server_linux_amd64+/restate-server"),
-			filepath.Join(root, "restate_server_linux_amd64/restate-server"),
-			filepath.Join(root, "restate_server_linux_arm64+/restate-server"),
-			filepath.Join(root, "restate_server_linux_arm64/restate-server"),
-			filepath.Join(root, "_main/external/restate_server_linux_amd64+/restate-server"),
-			filepath.Join(root, "_main/external/restate_server_linux_arm64+/restate-server"),
-			filepath.Join(root, "+http_archive+restate_server_linux_amd64/restate-server"),
-			filepath.Join(root, "+http_archive+restate_server_linux_arm64/restate-server"),
+			filepath.Join(root, repo+"+/restate-server"),
+			filepath.Join(root, repo+"/restate-server"),
+			filepath.Join(root, "_main/external/"+repo+"+/restate-server"),
+			filepath.Join(root, "_main/external/"+repo+"/restate-server"),
+			filepath.Join(root, "+http_archive+"+repo+"/restate-server"),
 		} {
 			if fi, err := os.Stat(cand); err == nil && !fi.IsDir() && (fi.Mode()&0o111 != 0) {
 				return cand

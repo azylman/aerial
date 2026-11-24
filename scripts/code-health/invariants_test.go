@@ -252,8 +252,20 @@ func TestCheckDependabotManifests(t *testing.T) {
 			name: "covered",
 			dependabot: `version: 2
 updates:
-  - directory: "/"
-  - directory: "/services/console/ui"
+  - package-ecosystem: "gomod"
+    directory: "/"
+    groups:
+      v:
+        applies-to: version-updates
+      s:
+        applies-to: security-updates
+  - package-ecosystem: "npm"
+    directory: "/services/console/ui"
+    groups:
+      v:
+        applies-to: version-updates
+      s:
+        applies-to: security-updates
 `,
 			manifests:   []string{"go.mod", "services/console/ui/package.json"},
 			expectCount: 0,
@@ -262,16 +274,32 @@ updates:
 			name: "missing_manifest_dir",
 			dependabot: `version: 2
 updates:
-  - directory: "/"
+  - package-ecosystem: "gomod"
+    directory: "/"
+    groups:
+      v:
+        applies-to: version-updates
+      s:
+        applies-to: security-updates
 `,
 			manifests:   []string{"go.mod", "services/console/ui/package.json"},
+			expectCount: 1,
+		},
+		{
+			name: "grouping_mismatch",
+			dependabot: `version: 2
+updates:
+  - package-ecosystem: "gomod"
+    directory: "/"
+`,
+			manifests:   []string{"go.mod"},
 			expectCount: 1,
 		},
 		{
 			name:        "dependabot_file_missing",
 			dependabot:  "",
 			manifests:   []string{"go.mod"},
-			expectCount: 0,
+			expectCount: 1,
 		},
 	}
 

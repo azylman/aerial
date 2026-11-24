@@ -88,32 +88,84 @@ func checkNoMainInTests(absRoot string, testTargets []string) []string {
 	return violations
 }
 
+func discoverManifestDirs(absRoot string) (map[string]bool, error) {
+	discoveredDirs := make(map[string]bool)
+	err := filepath.WalkDir(absRoot, func(path string, d os.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		if path == absRoot {
+			return nil
+		}
+		rel, relErr := filepath.Rel(absRoot, path)
+		if relErr != nil {
+			return relErr
+		}
+		parts := strings.Split(filepath.ToSlash(rel), "/")
+		if len(parts) > 4 {
+			if d.IsDir() {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		name := d.Name()
+		if d.IsDir() {
+			if strings.HasPrefix(name, ".") || name == "vendor" || name == "node_modules" || name == "testdata" {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if name == "go.mod" || name == "Cargo.toml" || name == "pyproject.toml" || name == "package.json" {
+			dir := filepath.Dir(rel)
+			targetDir := "/"
+			if dir != "." {
+				targetDir = "/" + filepath.ToSlash(dir)
+			}
+			discoveredDirs[targetDir] = true
+		}
+		return nil
+	})
+	return discoveredDirs, err
+}
+
 func checkDependabotCoverage(absRoot string) []string {
+	discoveredDirs, err := discoverManifestDirs(absRoot)
+	if err != nil {
+		return []string{err.Error()}
+	}
+	if len(discoveredDirs) == 0 {
+		return nil
+	}
+
 	depPath := filepath.Join(absRoot, ".github", "dependabot.yml")
 	depBytes, err := os.ReadFile(depPath)
 	if os.IsNotExist(err) {
-		return nil
+		return []string{".github/dependabot.yml: file not found"}
 	}
 	if err != nil {
 		return []string{err.Error()}
 	}
 	depContent := string(depBytes)
-	candidateManifests := []string{"go.mod", "services/console/ui/package.json"}
+
 	var violations []string
-	for _, m := range candidateManifests {
-		if _, statErr := os.Stat(filepath.Join(absRoot, m)); statErr != nil {
-			continue
-		}
-		dir := filepath.Dir(m)
-		targetDir := "/"
-		if dir != "." {
-			targetDir = "/" + filepath.ToSlash(dir)
-		}
-		quotedDouble := "\"" + targetDir + "\""
-		quotedSingle := "'" + targetDir + "'"
-		if !strings.Contains(depContent, quotedDouble) && !strings.Contains(depContent, quotedSingle) && !strings.Contains(depContent, targetDir) {
+	for targetDir := range discoveredDirs {
+		qDouble := "\"" + targetDir + "\""
+		qSingle := "'" + targetDir + "'"
+		dirMatch := "directory: " + targetDir
+		if !strings.Contains(depContent, qDouble) && !strings.Contains(depContent, qSingle) && !strings.Contains(depContent, dirMatch) {
 			violations = append(violations, ".github/dependabot.yml: missing package manifest coverage for directory "+targetDir)
 		}
 	}
+
+	ecoCount := strings.Count(depContent, "package-ecosystem:")
+	verCount := strings.Count(depContent, "applies-to: version-updates")
+	secCount := strings.Count(depContent, "applies-to: security-updates")
+
+	if ecoCount == 0 {
+		violations = append(violations, ".github/dependabot.yml: no package-ecosystem entries defined")
+	} else if ecoCount != verCount || ecoCount != secCount {
+		violations = append(violations, fmt.Sprintf(".github/dependabot.yml: grouping mismatch (package-ecosystems=%d, version-updates=%d, security-updates=%d)", ecoCount, verCount, secCount))
+	}
+
 	return violations
 }

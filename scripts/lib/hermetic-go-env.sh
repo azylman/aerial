@@ -51,8 +51,4 @@ ensure_bazel_build_files() {
     else
         (cd "$root" && bazel run //:gazelle) || return $?
     fi
-    db_build="$root/services/eri/pkg/db/BUILD.bazel"
-    if [ -f "$db_build" ] && ! grep -q 'schema.sql' "$db_build" 2>/dev/null; then
-        printf '\nexports_files(["schema.sql"], visibility = ["//visibility:public"])\n' >> "$db_build"
-    fi
 }
