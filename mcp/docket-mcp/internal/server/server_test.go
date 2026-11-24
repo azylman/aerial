@@ -27,12 +27,13 @@ import (
 )
 
 type memoryTaskStore struct {
-	mu          sync.Mutex
-	resolutions map[int64]string
-	searchHits  []config.ScoredTaskSummary
-	searchErr   error
-	fetchErr    error
-	updateErr   error
+	mu                       sync.Mutex
+	resolutions              map[int64]string
+	searchHits               []config.ScoredTaskSummary
+	searchErr                error
+	fetchErr                 error
+	updateErr                error
+	embeddingResolutionCalls int
 }
 
 func newMemoryTaskStore() *memoryTaskStore {
@@ -43,6 +44,7 @@ func newMemoryTaskStore() *memoryTaskStore {
 		searchHits: []config.ScoredTaskSummary{
 			{ID: 1, Title: "Top Task 1", Status: "open", Score: 0.95},
 			{ID: 2, Title: "Subtask 2", Status: "open", Score: 0.85},
+			{ID: 1000349, Title: "Million Task 317", Status: "open", Score: 0.75},
 		},
 	}
 }
@@ -59,6 +61,7 @@ func (m *memoryTaskStore) UpdateTaskEmbedding(ctx context.Context, taskID int64,
 func (m *memoryTaskStore) UpdateTaskEmbeddingAndResolution(ctx context.Context, taskID int64, embedding []float32, resolution string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	m.embeddingResolutionCalls++
 	if m.updateErr != nil {
 		return m.updateErr
 	}
@@ -174,9 +177,11 @@ func fixtureTasks() []config.VikunjaTask {
 			ID: 76, Title: "Task 76", Description: "Blocked by 75", Done: false, ProjectID: 1,
 			RelatedTasks: map[string][]config.VikunjaTask{
 				"blocked": rel(75),
-				"related": {{ID: 60, Title: "Foreign Task 60", ProjectID: 2}},
+				"related": {{ID: 60, Index: 1, Title: "Foreign Task 60", ProjectID: 2}},
 			},
 		},
+		{ID: 1000349, Index: 317, Title: "Million Task 317", Description: "Global id drift", Done: false, ProjectID: 1},
+		{ID: 8888, Index: 100, Title: "Index 100 Task", Description: "Has index 100 which matches put task global id", Done: false, ProjectID: 1},
 	}
 }
 
@@ -678,6 +683,27 @@ func TestServer_ToolsExecutionTable(t *testing.T) {
 		{name: "ready includes tasks past first page", toolName: "ready", args: `{}`, wantSubstr: `{"id":75,"title":"High Task 75","status":"open"}`},
 		{name: "ready scoped parent tasks", toolName: "ready", args: `{"parent_id":1}`, wantSubstr: `"id":2`},
 		{name: "list open tasks", toolName: "list", args: `{"status":"open"}`, wantSubstr: `"id":1`},
+		{name: "list exposes per-project index not global id", toolName: "list", args: `{"status":"open"}`, wantSubstr: `{"id":317,"title":"Million Task 317","status":"open"}`},
+		{name: "show resolves per-project index to global task", toolName: "show", args: `{"id":317}`, wantSubstr: `{"id":317,"title":"Million Task 317","status":"open"`},
+		{name: "comment resolves per-project index", toolName: "comment", args: `{"id":317,"text":"on index"}`, wantSubstr: "comment added to task 317"},
+		{name: "search exposes per-project index not global id", toolName: "search", args: `{"query":"million","status":"open","limit":5}`, wantSubstr: `{"id":317,"title":"Million Task 317","status":"open","score":0.75}`},
+		{name: "update resolves per-project index", toolName: "update", args: `{"id":317,"title":"Renamed 317"}`, wantSubstr: `{"id":317,"title":"Renamed 317","status":"open"}`},
+		{name: "link resolves per-project index to global relation", toolName: "link", args: `{"id":4,"target_id":317,"type":"blocks"}`, wantSubstr: "relation blocks between task 4 and 317 created", wantRelations: []rel{{4, 1000349, "blocking"}}},
+		{name: "close resolves per-project index", toolName: "close", args: `{"id":317,"resolution":"completed","reason":"done"}`, wantSubstr: `{"id":317,"title":"Million Task 317","status":"completed"}`},
+		{name: "create blocks resolves per-project index to global relation", toolName: "create", args: `{"title":"Blocks Million","blocks":[317]}`, wantSubstr: `"blocks":[317]`, wantRelations: []rel{{100, 1000349, "blocking"}}},
+		{name: "link remove resolves per-project index", toolName: "link", args: `{"id":4,"target_id":317,"type":"blocks","remove":true}`, wantSubstr: "relation blocks between task 4 and 317 removed"},
+		{name: "comment unknown index fails", toolName: "comment", args: `{"id":999,"text":"x"}`, wantSubstr: "failed to add comment to task 999", wantError: true},
+		{name: "close wont_do resolves per-project index", toolName: "close", args: `{"id":317,"resolution":"wont_do","reason":"drop"}`, wantSubstr: `{"id":317,"title":"Million Task 317","status":"wont_do"}`},
+		{name: "update unknown index fails", toolName: "update", args: `{"id":999,"title":"x"}`, wantSubstr: "failed to fetch task 999", wantError: true},
+		{name: "link foreign task fails", toolName: "link", args: `{"id":4,"target_id":60,"type":"related"}`, wantSubstr: "task 60 not found in project graph", wantError: true},
+		{name: "comment foreign task fails", toolName: "comment", args: `{"id":60,"text":"x"}`, wantSubstr: "task 60 not found in project graph", wantError: true},
+		{name: "create task id collision with existing index does not resolve created id", toolName: "create", args: `{"title":"Created With Collision","blocks":[4]}`, wantSubstr: `"title":"Created With Collision"`, wantRelations: []rel{{100, 4, "blocking"}}},
+		{name: "comment upstream comment failure", toolName: "comment", args: `{"id":5,"text":"x"}`, wantSubstr: "failed to add comment to task 5", wantError: true},
+		{name: "link remove unknown target fails", toolName: "link", args: `{"id":1,"target_id":999,"type":"blocks","remove":true}`, wantSubstr: "failed to remove relation", wantError: true},
+		{name: "link remove unknown source fails", toolName: "link", args: `{"id":999,"target_id":1,"type":"blocks","remove":true}`, wantSubstr: "failed to remove relation", wantError: true},
+		{name: "link create unknown target fails", toolName: "link", args: `{"id":1,"target_id":999,"type":"related"}`, wantSubstr: "failed to create relation", wantError: true},
+		{name: "link create unknown source fails", toolName: "link", args: `{"id":999,"target_id":1,"type":"related"}`, wantSubstr: "failed to create relation", wantError: true},
+		{name: "close completed with comment failure still closes", toolName: "close", args: `{"id":5,"resolution":"completed","reason":"again"}`, wantSubstr: `{"id":5,"title":"Completed Task 5","status":"completed"}`},
 		{name: "list all tasks", toolName: "list", args: `{"status":"all"}`, wantSubstr: `"id":5`},
 		{name: "list includes tasks past first page", toolName: "list", args: `{"status":"open"}`, wantSubstr: `{"id":76,"title":"Task 76","status":"open","blocked_by":[75]}`},
 		{name: "list scoped by parent", toolName: "list", args: `{"status":"open","parent_id":1}`, wantSubstr: `"id":2`},
@@ -738,10 +764,10 @@ func TestServer_ToolsExecutionTable(t *testing.T) {
 		{name: "ready upstream failure", toolName: "ready", args: `{}`, wantSubstr: "failed to get default project: vikunja API returned status 500", wantError: true, vikunjaDown: true},
 		{name: "list upstream failure", toolName: "list", args: `{}`, wantSubstr: "failed to get default project: vikunja API returned status 500", wantError: true, vikunjaDown: true},
 		{name: "search store failure", toolName: "search", args: `{"query":"error test"}`, wantSubstr: "search db failed", wantError: true, vikunjaDown: true},
-		{name: "show upstream failure", toolName: "show", args: `{"id":1}`, wantSubstr: "failed to fetch task 1: vikunja API returned status 500", wantError: true, vikunjaDown: true},
+		{name: "show upstream failure", toolName: "show", args: `{"id":1}`, wantSubstr: "failed to get default project: vikunja API returned status 500", wantError: true, vikunjaDown: true},
 		{name: "create upstream failure", toolName: "create", args: `{"title":"Task"}`, wantSubstr: "failed to get default project: vikunja API returned status 500", wantError: true, vikunjaDown: true},
-		{name: "update upstream failure", toolName: "update", args: `{"id":1,"title":"Task"}`, wantSubstr: "failed to fetch task 1: vikunja API returned status 500", wantError: true, vikunjaDown: true},
-		{name: "comment upstream failure", toolName: "comment", args: `{"id":1,"text":"Hello"}`, wantSubstr: "failed to add comment to task 1: vikunja API returned status 500", wantError: true, vikunjaDown: true},
+		{name: "update upstream failure", toolName: "update", args: `{"id":1,"title":"Task"}`, wantSubstr: "failed to get default project: vikunja API returned status 500", wantError: true, vikunjaDown: true},
+		{name: "comment upstream failure", toolName: "comment", args: `{"id":1,"text":"Hello"}`, wantSubstr: "failed to get default project: vikunja API returned status 500", wantError: true, vikunjaDown: true},
 		{name: "link upstream failure", toolName: "link", args: `{"id":1,"target_id":2,"type":"blocks"}`, wantSubstr: "failed to get default project: vikunja API returned status 500", wantError: true, vikunjaDown: true},
 		{name: "close upstream failure", toolName: "close", args: `{"id":1,"resolution":"completed","reason":"done"}`, wantSubstr: "failed to get default project: vikunja API returned status 500", wantError: true, vikunjaDown: true},
 	}
@@ -847,7 +873,7 @@ func TestRunServer_Execution(t *testing.T) {
 	}
 }
 
-func closeTestServer(t *testing.T, updateErr error) *Server {
+func closeTestServer(t *testing.T, updateErr error) (*Server, *vikunjaNodeSource) {
 	t.Helper()
 	env := setupTestEnvironment(t)
 	taskStore, ok := env.srv.store.(*memoryTaskStore)
@@ -855,7 +881,11 @@ func closeTestServer(t *testing.T, updateErr error) *Server {
 		t.Fatalf("store = %T, want *memoryTaskStore", env.srv.store)
 	}
 	taskStore.updateErr = updateErr
-	return env.srv
+	src, err := env.srv.newNodeSource(context.Background())
+	if err != nil {
+		t.Fatalf("newNodeSource = %v", err)
+	}
+	return env.srv, src
 }
 
 func TestServer_CloseCompleted_Errors(t *testing.T) {
@@ -873,7 +903,8 @@ func TestServer_CloseCompleted_Errors(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			err := closeTestServer(t, tc.updateErr).closeCompleted(context.Background(), tc.taskID, "reason", time.Now().UTC())
+			srv, src := closeTestServer(t, tc.updateErr)
+			err := srv.closeCompleted(context.Background(), src, tc.taskID, "reason", time.Now().UTC())
 			if got := errText(err); got != tc.wantErr {
 				t.Fatalf("closeCompleted err = %q, want %q", got, tc.wantErr)
 			}
@@ -898,11 +929,86 @@ func TestServer_CloseWontDo_Errors(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			err := closeTestServer(t, tc.updateErr).closeWontDo(context.Background(), tc.taskID, "reason", tc.openSubIDs, time.Now().UTC())
+			srv, src := closeTestServer(t, tc.updateErr)
+			err := srv.closeWontDo(context.Background(), src, tc.taskID, "reason", tc.openSubIDs, time.Now().UTC())
 			if got := errText(err); got != tc.wantErr {
 				t.Fatalf("closeWontDo err = %q, want %q", got, tc.wantErr)
 			}
 		})
+	}
+}
+
+func TestServer_WireCreateRelations_Errors(t *testing.T) {
+	t.Parallel()
+
+	p888 := int64(888)
+	tests := []struct {
+		name          string
+		taskGlobalID  int64
+		parentID      *int64
+		blocks        []int64
+		blockedBy     []int64
+		related       []int64
+		wantRelations []VikunjaRelationRecord
+	}{
+		{
+			name:         "resolve errors logged and skipped",
+			taskGlobalID: 100,
+			parentID:     &p888,
+			blocks:       []int64{888},
+			blockedBy:    []int64{888},
+			related:      []int64{888},
+		},
+		{
+			name:         "create relation failure logged",
+			taskGlobalID: 888,
+			blocks:       []int64{4},
+		},
+		{
+			name:          "resolved relations recorded while unresolved are skipped",
+			taskGlobalID:  100,
+			parentID:      &p888,
+			blocks:        []int64{4},
+			blockedBy:     []int64{2},
+			related:       []int64{1},
+			wantRelations: []VikunjaRelationRecord{{100, 4, "blocking"}, {2, 100, "blocking"}, {100, 1, "related"}},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			env := setupTestEnvironment(t)
+			src, err := env.srv.newNodeSource(context.Background())
+			if err != nil {
+				t.Fatalf("newNodeSource = %v", err)
+			}
+			env.srv.wireCreateRelations(context.Background(), src, tc.taskGlobalID, tc.parentID, tc.blocks, tc.blockedBy, tc.related)
+			if !slices.Equal(env.state.recordedRelations, tc.wantRelations) {
+				t.Fatalf("recorded relations = %+v, want %+v", env.state.recordedRelations, tc.wantRelations)
+			}
+		})
+	}
+}
+
+func TestServer_CreateEmbeddingFailureLogged(t *testing.T) {
+	t.Parallel()
+
+	env := setupTestEnvironment(t)
+	taskStore, ok := env.srv.store.(*memoryTaskStore)
+	if !ok {
+		t.Fatalf("store = %T, want *memoryTaskStore", env.srv.store)
+	}
+	taskStore.updateErr = errors.New("embedding db failed")
+	got, isErr := env.srv.toolCreate(context.Background(), CreateArgs{Title: "Created Despite Embedding Failure"})
+	if isErr || !strings.Contains(got, `"title":"Created Despite Embedding Failure"`) {
+		t.Fatalf("toolCreate = %q, %v; want summary despite embedding store failure", got, isErr)
+	}
+	taskStore.mu.Lock()
+	calls := taskStore.embeddingResolutionCalls
+	taskStore.mu.Unlock()
+	if calls != 1 {
+		t.Fatalf("UpdateTaskEmbeddingAndResolution calls = %d, want 1 (embedding path reached)", calls)
 	}
 }
 

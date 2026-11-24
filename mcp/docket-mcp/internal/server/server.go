@@ -141,19 +141,22 @@ func setEnum(schema *jsonschema.Schema, prop, defaultJSON string, values ...any)
 }
 
 func (s *Server) loadGraph(ctx context.Context) (map[int64]config.TaskNode, error) {
-	projectID, err := s.vikunja.GetDefaultProject(ctx)
-	if err != nil {
-		return nil, fmt.Errorf("failed to get default project: %w", err)
-	}
+	nodes, _, err := s.loadGraphMaps(ctx)
+	return nodes, err
+}
 
-	tasks, err := s.vikunja.ListProjectTasks(ctx, projectID)
+func (s *Server) loadGraphMaps(ctx context.Context) (map[int64]config.TaskNode, map[int64]config.VikunjaTask, error) {
+	src, err := s.newNodeSource(ctx)
 	if err != nil {
-		return nil, fmt.Errorf("failed to list project tasks: %w", err)
+		return nil, nil, err
 	}
+	return s.loadGraphMapsFromSource(ctx, src)
+}
 
-	taskIDs := make([]int64, len(tasks))
-	for i, t := range tasks {
-		taskIDs[i] = t.ID
+func (s *Server) loadGraphMapsFromSource(ctx context.Context, src *vikunjaNodeSource) (map[int64]config.TaskNode, map[int64]config.VikunjaTask, error) {
+	taskIDs := make([]int64, 0, len(src.tasksByDisplay))
+	for _, t := range src.tasksByDisplay {
+		taskIDs = append(taskIDs, t.ID)
 	}
 
 	resMap, err := s.store.FetchTaskResolutions(ctx, taskIDs)
@@ -161,18 +164,25 @@ func (s *Server) loadGraph(ctx context.Context) (map[int64]config.TaskNode, erro
 		resMap = make(map[int64]string)
 	}
 
-	nodes := make(map[int64]config.TaskNode, len(tasks))
-	for _, t := range tasks {
-		nodes[t.ID] = config.TaskToNode(t, resMap[t.ID])
+	nodes := make(map[int64]config.TaskNode, len(src.tasksByDisplay))
+	byGlobal := make(map[int64]config.VikunjaTask, len(src.tasksByDisplay))
+	for dID, t := range src.tasksByDisplay {
+		node := config.TaskToNode(t, resMap[t.ID])
+		nodes[dID] = node
+		src.cache[dID] = node
+		byGlobal[t.ID] = t
 	}
-	return nodes, nil
+	return nodes, byGlobal, nil
 }
 
 type vikunjaNodeSource struct {
-	vikunja   *store.VikunjaClient
-	store     store.TaskStore
-	projectID int64
-	cache     map[int64]config.TaskNode
+	vikunja         *store.VikunjaClient
+	store           store.TaskStore
+	projectID       int64
+	cache           map[int64]config.TaskNode
+	displayToGlobal map[int64]int64
+	globalToDisplay map[int64]int64
+	tasksByDisplay  map[int64]config.VikunjaTask
 }
 
 func (s *Server) newNodeSource(ctx context.Context) (*vikunjaNodeSource, error) {
@@ -180,14 +190,79 @@ func (s *Server) newNodeSource(ctx context.Context) (*vikunjaNodeSource, error) 
 	if err != nil {
 		return nil, fmt.Errorf("failed to get default project: %w", err)
 	}
-	return &vikunjaNodeSource{vikunja: s.vikunja, store: s.store, projectID: projectID, cache: make(map[int64]config.TaskNode)}, nil
+	tasks, err := s.vikunja.ListProjectTasks(ctx, projectID)
+	if err != nil {
+		return nil, fmt.Errorf("failed to list project tasks: %w", err)
+	}
+	displayToGlobal := make(map[int64]int64, len(tasks))
+	globalToDisplay := make(map[int64]int64, len(tasks))
+	tasksByDisplay := make(map[int64]config.VikunjaTask, len(tasks))
+	for _, t := range tasks {
+		dID := t.DisplayID()
+		displayToGlobal[dID] = t.ID
+		globalToDisplay[t.ID] = dID
+		tasksByDisplay[dID] = t
+	}
+	return &vikunjaNodeSource{
+		vikunja:         s.vikunja,
+		store:           s.store,
+		projectID:       projectID,
+		cache:           make(map[int64]config.TaskNode),
+		displayToGlobal: displayToGlobal,
+		globalToDisplay: globalToDisplay,
+		tasksByDisplay:  tasksByDisplay,
+	}, nil
+}
+
+func (src *vikunjaNodeSource) ResolveGlobalID(ctx context.Context, displayID int64) (int64, error) {
+	if global, ok := src.displayToGlobal[displayID]; ok {
+		return global, nil
+	}
+	task, err := src.vikunja.GetTask(ctx, displayID)
+	if err != nil {
+		return 0, err
+	}
+	if task.ProjectID != src.projectID {
+		return 0, fmt.Errorf("task %d %w", displayID, ErrTaskNotFound)
+	}
+	src.displayToGlobal[displayID] = task.ID
+	if src.globalToDisplay != nil {
+		src.globalToDisplay[task.ID] = task.DisplayID()
+	}
+	return task.ID, nil
+}
+
+func (src *vikunjaNodeSource) ResolveGlobalIDs(ctx context.Context, displayIDs []int64) ([]int64, error) {
+	out := make([]int64, 0, len(displayIDs))
+	for _, id := range displayIDs {
+		global, err := src.ResolveGlobalID(ctx, id)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, global)
+	}
+	return out, nil
+}
+
+func (src *vikunjaNodeSource) GetTask(ctx context.Context, displayID int64) (*config.VikunjaTask, error) {
+	if t, ok := src.tasksByDisplay[displayID]; ok {
+		cpy := t
+		return &cpy, nil
+	}
+	if dID, ok := src.globalToDisplay[displayID]; ok {
+		if t, ok := src.tasksByDisplay[dID]; ok {
+			cpy := t
+			return &cpy, nil
+		}
+	}
+	return src.vikunja.GetTask(ctx, displayID)
 }
 
 func (src *vikunjaNodeSource) Node(ctx context.Context, id int64) (config.TaskNode, bool, error) {
 	if node, ok := src.cache[id]; ok {
 		return node, true, nil
 	}
-	task, err := src.vikunja.GetTask(ctx, id)
+	task, err := src.GetTask(ctx, id)
 	if err != nil {
 		if isVikunjaNotFound(err) {
 			return config.TaskNode{}, false, nil
@@ -198,12 +273,36 @@ func (src *vikunjaNodeSource) Node(ctx context.Context, id int64) (config.TaskNo
 		return config.TaskNode{}, false, nil
 	}
 	var resolution string
-	if resMap, err := src.store.FetchTaskResolutions(ctx, []int64{id}); err == nil {
-		resolution = resMap[id]
+	if resMap, err := src.store.FetchTaskResolutions(ctx, []int64{task.ID}); err == nil {
+		resolution = resMap[task.ID]
 	}
 	node := config.TaskToNode(*task, resolution)
 	src.cache[id] = node
 	return node, true, nil
+}
+
+// resolveGlobalID maps a user-facing display id to Vikunja's global id.
+func (s *Server) resolveGlobalID(ctx context.Context, displayID int64) (int64, error) {
+	src, err := s.newNodeSource(ctx)
+	if err != nil {
+		return 0, err
+	}
+	return src.ResolveGlobalID(ctx, displayID)
+}
+
+func (s *Server) getTaskByDisplayID(ctx context.Context, displayID int64) (*config.VikunjaTask, *vikunjaNodeSource, error) {
+	src, err := s.newNodeSource(ctx)
+	if err != nil {
+		return nil, nil, err
+	}
+	task, err := src.GetTask(ctx, displayID)
+	if err != nil {
+		return nil, nil, fmt.Errorf("failed to fetch task %d: %w", displayID, err)
+	}
+	if task.ProjectID != src.projectID {
+		return nil, nil, fmt.Errorf("task %d %w", displayID, ErrTaskNotFound)
+	}
+	return task, src, nil
 }
 
 func isVikunjaNotFound(err error) bool {
@@ -307,9 +406,13 @@ func (s *Server) searchTasks(ctx context.Context, query, status string, limit in
 		return nil, err
 	}
 
-	nodes, err := s.loadGraph(ctx)
-	if err == nil {
+	// Search hits are keyed by global id in the store; rewrite to display ids.
+	nodes, byGlobal, graphErr := s.loadGraphMaps(ctx)
+	if graphErr == nil {
 		for i := range results {
+			if t, ok := byGlobal[results[i].ID]; ok {
+				results[i].ID = t.DisplayID()
+			}
 			if node, ok := nodes[results[i].ID]; ok {
 				results[i].ParentID = node.ParentID
 			}
@@ -337,19 +440,12 @@ func (s *Server) toolShow(ctx context.Context, args ShowArgs) (string, bool) {
 }
 
 func (s *Server) showTask(ctx context.Context, id int64) (config.HydratedTask, error) {
-	task, err := s.vikunja.GetTask(ctx, id)
-	if err != nil {
-		return config.HydratedTask{}, fmt.Errorf("failed to fetch task %d: %w", id, err)
-	}
-	src, err := s.newNodeSource(ctx)
+	task, src, err := s.getTaskByDisplayID(ctx, id)
 	if err != nil {
 		return config.HydratedTask{}, err
 	}
-	if task.ProjectID != src.projectID {
-		return config.HydratedTask{}, fmt.Errorf("task %d %w", id, ErrTaskNotFound)
-	}
 
-	comments, err := s.vikunja.ListComments(ctx, id)
+	comments, err := s.vikunja.ListComments(ctx, task.ID)
 	if err != nil {
 		comments = nil
 	}
@@ -357,10 +453,17 @@ func (s *Server) showTask(ctx context.Context, id int64) (config.HydratedTask, e
 	neighbors := make(map[int64]config.TaskNode)
 	for _, related := range task.RelatedTasks {
 		for _, t := range related {
+			if t.ProjectID != 0 && t.ProjectID != task.ProjectID {
+				continue
+			}
 			if _, seen := neighbors[t.ID]; seen {
 				continue
 			}
-			node, ok, err := src.Node(ctx, t.ID)
+			dID := t.DisplayID()
+			if mapped, ok := src.globalToDisplay[t.ID]; ok {
+				dID = mapped
+			}
+			node, ok, err := src.Node(ctx, dID)
 			if err != nil {
 				return config.HydratedTask{}, err
 			}
@@ -401,7 +504,7 @@ func validateCreateRelations(ctx context.Context, src config.NodeSource, parentI
 	return config.DetectCreateCycle(ctx, src, blocks, blockedBy)
 }
 
-func (s *Server) wireCreateRelations(ctx context.Context, taskID int64, parentID *int64, blocks, blockedBy, related []int64) {
+func (s *Server) wireCreateRelations(ctx context.Context, src *vikunjaNodeSource, taskGlobalID int64, parentID *int64, blocks, blockedBy, related []int64) {
 	type relEdge struct {
 		from, to int64
 		kind     string
@@ -409,16 +512,36 @@ func (s *Server) wireCreateRelations(ctx context.Context, taskID int64, parentID
 	}
 	var edges []relEdge
 	if parentID != nil {
-		edges = append(edges, relEdge{taskID, *parentID, relKindParenttask, relKindParenttask})
+		to, err := src.ResolveGlobalID(ctx, *parentID)
+		if err != nil {
+			slog.ErrorContext(ctx, "[docket-mcp] resolve relation error", "kind", relKindParenttask, "parent_id", *parentID, "error", err)
+		} else {
+			edges = append(edges, relEdge{taskGlobalID, to, relKindParenttask, relKindParenttask})
+		}
 	}
 	for _, b := range blocks {
-		edges = append(edges, relEdge{taskID, b, relKindBlocking, relKindBlocking})
+		to, err := src.ResolveGlobalID(ctx, b)
+		if err != nil {
+			slog.ErrorContext(ctx, "[docket-mcp] resolve relation error", "kind", relKindBlocking, "blocked_id", b, "error", err)
+		} else {
+			edges = append(edges, relEdge{taskGlobalID, to, relKindBlocking, relKindBlocking})
+		}
 	}
 	for _, bb := range blockedBy {
-		edges = append(edges, relEdge{bb, taskID, relKindBlocking, "blocked_by"})
+		from, err := src.ResolveGlobalID(ctx, bb)
+		if err != nil {
+			slog.ErrorContext(ctx, "[docket-mcp] resolve relation error", "kind", "blocked_by", "blocker_id", bb, "error", err)
+		} else {
+			edges = append(edges, relEdge{from, taskGlobalID, relKindBlocking, "blocked_by"})
+		}
 	}
 	for _, r := range related {
-		edges = append(edges, relEdge{taskID, r, config.RelationRelated, config.RelationRelated})
+		to, err := src.ResolveGlobalID(ctx, r)
+		if err != nil {
+			slog.ErrorContext(ctx, "[docket-mcp] resolve relation error", "kind", config.RelationRelated, "related_id", r, "error", err)
+		} else {
+			edges = append(edges, relEdge{taskGlobalID, to, config.RelationRelated, config.RelationRelated})
+		}
 	}
 	for _, e := range edges {
 		if err := s.vikunja.CreateRelation(ctx, e.from, e.to, e.kind); err != nil {
@@ -456,7 +579,7 @@ func (s *Server) toolCreate(ctx context.Context, args CreateArgs) (string, bool)
 		return fmt.Sprintf("failed to create task: %v", err), true
 	}
 
-	s.wireCreateRelations(ctx, task.ID, args.ParentID, args.Blocks, args.BlockedBy, args.Related)
+	s.wireCreateRelations(ctx, src, task.ID, args.ParentID, args.Blocks, args.BlockedBy, args.Related)
 
 	var emb []float32
 	if s.ollamaClient != nil {
@@ -470,7 +593,7 @@ func (s *Server) toolCreate(ctx context.Context, args CreateArgs) (string, bool)
 	}
 
 	summary := config.TaskSummary{
-		ID:        task.ID,
+		ID:        task.DisplayID(),
 		Title:     task.Title,
 		Status:    config.TaskStatusOpen,
 		ParentID:  args.ParentID,
@@ -492,9 +615,9 @@ func (s *Server) toolUpdate(ctx context.Context, args UpdateArgs) (string, bool)
 		return errMsgInvalidID, true
 	}
 
-	task, err := s.vikunja.GetTask(ctx, args.ID)
+	task, _, err := s.getTaskByDisplayID(ctx, args.ID)
 	if err != nil {
-		return fmt.Sprintf("failed to fetch task %d: %v", args.ID, err), true
+		return err.Error(), true
 	}
 
 	if args.Title != nil && strings.TrimSpace(*args.Title) != "" {
@@ -518,21 +641,21 @@ func (s *Server) toolUpdate(ctx context.Context, args UpdateArgs) (string, bool)
 	}
 
 	if len(emb) > 0 {
-		if err = s.store.UpdateTaskEmbedding(ctx, args.ID, emb); err != nil {
-			slog.ErrorContext(ctx, "[docket-mcp] update embedding error", "task_id", args.ID, "error", err)
+		if err = s.store.UpdateTaskEmbedding(ctx, task.ID, emb); err != nil {
+			slog.ErrorContext(ctx, "[docket-mcp] update embedding error", "task_id", task.ID, "error", err)
 		}
 	}
 
 	var res string
-	resMap, err := s.store.FetchTaskResolutions(ctx, []int64{args.ID})
+	resMap, err := s.store.FetchTaskResolutions(ctx, []int64{task.ID})
 	if err != nil {
-		slog.ErrorContext(ctx, "[docket-mcp] fetch resolution for update error", "task_id", args.ID, "error", err)
+		slog.ErrorContext(ctx, "[docket-mcp] fetch resolution for update error", "task_id", task.ID, "error", err)
 	} else {
-		res = resMap[args.ID]
+		res = resMap[task.ID]
 	}
 
 	summary := config.TaskSummary{
-		ID:     updated.ID,
+		ID:     updated.DisplayID(),
 		Title:  updated.Title,
 		Status: config.ResolveTaskStatus(updated.Done, res),
 	}
@@ -550,7 +673,11 @@ func (s *Server) toolComment(ctx context.Context, args CommentArgs) (string, boo
 		return "parameters 'id' and non-empty 'text' are required", true
 	}
 
-	if err := s.vikunja.CreateComment(ctx, args.ID, args.Text); err != nil {
+	globalID, err := s.resolveGlobalID(ctx, args.ID)
+	if err != nil {
+		return fmt.Sprintf("failed to add comment to task %d: %v", args.ID, err), true
+	}
+	if err := s.vikunja.CreateComment(ctx, globalID, args.Text); err != nil {
 		return fmt.Sprintf("failed to add comment to task %d: %v", args.ID, err), true
 	}
 	return fmt.Sprintf("comment added to task %d", args.ID), false
@@ -584,31 +711,49 @@ func (s *Server) toolLink(ctx context.Context, args LinkArgs) (string, bool) {
 		return fmt.Sprintf("invalid relation type: %q (must be parent, blocks, or related)", args.Type), true
 	}
 
+	src, err := s.newNodeSource(ctx)
+	if err != nil {
+		return err.Error(), true
+	}
+
+	var globalID, globalTarget int64
 	if args.Remove {
-		if err := s.vikunja.DeleteRelation(ctx, args.ID, args.TargetID, kind); err != nil {
+		globalID, err = src.ResolveGlobalID(ctx, args.ID)
+		if err != nil {
+			return fmt.Sprintf("failed to remove relation: %v", err), true
+		}
+		globalTarget, err = src.ResolveGlobalID(ctx, args.TargetID)
+		if err != nil {
+			return fmt.Sprintf("failed to remove relation: %v", err), true
+		}
+		if err = s.vikunja.DeleteRelation(ctx, globalID, globalTarget, kind); err != nil {
 			return fmt.Sprintf("failed to remove relation: %v", err), true
 		}
 		return fmt.Sprintf("relation %s between task %d and %d removed", args.Type, args.ID, args.TargetID), false
 	}
 
 	if args.Type != config.RelationRelated {
-		src, err := s.newNodeSource(ctx)
-		if err != nil {
-			return err.Error(), true
-		}
-		if err := config.DetectGraphCycle(ctx, src, args.ID, args.TargetID, args.Type); err != nil {
-			return err.Error(), true
+		if cycleErr := config.DetectGraphCycle(ctx, src, args.ID, args.TargetID, args.Type); cycleErr != nil {
+			return cycleErr.Error(), true
 		}
 	}
 
-	if err := s.vikunja.CreateRelation(ctx, args.ID, args.TargetID, kind); err != nil {
+	globalID, err = src.ResolveGlobalID(ctx, args.ID)
+	if err != nil {
+		return fmt.Sprintf("failed to create relation: %v", err), true
+	}
+	globalTarget, err = src.ResolveGlobalID(ctx, args.TargetID)
+	if err != nil {
+		return fmt.Sprintf("failed to create relation: %v", err), true
+	}
+	if err = s.vikunja.CreateRelation(ctx, globalID, globalTarget, kind); err != nil {
 		return fmt.Sprintf("failed to create relation: %v", err), true
 	}
 	return fmt.Sprintf("relation %s between task %d and %d created", args.Type, args.ID, args.TargetID), false
 }
 
-func (s *Server) markTaskDone(ctx context.Context, id int64, comment string, now time.Time) error {
-	task, err := s.vikunja.GetTask(ctx, id)
+func (s *Server) markTaskDone(ctx context.Context, src *vikunjaNodeSource, id int64, comment string, now time.Time) error {
+	task, err := src.GetTask(ctx, id)
 	if err != nil {
 		return fmt.Errorf("failed to get task: %w", err)
 	}
@@ -618,36 +763,46 @@ func (s *Server) markTaskDone(ctx context.Context, id int64, comment string, now
 		return fmt.Errorf("failed to update task status: %w", err)
 	}
 	if comment != "" {
-		if err := s.vikunja.CreateComment(ctx, id, comment); err != nil {
+		if err := s.vikunja.CreateComment(ctx, task.ID, comment); err != nil {
 			slog.ErrorContext(ctx, "[docket-mcp] comment error", "task_id", id, "error", err)
 		}
 	}
 	return nil
 }
 
-func (s *Server) closeCompleted(ctx context.Context, id int64, reason string, now time.Time) error {
-	if err := s.markTaskDone(ctx, id, "Closed as completed: "+reason, now); err != nil {
+func (s *Server) closeCompleted(ctx context.Context, src *vikunjaNodeSource, id int64, reason string, now time.Time) error {
+	var comment string
+	if reason != "" {
+		comment = "Closed as completed: " + reason
+	}
+	if err := s.markTaskDone(ctx, src, id, comment, now); err != nil {
 		return err
 	}
-	if err := s.store.UpdateTaskResolutionBatch(ctx, []int64{id}, config.TaskStatusCompleted); err != nil {
+	globalID, err := src.ResolveGlobalID(ctx, id)
+	if err != nil {
+		slog.ErrorContext(ctx, "[docket-mcp] update resolution error", "task_id", id, "error", err)
+	} else if err := s.store.UpdateTaskResolutionBatch(ctx, []int64{globalID}, config.TaskStatusCompleted); err != nil {
 		slog.ErrorContext(ctx, "[docket-mcp] update resolution error", "task_id", id, "error", err)
 	}
 	return nil
 }
 
-func (s *Server) closeWontDo(ctx context.Context, id int64, reason string, openSubIDs []int64, now time.Time) error {
-	if err := s.markTaskDone(ctx, id, "Closed as wont_do: "+reason, now); err != nil {
+func (s *Server) closeWontDo(ctx context.Context, src *vikunjaNodeSource, id int64, reason string, openSubIDs []int64, now time.Time) error {
+	if err := s.markTaskDone(ctx, src, id, "Closed as wont_do: "+reason, now); err != nil {
 		return err
 	}
 
 	for _, sid := range openSubIDs {
 		comment := fmt.Sprintf("Cascaded close (wont_do) from parent task %d: %s", id, reason)
-		if err := s.markTaskDone(ctx, sid, comment, now); err != nil {
+		if err := s.markTaskDone(ctx, src, sid, comment, now); err != nil {
 			slog.ErrorContext(ctx, "[docket-mcp] update subtask error", "task_id", sid, "error", err)
 		}
 	}
 	closedIDs := append([]int64{id}, openSubIDs...)
-	if err := s.store.UpdateTaskResolutionBatch(ctx, closedIDs, config.TaskStatusWontDo); err != nil {
+	globalIDs, err := src.ResolveGlobalIDs(ctx, closedIDs)
+	if err != nil {
+		slog.ErrorContext(ctx, "[docket-mcp] update resolution batch error", "task_ids", closedIDs, "error", err)
+	} else if err := s.store.UpdateTaskResolutionBatch(ctx, globalIDs, config.TaskStatusWontDo); err != nil {
 		slog.ErrorContext(ctx, "[docket-mcp] update resolution batch error", "task_ids", closedIDs, "error", err)
 	}
 	return nil
@@ -687,13 +842,13 @@ func (s *Server) toolClose(ctx context.Context, args CloseArgs) (string, bool) {
 	var closedIDs []int64
 	if args.Resolution == config.TaskStatusCompleted {
 		closedIDs = []int64{args.ID}
-		if err = s.closeCompleted(ctx, args.ID, args.Reason, now); err != nil {
+		if err = s.closeCompleted(ctx, src, args.ID, args.Reason, now); err != nil {
 			return err.Error(), true
 		}
 	} else {
 		openSubIDs := config.CollectOpenSubtreeIDs(nodesBefore, args.ID)
 		closedIDs = append([]int64{args.ID}, openSubIDs...)
-		if err = s.closeWontDo(ctx, args.ID, args.Reason, openSubIDs, now); err != nil {
+		if err = s.closeWontDo(ctx, src, args.ID, args.Reason, openSubIDs, now); err != nil {
 			return err.Error(), true
 		}
 	}

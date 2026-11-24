@@ -30,6 +30,7 @@ const (
 // VikunjaTask models a task object from the Vikunja REST API.
 type VikunjaTask struct {
 	ID           int64                    `json:"id"`
+	Index        int64                    `json:"index,omitempty"`
 	Title        string                   `json:"title"`
 	Description  string                   `json:"description"`
 	Done         bool                     `json:"done"`
@@ -38,6 +39,15 @@ type VikunjaTask struct {
 	Updated      time.Time                `json:"updated"`
 	ProjectID    int64                    `json:"project_id"`
 	RelatedTasks map[string][]VikunjaTask `json:"related_tasks,omitempty"`
+}
+
+// DisplayID is the user-facing task number: the per-project index when
+// Vikunja provides one, otherwise the global id.
+func (t VikunjaTask) DisplayID() int64 {
+	if t.Index > 0 {
+		return t.Index
+	}
+	return t.ID
 }
 
 // VikunjaProject models a project object in Vikunja.
@@ -294,28 +304,39 @@ type NodeSource interface {
 // TaskToNode converts a Vikunja task and its stored resolution into a graph node.
 func TaskToNode(t VikunjaTask, resolution string) TaskNode {
 	node := TaskNode{
-		ID:          t.ID,
+		ID:          t.DisplayID(),
 		Title:       t.Title,
 		Description: t.Description,
 		Done:        t.Done,
 		Resolution:  resolution,
 		Status:      ResolveTaskStatus(t.Done, resolution),
 	}
-	if parents := t.RelatedTasks["parenttask"]; len(parents) > 0 {
-		pID := parents[0].ID
+	isSameProject := func(other VikunjaTask) bool {
+		return other.ProjectID == 0 || other.ProjectID == t.ProjectID
+	}
+	if parents := t.RelatedTasks["parenttask"]; len(parents) > 0 && isSameProject(parents[0]) {
+		pID := parents[0].DisplayID()
 		node.ParentID = &pID
 	}
 	for _, sub := range t.RelatedTasks["subtask"] {
-		node.SubtaskIDs = append(node.SubtaskIDs, sub.ID)
+		if isSameProject(sub) {
+			node.SubtaskIDs = append(node.SubtaskIDs, sub.DisplayID())
+		}
 	}
 	for _, blk := range t.RelatedTasks["blocking"] {
-		node.Blocks = append(node.Blocks, blk.ID)
+		if isSameProject(blk) {
+			node.Blocks = append(node.Blocks, blk.DisplayID())
+		}
 	}
 	for _, bkd := range t.RelatedTasks["blocked"] {
-		node.BlockedBy = append(node.BlockedBy, bkd.ID)
+		if isSameProject(bkd) {
+			node.BlockedBy = append(node.BlockedBy, bkd.DisplayID())
+		}
 	}
 	for _, rel := range t.RelatedTasks[RelationRelated] {
-		node.Related = append(node.Related, rel.ID)
+		if isSameProject(rel) {
+			node.Related = append(node.Related, rel.DisplayID())
+		}
 	}
 	return node
 }
@@ -326,8 +347,11 @@ func TaskToNode(t VikunjaTask, resolution string) TaskNode {
 // or outside the project) falls back to its embedded id, title, and status.
 func HydrateTask(task VikunjaTask, status string, comments []VikunjaComment, neighbors map[int64]TaskNode) HydratedTask {
 	summarize := func(t VikunjaTask) TaskSummary {
-		if node, ok := neighbors[t.ID]; ok {
-			return SummarizeNode(node)
+		if t.ProjectID == 0 || t.ProjectID == task.ProjectID {
+			if node, ok := neighbors[t.ID]; ok {
+				return SummarizeNode(node)
+			}
+			return TaskSummary{ID: t.DisplayID(), Title: t.Title, Status: ResolveTaskStatus(t.Done, "")}
 		}
 		return TaskSummary{ID: t.ID, Title: t.Title, Status: ResolveTaskStatus(t.Done, "")}
 	}
@@ -344,7 +368,7 @@ func HydrateTask(task VikunjaTask, status string, comments []VikunjaComment, nei
 	}
 
 	hydrated := HydratedTask{
-		ID:          task.ID,
+		ID:          task.DisplayID(),
 		Title:       task.Title,
 		Status:      status,
 		Description: task.Description,
