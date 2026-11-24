@@ -38,7 +38,13 @@ fi
 
 if [ ${#CHANGED_FILES[@]} -eq 0 ]; then
     if git rev-parse --git-dir >/dev/null 2>&1; then
-        mapfile -t CHANGED_FILES < <(git diff --name-only HEAD~1 2>/dev/null || git diff --name-only HEAD 2>/dev/null || git status --porcelain | awk '{print $NF}')
+        CURRENT_BRANCH=$(git rev-parse --abbrev-ref HEAD 2>/dev/null || true)
+        if git rev-parse --verify origin/main >/dev/null 2>&1 && [ "$CURRENT_BRANCH" != "main" ]; then
+            mapfile -t CHANGED_FILES < <(git diff --name-only origin/main...HEAD 2>/dev/null || true)
+        fi
+        if [ ${#CHANGED_FILES[@]} -eq 0 ]; then
+            mapfile -t CHANGED_FILES < <(git diff --name-only HEAD~1 2>/dev/null || git diff --name-only HEAD 2>/dev/null || git status --porcelain | awk '{print $NF}')
+        fi
     fi
 fi
 
