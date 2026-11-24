@@ -76,32 +76,11 @@ func TestUnifiedProcessPool_SessionPropagation_Suite(t *testing.T) {
 }
 
 type acquireLeaseSuiteCase struct {
-	name, customExistingSessID, respPayload, respErr, respStatus, expectPrevSess, expectSubstantive                          string
-	existingTurnCount, maxTurns, expectTurnCount                                                                             int
-	targetLockTimeout                                                                                                        time.Duration
-	onRotatedErr                                                                                                             error
-	validationNilPool, validationEmptyTarget, twoAttemptsThrottle, concurrencyConflict                                       bool
-	expectAcquireErr, expectExecErr, expectReleaseErr, expectRotated, expectColdBefore, expectColdAfter, expectPreservedSess bool
-}
-
-func checkAcquireLeaseValidation(ctx context.Context, t *testing.T, tc acquireLeaseSuiteCase) bool {
-	t.Helper()
-	if tc.validationNilPool {
-		var nilPool *UnifiedProcessPool
-		if _, err := nilPool.AcquireLease(ctx, "target"); err == nil {
-			t.Error("expected error from nil pool AcquireLease")
-		}
-		return true
-	}
-	if tc.validationEmptyTarget {
-		pool := NewUnifiedProcessPool(PoolConfig{}, &MockDaemonSpawner{})
-		defer pool.Close()
-		if _, err := pool.AcquireLease(ctx, "   "); err == nil {
-			t.Error("expected error from empty targetKey AcquireLease")
-		}
-		return true
-	}
-	return false
+	name, customExistingSessID, respPayload, respErr, respStatus, expectPrevSess, expectSubstantive string
+	existingTurnCount, maxTurns, expectTurnCount                                                    int
+	onRotatedErr                                                                                    error
+	twoAttemptsThrottle, expectCold                                                                 bool
+	expectExecErr, expectReleaseErr, expectRotated                                                  bool
 }
 
 func executeLeaseTurn(ctx context.Context, t *testing.T, lease SessionLease, tc acquireLeaseSuiteCase) (*TurnResult, error) {
@@ -130,7 +109,7 @@ func assertLeaseExecutionState(t *testing.T, res *TurnResult, execErr error, lea
 	if tc.expectSubstantive != "" && (res == nil || !strings.Contains(res.Response, tc.expectSubstantive)) {
 		t.Errorf("expected response containing %q, got: %+v", tc.expectSubstantive, res)
 	}
-	if tc.expectColdAfter && lease.IsCold() {
+	if tc.expectCold && lease.IsCold() {
 		t.Errorf("expected IsCold to be false after execution")
 	}
 	if tc.expectTurnCount > 0 && lease.TurnCount() != tc.expectTurnCount {
@@ -157,14 +136,6 @@ func assertLeaseReleaseAndRotation(t *testing.T, pool *UnifiedProcessPool, lease
 		t.Fatalf("unexpected Release error: %v", relErr)
 	}
 
-	if tc.concurrencyConflict {
-		if lease3, err3 := pool.AcquireLease(context.Background(), targetKey); err3 != nil {
-			t.Fatalf("lease3 error: %v", err3)
-		} else if err := lease3.Release(); err != nil {
-			t.Fatalf("lease3 release error: %v", err)
-		}
-	}
-
 	if tc.expectRotated {
 		if !*rotationCalled || *rotatedOld != pinnedSessID || *rotatedNew == "" || *rotatedNew == *rotatedOld {
 			t.Errorf("expected valid rotation: called=%v old=%q new=%q", *rotationCalled, *rotatedOld, *rotatedNew)
@@ -177,9 +148,6 @@ func assertLeaseReleaseAndRotation(t *testing.T, pool *UnifiedProcessPool, lease
 func runAcquireLeaseSuiteCase(t *testing.T, tc acquireLeaseSuiteCase) {
 	t.Helper()
 	ctx := context.Background()
-	if checkAcquireLeaseValidation(ctx, t, tc) {
-		return
-	}
 
 	var rotationCalled bool
 	var rotatedOld, rotatedNew string
@@ -203,8 +171,7 @@ func runAcquireLeaseSuiteCase(t *testing.T, tc acquireLeaseSuiteCase) {
 	})
 
 	poolCfg := PoolConfig{
-		MaxSessionTurns:   tc.maxTurns,
-		TargetLockTimeout: tc.targetLockTimeout,
+		MaxSessionTurns: tc.maxTurns,
 		GetSessionRecord: func(ctx context.Context, targetKey string) (SessionRecord, error) {
 			return SessionRecord{ActiveSessionID: pinnedSessID, PreviousSessionID: tc.expectPrevSess, TurnCount: tc.existingTurnCount}, nil
 		},
@@ -220,34 +187,20 @@ func runAcquireLeaseSuiteCase(t *testing.T, tc acquireLeaseSuiteCase) {
 
 	targetKey := "thread-lease-" + uuid.New().String()
 	lease, err := pool.AcquireLease(ctx, targetKey)
-	if tc.expectAcquireErr {
-		if err == nil {
-			t.Fatalf("expected AcquireLease error, got nil")
-		}
-		return
-	}
 	if err != nil {
 		t.Fatalf("unexpected AcquireLease error: %v", err)
 	}
-	if tc.expectColdBefore && !lease.IsCold() {
+	if tc.expectCold && !lease.IsCold() {
 		t.Errorf("expected IsCold before execution to be true")
 	}
 	if tc.expectPrevSess != "" && lease.PreviousSessionID() != tc.expectPrevSess {
 		t.Errorf("expected prev session %q, got %q", tc.expectPrevSess, lease.PreviousSessionID())
 	}
-	if tc.expectPreservedSess && lease.SessionID() != pinnedSessID {
+	if lease.SessionID() != pinnedSessID {
 		t.Errorf("expected session %q, got %q", pinnedSessID, lease.SessionID())
 	}
-	if tc.expectPreservedSess && rotationCalled {
+	if rotationCalled {
 		t.Errorf("rotation must NOT be called before release")
-	}
-
-	if tc.concurrencyConflict {
-		ctxTimeout, cancel := context.WithTimeout(ctx, 50*time.Millisecond)
-		defer cancel()
-		if _, cErr := pool.AcquireLease(ctxTimeout, targetKey); cErr == nil {
-			t.Fatalf("expected concurrent AcquireLease timeout")
-		}
 	}
 
 	res, execErr := executeLeaseTurn(ctx, t, lease, tc)
@@ -255,22 +208,88 @@ func runAcquireLeaseSuiteCase(t *testing.T, tc acquireLeaseSuiteCase) {
 	assertLeaseReleaseAndRotation(t, pool, lease, targetKey, pinnedSessID, &rotatedOld, &rotatedNew, &rotationCalled, tc)
 }
 
+func TestUnifiedProcessPool_AcquireLease_ValidationAndLocking(t *testing.T) {
+	ctx := context.Background()
+
+	t.Run("Validation_NilPool", func(t *testing.T) {
+		var nilPool *UnifiedProcessPool
+		if _, err := nilPool.AcquireLease(ctx, "target"); err == nil {
+			t.Error("expected error from nil pool AcquireLease")
+		}
+	})
+
+	t.Run("Validation_EmptyTarget", func(t *testing.T) {
+		pool := NewUnifiedProcessPool(PoolConfig{}, &MockDaemonSpawner{})
+		defer pool.Close()
+		if _, err := pool.AcquireLease(ctx, "   "); err == nil {
+			t.Error("expected error from empty targetKey AcquireLease")
+		}
+	})
+
+	t.Run("ConcurrencySerialization", func(t *testing.T) {
+		pinnedSessID := uuid.New().String()
+		mock := newPipeMockSpawner(pipeMockSpawnerOpts{
+			pid:        350,
+			initSessID: pinnedSessID,
+			onUser: func(attempt int, line string) (string, string, string) {
+				return "ok", "", ""
+			},
+		})
+
+		poolCfg := PoolConfig{
+			TargetLockTimeout: 200 * time.Millisecond,
+			GetSessionRecord: func(ctx context.Context, targetKey string) (SessionRecord, error) {
+				return SessionRecord{ActiveSessionID: pinnedSessID}, nil
+			},
+		}
+
+		pool := NewUnifiedProcessPool(poolCfg, mock)
+		defer pool.Close()
+
+		targetKey := "thread-lease-" + uuid.New().String()
+		lease, err := pool.AcquireLease(ctx, targetKey)
+		if err != nil {
+			t.Fatalf("unexpected AcquireLease error: %v", err)
+		}
+
+		ctxTimeout, cancel := context.WithTimeout(ctx, 50*time.Millisecond)
+		defer cancel()
+		if _, cErr := pool.AcquireLease(ctxTimeout, targetKey); cErr == nil {
+			t.Fatalf("expected concurrent AcquireLease timeout")
+		}
+
+		turnCtx := &TurnContext{TurnID: "turn-1", Prompt: "prompt-1", Ctx: ctx}
+		if _, execErr := lease.Execute(ctx, turnCtx); execErr != nil {
+			t.Fatalf("unexpected Execute error: %v", execErr)
+		}
+
+		if err := lease.Release(); err != nil {
+			t.Fatalf("unexpected Release error: %v", err)
+		}
+
+		lease3, err3 := pool.AcquireLease(ctx, targetKey)
+		if err3 != nil {
+			t.Fatalf("lease3 error: %v", err3)
+		}
+		if err := lease3.Release(); err != nil {
+			t.Fatalf("lease3 release error: %v", err)
+		}
+	})
+}
+
 func TestUnifiedProcessPool_AcquireLease_Suite(t *testing.T) {
 	tests := []acquireLeaseSuiteCase{
-		{name: "BasicExecution", customExistingSessID: "550e8400-e29b-41d4-a716-446655440001", expectPrevSess: "550e8400-e29b-41d4-a716-446655440000", respPayload: "lease reply", expectColdBefore: true, expectColdAfter: false, expectTurnCount: 1, expectSubstantive: "lease reply"},
+		{name: "BasicExecution", customExistingSessID: "550e8400-e29b-41d4-a716-446655440001", expectPrevSess: "550e8400-e29b-41d4-a716-446655440000", respPayload: "lease reply", expectTurnCount: 1, expectSubstantive: "lease reply", expectCold: true},
 		{name: "RotationAndPersistence", maxTurns: 1, respPayload: "ok", expectRotated: true},
 		{name: "PersistenceFailureRollback", maxTurns: 1, respPayload: "ok", onRotatedErr: errors.New("simulated DB latch timeout"), expectReleaseErr: true},
-		{name: "ConcurrencySerialization", targetLockTimeout: 200 * time.Millisecond, respPayload: "ok", concurrencyConflict: true},
 		{name: "CancelRotationOnQuotaExhausted", maxTurns: 1, respErr: "RESOURCE_EXHAUSTED: quota exceeded. Resets in 30s.", respStatus: "ERROR", expectExecErr: true, expectRotated: false},
 		{name: "RotatesWhenResponseSubstantiveDespiteStderrThrottle", maxTurns: 1, respPayload: "Task completed successfully and verified.", respErr: "API error (attempt 1): RESOURCE_EXHAUSTED (code 429): You have exhausted your capacity on this model. Your quota will reset after 0s.", respStatus: "DONE", expectRotated: true, expectSubstantive: "Task completed successfully and verified."},
 		{name: "ClearsCancelRotationOnSuccessfulRetry", maxTurns: 1, twoAttemptsThrottle: true, expectRotated: true, expectSubstantive: "Retry succeeded with substantive output."},
 		{name: "ConversationalRateLimitTextDoesNotCancelRotation", maxTurns: 1, respPayload: "I hit an external rate limit reached earlier, but I cached the result.", respStatus: "DONE", expectRotated: true, expectSubstantive: "rate limit reached"},
 		{name: "EmptyResponse_NonQuota_MarksDirty", maxTurns: 1, respPayload: "", respStatus: "DONE", expectRotated: true},
 		{name: "EmptyResponse_Quota_CancelsRotation", maxTurns: 1, respPayload: "", respErr: "RESOURCE_EXHAUSTED: quota exceeded. Resets in 30s.", respStatus: "DONE", expectRotated: false},
-		{name: "Validation_NilPool", validationNilPool: true, expectAcquireErr: true},
-		{name: "Validation_EmptyTarget", validationEmptyTarget: true, expectAcquireErr: true},
 		{name: "PropagatesInitialTurnCountAndRotates", existingTurnCount: DefaultMaxSessionTurns - 1, respPayload: "ok", expectRotated: true, expectTurnCount: DefaultMaxSessionTurns},
-		{name: "DefersRotationToTurnEndEvenIfExceeded", existingTurnCount: DefaultMaxSessionTurns, respPayload: "ok", expectRotated: true, expectPreservedSess: true},
+		{name: "DefersRotationToTurnEndEvenIfExceeded", existingTurnCount: DefaultMaxSessionTurns, respPayload: "ok", expectRotated: true},
 	}
 
 	for _, tc := range tests {

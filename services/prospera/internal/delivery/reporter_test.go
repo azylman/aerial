@@ -139,70 +139,41 @@ func (d *discordRecorder) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(nextCode(&d.transcriptCodes))
 }
 
-type deliverReportTestCase struct {
+type deliverReportCase struct {
 	name            string
 	key             string
 	reqCallID       string
-	noCall          bool
-	nilStore        bool
 	initialStatus   string
 	direction       string
 	cursor          int
-	getErr          error
-	transErr        error
-	advanceErr      error
-	failTransitions []string
 	transcriptCodes []int
 	summaryCodes    []int
 	geminiDown      bool
-	deleteOnRetry   bool
-	retryGetErr     error
 	extraTriggers   int
-	wantTerminal    restate.Code
 	wantRetries     int
 	wantSummaries   int
 	wantTranscripts int
 	wantStatus      string
-	wantWith        string
-	wantSummaryText string
-	wantRecording   bool
 }
 
 const maxTestAttempts = 3
 
-func TestProsperaReport_DeliverReport(t *testing.T) {
+func TestProsperaReport_DeliverReport_SuccessAndReplay(t *testing.T) {
 	t.Parallel()
 
-	tests := []deliverReportTestCase{
-		{name: "delivers summary with audio and flushes transcript", key: "c-ok", initialStatus: "pending", direction: "outbound", wantSummaries: 1, wantTranscripts: 1, wantStatus: "delivered", wantWith: "+15105550199"},
-		{name: "inbound call names the caller", key: "c-in", initialStatus: "pending", direction: "inbound", wantSummaries: 1, wantTranscripts: 1, wantStatus: "delivered", wantWith: "+15105550100"},
+	tests := []deliverReportCase{
+		{name: "delivers summary with audio and flushes transcript", key: "c-ok", initialStatus: "pending", direction: "outbound", wantSummaries: 1, wantTranscripts: 1, wantStatus: "delivered"},
+		{name: "inbound call names the caller", key: "c-in", initialStatus: "pending", direction: "inbound", wantSummaries: 1, wantTranscripts: 1, wantStatus: "delivered"},
 		{name: "falls back to request call id when key is empty", reqCallID: "c-req", initialStatus: "pending", wantSummaries: 1, wantTranscripts: 1, wantStatus: "delivered"},
 		{name: "processing row from a crashed attempt is re-claimed", key: "c-proc", initialStatus: "processing", wantSummaries: 1, wantTranscripts: 1, wantStatus: "delivered"},
 		{name: "failed row is re-claimed", key: "c-failed", initialStatus: "failed", wantSummaries: 1, wantTranscripts: 1, wantStatus: "delivered"},
 		{name: "already flushed transcript posts only the summary", key: "c-flushed", initialStatus: "pending", cursor: 2, wantSummaries: 1, wantStatus: "delivered"},
 		{name: "replay after failed post re-posts with audio", key: "c-replay", initialStatus: "pending", summaryCodes: []int{http.StatusBadGateway}, wantRetries: 1, wantSummaries: 2, wantTranscripts: 1, wantStatus: "delivered"},
-		{name: "gemini outage posts the fallback summary", key: "c-gem", initialStatus: "pending", geminiDown: true, wantSummaries: 1, wantTranscripts: 1, wantStatus: "delivered", wantSummaryText: "ended with state"},
-		{name: "call deleted mid-report is terminal 404", key: "c-gone", initialStatus: "pending", transcriptCodes: []int{http.StatusBadGateway}, deleteOnRetry: true, wantRetries: 1, wantTranscripts: 2, wantTerminal: http.StatusNotFound, wantRecording: true},
-		{name: "schema error loading the call mid-report is terminal 400", key: "c-schema", initialStatus: "pending", transcriptCodes: []int{http.StatusBadGateway}, retryGetErr: &pgconn.PgError{Code: "42P01"}, wantRetries: 1, wantTranscripts: 2, wantTerminal: http.StatusBadRequest, wantRecording: true},
-		{name: "cursor advance constraint violation is terminal 400", key: "c-adv-23", initialStatus: "pending", advanceErr: &pgconn.PgError{Code: "23514"}, wantTranscripts: 1, wantTerminal: http.StatusBadRequest, wantStatus: "processing", wantRecording: true},
+		{name: "gemini outage posts the fallback summary", key: "c-gem", initialStatus: "pending", geminiDown: true, wantSummaries: 1, wantTranscripts: 1, wantStatus: "delivered"},
 		{name: "second trigger after delivery is a no-op", key: "c-twice", initialStatus: "pending", extraTriggers: 2, wantSummaries: 1, wantTranscripts: 1, wantStatus: "delivered"},
-		{name: "already delivered row is skipped", key: "c-done", initialStatus: "delivered", wantStatus: "delivered", wantRecording: true},
-		{name: "voicemail-owned row is skipped", key: "c-vm", initialStatus: "awaiting_recording", wantStatus: "awaiting_recording", wantRecording: true},
+		{name: "already delivered row is skipped", key: "c-done", initialStatus: "delivered", wantStatus: "delivered"},
+		{name: "voicemail-owned row is skipped", key: "c-vm", initialStatus: "awaiting_recording", wantStatus: "awaiting_recording"},
 		{name: "transcript post failure is retried, not swallowed", key: "c-tx-fail", initialStatus: "pending", transcriptCodes: []int{http.StatusBadGateway}, wantRetries: 1, wantSummaries: 1, wantTranscripts: 2, wantStatus: "delivered"},
-		{name: "cursor advance failure retries without re-posting transcript", key: "c-adv-fail", initialStatus: "pending", advanceErr: errors.New("conn reset"), wantRetries: maxTestAttempts, wantTranscripts: 1, wantStatus: "processing", wantRecording: true},
-		{name: "mark delivered failure retries without re-posting summary", key: "c-mark-fail", initialStatus: "pending", failTransitions: []string{"delivered"}, wantRetries: maxTestAttempts, wantSummaries: 1, wantTranscripts: 1, wantStatus: "processing", wantRecording: true},
-		{name: "claim failure is retryable", key: "c-claim-fail", initialStatus: "pending", transErr: errors.New("conn reset"), wantRetries: maxTestAttempts, wantStatus: "pending", wantRecording: true},
-		{name: "missing call is terminal 404", key: "c-missing", noCall: true, wantTerminal: http.StatusNotFound, wantRecording: true},
-		{name: "store not-found error is terminal 404", key: "c-nf", getErr: store.ErrCallNotFound, wantTerminal: http.StatusNotFound, wantRecording: true},
-		{name: "unique violation is terminal 400", key: "c-23505", getErr: &pgconn.PgError{Code: "23505"}, wantTerminal: http.StatusBadRequest, wantRecording: true},
-		{name: "invalid text representation is terminal 400", key: "c-22p02", getErr: &pgconn.PgError{Code: "22P02"}, wantTerminal: http.StatusBadRequest, wantRecording: true},
-		{name: "undefined table is terminal 400", key: "c-42p01", getErr: &pgconn.PgError{Code: "42P01"}, wantTerminal: http.StatusBadRequest, wantRecording: true},
-		{name: "deadlock stays retryable", key: "c-40p01", getErr: &pgconn.PgError{Code: "40P01"}, wantRetries: maxTestAttempts, wantRecording: true},
-		{name: "serialization failure stays retryable", key: "c-40001", getErr: &pgconn.PgError{Code: "40001"}, wantRetries: maxTestAttempts, wantRecording: true},
-		{name: "connection failure stays retryable", key: "c-08006", getErr: &pgconn.PgError{Code: "08006"}, wantRetries: maxTestAttempts, wantRecording: true},
-		{name: "context timeout stays retryable", key: "c-timeout", getErr: context.DeadlineExceeded, wantRetries: maxTestAttempts, wantRecording: true},
-		{name: "empty call id is terminal 400", wantTerminal: http.StatusBadRequest, wantRecording: true},
-		{name: "nil store is terminal", key: "c-nil", nilStore: true, wantTerminal: http.StatusInternalServerError, wantRecording: true},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -212,7 +183,7 @@ func TestProsperaReport_DeliverReport(t *testing.T) {
 	}
 }
 
-func runDeliverReportCase(t *testing.T, tc deliverReportTestCase) {
+func runDeliverReportCase(t *testing.T, tc deliverReportCase) {
 	t.Helper()
 	callID := tc.key
 	if callID == "" {
@@ -224,7 +195,7 @@ func runDeliverReportCase(t *testing.T, tc deliverReportTestCase) {
 	defer srv.Close()
 
 	st := fakes.NewFakeStore()
-	if !tc.noCall && callID != "" {
+	if callID != "" {
 		require.NoError(t, st.CreateOutboundCall(context.Background(), model.VoiceCall{
 			CallID:               callID,
 			ReportStatus:         tc.initialStatus,
@@ -232,6 +203,151 @@ func runDeliverReportCase(t *testing.T, tc deliverReportTestCase) {
 			FromNumber:           "+15105550100",
 			ToNumber:             "+15105550199",
 			LiveTranscriptCursor: tc.cursor,
+			Transcript: []model.TranscriptTurn{
+				{Role: "user", Text: "Hello"},
+				{Role: "model", Text: "Hi there"},
+			},
+		}, 5))
+	}
+
+	var recMu sync.Mutex
+	recordings := map[string][]byte{callID: []byte("RIFF-wav")}
+	opts := []ReporterOption{
+		WithReporterHTTPClient(srv.Client()),
+		WithReporterGeminiBaseURL(srv.URL),
+		WithReporterRecordingProvider(func(id string) []byte {
+			recMu.Lock()
+			defer recMu.Unlock()
+			return recordings[id]
+		}),
+		WithReporterRecordingDeleter(func(id string) {
+			recMu.Lock()
+			defer recMu.Unlock()
+			delete(recordings, id)
+		}),
+	}
+	cfg := &config.Config{BrainURL: srv.URL, GeminiAPIKey: "k", GeminiFallbackModel: "gemini-2.5-flash", DefaultDiscordChannel: "prospera"}
+	obj := NewProsperaReport(NewReporter(fakes.StaticConfig{Cfg: cfg}, st, &fakes.FakeTwilio{}, opts...))
+	req := DeliverReportRequest{CallID: tc.reqCallID}
+
+	journal := &fakeJournal{}
+	retries := 0
+	var final error
+	for range maxTestAttempts {
+		res, retryable := journal.invoke(t, obj, tc.key, req)
+		if retryable != nil {
+			assert.False(t, restate.IsTerminalError(retryable), "aborted attempt must carry a retryable error")
+			retries++
+			continue
+		}
+		final = res
+		break
+	}
+	for range tc.extraTriggers {
+		res, retryable := (&fakeJournal{}).invoke(t, obj, tc.key, req)
+		require.NoError(t, retryable)
+		require.NoError(t, res)
+	}
+
+	assert.Equal(t, tc.wantRetries, retries, "retryable attempts")
+	assert.NoError(t, final)
+
+	rec.mu.Lock()
+	summaries, transcripts := rec.summaryPosts, rec.transcriptPosts
+	rec.mu.Unlock()
+	assert.Len(t, summaries, tc.wantSummaries, "summary posts")
+	assert.Equal(t, tc.wantTranscripts, transcripts, "transcript posts")
+	for _, s := range summaries {
+		if assert.Len(t, s.Attachments, 1, "every summary post carries audio") {
+			assert.Equal(t, callID+".wav", s.Attachments[0].Filename)
+		}
+		switch tc.direction {
+		case "inbound":
+			assert.Contains(t, s.Content, "+15105550100")
+		case "outbound":
+			assert.Contains(t, s.Content, "+15105550199")
+		}
+		if tc.geminiDown {
+			assert.Contains(t, s.Content, "ended with state")
+		}
+	}
+
+	if tc.wantStatus != "" {
+		st.OpErr = nil
+		got, err := st.GetCall(context.Background(), callID)
+		require.NoError(t, err)
+		assert.Equal(t, tc.wantStatus, got.ReportStatus)
+	}
+	recMu.Lock()
+	_, kept := recordings[callID]
+	recMu.Unlock()
+	wantRecording := tc.initialStatus == "delivered" || tc.initialStatus == "awaiting_recording"
+	assert.Equal(t, wantRecording, kept, "recording kept")
+}
+
+type deliverReportFaultCase struct {
+	name            string
+	key             string
+	noCall          bool
+	nilStore        bool
+	getErr          error
+	transErr        error
+	advanceErr      error
+	failTransitions []string
+	transcriptCodes []int
+	deleteOnRetry   bool
+	retryGetErr     error
+	wantTerminal    restate.Code
+	wantRetries     int
+}
+
+func TestProsperaReport_DeliverReport_ErrorClassification(t *testing.T) {
+	t.Parallel()
+
+	tests := []deliverReportFaultCase{
+		{name: "call deleted mid-report is terminal 404", key: "c-gone", transcriptCodes: []int{http.StatusBadGateway}, deleteOnRetry: true, wantRetries: 1, wantTerminal: http.StatusNotFound},
+		{name: "schema error loading the call mid-report is terminal 400", key: "c-schema", transcriptCodes: []int{http.StatusBadGateway}, retryGetErr: &pgconn.PgError{Code: "42P01"}, wantRetries: 1, wantTerminal: http.StatusBadRequest},
+		{name: "cursor advance constraint violation is terminal 400", key: "c-adv-23", advanceErr: &pgconn.PgError{Code: "23514"}, wantTerminal: http.StatusBadRequest},
+		{name: "cursor advance failure retries without re-posting transcript", key: "c-adv-fail", advanceErr: errors.New("conn reset"), wantRetries: maxTestAttempts},
+		{name: "mark delivered failure retries without re-posting summary", key: "c-mark-fail", failTransitions: []string{"delivered"}, wantRetries: maxTestAttempts},
+		{name: "claim failure is retryable", key: "c-claim-fail", transErr: errors.New("conn reset"), wantRetries: maxTestAttempts},
+		{name: "missing call is terminal 404", key: "c-missing", noCall: true, wantTerminal: http.StatusNotFound},
+		{name: "store not-found error is terminal 404", key: "c-nf", getErr: store.ErrCallNotFound, wantTerminal: http.StatusNotFound},
+		{name: "unique violation is terminal 400", key: "c-23505", getErr: &pgconn.PgError{Code: "23505"}, wantTerminal: http.StatusBadRequest},
+		{name: "invalid text representation is terminal 400", key: "c-22p02", getErr: &pgconn.PgError{Code: "22P02"}, wantTerminal: http.StatusBadRequest},
+		{name: "undefined table is terminal 400", key: "c-42p01", getErr: &pgconn.PgError{Code: "42P01"}, wantTerminal: http.StatusBadRequest},
+		{name: "deadlock stays retryable", key: "c-40p01", getErr: &pgconn.PgError{Code: "40P01"}, wantRetries: maxTestAttempts},
+		{name: "serialization failure stays retryable", key: "c-40001", getErr: &pgconn.PgError{Code: "40001"}, wantRetries: maxTestAttempts},
+		{name: "connection failure stays retryable", key: "c-08006", getErr: &pgconn.PgError{Code: "08006"}, wantRetries: maxTestAttempts},
+		{name: "context timeout stays retryable", key: "c-timeout", getErr: context.DeadlineExceeded, wantRetries: maxTestAttempts},
+		{name: "empty call id is terminal 400", wantTerminal: http.StatusBadRequest},
+		{name: "nil store is terminal", key: "c-nil", nilStore: true, wantTerminal: http.StatusInternalServerError},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			runDeliverReportFaultCase(t, tc)
+		})
+	}
+}
+
+func runDeliverReportFaultCase(t *testing.T, tc deliverReportFaultCase) {
+	t.Helper()
+	callID := tc.key
+
+	rec := &discordRecorder{transcriptCodes: tc.transcriptCodes}
+	srv := httptest.NewServer(rec)
+	defer srv.Close()
+
+	st := fakes.NewFakeStore()
+	if !tc.noCall && callID != "" {
+		require.NoError(t, st.CreateOutboundCall(context.Background(), model.VoiceCall{
+			CallID:               callID,
+			ReportStatus:         "pending",
+			Direction:            "outbound",
+			FromNumber:           "+15105550100",
+			ToNumber:             "+15105550199",
+			LiveTranscriptCursor: 0,
 			Transcript: []model.TranscriptTurn{
 				{Role: "user", Text: "Hello"},
 				{Role: "model", Text: "Hi there"},
@@ -265,7 +381,7 @@ func runDeliverReportCase(t *testing.T, tc deliverReportTestCase) {
 	}
 	cfg := &config.Config{BrainURL: srv.URL, GeminiAPIKey: "k", GeminiFallbackModel: "gemini-2.5-flash", DefaultDiscordChannel: "prospera"}
 	obj := NewProsperaReport(NewReporter(fakes.StaticConfig{Cfg: cfg}, reporterStore, &fakes.FakeTwilio{}, opts...))
-	req := DeliverReportRequest{CallID: tc.reqCallID}
+	req := DeliverReportRequest{}
 
 	journal := &fakeJournal{}
 	retries := 0
@@ -286,11 +402,6 @@ func runDeliverReportCase(t *testing.T, tc deliverReportTestCase) {
 		final = res
 		break
 	}
-	for range tc.extraTriggers {
-		res, retryable := (&fakeJournal{}).invoke(t, obj, tc.key, req)
-		require.NoError(t, retryable)
-		require.NoError(t, res)
-	}
 
 	assert.Equal(t, tc.wantRetries, retries, "retryable attempts")
 	if tc.wantTerminal != 0 {
@@ -304,26 +415,30 @@ func runDeliverReportCase(t *testing.T, tc deliverReportTestCase) {
 	rec.mu.Lock()
 	summaries, transcripts := rec.summaryPosts, rec.transcriptPosts
 	rec.mu.Unlock()
-	assert.Len(t, summaries, tc.wantSummaries, "summary posts")
-	assert.Equal(t, tc.wantTranscripts, transcripts, "transcript posts")
-	for _, s := range summaries {
-		if assert.Len(t, s.Attachments, 1, "every summary post carries audio") {
-			assert.Equal(t, callID+".wav", s.Attachments[0].Filename)
-		}
-		assert.Contains(t, s.Content, tc.wantWith)
-		assert.Contains(t, s.Content, tc.wantSummaryText)
+	switch {
+	case len(tc.transcriptCodes) > 0:
+		assert.Equal(t, 2, transcripts, "transcript posts")
+	case tc.advanceErr != nil:
+		assert.Equal(t, 1, transcripts, "transcript posts")
+	case len(tc.failTransitions) > 0:
+		assert.Equal(t, 1, transcripts, "transcript posts")
+		assert.Len(t, summaries, 1, "summary posts")
 	}
 
-	if tc.wantStatus != "" {
-		st.OpErr = nil
+	if tc.advanceErr != nil || len(tc.failTransitions) > 0 {
 		got, err := st.GetCall(context.Background(), callID)
 		require.NoError(t, err)
-		assert.Equal(t, tc.wantStatus, got.ReportStatus)
+		assert.Equal(t, "processing", got.ReportStatus)
+	} else if tc.transErr != nil {
+		got, err := st.GetCall(context.Background(), callID)
+		require.NoError(t, err)
+		assert.Equal(t, "pending", got.ReportStatus)
 	}
+
 	recMu.Lock()
 	_, kept := recordings[callID]
 	recMu.Unlock()
-	assert.Equal(t, tc.wantRecording, kept, "recording kept")
+	assert.True(t, kept, "recording kept")
 }
 
 func TestProsperaReport_Definition(t *testing.T) {

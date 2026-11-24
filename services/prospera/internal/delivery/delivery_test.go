@@ -193,11 +193,119 @@ func TestFlushLiveTranscript(t *testing.T) {
 	}
 }
 
+type voicemailRecordingGuardCase struct {
+	name          string
+	initialStatus string
+	nilStore      bool
+	missingCall   bool
+	transErr      error
+	wantErr       bool
+	wantStatus    string
+}
+
+func TestProcessVoicemailRecording_GuardsAndSkips(t *testing.T) {
+	t.Parallel()
+
+	tests := []voicemailRecordingGuardCase{
+		{
+			name:          "already delivered skipped",
+			initialStatus: "delivered",
+			wantStatus:    "delivered",
+		},
+		{
+			name:     "nil store returns error",
+			nilStore: true,
+			wantErr:  true,
+		},
+		{
+			name:        "nonexistent call returns error",
+			missingCall: true,
+			wantErr:     true,
+		},
+		{
+			name:          "transition to processing error returns error",
+			initialStatus: "awaiting_recording",
+			transErr:      errors.New("transition failed"),
+			wantErr:       true,
+			wantStatus:    "awaiting_recording",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			runVoicemailRecordingGuardCase(t, tc)
+		})
+	}
+}
+
+func seedVoicemailGuardStore(t *testing.T, tc voicemailRecordingGuardCase, callID string) *fakes.FakeStore {
+	t.Helper()
+	fakeStore := fakes.NewFakeStore()
+	fakeStore.TransErr = tc.transErr
+	if tc.missingCall {
+		return fakeStore
+	}
+	initStatus := tc.initialStatus
+	if initStatus == "" {
+		initStatus = "awaiting_recording"
+	}
+	call := model.VoiceCall{
+		CallID:       callID,
+		FromNumber:   "+15105550199",
+		ToNumber:     "+15105550100",
+		ReportStatus: initStatus,
+	}
+	if err := fakeStore.CreateInboundCall(context.Background(), call); err != nil {
+		t.Fatalf("CreateInboundCall: %v", err)
+	}
+	return fakeStore
+}
+
+func runVoicemailRecordingGuardCase(t *testing.T, tc voicemailRecordingGuardCase) {
+	t.Helper()
+
+	callID := "call-vm-guard"
+	if tc.missingCall {
+		callID = "call-nonexistent"
+	}
+
+	var st store.Store
+	var fakeStore *fakes.FakeStore
+	if !tc.nilStore {
+		fakeStore = seedVoicemailGuardStore(t, tc, callID)
+		st = fakeStore
+	}
+
+	cfg := &config.Config{
+		BrainURL:              "http://brain.local",
+		WhisperURL:            "http://voice.local",
+		GeminiAPIKey:          "test-key",
+		GeminiFallbackModel:   "gemini-2.5-flash",
+		DefaultDiscordChannel: "prospera",
+	}
+
+	reporter := NewReporter(fakes.StaticConfig{Cfg: cfg}, st, &fakes.FakeTwilio{})
+	err := reporter.ProcessVoicemailRecording(context.Background(), callID, "https://api.twilio.com/recording.wav")
+
+	if (err != nil) != tc.wantErr {
+		t.Fatalf("ProcessVoicemailRecording() err = %v, wantErr = %v", err, tc.wantErr)
+	}
+
+	if fakeStore != nil && !tc.missingCall && tc.wantStatus != "" {
+		updated, err := fakeStore.GetCall(context.Background(), callID)
+		if err != nil {
+			t.Fatalf("GetCall: %v", err)
+		}
+		if updated.ReportStatus != tc.wantStatus {
+			t.Fatalf("final ReportStatus = %s, want %s", updated.ReportStatus, tc.wantStatus)
+		}
+	}
+}
+
 type voicemailRecordingTestCase struct {
 	name                  string
 	initialStatus         string
-	nilStore              bool
-	missingCall           bool
 	emptyAudioContentType bool
 	whisperCode           int
 	whisperResp           string
@@ -206,10 +314,8 @@ type voicemailRecordingTestCase struct {
 	downloadErr           error
 	discordCode           int
 	vmRecErr              error
-	transErr              error
 	failTransitions       []string
-	wantErr               bool
-	wantErrContains       string
+	wantErrSub            string
 	wantStatus            string
 }
 
@@ -245,8 +351,7 @@ func TestProcessVoicemailRecording(t *testing.T) {
 			initialStatus:   "awaiting_recording",
 			downloadErr:     errors.New("download timeout"),
 			failTransitions: []string{"failed"},
-			wantErr:         true,
-			wantErrContains: "download recording",
+			wantErrSub:      "download recording",
 			wantStatus:      "processing",
 		},
 		{
@@ -264,14 +369,8 @@ func TestProcessVoicemailRecording(t *testing.T) {
 			whisperResp:     `{"text":"Please call back tomorrow morning."}`,
 			discordCode:     http.StatusInternalServerError,
 			failTransitions: []string{"failed"},
-			wantErr:         true,
-			wantErrContains: "discord returned status",
+			wantErrSub:      "discord returned status",
 			wantStatus:      "processing",
-		},
-		{
-			name:          "already delivered skipped",
-			initialStatus: "delivered",
-			wantStatus:    "delivered",
 		},
 		{
 			name:          "retry after failed status succeeds",
@@ -289,20 +388,10 @@ func TestProcessVoicemailRecording(t *testing.T) {
 			wantStatus:            "delivered",
 		},
 		{
-			name:     "nil store returns error",
-			nilStore: true,
-			wantErr:  true,
-		},
-		{
-			name:        "nonexistent call returns error",
-			missingCall: true,
-			wantErr:     true,
-		},
-		{
 			name:          "download error returns error",
 			initialStatus: "awaiting_recording",
 			downloadErr:   errors.New("download timeout"),
-			wantErr:       true,
+			wantErrSub:    "download timeout",
 			wantStatus:    "failed",
 		},
 		{
@@ -311,15 +400,8 @@ func TestProcessVoicemailRecording(t *testing.T) {
 			whisperCode:   http.StatusOK,
 			whisperResp:   `{"text":"Please call back."}`,
 			discordCode:   http.StatusInternalServerError,
-			wantErr:       true,
+			wantErrSub:    "discord returned status",
 			wantStatus:    "failed",
-		},
-		{
-			name:          "transition to processing error returns error",
-			initialStatus: "awaiting_recording",
-			transErr:      errors.New("transition failed"),
-			wantErr:       true,
-			wantStatus:    "awaiting_recording",
 		},
 	}
 
@@ -335,11 +417,7 @@ func seedVoicemailStore(t *testing.T, tc voicemailRecordingTestCase, callID stri
 	t.Helper()
 	fakeStore := fakes.NewFakeStore()
 	fakeStore.VMRecErr = tc.vmRecErr
-	fakeStore.TransErr = tc.transErr
 	fakes.SeedFailTransitions(fakeStore, tc.failTransitions)
-	if tc.missingCall {
-		return fakeStore
-	}
 	initStatus := tc.initialStatus
 	if initStatus == "" {
 		initStatus = "awaiting_recording"
@@ -360,16 +438,7 @@ func runProcessVoicemailRecordingCase(t *testing.T, tc voicemailRecordingTestCas
 	t.Helper()
 
 	callID := "call-vm-1"
-	if tc.missingCall {
-		callID = "call-nonexistent"
-	}
-
-	var st store.Store
-	var fakeStore *fakes.FakeStore
-	if !tc.nilStore {
-		fakeStore = seedVoicemailStore(t, tc, callID)
-		st = fakeStore
-	}
+	fakeStore := seedVoicemailStore(t, tc, callID)
 
 	discordCode := tc.discordCode
 	if discordCode == 0 {
@@ -401,17 +470,21 @@ func runProcessVoicemailRecordingCase(t *testing.T, tc voicemailRecordingTestCas
 		DownloadErr: tc.downloadErr,
 	}
 
-	reporter := NewReporter(fakes.StaticConfig{Cfg: cfg}, st, twilioMock, WithReporterHTTPClient(srv.Client()), WithReporterGeminiBaseURL(srv.URL))
+	reporter := NewReporter(fakes.StaticConfig{Cfg: cfg}, fakeStore, twilioMock, WithReporterHTTPClient(srv.Client()), WithReporterGeminiBaseURL(srv.URL))
 	err := reporter.ProcessVoicemailRecording(context.Background(), callID, "https://api.twilio.com/recording.wav")
 
-	if (err != nil) != tc.wantErr {
-		t.Fatalf("ProcessVoicemailRecording() err = %v, wantErr = %v", err, tc.wantErr)
-	}
-	if tc.wantErr && tc.wantErrContains != "" && !strings.Contains(err.Error(), tc.wantErrContains) {
-		t.Fatalf("ProcessVoicemailRecording() err = %v, want substring %q", err, tc.wantErrContains)
+	if tc.wantErrSub != "" {
+		if err == nil {
+			t.Fatalf("ProcessVoicemailRecording() err = nil, want substring %q", tc.wantErrSub)
+		}
+		if !strings.Contains(err.Error(), tc.wantErrSub) {
+			t.Fatalf("ProcessVoicemailRecording() err = %v, want substring %q", err, tc.wantErrSub)
+		}
+	} else if err != nil {
+		t.Fatalf("ProcessVoicemailRecording() unexpected err = %v", err)
 	}
 
-	if fakeStore != nil && !tc.missingCall && tc.wantStatus != "" {
+	if tc.wantStatus != "" {
 		updated, err := fakeStore.GetCall(context.Background(), callID)
 		if err != nil {
 			t.Fatalf("GetCall: %v", err)
