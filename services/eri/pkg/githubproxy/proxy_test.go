@@ -63,6 +63,7 @@ func TestRegister(t *testing.T) {
 	upstream := newEchoUpstream(t)
 	t.Setenv("GITHUB_API_URL", upstream.URL)
 	t.Setenv("AERIAL_GITHUB_GIT_UPSTREAM", upstream.URL+"/")
+	t.Setenv("AERIAL_GHCR_TOKEN_UPSTREAM", upstream.URL+"/token")
 
 	const pat = "dummy-proxy-pat"
 	// base64("x-access-token:dummy-proxy-pat"), derived by hand.
@@ -108,6 +109,54 @@ func TestRegister(t *testing.T) {
 			wantEcho:   &upstreamEcho{Auth: gitBasic, Path: "/org/repo.git/info/refs", Query: "service=git-receive-pack", Method: http.MethodGet},
 		},
 		{
+			name: "ghcr token forwards read-only pull scope", cfg: cfgWithPAT(pat), method: http.MethodGet,
+			target: "/internal/github-ghcr-token?scope=repository:azylman/aerial-sidecar-vision:pull&service=ghcr.io/token", remoteAddr: "127.0.0.1:5000",
+			headers:    map[string]string{"Authorization": "token client-token", "X-Custom": "val"},
+			wantStatus: http.StatusOK,
+			wantEcho:   &upstreamEcho{Auth: gitBasic, Path: "/token", Query: "scope=repository%3Aazylman%2Faerial-sidecar-vision%3Apull&service=ghcr.io%2Ftoken", Method: http.MethodGet},
+		},
+		{
+			name: "ghcr token supports ghcr.io service", cfg: cfgWithPAT(pat), method: http.MethodGet,
+			target: "/internal/github-ghcr-token?scope=repository:azylman/aerial:pull&service=ghcr.io", remoteAddr: "127.0.0.1:5000",
+			wantStatus: http.StatusOK,
+			wantEcho:   &upstreamEcho{Auth: gitBasic, Path: "/token", Query: "scope=repository%3Aazylman%2Faerial%3Apull&service=ghcr.io", Method: http.MethodGet},
+		},
+		{
+			name: "ghcr token missing scope rejected", cfg: cfgWithPAT(pat), method: http.MethodGet,
+			target: "/internal/github-ghcr-token?service=ghcr.io/token", remoteAddr: "127.0.0.1:5000",
+			wantStatus: http.StatusForbidden, wantSubstr: "Scope is required",
+		},
+		{
+			name: "ghcr token wrong subpath rejected", cfg: cfgWithPAT(pat), method: http.MethodGet,
+			target: "/internal/github-ghcr-token/extra?scope=repository:azylman/aerial:pull&service=ghcr.io/token", remoteAddr: "127.0.0.1:5000",
+			wantStatus: http.StatusForbidden, wantSubstr: "Forbidden path",
+		},
+		{
+			name: "ghcr token non-pull scope rejected", cfg: cfgWithPAT(pat), method: http.MethodGet,
+			target: "/internal/github-ghcr-token?scope=repository:azylman/aerial:push&service=ghcr.io/token", remoteAddr: "127.0.0.1:5000",
+			wantStatus: http.StatusForbidden, wantSubstr: "Unauthorized scope",
+		},
+		{
+			name: "ghcr token invalid service rejected", cfg: cfgWithPAT(pat), method: http.MethodGet,
+			target: "/internal/github-ghcr-token?scope=repository:azylman/aerial:pull&service=docker.io", remoteAddr: "127.0.0.1:5000",
+			wantStatus: http.StatusForbidden, wantSubstr: "Invalid or unauthorized service",
+		},
+		{
+			name: "ghcr token method not allowed for post", cfg: cfgWithPAT(pat), method: http.MethodPost,
+			target: "/internal/github-ghcr-token?scope=repository:azylman/aerial:pull&service=ghcr.io/token", remoteAddr: "127.0.0.1:5000",
+			wantStatus: http.StatusMethodNotAllowed, wantSubstr: "Method not allowed",
+		},
+		{
+			name: "ghcr token missing PAT returns 503", cfg: cfgWithPAT(""), method: http.MethodGet,
+			target: "/internal/github-ghcr-token?scope=repository:azylman/aerial:pull&service=ghcr.io/token", remoteAddr: "127.0.0.1:5000",
+			wantStatus: http.StatusServiceUnavailable, wantSubstr: "GitHub PAT not configured",
+		},
+		{
+			name: "ghcr token non-loopback caller gets 403", cfg: cfgWithPAT(pat), method: http.MethodGet,
+			target: "/internal/github-ghcr-token?scope=repository:azylman/aerial:pull&service=ghcr.io/token", remoteAddr: "192.0.2.10:5000",
+			wantStatus: http.StatusForbidden, wantSubstr: "forbidden",
+		},
+		{
 			name: "api missing PAT returns 503", cfg: cfgWithPAT(""), method: http.MethodGet,
 			target: "/internal/github-api/user", remoteAddr: "127.0.0.1:5000",
 			wantStatus: http.StatusServiceUnavailable, wantSubstr: "GitHub PAT not configured",
@@ -138,39 +187,52 @@ func TestRegister(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			mux := http.NewServeMux()
 			Register(mux, tc.cfg)
-
-			req := httptest.NewRequest(tc.method, tc.target, strings.NewReader(tc.body))
-			req.RemoteAddr = tc.remoteAddr
-			for k, v := range tc.headers {
-				req.Header.Set(k, v)
-			}
-			rec := httptest.NewRecorder()
-			mux.ServeHTTP(rec, req)
-
-			if rec.Code != tc.wantStatus {
-				t.Fatalf("status = %d, want %d (body: %s)", rec.Code, tc.wantStatus, rec.Body.String())
-			}
-			if tc.wantSubstr != "" && !strings.Contains(rec.Body.String(), tc.wantSubstr) {
-				t.Fatalf("body %q missing %q", rec.Body.String(), tc.wantSubstr)
-			}
-			if tc.wantEcho == nil {
-				return
-			}
-			if got := rec.Header().Get("X-Upstream"); got != "echo" {
-				t.Errorf("X-Upstream header = %q, want echo", got)
-			}
-			var got upstreamEcho
-			if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
-				t.Fatalf("decode upstream echo: %v (body: %s)", err, rec.Body.String())
-			}
-			if got != *tc.wantEcho {
-				t.Errorf("upstream saw %+v, want %+v", got, *tc.wantEcho)
-			}
+			checkProxyResponse(t, mux, tc.method, tc.target, tc.remoteAddr, tc.body, tc.headers, tc.wantStatus, tc.wantSubstr, tc.wantEcho)
 		})
 	}
 }
 
+func checkProxyResponse(t *testing.T, handler http.Handler, method, target, remoteAddr, body string, headers map[string]string, wantStatus int, wantSubstr string, wantEcho *upstreamEcho) {
+	t.Helper()
+	req := httptest.NewRequest(method, target, strings.NewReader(body))
+	req.RemoteAddr = remoteAddr
+	for k, v := range headers {
+		req.Header.Set(k, v)
+	}
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != wantStatus {
+		t.Fatalf("status = %d, want %d (body: %s)", rec.Code, wantStatus, rec.Body.String())
+	}
+	if wantSubstr != "" && !strings.Contains(rec.Body.String(), wantSubstr) {
+		t.Fatalf("body %q missing %q", rec.Body.String(), wantSubstr)
+	}
+	if wantEcho == nil {
+		return
+	}
+	if got := rec.Header().Get("X-Upstream"); got != "echo" {
+		t.Errorf("X-Upstream header = %q, want echo", got)
+	}
+	var got upstreamEcho
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+		t.Fatalf("decode upstream echo: %v (body: %s)", err, rec.Body.String())
+	}
+	if got != *wantEcho {
+		t.Errorf("upstream saw %+v, want %+v", got, *wantEcho)
+	}
+}
+
 func TestAPIHandler(t *testing.T) {
+	runProxyHandlerErrors(t, "GITHUB_API_URL", "/internal/github-api/user", APIHandler)
+}
+
+func TestGHCRTokenHandler(t *testing.T) {
+	runProxyHandlerErrors(t, "AERIAL_GHCR_TOKEN_UPSTREAM", "/internal/github-ghcr-token?scope=repository:azylman/aerial:pull&service=ghcr.io/token", GHCRTokenHandler)
+}
+
+func runProxyHandlerErrors(t *testing.T, envVar, reqPath string, getHandler func(cfg *config.Config) http.HandlerFunc) {
+	t.Helper()
 	tests := []struct {
 		name       string
 		upstream   string
@@ -183,10 +245,10 @@ func TestAPIHandler(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			t.Setenv("GITHUB_API_URL", tc.upstream)
-			req := httptest.NewRequest(http.MethodGet, "/internal/github-api/user", http.NoBody)
+			t.Setenv(envVar, tc.upstream)
+			req := httptest.NewRequest(http.MethodGet, reqPath, http.NoBody)
 			rec := httptest.NewRecorder()
-			APIHandler(cfgWithPAT("dummy-proxy-pat"))(rec, req)
+			getHandler(cfgWithPAT("dummy-proxy-pat"))(rec, req)
 			if rec.Code != tc.wantStatus {
 				t.Fatalf("status = %d, want %d (body: %s)", rec.Code, tc.wantStatus, rec.Body.String())
 			}

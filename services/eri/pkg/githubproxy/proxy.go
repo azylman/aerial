@@ -10,7 +10,9 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
+	"regexp"
 	"strings"
 
 	"github.com/azylman/aerial/pkg/httpkit"
@@ -19,27 +21,32 @@ import (
 
 // Route prefixes served by the proxy.
 const (
-	APIPrefix = "/internal/github-api/"
-	GitPrefix = "/internal/github-git/"
+	APIPrefix       = "/internal/github-api/"
+	GitPrefix       = "/internal/github-git/"
+	GHCRTokenPrefix = "/internal/github-ghcr-token"
 )
 
 const (
-	defaultAPIBase = "https://api.github.com"
-	defaultGitBase = "https://github.com"
-	apiBaseEnv     = "GITHUB_API_URL"
-	gitBaseEnv     = "AERIAL_GITHUB_GIT_UPSTREAM"
-	patMissingBody = `{"error":"GitHub PAT not configured"}`
+	defaultAPIBase      = "https://api.github.com"
+	defaultGitBase      = "https://github.com"
+	defaultGHCRTokenURL = "https://ghcr.io/token"
+	apiBaseEnv          = "GITHUB_API_URL"
+	gitBaseEnv          = "AERIAL_GITHUB_GIT_UPSTREAM"
+	ghcrTokenURLEnv     = "AERIAL_GHCR_TOKEN_UPSTREAM"
+	patMissingBody      = `{"error":"GitHub PAT not configured"}`
 )
 
 var httpClient = &http.Client{
 	Timeout: 0,
 }
 
-// Register mounts both proxy routes on mux behind httpkit.LoopbackOnly, so the
+// Register mounts proxy routes on mux behind httpkit.LoopbackOnly, so the
 // PAT-bearing proxy is reachable only from inside the pod.
 func Register(mux *http.ServeMux, cfg *config.Config) {
 	mux.Handle(APIPrefix, httpkit.LoopbackOnly(APIHandler(cfg)))
 	mux.Handle(GitPrefix, httpkit.LoopbackOnly(GitHandler(cfg)))
+	mux.Handle(GHCRTokenPrefix, httpkit.LoopbackOnly(GHCRTokenHandler(cfg)))
+	mux.Handle(GHCRTokenPrefix+"/", httpkit.LoopbackOnly(GHCRTokenHandler(cfg)))
 }
 
 // APIHandler proxies APIPrefix requests to the GitHub REST API with
@@ -74,6 +81,92 @@ func GitHandler(cfg *config.Config) http.HandlerFunc {
 			return
 		}
 		forward(w, r, body, GitPrefix, defaultGitBase, gitBaseEnv, "Basic "+authVal)
+	}
+}
+
+var pullScopePattern = regexp.MustCompile(`^repository:[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+:pull$`)
+
+func validateGHCRTokenRequest(r *http.Request) (service string, scopes []string, errStatus int, errMsg string) {
+	if r.Method != http.MethodGet {
+		return "", nil, http.StatusMethodNotAllowed, `{"error":"Method not allowed"}`
+	}
+	if r.URL.Path != GHCRTokenPrefix {
+		return "", nil, http.StatusForbidden, `{"error":"Forbidden path"}`
+	}
+
+	service = r.URL.Query().Get("service")
+	if service != "ghcr.io" && service != "ghcr.io/token" {
+		return "", nil, http.StatusForbidden, `{"error":"Invalid or unauthorized service"}`
+	}
+
+	scopes = r.URL.Query()["scope"]
+	if len(scopes) == 0 {
+		return "", nil, http.StatusForbidden, `{"error":"Scope is required"}`
+	}
+	for _, scope := range scopes {
+		if !pullScopePattern.MatchString(scope) {
+			return "", nil, http.StatusForbidden, `{"error":"Unauthorized scope"}`
+		}
+	}
+	return service, scopes, 0, ""
+}
+
+func buildGHCRTargetURL(service string, scopes []string) string {
+	targetBase := upstreamBase(ghcrTokenURLEnv, defaultGHCRTokenURL)
+	q := url.Values{}
+	q.Set("service", service)
+	for _, scope := range scopes {
+		q.Add("scope", scope)
+	}
+	if strings.Contains(targetBase, "?") {
+		return targetBase + "&" + q.Encode()
+	}
+	return targetBase + "?" + q.Encode()
+}
+
+// GHCRTokenHandler proxies GHCRTokenPrefix requests to ghcr.io/token with
+// x-access-token basic auth for read-only repository pull scopes.
+func GHCRTokenHandler(cfg *config.Config) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		service, scopes, status, errMsg := validateGHCRTokenRequest(r)
+		if status != 0 {
+			http.Error(w, errMsg, status)
+			return
+		}
+
+		pat, ok := resolvePAT(cfg)
+		if !ok {
+			http.Error(w, patMissingBody, http.StatusServiceUnavailable)
+			return
+		}
+
+		targetURL := buildGHCRTargetURL(service, scopes)
+		proxyReq, err := http.NewRequestWithContext(r.Context(), http.MethodGet, targetURL, http.NoBody)
+		if err != nil {
+			http.Error(w, fmt.Sprintf(`{"error":"Failed to create proxy request: %v"}`, err), http.StatusInternalServerError)
+			return
+		}
+
+		for k, vv := range r.Header {
+			if strings.EqualFold(k, "Authorization") || strings.EqualFold(k, "Connection") || strings.EqualFold(k, "Transfer-Encoding") {
+				continue
+			}
+			for _, v := range vv {
+				proxyReq.Header.Add(k, v)
+			}
+		}
+
+		authVal := base64.StdEncoding.EncodeToString([]byte("x-access-token:" + pat))
+		proxyReq.Header.Set("Authorization", "Basic "+authVal)
+
+		resp, err := httpClient.Do(proxyReq)
+		if err != nil {
+			http.Error(w, fmt.Sprintf(`{"error":"Upstream proxy error: %v"}`, err), http.StatusBadGateway)
+			return
+		}
+		defer resp.Body.Close()
+
+		StreamResponse(w, resp)
 	}
 }
 
