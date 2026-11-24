@@ -26,10 +26,21 @@ _go_prod_cover_transition = transition(
 
 def _go_cover_binary_impl(ctx):
     actual = ctx.attr.actual[0]
+    orig_exe = actual[DefaultInfo].files.to_list()[0]
+    out_name = ctx.attr.out_name if ctx.attr.out_name else orig_exe.basename
+    out_exe = ctx.actions.declare_file(ctx.label.name + "/" + out_name)
+    ctx.actions.run_shell(
+        inputs = [orig_exe],
+        outputs = [out_exe],
+        command = "cp -L \"$1\" \"$2\"",
+        arguments = [orig_exe.path, out_exe.path],
+        mnemonic = "CopyCoverBin",
+    )
     return [
         DefaultInfo(
-            files = actual[DefaultInfo].files,
+            files = depset([out_exe]),
             runfiles = actual[DefaultInfo].default_runfiles,
+            executable = out_exe,
         ),
     ]
 
@@ -40,7 +51,9 @@ go_cover_binary = rule(
             cfg = _go_prod_cover_transition,
             mandatory = True,
         ),
+        "out_name": attr.string(),
     },
+    executable = True,
 )
 
 def _go_pure_binary_transition_impl(settings, attr):
@@ -138,36 +151,43 @@ def aerial_go_image(
         bin_dir = "/app"
 
     bin_target = binary
+    strip_prefix = None
     if cover:
         cover_bin_name = name + "_cover_bin"
         go_cover_binary(
             name = cover_bin_name,
             actual = binary,
+            out_name = bin_name,
         )
         bin_target = ":" + cover_bin_name
+        strip_prefix = cover_bin_name
     else:
         pure_bin_name = name + "_pure_bin"
         go_pure_binary(
             name = pure_bin_name,
             actual = binary,
         )
-        bin_target = ":" + pure_bin_name
+        named_bin_target = name + "_bin_named"
+        native.genrule(
+            name = named_bin_target,
+            srcs = [":" + pure_bin_name],
+            outs = [name + "_bin/" + bin_name],
+            cmd = "cp -L $< $@",
+            executable = True,
+        )
+        bin_target = ":" + named_bin_target
+        strip_prefix = name + "_bin"
 
-    named_bin_target = name + "_bin_named"
-    native.genrule(
-        name = named_bin_target,
-        srcs = [bin_target],
-        outs = [name + "_bin/" + bin_name],
-        cmd = "cp -L $< $@",
-        executable = True,
-    )
-
-    layer_target = name + "_layer"
+    layer_target = name + "_bin_tar"
     pkg_tar(
         name = layer_target,
-        srcs = [":" + named_bin_target],
+        srcs = [bin_target],
         package_dir = bin_dir,
-        strip_prefix = name + "_bin",
+        strip_prefix = strip_prefix,
+    )
+    native.alias(
+        name = name + "_layer",
+        actual = ":" + layer_target,
     )
 
     tars = [":" + layer_target] + extra_tars

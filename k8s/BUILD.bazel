@@ -1,0 +1,14 @@
+load("@rules_shell//shell:sh_test.bzl", "sh_test")
+
+# Validates k8s manifests, Flux substitutions, and kustomize rendering.
+# Declares all configMapGenerator sources referenced by k8s/kustomization.yaml:
+# - //services/homepage:configmap_sources (entrypoint.sh, prepare-config.js, lib/merge.js, config/*)
+# - //web/theme:theme (aerial-tokens.css, aerial-theme.js)
+sh_test(
+    name = "manifests_test",
+    srcs = ["//build:tests/k8s_manifests_test.sh"],
+    data = glob(["*.yaml"]) + [
+        "//services/homepage:configmap_sources",
+        "//web/theme",
+    ],
+)

@@ -49,6 +49,9 @@ PR_DESCRIPTION.md
 !/BUILD.bazel
 !/build/BUILD.bazel
 !/images/BUILD.bazel
+!/k8s/BUILD.bazel
 !/services/docs-service/BUILD.bazel
+!/services/grafana/BUILD.bazel
+!/services/homepage/BUILD.bazel
 !/web/theme/BUILD.bazel
 

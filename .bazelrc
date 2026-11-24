@@ -10,6 +10,7 @@ test --test_env=PATH
 test --sandbox_tmpfs_path=/dev/shm
 test --test_output=errors
 test --test_summary=short
+coverage --test_env=PATH
 coverage --@rules_go//go/config:cover_format=go_cover
 coverage --remote_download_regex=.*coverage\.dat$
 build --remote_download_regex=.*images/.*

@@ -242,11 +242,15 @@ split_module_profile() {
     ' "$src_prof"
 }
 
-bazel_targets=""
-while IFS= read -r svc; do
-    [ -n "$svc" ] || continue
-    bazel_targets="$bazel_targets //${svc}/..."
-done < "$SVC_LIST_FILE"
+if [ -z "$TARGET_SERVICE" ]; then
+    bazel_targets="//..."
+else
+    bazel_targets=""
+    while IFS= read -r svc; do
+        [ -n "$svc" ] || continue
+        bazel_targets="$bazel_targets //${svc}/..."
+    done < "$SVC_LIST_FILE"
+fi
 
 coverage_log="${PROF_DIR}/bazel_coverage.log"
 bazel_status=0

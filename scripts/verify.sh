@@ -450,31 +450,6 @@ run_go_pkg_coverage() {
     fi
 }
 
-run_node_syntax() {
-    file="$1"
-    if [ -f "$file" ]; then
-        echo "   [node --check] Checking syntax of $file..."
-        if has_cmd node; then
-            node --check "$file"
-        elif has_docker; then
-            cat "$file" | docker run --rm -i node:22 node --check
-        fi
-    fi
-}
-
-run_node_test() {
-    dir="$1"
-    test_pattern="$2"
-    if [ -d "$dir" ]; then
-        echo "   [node --test] Testing in $dir ($test_pattern)..."
-        if has_cmd node; then
-            (cd "$dir" && node --test $test_pattern)
-        elif has_docker; then
-            tar -cf - "$dir" | docker run --rm -i node:22 sh -c "tar -xf - && cd $dir && node --test $test_pattern"
-        fi
-    fi
-}
-
 # React console UI (services/console/ui): install when node_modules is missing or stale, then
 # typecheck, run Vitest with its 95% coverage thresholds, and production-build with Vite.
 run_console_ui() {
@@ -518,18 +493,6 @@ run_console_e2e() {
     )
 }
 
-run_json_syntax() {
-    file="$1"
-    if [ -f "$file" ]; then
-        echo "   [json-check] Validating syntax of $file..."
-        if has_cmd node; then
-            node -e "JSON.parse(require('fs').readFileSync('$file', 'utf8'))"
-        elif has_docker; then
-            cat "$file" | docker run --rm -i node:22 node -e "let d=''; process.stdin.on('data', c => d += c); process.stdin.on('end', () => JSON.parse(d));"
-        fi
-    fi
-}
-
 check_no_imperative_ddl() {
     local files=""
     if [ "$MODE" = "staged" ]; then
@@ -556,6 +519,87 @@ check_no_imperative_ddl() {
         return 1
     fi
     return 0
+}
+
+check_cnpg_cluster_immutability() {
+    has_cmd git || return 0
+    has_cmd python3 || return 0
+    if ! git rev-parse --verify origin/main >/dev/null 2>&1; then
+        return 0
+    fi
+    python3 - "$REPO_ROOT" << 'EOF'
+import glob
+import os
+import re
+import subprocess
+import sys
+
+repo_root = sys.argv[1]
+k8s_dir = os.path.join(repo_root, "k8s")
+yaml_files = sorted(glob.glob(os.path.join(k8s_dir, "*.yaml")))
+
+errors = []
+
+def parse_cnpg_resources(content):
+    docs = re.split(r"(?m)^---\s*$", content)
+    resources = {}
+    for doc in docs:
+        if not re.search(r"(?m)^\s*apiVersion:\s*[\"']?postgresql\.cnpg\.io/v1", doc):
+            continue
+        kind_m = re.search(r"(?m)^\s*kind:\s*[\"']?(Database|ScheduledBackup)[\"']?\s*$", doc)
+        if not kind_m:
+            continue
+        kind = kind_m.group(1).strip()
+
+        meta_m = re.search(r"(?m)^\s*metadata:\s*\n((?:^[ \t]+[^\n]*\n?)*)", doc)
+        if not meta_m:
+            continue
+        meta_text = meta_m.group(1)
+        name_m = re.search(r"(?m)^\s+name:\s*[\"']?([^\"'\s]+)", meta_text)
+        if not name_m:
+            continue
+        name = name_m.group(1).strip()
+        ns_m = re.search(r"(?m)^\s+namespace:\s*[\"']?([^\"'\s]+)", meta_text)
+        namespace = ns_m.group(1).strip() if ns_m else "default"
+
+        spec_m = re.search(r"(?m)^\s*spec:\s*\n((?:^[ \t]+[^\n]*\n?)*)", doc)
+        if not spec_m:
+            continue
+        spec_text = spec_m.group(1)
+        cluster_m = re.search(r"(?m)^\s+cluster:\s*\n(?:^\s+[^\n]*\n)*?\s+name:\s*[\"']?([^\"'\s]+)", spec_text)
+        if not cluster_m:
+            continue
+        cluster_name = cluster_m.group(1).strip()
+        resources[(kind, namespace, name)] = cluster_name
+    return resources
+
+for yaml_path in yaml_files:
+    basename = os.path.basename(yaml_path)
+    rel_path = os.path.relpath(yaml_path, repo_root)
+    with open(yaml_path, "r", encoding="utf-8") as f:
+        content = f.read()
+
+    current_cnpg = parse_cnpg_resources(content)
+    if current_cnpg:
+        git_show = subprocess.run(["git", "-C", repo_root, "show", f"origin/main:k8s/{basename}"],
+                                  stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True)
+        if git_show.returncode == 0:
+            base_cnpg = parse_cnpg_resources(git_show.stdout)
+            for (kind, ns, name), current_cluster in current_cnpg.items():
+                if (kind, ns, name) in base_cnpg:
+                    base_cluster = base_cnpg[(kind, ns, name)]
+                    if current_cluster != base_cluster:
+                        errors.append(
+                            f"{rel_path}: {kind} '{ns}/{name}' changes spec.cluster.name from '{base_cluster}' to '{current_cluster}'. "
+                            f"spec.cluster.name is immutable on CloudNativePG Database/ScheduledBackup CRDs and a new resource name must be used."
+                        )
+
+if errors:
+    print("🚨 [Aerial Verify] CloudNativePG immutability violation detected:", file=sys.stderr)
+    for err in errors:
+        print(f"   • {err}", file=sys.stderr)
+    sys.exit(1)
+EOF
 }
 
 check_synapse_zero_vanadis() {
@@ -604,149 +648,8 @@ check_code_health() {
 }
 
 run_atlas_validate() {
-    has_cmd atlas || return 0
-    find . -maxdepth 3 -name "atlas.hcl" 2>/dev/null | sort | while IFS= read -r hcl; do
-        [ -f "$hcl" ] || continue
-        local target_dir
-        target_dir="$(dirname "$hcl")"
-        local mig_dir
-        mig_dir=$(grep -E 'dir\s*=' "$hcl" 2>/dev/null | head -n1 | sed -E 's/.*dir\s*=\s*"([^"]+)".*/\1/' || true)
-        if [ -z "$mig_dir" ]; then
-            mig_dir="file://migrations"
-        elif [ "${mig_dir#file://}" = "$mig_dir" ]; then
-            mig_dir="file://${mig_dir}"
-        fi
-        echo "   [atlas validate] Validating migration integrity in ${target_dir} (${mig_dir})..."
-        (cd "$target_dir" && atlas migrate validate --dir "$mig_dir")
-    done
-}
-
-check_k8s_manifests() {
-    if [ "$MODE" != "staged" ]; then
-        echo "   [k8s-manifests] Validating Kubernetes manifests, Flux substitutions, and CRD immutability..."
-    fi
-    # Step A: Validate Kustomize rendering if kubectl is available
-    if has_cmd kubectl; then
-        if ! kubectl kustomize --load-restrictor=LoadRestrictionsNone "$REPO_ROOT/k8s" >/dev/null; then
-            echo "🚨 [Aerial Verify] Error: kubectl kustomize failed to render k8s manifests." >&2
-            exit 1
-        fi
-    fi
-
-    # Step B: Standard-library Python validation
-    if has_cmd python3; then
-        python3 - "$REPO_ROOT" << 'EOF'
-import glob
-import os
-import re
-import subprocess
-import sys
-
-repo_root = sys.argv[1]
-k8s_dir = os.path.join(repo_root, "k8s")
-yaml_files = sorted(glob.glob(os.path.join(k8s_dir, "*.yaml")))
-
-errors = []
-
-def parse_cnpg_resources(content):
-    docs = re.split(r"(?m)^---\s*$", content)
-    resources = {}
-    for doc in docs:
-        if not re.search(r"(?m)^\s*apiVersion:\s*[\"']?postgresql\.cnpg\.io/v1", doc):
-            continue
-        kind_m = re.search(r"(?m)^\s*kind:\s*[\"']?(Database|ScheduledBackup)[\"']?\s*$", doc)
-        if not kind_m:
-            continue
-        kind = kind_m.group(1).strip()
-
-        meta_m = re.search(r"(?m)^\s*metadata:\s*\n((?:^[ \t]+[^\n]*\n?)*)", doc)
-        if not meta_m:
-            continue
-        meta_text = meta_m.group(1)
-        name_m = re.search(r"(?m)^\s+name:\s*[\"']?([^\"'\s]+)", meta_text)
-        if not name_m:
-            continue
-        name = name_m.group(1).strip()
-        ns_m = re.search(r"(?m)^\s+namespace:\s*[\"']?([^\"'\s]+)", meta_text)
-        namespace = ns_m.group(1).strip() if ns_m else "default"
-
-        spec_m = re.search(r"(?m)^\s*spec:\s*\n((?:^[ \t]+[^\n]*\n?)*)", doc)
-        if not spec_m:
-            continue
-        spec_text = spec_m.group(1)
-        cluster_m = re.search(r"(?m)^\s+cluster:\s*\n(?:^\s+[^\n]*\n)*?\s+name:\s*[\"']?([^\"'\s]+)", spec_text)
-        if not cluster_m:
-            continue
-        cluster_name = cluster_m.group(1).strip()
-        resources[(kind, namespace, name)] = cluster_name
-    return resources
-
-has_origin_main = False
-res = subprocess.run(["git", "-C", repo_root, "rev-parse", "--verify", "origin/main"],
-                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-if res.returncode == 0:
-    has_origin_main = True
-
-for yaml_path in yaml_files:
-    basename = os.path.basename(yaml_path)
-    rel_path = os.path.relpath(yaml_path, repo_root)
-    with open(yaml_path, "r", encoding="utf-8") as f:
-        content = f.read()
-
-    lines = content.splitlines()
-    docs = []
-    current_doc = []
-    doc_start = 1
-    for idx, line in enumerate(lines, start=1):
-        if re.match(r"^---\s*$", line):
-            if current_doc:
-                docs.append((doc_start, current_doc))
-            current_doc = []
-            doc_start = idx + 1
-        else:
-            current_doc.append((idx, line))
-    if current_doc:
-        docs.append((doc_start, current_doc))
-
-    for start_line, doc in docs:
-        doc_text = "\n".join(l for _, l in doc)
-        if basename == "kustomization.yaml" or "kustomize.toolkit.fluxcd.io/substitute: disabled" in doc_text:
-            continue
-        for lineno, line in doc:
-            stripped = line.strip()
-            if stripped.startswith("#"):
-                continue
-            for m in re.finditer(r"(?<!\$)\$\{([^}]+)\}", line):
-                expr = m.group(1)
-                if ":=" not in expr and ":-" not in expr:
-                    errors.append(f"{rel_path}:{lineno}: unescaped ${{{expr}}} without Flux default (:= or :-) or kustomize.toolkit.fluxcd.io/substitute: disabled")
-
-    if has_origin_main:
-        current_cnpg = parse_cnpg_resources(content)
-        if current_cnpg:
-            git_show = subprocess.run(["git", "-C", repo_root, "show", f"origin/main:k8s/{basename}"],
-                                      stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True)
-            if git_show.returncode == 0:
-                base_cnpg = parse_cnpg_resources(git_show.stdout)
-                for (kind, ns, name), current_cluster in current_cnpg.items():
-                    if (kind, ns, name) in base_cnpg:
-                        base_cluster = base_cnpg[(kind, ns, name)]
-                        if current_cluster != base_cluster:
-                            errors.append(
-                                f"{rel_path}: {kind} '{ns}/{name}' changes spec.cluster.name from '{base_cluster}' to '{current_cluster}'. "
-                                f"spec.cluster.name is immutable on CloudNativePG Database/ScheduledBackup CRDs and a new resource name must be used."
-                            )
-
-if errors:
-    print("🚨 [Aerial Verify] Kubernetes manifest validation errors detected:", file=sys.stderr)
-    for err in errors:
-        print(f"   • {err}", file=sys.stderr)
-    sys.exit(1)
-EOF
-    else
-        echo "🚨 [Aerial Verify] Error: python3 not found to perform k8s manifest validation." >&2
-        exit 1
-    fi
+    echo "   [atlas validate] Validating migration integrity in services/eri/pkg/db via Bazel..."
+    bazel test //services/eri/pkg/db:atlas_validate_test
 }
 
 if [ "$MODE" = "staged" ]; then
@@ -776,10 +679,8 @@ if [ "$MODE" = "staged" ]; then
     check_no_imperative_ddl
     check_synapse_zero_vanadis
     check_code_health
-
-    # Check Kubernetes manifests
-    if echo "$CHANGED_FILES" | grep -q -E '^(k8s/|scripts/verify\.sh$)'; then
-        check_k8s_manifests
+    if echo "$CHANGED_FILES" | grep -q -E '^k8s/'; then
+        check_cnpg_cluster_immutability
     fi
 
     lint_all_go=0
@@ -837,8 +738,33 @@ if [ "$MODE" = "staged" ]; then
         fi
     done
 
+    # Check Kubernetes manifests
+    if echo "$CHANGED_FILES" | grep -q -E '^k8s/'; then
+        bazel test //k8s:manifests_test
+    fi
+
+    # Check shared web theme
+    if echo "$CHANGED_FILES" | grep -q -E "^web/theme/"; then
+        bazel test //web/theme:theme_test
+    fi
+
+    # Check docs service syntax
+    if echo "$CHANGED_FILES" | grep -q -E "^(services/)?docs-service/"; then
+        bazel test //services/docs-service:syntax_test
+    fi
+
+    # Check homepage syntax and tests
+    if echo "$CHANGED_FILES" | grep -q -E "^(services/)?homepage/"; then
+        bazel test //services/homepage:homepage_test
+    fi
+
+    # Check grafana dashboard syntax
+    if echo "$CHANGED_FILES" | grep -q -E "^(services/)?grafana/dashboards/"; then
+        bazel test //services/grafana:dashboards_test
+    fi
+
     # Check Atlas migrations
-    if echo "$CHANGED_FILES" | grep -q -E "migrations/|atlas\.hcl|schema\.sql"; then
+    if echo "$CHANGED_FILES" | grep -q -E "atlas\.hcl|migrations/|schema\.sql"; then
         run_atlas_validate
     fi
 
@@ -852,35 +778,9 @@ if [ "$MODE" = "staged" ]; then
         run_console_e2e
     fi
 
-    # Shared dual-theme script: syntax and unit tests; Console bundles it, so rerun its UI gates
-    if echo "$CHANGED_FILES" | grep -q -E "^web/theme/"; then
-        run_node_syntax "web/theme/aerial-theme.js"
-        run_node_test "web/theme" "aerial-theme.test.js"
-        if ! echo "$CHANGED_FILES" | grep -q -E "^services/console/ui/"; then
-            run_console_ui
-        fi
-    fi
-
-    # Check docs service JS syntax
-    if echo "$CHANGED_FILES" | grep -q -E "^(services/)?docs-service/"; then
-        run_node_syntax "services/docs-service/app/assets/js/plugins/docsify-mermaid.js"
-        run_node_syntax "services/docs-service/app/assets/js/plugins/docsify-theme.js"
-    fi
-
-    # Check homepage JS syntax & unit tests
-    if echo "$CHANGED_FILES" | grep -q -E "^(services/)?homepage/"; then
-        run_node_syntax "services/homepage/lib/merge.js"
-        run_node_syntax "services/homepage/prepare-config.js"
-        if [ -d "services/homepage/test" ]; then
-            run_node_test "services/homepage" "test/*.test.js"
-        fi
-    fi
-
-    # Check grafana dashboard JSON syntax
-    if echo "$CHANGED_FILES" | grep -q -E "^(services/)?grafana/dashboards/"; then
-        for jf in services/grafana/dashboards/*.json; do
-            run_json_syntax "$jf"
-        done
+    # Console bundles the shared theme, so rerun its UI gates when web/theme changes
+    if echo "$CHANGED_FILES" | grep -q -E "^web/theme/" && ! echo "$CHANGED_FILES" | grep -q -E "^services/console/ui/"; then
+        run_console_ui
     fi
 
     if has_cmd git && git diff --quiet 2>/dev/null; then
@@ -904,7 +804,7 @@ check_rule_file_sizes
 check_dependabot_coverage
 
 echo "=== 1. Static Analysis & Linting ==="
-check_k8s_manifests
+check_cnpg_cluster_immutability
 for svc in $GO_SERVICES; do
     run_golangci_lint "$svc"
     run_deadcode "$svc"
@@ -914,25 +814,11 @@ check_synapse_zero_vanadis
 check_code_health
 run_atlas_validate
 
-echo "=== 2. Frontend & Script Syntax Checks ==="
-run_node_syntax "web/theme/aerial-theme.js"
-run_node_syntax "services/docs-service/app/assets/js/plugins/docsify-mermaid.js"
-run_node_syntax "services/docs-service/app/assets/js/plugins/docsify-theme.js"
-run_node_syntax "services/homepage/lib/merge.js"
-run_node_syntax "services/homepage/prepare-config.js"
+echo "=== 2. Frontend & Console UI Gates ==="
 run_console_ui
 run_console_e2e
-for jf in services/grafana/dashboards/*.json; do
-    run_json_syntax "$jf"
-done
 
-echo "=== 3. Unit Test Suites ==="
-if [ -d "services/homepage/test" ]; then
-    run_node_test "services/homepage" "test/*.test.js"
-fi
-run_node_test "web/theme" "aerial-theme.test.js"
-
-echo "=== 4. Go Unit Tests & Coverage Gating ==="
+echo "=== 3. Unit Test Suites & Coverage Gating ==="
 if [ -f "$SCRIPT_DIR/check-coverage.sh" ]; then
     sh "$SCRIPT_DIR/check-coverage.sh" --check
 fi
