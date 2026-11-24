@@ -448,6 +448,10 @@ go_test(
         ":cover_sample_cover_bin",
         ":coverage_ingest_tools_layer",
         ":eri_restate_scripts_layer",
+        ":github_runner_bins_layer",
+        ":github_runner_configs_layer",
         ":go_wrapper_named",
+        ":infisical_mcp_entrypoint_layer",
+        ":infisical_mcp_standby_layer",
     ],  # keep
 )

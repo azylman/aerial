@@ -58,6 +58,36 @@ func TestTarLayers(t *testing.T) {
 				"usr/local/bin/lib/hermetic-go-env.sh",
 			},
 		},
+		{
+			name:       "github runner bins layer",
+			tarRelPath: "images/github_runner_bins_layer.tar",
+			requiredEntries: []string{
+				"usr/local/bin/roborev",
+				"entrypoint.sh",
+			},
+		},
+		{
+			name:       "github runner configs layer",
+			tarRelPath: "images/github_runner_configs_layer.tar",
+			requiredEntries: []string{
+				"etc/roborev/config.toml",
+				"etc/claude-settings.json",
+			},
+		},
+		{
+			name:       "infisical mcp entrypoint layer",
+			tarRelPath: "images/infisical_mcp_entrypoint_layer.tar",
+			requiredEntries: []string{
+				"usr/local/bin/entrypoint.sh",
+			},
+		},
+		{
+			name:       "infisical mcp standby layer",
+			tarRelPath: "images/infisical_mcp_standby_layer.tar",
+			requiredEntries: []string{
+				"usr/local/bin/standby.js",
+			},
+		},
 	}
 
 	for _, tc := range tests {
@@ -110,31 +140,6 @@ func TestProdCoverBinaryFlush(t *testing.T) {
 	goWrapperBin, err := findRunfile("images/go_wrapper_bin/go")
 	if err != nil {
 		t.Fatalf("resolve go wrapper binary: %v", err)
-	}
-	toolsTarPath, err := findRunfile("images/coverage_ingest_tools_layer.tar")
-	if err != nil {
-		t.Fatalf("resolve coverage_ingest_tools_layer.tar: %v", err)
-	}
-
-	tarFile, err := os.Open(toolsTarPath)
-	if err != nil {
-		t.Fatalf("open coverage_ingest_tools_layer.tar: %v", err)
-	}
-	defer tarFile.Close()
-	tr := tar.NewReader(tarFile)
-	tarEntries := make(map[string]bool)
-	for {
-		hdr, err := tr.Next()
-		if err == io.EOF {
-			break
-		}
-		if err != nil {
-			t.Fatalf("read tar entry: %v", err)
-		}
-		tarEntries[strings.TrimLeft(hdr.Name, "./")] = true
-	}
-	if !tarEntries["usr/local/bin/go"] || !tarEntries["usr/local/bin/covdata"] {
-		t.Fatalf("expected coverage_ingest_tools_layer.tar to package usr/local/bin/go and usr/local/bin/covdata, got entries: %v", tarEntries)
 	}
 
 	flushDir := t.TempDir()

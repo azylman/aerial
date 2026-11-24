@@ -137,15 +137,15 @@ elif [ ${#bazel_targets[@]} -gt 0 ]; then
 fi
 
 DOCKER_CFG=(
-    "eri-restate:.:./services/eri-restate/Dockerfile:services/eri-restate/Dockerfile"
-    "github-runner:.:./services/github-runner/Dockerfile:services/github-runner/Dockerfile"
-    "discord-mcp:.:./mcp/discord-mcp/Dockerfile:mcp/discord-mcp/Dockerfile"
-    "infisical-mcp:./mcp/infisical-mcp:./mcp/infisical-mcp/Dockerfile:mcp/infisical-mcp/Dockerfile"
+    "eri-restate:.:./services/eri-restate/Dockerfile:services/eri-restate/Dockerfile:eri_restate_base"
+    "github-runner:.:./services/github-runner/Dockerfile:services/github-runner/Dockerfile:github_runner_base"
+    "discord-mcp:.:./mcp/discord-mcp/Dockerfile:mcp/discord-mcp/Dockerfile:discord_mcp_base"
+    "infisical-mcp:./mcp/infisical-mcp:./mcp/infisical-mcp/Dockerfile:mcp/infisical-mcp/Dockerfile:infisical_mcp_base"
 )
 
 declare -A DOCKER_TRIGGERED
 for entry in "${DOCKER_CFG[@]}"; do
-    IFS=":" read -r svc ctx df df_file <<< "$entry"
+    IFS=":" read -r svc ctx df df_file base_repo <<< "$entry"
     DOCKER_TRIGGERED["$svc"]="false"
     for f in "${CHANGED_FILES[@]}"; do
         if [ "$f" = "$df_file" ]; then
@@ -155,6 +155,28 @@ for entry in "${DOCKER_CFG[@]}"; do
             break
         fi
     done
+    if [ "${DOCKER_TRIGGERED[$svc]}" != "true" ] && [ -n "${base_repo:-}" ] && [ -f "$REPO_ROOT/$df_file" ]; then
+        actual_df_sha=$(sha256sum "$REPO_ROOT/$df_file" | awk '{print $1}')
+        recorded_df_sha=$(awk -v repo="$base_repo" '
+            /base_dockerfile_sha256:/ {
+                for (i = 1; i <= NF; i++) {
+                    if ($i ~ /^[0-9a-f]{64}$/) {
+                        sha = $i
+                    }
+                }
+            }
+            $0 ~ "name = \"" repo "\"" {
+                print sha
+                exit
+            }
+        ' "$REPO_ROOT/MODULE.bazel")
+        if [ -z "$recorded_df_sha" ] || [ "$actual_df_sha" != "$recorded_df_sha" ]; then
+            DOCKER_TRIGGERED["$svc"]="true"
+            AFFECTED_SERVICES["$svc"]="true"
+            SELECTED_SERVICES["$svc"]="true"
+            echo "Base Dockerfile hash for $svc differs from MODULE.bazel ($base_repo); falling back to type=docker until scripts/update-oci-base-digests.sh is run" >&2
+        fi
+    fi
 done
 
 if [ "$FORCE_ALL" = "true" ]; then
@@ -227,7 +249,7 @@ for svc in "${OCI_SERVICES[@]}"; do
 done
 
 for entry in "${DOCKER_CFG[@]}"; do
-    IFS=":" read -r svc ctx df df_file <<< "$entry"
+    IFS=":" read -r svc ctx df df_file base_repo <<< "$entry"
     if [ "${DOCKER_TRIGGERED[$svc]:-false}" = "true" ]; then
         SELECTED_MATRIX+=("{\"service\":\"${svc}\",\"image_name\":\"aerial-${svc}\",\"type\":\"docker\",\"context\":\"${ctx}\",\"file\":\"${df}\"}")
     fi

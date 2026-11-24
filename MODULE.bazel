@@ -36,24 +36,32 @@ oci.pull(
     image = "index.docker.io/arigaio/atlas",
     platforms = ["linux/amd64"],
 )
+
+# base_dockerfile_sha256: 73e7e376bd9b004d3fb5077020b79aafd137f3ce966753a6fb1b8780d3061b49
 oci.pull(
     name = "eri_restate_base",
     digest = "sha256:280251828141cdf0ac255b928d52d925109d6436f4b8d9292adf787712cd7e56",
     image = "ghcr.io/azylman/aerial-eri-restate",
     platforms = ["linux/amd64"],
 )
+
+# base_dockerfile_sha256: aac5fae8129e30c78028e3638fc6c8ee62f52f6a6201bacfec79187f4da5bbef
 oci.pull(
     name = "github_runner_base",
     digest = "sha256:7d14e61185e66aedb54bd926ad459890567d960372c8ddf3f6c8c28661759cbf",
     image = "ghcr.io/azylman/aerial-github-runner",
     platforms = ["linux/amd64"],
 )
+
+# base_dockerfile_sha256: ce071c3540b895aa596f294a77746acca848536c71d96092863df336d0fafec8
 oci.pull(
     name = "discord_mcp_base",
     digest = "sha256:5f7c866097330963aaeb9b777737b5146834f4d4d9da9ed6452709380fefe2a8",
     image = "ghcr.io/azylman/aerial-discord-mcp",
     platforms = ["linux/amd64"],
 )
+
+# base_dockerfile_sha256: c03c44b0638fdb4279b4b09d33a4012f5027f2ea94db0cc3aa084bb4c77eb197
 oci.pull(
     name = "infisical_mcp_base",
     digest = "sha256:dd29a8e91eb03680f389690f039756442be4d8018a592352f349a0ae81c444ea",
