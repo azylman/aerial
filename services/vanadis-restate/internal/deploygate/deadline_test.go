@@ -535,6 +535,9 @@ func TestDeploymentDeadlineLifecycle(t *testing.T) {
 				require.Contains(t, eri.lastDispatch.Prompt, "Readiness remains unconfirmed")
 				require.Contains(t, eri.lastDispatch.Prompt, "web")
 				require.Equal(t, "vanadis-deploy-deadline-c-1-sha-1", eri.lastDispatch.ID)
+				require.Equal(t, "vanadis-restate", eri.lastDispatch.Source)
+				require.Equal(t, "vanadis-c", eri.lastDispatch.SessionID)
+				require.Equal(t, "c", eri.lastDispatch.VanadisChunkID)
 			}
 			if len(tc.dispatchErrs) > 0 {
 				require.Equal(t, statusDeployFailed, st.chunks[0].Status)

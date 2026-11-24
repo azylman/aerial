@@ -372,12 +372,14 @@ func (g *Gate) DeliverDeadline(ctx context.Context, buildID string, a Attempt) (
 			wakeCtx = ericlient.WithAgent(ctx, agent)
 		}
 		e = g.exec.EriClient.DispatchAccepted(wakeCtx, eriwire.BrainDispatchRequest{
-			ID:        id,
-			Source:    "discord",
-			SessionID: "vanadis-deploy-deadline-" + c.ID,
-			TargetID:  build.ThreadID,
-			Prompt:    executor.FormatDeployFailurePrompt(ev),
-			Agent:     agent,
+			ID:             id,
+			Source:         "vanadis-restate",
+			SessionID:      "vanadis-" + c.ID,
+			VanadisChunkID: c.ID,
+			TargetID:       build.ThreadID,
+			Prompt:         executor.FormatDeployFailurePrompt(ev),
+			Agent:          agent,
+			Effort:         store.CapChunkEffort(c.Effort),
 		})
 		if e != nil {
 			result.Error = e.Error()

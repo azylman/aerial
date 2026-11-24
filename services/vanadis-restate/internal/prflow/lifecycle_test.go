@@ -748,6 +748,8 @@ func TestFlow_SelectUnattachedTargetChunk(t *testing.T) {
 		{"thread fallback ambiguous match rejected", build, []model.VanadisChunk{running("c1"), running("c2")}, threadEv, ""},
 		{"thread mismatch rejected", build, []model.VanadisChunk{running("c1")}, pubsub.PRLifecycleEvent{TargetID: "other", Repo: "owner/repo", PRNumber: 12}, ""},
 		{"quiet event rejected", build, []model.VanadisChunk{running("c1")}, pubsub.PRLifecycleEvent{TargetID: "th-1", Repo: "owner/repo", PRNumber: 12, Quiet: true}, ""},
+		{"branch-encoded deploy_failed chunk adopts repair pr", build, []model.VanadisChunk{{ID: "c1", BuildID: "b1", Mode: "pr", Status: "deploy_failed", Repo: "owner/repo", StartedAt: now, PRNumber: 10}}, pubsub.PRLifecycleEvent{Repo: "owner/repo", PRNumber: 12, Branch: "feat/repo-pr-vanadis-c1-123456", TargetID: "th-1"}, "c1"},
+		{"thread fallback deploy_failed chunk adopts repair pr", build, []model.VanadisChunk{{ID: "c1", BuildID: "b1", Mode: "pr", Status: "deploy_failed", Repo: "owner/repo", StartedAt: now, PRNumber: 10}}, threadEv, "c1"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -1024,6 +1026,34 @@ func TestFlow_IsEligibleUnattachedChunk(t *testing.T) {
 			chunk: &model.VanadisChunk{ID: "c1", BuildID: "b1", Mode: "other", Status: "running", StartedAt: now, Repo: "owner/repo"},
 			event: pubsub.PRLifecycleEvent{TargetID: "th-1", Repo: "owner/repo", Branch: "feat/repo-pr-vanadis-c1-123456", PRNumber: 12},
 			want:  false,
+		},
+		{
+			name:  "branch match deploy_failed chunk adopting new repair pr accepted",
+			build: build,
+			chunk: &model.VanadisChunk{ID: "c1", BuildID: "b1", Mode: "pr", Status: "deploy_failed", StartedAt: now, Repo: "owner/repo", PRNumber: 10},
+			event: pubsub.PRLifecycleEvent{TargetID: "th-1", Repo: "owner/repo", Branch: "feat/repo-pr-vanadis-c1-123456", PRNumber: 12},
+			want:  true,
+		},
+		{
+			name:  "branch match deploy_failed chunk with same pr rejected",
+			build: build,
+			chunk: &model.VanadisChunk{ID: "c1", BuildID: "b1", Mode: "pr", Status: "deploy_failed", StartedAt: now, Repo: "owner/repo", PRNumber: 12},
+			event: pubsub.PRLifecycleEvent{TargetID: "th-1", Repo: "owner/repo", Branch: "feat/repo-pr-vanadis-c1-123456", PRNumber: 12},
+			want:  false,
+		},
+		{
+			name:  "thread match deploy_failed chunk adopting new repair pr accepted",
+			build: build,
+			chunk: &model.VanadisChunk{ID: "c1", BuildID: "b1", Mode: "pr", Status: "deploy_failed", StartedAt: now, Repo: "owner/repo", PRNumber: 10},
+			event: ev,
+			want:  true,
+		},
+		{
+			name:  "branch match deploy_failed action chunk adopting new repair pr accepted",
+			build: build,
+			chunk: &model.VanadisChunk{ID: "c1", BuildID: "b1", Mode: "action", Status: "deploy_failed", Repo: "owner/repo", PRNumber: 10},
+			event: pubsub.PRLifecycleEvent{TargetID: "th-1", Repo: "owner/repo", Branch: "feat/repo-pr-vanadis-c1-123456", PRNumber: 12},
+			want:  true,
 		},
 	}
 	for _, tc := range tests {
