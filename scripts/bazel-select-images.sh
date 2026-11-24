@@ -18,10 +18,10 @@ fi
 for f in "${CHANGED_FILES[@]}"; do
     case "$f" in .github/workflows/docker-publish.yml|.dockerignore|images/BUILD.bazel|build/*|MODULE.bazel*|BUILD.bazel|go.mod|go.sum) FORCE_ALL="true" ;; esac
 done
-OCI_SVCS=("eri" "haro" "coven" "docket-mcp" "kernel-mcp" "synapse" "transcripts" "vanadis" "vanadis-restate" "vanadis-nats" "prospera" "console" "redact-pattern" "coverage-ingest" "docs" "migrator")
-DOCKER_CFG=("eri-restate:.:./services/eri-restate/Dockerfile:services/eri-restate/*|services/eri/*|scripts/*|rules/*|.agents/*|pkg/*|go.mod|go.sum" "github-runner:.:./services/github-runner/Dockerfile:services/github-runner/*" "discord-mcp:.:./mcp/discord-mcp/Dockerfile:mcp/discord-mcp/*" "infisical-mcp:./mcp/infisical-mcp:./mcp/infisical-mcp/Dockerfile:mcp/infisical-mcp/*")
+OCI_SVCS=("eri" "haro" "coven" "docket-mcp" "kernel-mcp" "synapse" "transcripts" "vanadis" "vanadis-restate" "vanadis-nats" "prospera" "console" "redact-pattern" "coverage-ingest" "docs" "migrator" "eri-restate" "github-runner" "discord-mcp" "infisical-mcp")
+DOCKER_CFG=("eri-restate:.:./services/eri-restate/Dockerfile:services/eri-restate/Dockerfile" "github-runner:.:./services/github-runner/Dockerfile:services/github-runner/Dockerfile" "discord-mcp:.:./mcp/discord-mcp/Dockerfile:mcp/discord-mcp/Dockerfile" "infisical-mcp:./mcp/infisical-mcp:./mcp/infisical-mcp/Dockerfile:mcp/infisical-mcp/Dockerfile")
 PKG_CHANGED="false"; for f in "${CHANGED_FILES[@]}"; do [[ "$f" == pkg/* ]] && { PKG_CHANGED="true"; break; }; done
-declare -A AFF SEL; for s in "${OCI_SVCS[@]}"; do AFF["$s"]="false"; SEL["$s"]="false"; done; for ent in "${DOCKER_CFG[@]}"; do IFS=":" read -r s _ _ _ <<< "$ent"; AFF["$s"]="false"; SEL["$s"]="false"; done
+declare -A AFF SEL D_TRIG; for s in "${OCI_SVCS[@]}"; do AFF["$s"]="false"; SEL["$s"]="false"; D_TRIG["$s"]="false"; done
 for f in "${CHANGED_FILES[@]}"; do
     case "$f" in
         services/docs-service/*) AFF["docs"]="true" ;;
@@ -31,65 +31,63 @@ for f in "${CHANGED_FILES[@]}"; do
     esac
 done
 [ "$PKG_CHANGED" = "true" ] && for s in "${OCI_SVCS[@]}"; do AFF["$s"]="true"; done
+for ent in "${DOCKER_CFG[@]}"; do
+    IFS=":" read -r s _ _ df_f <<< "$ent"
+    for f in "${CHANGED_FILES[@]}"; do [ "$f" = "$df_f" ] && { D_TRIG["$s"]="true"; AFF["$s"]="true"; SEL["$s"]="true"; break; }; done
+done
 CAND_OCI=()
 if [ "$FORCE_ALL" = "true" ]; then CAND_OCI=("${OCI_SVCS[@]}"); else
-    b_pkgs=(); chk_all="false"
+    b_pkgs=(); chk_all="false"; [ ${#CHANGED_FILES[@]} -eq 0 ] && chk_all="true"
     for f in "${CHANGED_FILES[@]}"; do
         case "$f" in
+            scripts/*|rules/*|.agents/*) b_pkgs+=("//:all") ;;
             services/docs-service/*) [ -f "$REPO_ROOT/services/docs-service/BUILD.bazel" ] && b_pkgs+=("//services/docs-service:all") ;;
             services/eri/pkg/db/migrations/*) [ -f "$REPO_ROOT/services/eri/pkg/db/BUILD.bazel" ] && b_pkgs+=("//services/eri/pkg/db:all") ;;
             services/*|mcp/*|pkg/*)
                 d=$(dirname "$f"); pkg=""
-                while [ -n "$d" ] && [ "$d" != "." ] && [ "$d" != "/" ]; do
-                    [ -f "$REPO_ROOT/$d/BUILD.bazel" ] && { pkg="$d"; break; }
-                    d=$(dirname "$d")
-                done
-                [ -n "$pkg" ] && b_pkgs+=("//${pkg}:all") || chk_all="true"
-                ;;
+                while [ -n "$d" ] && [ "$d" != "." ] && [ "$d" != "/" ]; do [ -f "$REPO_ROOT/$d/BUILD.bazel" ] && { pkg="$d"; break; }; d=$(dirname "$d"); done
+                [ -n "$pkg" ] && b_pkgs+=("//${pkg}:all") || chk_all="true" ;;
             web/theme/*) [ -f "$REPO_ROOT/web/theme/BUILD.bazel" ] && b_pkgs+=("//web/theme:all") ;;
             images/*) [ -f "$REPO_ROOT/images/BUILD.bazel" ] && b_pkgs+=("//images:all") ;;
-            docs/*|k8s/*|rules/*|*.md|.gitignore|.git*|.agents/*|channels/*|custom-skills/*|scripts/*|Makefile|.code-health-baseline.json|.golangci.yml) ;;
+            docs/*|k8s/*|*.md|.gitignore|.git*|channels/*|custom-skills/*|Makefile|.code-health-baseline.json|.golangci.yml) ;;
             *) chk_all="true" ;;
         esac
     done
-    if [ "$chk_all" = "true" ]; then
-        CAND_OCI=("${OCI_SVCS[@]}")
-    elif [ ${#b_pkgs[@]} -gt 0 ]; then
+    if [ "$chk_all" = "true" ]; then CAND_OCI=("${OCI_SVCS[@]}"); elif [ ${#b_pkgs[@]} -gt 0 ]; then
         . "$REPO_ROOT/scripts/lib/hermetic-go-env.sh" && ensure_bazel_build_files "$REPO_ROOT"
         p_set=$(printf '%s ' "${b_pkgs[@]}")
         q_out=$(bazel query "kind(oci_image, rdeps(//images:all, set($p_set)))" 2>/dev/null) || CAND_OCI=("${OCI_SVCS[@]}")
         if [ ${#CAND_OCI[@]} -eq 0 ]; then
-            while IFS= read -r m || [ -n "$m" ]; do c="${m#//images:}"; [ -n "$c" ] && { CAND_OCI+=("$c"); AFF["$c"]="true"; }; done <<< "$q_out"
-            [ ${#CAND_OCI[@]} -eq 0 ] && CAND_OCI=("${OCI_SVCS[@]}")
+            while IFS= read -r m || [ -n "$m" ]; do c="${m#//images:}"; [ -n "$c" ] && { CAND_OCI+=("$c"); [ -n "${AFF[$c]+_}" ] && AFF["$c"]="true"; }; done <<< "$q_out"
         fi
     fi
-    for s in "${OCI_SVCS[@]}"; do [ "${AFF[$s]}" = "true" ] && CAND_OCI+=("$s"); done
+    for s in "${OCI_SVCS[@]}"; do [ "${AFF[$s]}" = "true" ] && [ "${D_TRIG[$s]}" != "true" ] && CAND_OCI+=("$s"); done
     [ ${#CAND_OCI[@]} -gt 0 ] && IFS=" " read -r -a CAND_OCI <<< "$(printf '%s\n' "${CAND_OCI[@]}" | sort -u | tr '\n' ' ')"
 fi
 if [ "$FORCE_ALL" = "true" ]; then
-    for s in "${OCI_SVCS[@]}"; do SEL["$s"]="true"; AFF["$s"]="true"; done
+    for s in "${OCI_SVCS[@]}"; do [ "${D_TRIG[$s]}" = "true" ] && continue; SEL["$s"]="true"; AFF["$s"]="true"; done
 elif [ ${#CAND_OCI[@]} -gt 0 ]; then
-    command -v crane >/dev/null 2>&1 || { echo "::error::crane binary is required" >&2; exit 1; }
-    b_targets=(); for s in "${CAND_OCI[@]}"; do b_targets+=("//images:${s}"); AFF["$s"]="true"; done
-    bazel build --remote_download_toplevel "${b_targets[@]}"
-    for s in "${CAND_OCI[@]}"; do
-        ldig=$(jq -r '.manifests[0].digest // empty' "bazel-bin/images/${s}/index.json" 2>/dev/null || true)
-        [ -n "$ldig" ] || { echo "::error::missing local digest for $s" >&2; exit 1; }
-        rdig=""
-        if rdig_out=$(crane digest "ghcr.io/${OWNER}/aerial-${s}:latest" 2>&1); then rdig="$rdig_out"; elif echo "$rdig_out" | grep -q -i -E '(404|not found|NAME_UNKNOWN|MANIFEST_UNKNOWN|UNAUTHORIZED|DENIED)'; then rdig=""; else echo "::error::crane error for $s: $rdig_out" >&2; exit 1; fi
-        [ -z "$rdig" ] || [ "$ldig" != "$rdig" ] && { echo "Image $s changed: local=$ldig remote=$rdig" >&2; SEL["$s"]="true"; }
-    done
+    b_targets=(); b_svcs=()
+    for s in "${CAND_OCI[@]}"; do [ "${D_TRIG[$s]:-false}" = "true" ] && continue; b_targets+=("//images:${s}"); b_svcs+=("$s"); AFF["$s"]="true"; done
+    if [ ${#b_targets[@]} -gt 0 ]; then
+        command -v crane >/dev/null 2>&1 || { echo "::error::crane binary is required" >&2; exit 1; }
+        bazel build --remote_download_toplevel "${b_targets[@]}"
+        for s in "${b_svcs[@]}"; do
+            ldig=$(jq -r '.manifests[0].digest // empty' "bazel-bin/images/${s}/index.json" 2>/dev/null || true)
+            [ -n "$ldig" ] || { echo "::error::missing local digest for $s" >&2; exit 1; }
+            rdig=""
+            if rdig_out=$(crane digest "ghcr.io/${OWNER}/aerial-${s}:latest" 2>&1); then rdig="$rdig_out"; elif echo "$rdig_out" | grep -q -i -E '(404|not found|NAME_UNKNOWN|MANIFEST_UNKNOWN|UNAUTHORIZED|DENIED)'; then rdig=""; else echo "::error::crane error for $s: $rdig_out" >&2; exit 1; fi
+            [ -z "$rdig" ] || [ "$ldig" != "$rdig" ] && { echo "Image $s changed: local=$ldig remote=$rdig" >&2; SEL["$s"]="true"; }
+        done
+    fi
 fi
-SEL_MAT=(); for s in "${OCI_SVCS[@]}"; do [ "${SEL[$s]}" = "true" ] && SEL_MAT+=("{\"service\":\"$s\",\"image_name\":\"aerial-$s\",\"type\":\"bazel\"}"); done
+SEL_MAT=(); for s in "${OCI_SVCS[@]}"; do [ "${D_TRIG[$s]}" != "true" ] && [ "${SEL[$s]}" = "true" ] && SEL_MAT+=("{\"service\":\"$s\",\"image_name\":\"aerial-$s\",\"type\":\"bazel\"}"); done
 for ent in "${DOCKER_CFG[@]}"; do
-    IFS=":" read -r s ctx df pat <<< "$ent"; sel="$FORCE_ALL"
-    if [ "$sel" = "false" ]; then
-        for f in "${CHANGED_FILES[@]}"; do eval "case \"\$f\" in $pat) AFF[\"\$s\"]=\"true\"; [[ \"\$f\" =~ (_test\.go|testdata/) ]] || sel=\"true\" ;; esac"; [ "$sel" = "true" ] && break; done
-    else AFF["$s"]="true"; fi
-    [ "$sel" = "true" ] && { SEL["$s"]="true"; SEL_MAT+=("{\"service\":\"$s\",\"image_name\":\"aerial-$s\",\"type\":\"docker\",\"context\":\"$ctx\",\"file\":\"$df\"}"); }
+    IFS=":" read -r s ctx df _ <<< "$ent"
+    [ "${D_TRIG[$s]}" = "true" ] && SEL_MAT+=("{\"service\":\"$s\",\"image_name\":\"aerial-$s\",\"type\":\"docker\",\"context\":\"$ctx\",\"file\":\"$df\"}")
 done
 MAT_JSON="[$(IFS=,; echo "${SEL_MAT[*]}")]"; HAS_B="false"; [ ${#SEL_MAT[@]} -gt 0 ] && HAS_B="true"
 if [ -n "$GITHUB_OUT" ]; then
-    { echo "pkg=$PKG_CHANGED"; for s in "${OCI_SVCS[@]}"; do echo "$s=${AFF[$s]}"; done; for ent in "${DOCKER_CFG[@]}"; do IFS=":" read -r s _ _ _ <<< "$ent"; echo "$s=${AFF[$s]}"; done; echo "matrix=$MAT_JSON"; echo "has_builds=$HAS_B"; } >> "$GITHUB_OUT"
+    { echo "pkg=$PKG_CHANGED"; for s in "${OCI_SVCS[@]}"; do echo "$s=${AFF[$s]}"; done; echo "matrix=$MAT_JSON"; echo "has_builds=$HAS_B"; } >> "$GITHUB_OUT"
 fi
 echo "Build Selection Result: pkg=$PKG_CHANGED has_builds=$HAS_B count=${#SEL_MAT[@]}"

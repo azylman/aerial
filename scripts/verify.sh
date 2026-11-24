@@ -48,13 +48,13 @@ else
             while [ -n "$d" ] && [ "$d" != "." ] && [ "$d" != "/" ]; do [ -f "$d/BUILD.bazel" ] && { b_pkgs+=("//${d}:all"); break; }; d=$(dirname "$d"); done ;;
         esac
     done
-    [ ${#b_pkgs[@]} -gt 0 ] && TEST_TARGETS=$(bazel query "kind('go_test rule', rdeps(//..., set($(printf '%s ' "${b_pkgs[@]}"))))")
+    [ ${#b_pkgs[@]} -gt 0 ] && TEST_TARGETS=$(bazel query "kind('go_test rule', set($(printf '%s ' "${b_pkgs[@]}")))")
 fi
 if [ -n "$TEST_TARGETS" ]; then
     rm -rf bazel-testlogs && cov_status=0
     # shellcheck disable=SC2086
     bazel coverage --keep_going --instrumentation_filter="^//(services|mcp|pkg|scripts|images)[/:]" $TEST_TARGETS || cov_status=1
-    cov_files=$(find bazel-testlogs/ -maxdepth 5 -name "coverage.dat")
+    cov_files=$(find bazel-testlogs/ -name "coverage.dat")
     [ -n "$cov_files" ] || { echo "🚨 [Aerial Verify] No coverage files produced." >&2; exit 1; }
     # shellcheck disable=SC2086
     awk -v mode="$MODE" -v filter="$TARGET_PKGS" '

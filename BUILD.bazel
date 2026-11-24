@@ -20,3 +20,33 @@ filegroup(
     srcs = ["scripts/hooks/hooks.json"],
     visibility = ["//visibility:public"],
 )
+
+filegroup(
+    name = "runtime_scripts",
+    srcs = glob(
+        ["scripts/**"],
+        exclude = ["scripts/code-health/**"],
+    ),
+    visibility = ["//visibility:public"],
+)
+
+filegroup(
+    name = "runtime_rules",
+    srcs = glob(["rules/**"]),
+    visibility = ["//visibility:public"],
+)
+
+filegroup(
+    name = "runtime_agents",
+    srcs = glob([".agents/**"]),
+    visibility = ["//visibility:public"],
+)
+
+exports_files([
+    "services/github-runner/roborev-wrapper.sh",
+    "services/github-runner/roborev-config.toml",
+    "services/github-runner/claude-settings.json",
+    "services/github-runner/entrypoint.sh",
+    "mcp/infisical-mcp/standby.js",
+    "mcp/infisical-mcp/entrypoint.sh",
+])
