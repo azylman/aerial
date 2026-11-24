@@ -65,9 +65,7 @@ func main() {
 }
 
 func writef(w io.Writer, format string, args ...any) {
-	var buf bytes.Buffer
-	fmt.Fprintf(&buf, format, args...)
-	if _, err := w.Write(buf.Bytes()); err != nil {
+	if _, err := fmt.Fprintf(w, format, args...); err != nil {
 		return
 	}
 }
@@ -153,7 +151,12 @@ func runCheck(absRoot, baselinePath string, targets, testTargets []string, r rul
 		return 1
 	}
 	violations = append(violations, checkShellTargets(absRoot, r.withoutSkipped(shellTargets))...)
-	violations = append(violations, checkNoImperativeDDL(absRoot, targets)...)
+	ddlTargets, err := collectTargetsMatching(absRoot, nil, isCandidateDDLFile)
+	if err != nil {
+		writef(stderr, "code-health: collect ddl targets: %v\n", err)
+		return 1
+	}
+	violations = append(violations, checkNoImperativeDDL(absRoot, r.withoutSkipped(ddlTargets))...)
 	violations = append(violations, checkSynapseZeroVanadis(absRoot, targets)...)
 	violations = append(violations, checkUTF8BOM(absRoot, append(targets, shellTargets...))...)
 	violations = append(violations, checkNoMainInTests(absRoot, testTargets)...)

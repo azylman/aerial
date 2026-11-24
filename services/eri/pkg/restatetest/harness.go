@@ -37,11 +37,11 @@ func resolveRestateServerBin() string {
 				return env
 			}
 		}
-		for _, root := range []string{"", os.Getenv("RUNFILES_DIR"), os.Getenv("TEST_SRCDIR")} {
-			cand := env
-			if root != "" {
-				cand = filepath.Join(root, env)
+		for _, root := range []string{"", os.Getenv("RUNFILES_DIR"), os.Getenv("TEST_SRCDIR"), filepath.Join(os.Getenv("TEST_SRCDIR"), "_main")} {
+			if root == "" && !filepath.IsAbs(env) {
+				continue
 			}
+			cand := filepath.Join(root, env)
 			if fi, err := os.Stat(cand); err == nil && !fi.IsDir() && (fi.Mode()&0o111 != 0) {
 				return cand
 			}

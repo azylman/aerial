@@ -33,21 +33,30 @@ done
 [ "$PKG_CHANGED" = "true" ] && for s in "${OCI_SVCS[@]}"; do AFF["$s"]="true"; done
 CAND_OCI=()
 if [ "$FORCE_ALL" = "true" ]; then CAND_OCI=("${OCI_SVCS[@]}"); else
-    filtered=()
+    b_pkgs=(); chk_all="false"
     for f in "${CHANGED_FILES[@]}"; do
         case "$f" in
-            services/*|mcp/*|pkg/*|web/theme/*|images/*)
-                if [ -f "$f" ]; then filtered+=("$f"); else
-                    d="${f%/*}"; while [ ! -d "$d" ] && [ "$d" != "." ]; do d="${d%/*}"; done
-                    [ -d "$d" ] && [ "$d" != "." ] && { nf=$(find "$d" -maxdepth 2 -type f 2>/dev/null | head -n 1 || true); [ -n "$nf" ] && filtered+=("$nf"); }
-                fi
+            services/docs-service/*) [ -f "$REPO_ROOT/services/docs-service/BUILD.bazel" ] && b_pkgs+=("//services/docs-service:all") ;;
+            services/eri/pkg/db/migrations/*) [ -f "$REPO_ROOT/services/eri/pkg/db/BUILD.bazel" ] && b_pkgs+=("//services/eri/pkg/db:all") ;;
+            services/*|mcp/*|pkg/*)
+                d=$(dirname "$f"); pkg=""
+                while [ -n "$d" ] && [ "$d" != "." ] && [ "$d" != "/" ]; do
+                    [ -f "$REPO_ROOT/$d/BUILD.bazel" ] && { pkg="$d"; break; }
+                    d=$(dirname "$d")
+                done
+                [ -n "$pkg" ] && b_pkgs+=("//${pkg}:all") || chk_all="true"
                 ;;
+            web/theme/*) [ -f "$REPO_ROOT/web/theme/BUILD.bazel" ] && b_pkgs+=("//web/theme:all") ;;
+            images/*) [ -f "$REPO_ROOT/images/BUILD.bazel" ] && b_pkgs+=("//images:all") ;;
+            *) chk_all="true" ;;
         esac
     done
-    if [ ${#filtered[@]} -gt 0 ]; then
+    if [ "$chk_all" = "true" ] || [ ${#b_pkgs[@]} -eq 0 ]; then
+        CAND_OCI=("${OCI_SVCS[@]}")
+    else
         . "$REPO_ROOT/scripts/lib/hermetic-go-env.sh" && ensure_bazel_build_files "$REPO_ROOT"
-        f_set=$(printf '%s ' "${filtered[@]}")
-        q_out=$(bazel query "kind(oci_image, rdeps(//images:all, same_pkg_direct_rdeps(set($f_set))))" 2>/dev/null) || CAND_OCI=("${OCI_SVCS[@]}")
+        p_set=$(printf '%s ' "${b_pkgs[@]}")
+        q_out=$(bazel query "kind(oci_image, rdeps(//images:all, set($p_set)))" 2>/dev/null) || CAND_OCI=("${OCI_SVCS[@]}")
         if [ ${#CAND_OCI[@]} -eq 0 ]; then
             while IFS= read -r m || [ -n "$m" ]; do c="${m#//images:}"; [ -n "$c" ] && { CAND_OCI+=("$c"); AFF["$c"]="true"; }; done <<< "$q_out"
             [ ${#CAND_OCI[@]} -eq 0 ] && CAND_OCI=("${OCI_SVCS[@]}")

@@ -34,12 +34,17 @@ def go_test(name, data = [], **kwargs):
         extra_data.append("//services/synapse/testdata:testdata")
 
     restate_data = []
+    restate_env = None
 
     # Restate server binary for integration tests
     if pkg in ("services/eri/pkg/restatetest", "services/eri/pkg/queue"):
         restate_data = select({
             "@rules_go//go/platform:linux_arm64": ["@restate_server_linux_arm64//:restate-server"],
             "//conditions:default": ["@restate_server_linux_amd64//:restate-server"],
+        })
+        restate_env = select({
+            "@rules_go//go/platform:linux_arm64": {"RESTATE_SERVER_BIN": "$(rootpath @restate_server_linux_arm64//:restate-server)"},
+            "//conditions:default": {"RESTATE_SERVER_BIN": "$(rootpath @restate_server_linux_amd64//:restate-server)"},
         })
 
     # Schema.sql only for packages running database tests with pgtest
@@ -62,6 +67,9 @@ def go_test(name, data = [], **kwargs):
 
     if restate_data:
         all_data = all_data + restate_data
+
+    if restate_env != None and "env" not in kwargs:
+        kwargs["env"] = restate_env
 
     _go_test(
         name = name,

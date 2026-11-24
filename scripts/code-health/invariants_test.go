@@ -13,6 +13,7 @@ func TestCheckNoImperativeDDL(t *testing.T) {
 		content     string
 		isTestFile  bool
 		isDbPkg     bool
+		relPath     string
 		expectCount int
 	}{
 		{
@@ -52,6 +53,48 @@ func TestCheckNoImperativeDDL(t *testing.T) {
 			content:     "",
 			expectCount: 0,
 		},
+		{
+			name:        "python_create_table",
+			content:     "query = 'CREATE TABLE foo (id INT)'\n",
+			relPath:     "services/foo/main.py",
+			expectCount: 1,
+		},
+		{
+			name:        "python_comment_exempt",
+			content:     "# CREATE TABLE foo (id INT)\n",
+			relPath:     "services/foo/main.py",
+			expectCount: 0,
+		},
+		{
+			name:        "ts_alter_table",
+			content:     "const q = 'ALTER TABLE bar ADD COLUMN x INT';\n",
+			relPath:     "services/console/ui/db.ts",
+			expectCount: 1,
+		},
+		{
+			name:        "ts_test_exempt",
+			content:     "const q = 'ALTER TABLE bar ADD COLUMN x INT';\n",
+			relPath:     "services/console/ui/db.test.ts",
+			expectCount: 0,
+		},
+		{
+			name:        "python_test_exempt",
+			content:     "q = 'CREATE TABLE foo (id INT)'\n",
+			relPath:     "services/foo/test_bar.py",
+			expectCount: 0,
+		},
+		{
+			name:        "scripts_py_exempt",
+			content:     "q = 'CREATE TABLE foo (id INT)'\n",
+			relPath:     "scripts/build.py",
+			expectCount: 0,
+		},
+		{
+			name:        "non_candidate_md_exempt",
+			content:     "CREATE TABLE foo (id INT)\n",
+			relPath:     "docs/readme.md",
+			expectCount: 0,
+		},
 	}
 
 	for _, tc := range tests {
@@ -60,6 +103,8 @@ func TestCheckNoImperativeDDL(t *testing.T) {
 			dir := t.TempDir()
 			rel := "services/eri/internal/server/main.go"
 			switch {
+			case tc.relPath != "":
+				rel = tc.relPath
 			case tc.isTestFile:
 				rel = "services/eri/internal/server/main_test.go"
 			case tc.isDbPkg:
@@ -298,6 +343,18 @@ updates:
 		{
 			name:        "dependabot_file_missing",
 			dependabot:  "",
+			manifests:   []string{"go.mod"},
+			expectCount: 1,
+		},
+		{
+			name:        "no_manifests",
+			dependabot:  "version: 2\n",
+			manifests:   nil,
+			expectCount: 0,
+		},
+		{
+			name:        "no_ecosystems",
+			dependabot:  "version: 2\nupdates:\n  - directory: \"/\"\n",
 			manifests:   []string{"go.mod"},
 			expectCount: 1,
 		},

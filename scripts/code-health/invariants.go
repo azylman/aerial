@@ -11,10 +11,18 @@ import (
 
 var ddlRegex = regexp.MustCompile(`(?i)\b(CREATE|ALTER|DROP)\s+TABLE\b`)
 
+func isCandidateDDLFile(rel string) bool {
+	if strings.HasSuffix(rel, "_test.go") || strings.HasSuffix(rel, ".test.ts") || strings.HasPrefix(filepath.Base(rel), "test_") ||
+		strings.HasPrefix(rel, "services/eri/pkg/db/") || strings.HasPrefix(rel, "scripts/") {
+		return false
+	}
+	return strings.HasSuffix(rel, ".go") || strings.HasSuffix(rel, ".py") || strings.HasSuffix(rel, ".ts")
+}
+
 func checkNoImperativeDDL(absRoot string, targets []string) []string {
 	var violations []string
 	for _, rel := range targets {
-		if strings.HasSuffix(rel, "_test.go") || strings.HasPrefix(rel, "services/eri/pkg/db/") || strings.HasPrefix(rel, "scripts/") {
+		if !isCandidateDDLFile(rel) {
 			continue
 		}
 		full := filepath.Join(absRoot, filepath.FromSlash(rel))
@@ -25,7 +33,7 @@ func checkNoImperativeDDL(absRoot string, targets []string) []string {
 		lines := bytes.Split(data, []byte("\n"))
 		for i, line := range lines {
 			trimmed := bytes.TrimSpace(line)
-			if bytes.HasPrefix(trimmed, []byte("//")) || bytes.HasPrefix(trimmed, []byte("/*")) || bytes.HasPrefix(trimmed, []byte("*")) {
+			if bytes.HasPrefix(trimmed, []byte("//")) || bytes.HasPrefix(trimmed, []byte("/*")) || bytes.HasPrefix(trimmed, []byte("*")) || bytes.HasPrefix(trimmed, []byte("#")) {
 				continue
 			}
 			if ddlRegex.Match(trimmed) {
