@@ -187,6 +187,62 @@ func handleMCPMockCompleteChunk(w http.ResponseWriter, r *http.Request, body []b
 	_ = json.NewEncoder(w).Encode(completeChunkResponse{Status: "completed", BuildID: req.BuildID, ChunkID: req.ChunkID, Completed: true})
 }
 
+func handleMCPMockCreateBuild(w http.ResponseWriter, body []byte) {
+	var createReq model.CreateBuildRequest
+	if err := json.Unmarshal(body, &createReq); err != nil {
+		w.WriteHeader(http.StatusBadRequest)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	if err := json.NewEncoder(w).Encode(model.VanadisBuild{
+		ID:       createReq.ID,
+		ThreadID: createReq.ThreadID,
+		Tier:     createReq.Tier,
+		Status:   "running",
+	}); err != nil {
+		w.WriteHeader(http.StatusInternalServerError)
+	}
+}
+
+func handleMCPMockCancelBuild(w http.ResponseWriter) {
+	w.Header().Set("Content-Type", "application/json")
+	if err := json.NewEncoder(w).Encode(model.VanadisBuild{ID: "build-mcp-1", Status: "cancelled"}); err != nil {
+		w.WriteHeader(http.StatusInternalServerError)
+	}
+}
+
+func mockMCPCheckPreconditions(w http.ResponseWriter, path, bodyStr string) bool {
+	if !strings.HasPrefix(path, "/BuildRouter/") && !strings.HasPrefix(path, "/Build/") {
+		w.WriteHeader(http.StatusTeapot)
+		if _, err := w.Write([]byte(`{"message":"misrouted build object"}`)); err != nil {
+			return false
+		}
+		return false
+	}
+	if strings.Contains(path, "nonexistent") {
+		w.WriteHeader(http.StatusNotFound)
+		if _, err := w.Write([]byte(`{"message":"chunk not found"}`)); err != nil {
+			return false
+		}
+		return false
+	}
+	if strings.Contains(path, "build-mcp-2") || strings.Contains(bodyStr, `"chunk_ref":"0"`) {
+		w.WriteHeader(http.StatusConflict)
+		if _, err := w.Write([]byte(`{"message":"vanadis build state conflict"}`)); err != nil {
+			return false
+		}
+		return false
+	}
+	if strings.Contains(bodyStr, `"chunks":[]`) {
+		w.WriteHeader(http.StatusBadRequest)
+		if _, err := w.Write([]byte(`{"message":"invalid vanadis build input: at least one chunk is required"}`)); err != nil {
+			return false
+		}
+		return false
+	}
+	return true
+}
+
 func mockMCPRestateHandler(action bool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		path := r.URL.Path
@@ -200,57 +256,31 @@ func mockMCPRestateHandler(action bool) http.HandlerFunc {
 			}
 			r.Body = io.NopCloser(bytes.NewReader(bodyBytes))
 		}
-		bodyStr := string(bodyBytes)
-
-		// Build object calls must reach the canonical Build object.
-		if !strings.HasPrefix(path, "/BuildRouter/") {
-			want := "/Build/"
-			if !strings.HasPrefix(path, want) {
-				w.WriteHeader(http.StatusTeapot)
-				_, _ = w.Write([]byte(`{"message":"misrouted build object"}`))
-				return
-			}
+		if !mockMCPCheckPreconditions(w, path, string(bodyBytes)) {
+			return
 		}
 
-		if strings.Contains(path, "nonexistent") {
-			w.WriteHeader(http.StatusNotFound)
-			_, _ = w.Write([]byte(`{"message":"chunk not found"}`))
-			return
-		}
-		if strings.Contains(path, "build-mcp-2") || strings.Contains(bodyStr, `"chunk_ref":"0"`) {
-			w.WriteHeader(http.StatusConflict)
-			_, _ = w.Write([]byte(`{"message":"vanadis build state conflict"}`))
-			return
-		}
-		if strings.Contains(bodyStr, `"chunks":[]`) {
-			w.WriteHeader(http.StatusBadRequest)
-			_, _ = w.Write([]byte(`{"message":"invalid vanadis build input: at least one chunk is required"}`))
-			return
-		}
-		if strings.Contains(path, "RouteFailChunk") {
+		switch {
+		case strings.Contains(path, "RouteFailChunk"):
 			handleMCPMockFailChunk(w, r, action)
-			return
-		}
-		if strings.Contains(path, "CompleteChunk") {
+		case strings.Contains(path, "CompleteChunk"):
 			handleMCPMockCompleteChunk(w, r, bodyBytes)
-			return
-		}
-		if strings.Contains(path, "UpdateBuild") {
+		case strings.Contains(path, "Create"):
+			handleMCPMockCreateBuild(w, bodyBytes)
+		case strings.Contains(path, "Cancel"):
+			handleMCPMockCancelBuild(w)
+		case strings.Contains(path, "UpdateBuild"):
 			w.Header().Set("Content-Type", "application/json")
 			_ = json.NewEncoder(w).Encode(model.VanadisBuild{ID: "build-mcp-1", Status: "running"})
-			return
-		}
-		if strings.Contains(path, "UpdateChunk") {
+		case strings.Contains(path, "UpdateChunk"):
 			w.Header().Set("Content-Type", "application/json")
 			_ = json.NewEncoder(w).Encode(model.VanadisChunk{ID: "chunk-2", Status: "pending"})
-			return
-		}
-		if strings.Contains(path, "AppendChunks") {
+		case strings.Contains(path, "AppendChunks"):
 			w.Header().Set("Content-Type", "application/json")
 			_ = json.NewEncoder(w).Encode([]model.VanadisChunk{{ID: "chunk-3", Status: "pending"}})
-			return
+		default:
+			w.WriteHeader(http.StatusOK)
 		}
-		w.WriteHeader(http.StatusOK)
 	}
 }
 
@@ -362,6 +392,20 @@ func TestMCP_Tools(t *testing.T) {
 		{"complete_chunk", "idempotency key", `{"chunk_id":"chunk-1","dispatch_id":"vanadis-chunk-1-turn-0","summary":"all green"}`, false, `"completed":true`, fxSeeded},
 
 		{"retry_action_chunk", "nil store", `{"build_id":"build-mcp-1","chunk_id":"chunk-1","expected_dispatch_id":"d1","reason":"retry"}`, true, "vanadis store not configured", fxNilStore},
+
+		{"create_build", "nil store", `{"thread_id":"1234567890","objective":"test obj","chunks":[{"title":"c1","instructions":"i1","depends_on":[]}]}`, true, "vanadis store not configured", fxNilStore},
+		{"create_build", "invalid thread_id", `{"thread_id":"not-a-snowflake","objective":"test obj","chunks":[{"title":"c1","instructions":"i1","depends_on":[]}]}`, true, "invalid vanadis build input", fxSeeded},
+		{"create_build", "empty objective", `{"thread_id":"1234567890","objective":"","chunks":[{"title":"c1","instructions":"i1","depends_on":[]}]}`, true, "invalid vanadis build input", fxSeeded},
+		{"create_build", "empty chunks", `{"thread_id":"1234567890","objective":"test obj","chunks":[]}`, true, "invalid vanadis build input", fxSeeded},
+		{"create_build", "invalid chunk instructions", `{"thread_id":"1234567890","objective":"test obj","chunks":[{"title":"c1","instructions":"","depends_on":[]}]}`, true, "instructions are required", fxSeeded},
+		{"create_build", "valid create", `{"thread_id":"1234567890","objective":"test obj","chunks":[{"repo":"aerial","title":"c1","instructions":"i1","depends_on":[]}]}`, false, `"status":"accepted"`, fxSeeded},
+		{"create_build", "custom id and tier", `{"id":"build-custom-1","thread_id":"1234567890","tier":3,"objective":"test obj","chunks":[{"repo":"aerial","title":"c1","instructions":"i1","depends_on":[]}]}`, false, `"build_id":"build-custom-1"`, fxSeeded},
+
+		{"cancel_build", "nil store", `{"build_id":"build-mcp-1"}`, true, "vanadis store not configured", fxNilStore},
+		{"cancel_build", "empty build_id", `{"build_id":""}`, true, "build_id is required", fxSeeded},
+		{"cancel_build", "not found", `{"build_id":"nonexistent"}`, true, "build not found", fxSeeded},
+		{"cancel_build", "conflict status", `{"build_id":"build-mcp-2"}`, true, "vanadis build state conflict", fxSeeded},
+		{"cancel_build", "valid cancel", `{"build_id":"build-mcp-1"}`, false, `"status":"cancelled"`, fxSeeded},
 	}
 	for _, tc := range tests {
 		t.Run(tc.tool+" "+tc.name, func(t *testing.T) {
