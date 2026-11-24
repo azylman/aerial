@@ -34,7 +34,16 @@ done
 CAND_OCI=()
 if [ "$FORCE_ALL" = "true" ]; then CAND_OCI=("${OCI_SVCS[@]}"); else
     filtered=()
-    for f in "${CHANGED_FILES[@]}"; do case "$f" in services/*|mcp/*|pkg/*|web/theme/*|images/*) [ -f "$f" ] && filtered+=("$f") ;; esac; done
+    for f in "${CHANGED_FILES[@]}"; do
+        case "$f" in
+            services/*|mcp/*|pkg/*|web/theme/*|images/*)
+                if [ -f "$f" ]; then filtered+=("$f"); else
+                    d="${f%/*}"; while [ ! -d "$d" ] && [ "$d" != "." ]; do d="${d%/*}"; done
+                    [ -d "$d" ] && [ "$d" != "." ] && { nf=$(find "$d" -maxdepth 2 -type f 2>/dev/null | head -n 1 || true); [ -n "$nf" ] && filtered+=("$nf"); }
+                fi
+                ;;
+        esac
+    done
     if [ ${#filtered[@]} -gt 0 ]; then
         . "$REPO_ROOT/scripts/lib/hermetic-go-env.sh" && ensure_bazel_build_files "$REPO_ROOT"
         f_set=$(printf '%s ' "${filtered[@]}")
@@ -44,6 +53,8 @@ if [ "$FORCE_ALL" = "true" ]; then CAND_OCI=("${OCI_SVCS[@]}"); else
             [ ${#CAND_OCI[@]} -eq 0 ] && CAND_OCI=("${OCI_SVCS[@]}")
         fi
     fi
+    for s in "${OCI_SVCS[@]}"; do [ "${AFF[$s]}" = "true" ] && CAND_OCI+=("$s"); done
+    [ ${#CAND_OCI[@]} -gt 0 ] && IFS=" " read -r -a CAND_OCI <<< "$(printf '%s\n' "${CAND_OCI[@]}" | sort -u | tr '\n' ' ')"
 fi
 if [ "$FORCE_ALL" = "true" ]; then
     for s in "${OCI_SVCS[@]}"; do SEL["$s"]="true"; AFF["$s"]="true"; done

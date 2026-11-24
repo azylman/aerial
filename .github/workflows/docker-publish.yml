@@ -155,7 +155,7 @@ jobs:
           else
             CHANGED_FILES=$(git diff --name-only HEAD^1 HEAD 2>/dev/null || true)
           fi
-          if [ "${FORCE_ALL:-}" = "true" ] || [ -z "$CHANGED_FILES" ] || echo "$CHANGED_FILES" | grep -q -E '(^pkg/|^\.golangci\.ya?ml|^scripts/)'; then
+          if [ "${FORCE_ALL:-}" = "true" ] || [ -z "$CHANGED_FILES" ] || echo "$CHANGED_FILES" | grep -q -E '(^pkg/|^\.golangci\.ya?ml|^scripts/|^go\.(mod|sum)$|^build/|^MODULE\.bazel)'; then
             LINT_MODULES="$GO_MODULES"
           else
             LINT_MODULES=""

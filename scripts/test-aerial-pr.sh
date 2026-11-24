@@ -71,4 +71,5 @@ assert [ -f "$TMPD/rerun" ]
 touch "$TMPD/run_prog"; rm -f "$TMPD/rerun"
 assert echo "$("$SCRIPT" override-roborev 99 "rebuttal")" | jq -e '.status == "overridden"' && [ ! -f "$TMPD/rerun" ]
 assert_fail "$SCRIPT" override-roborev 98 "closed" && assert_fail "$SCRIPT" override-roborev badid "rebuttal"
+bash "$DIR/test-aerial-pr-edge.sh"
 echo "ok - hermetic aerial-pr test suite passed"

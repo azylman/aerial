@@ -153,6 +153,11 @@ func runCheck(absRoot, baselinePath string, targets, testTargets []string, r rul
 		return 1
 	}
 	violations = append(violations, checkShellTargets(absRoot, r.withoutSkipped(shellTargets))...)
+	violations = append(violations, checkNoImperativeDDL(absRoot, targets)...)
+	violations = append(violations, checkSynapseZeroVanadis(absRoot, targets)...)
+	violations = append(violations, checkUTF8BOM(absRoot, append(targets, shellTargets...))...)
+	violations = append(violations, checkNoMainInTests(absRoot, testTargets)...)
+	violations = append(violations, checkDependabotCoverage(absRoot)...)
 	if len(violations) > 0 {
 		writef(stderr, "🚨 [Code Health] %d ratchet violation(s) detected:\n", len(violations))
 		for _, v := range violations {
