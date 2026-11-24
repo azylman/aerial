@@ -50,6 +50,8 @@ cat << 'JSON_EOF' > "$TMPD/valid.json"
 JSON_EOF
 res_enq=$("$SCRIPT" enqueue --file "$TMPD/valid.json")
 assert echo "$res_enq" | jq -e '.turn_action == "end_turn" and .id == "b1"'
+res_notid=$(env -u DISCORD_THREAD_ID -u DISCORD_CHANNEL_ID -u AERIAL_TARGET_ID "$SCRIPT" enqueue "$TMPD/valid.json")
+assert echo "$res_notid" | jq -e '.turn_action == "end_turn" and .id == "b1"'
 res_stat=$("$SCRIPT" status b1)
 assert echo "$res_stat" | jq -e '.status == "running"'
 res_canc=$("$SCRIPT" cancel b1)

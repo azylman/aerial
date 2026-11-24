@@ -89,9 +89,9 @@ if [ "$MODE" = "full" ] || echo "$CHANGED_FILES" | grep -q -E "^(services/consol
     [ -f services/console/ui/package.json ] && command -v npm >/dev/null 2>&1 && (cd services/console/ui && { [ -d node_modules ] || npm ci --no-audit --no-fund --silent; } && npm run --silent typecheck && npm run --silent test:coverage && npm run --silent build)
 fi
 if [ "$MODE" = "full" ] || echo "$CHANGED_FILES" | grep -q -E "^services/console/(ui|static)/"; then
-    [ -f services/console/ui/playwright.config.ts ] && command -v npm >/dev/null 2>&1 && command -v go >/dev/null 2>&1 && (cd services/console/ui && node -e "require('@playwright/test').chromium.launch().then(b => b.close()).catch(() => process.exit(1))" >/dev/null 2>&1 && npm run --silent build && npm run --silent e2e)
+    [ -f services/console/ui/playwright.config.ts ] && command -v npm >/dev/null 2>&1 && command -v go >/dev/null 2>&1 && \
+        { ! (cd services/console/ui && node -e "require('@playwright/test').chromium.launch().then(b => b.close()).catch(() => process.exit(1))" >/dev/null 2>&1) || (cd services/console/ui && npm run --silent build && npm run --silent e2e); }
 fi
-
 if [ "$MODE" = "staged" ] && git diff --quiet 2>/dev/null; then
     tree_sha=$(git write-tree 2>/dev/null || true); git_dir=$(git rev-parse --git-dir 2>/dev/null || true)
     [ -n "$git_dir" ] && [ -n "$tree_sha" ] && printf '%s\n' "$tree_sha" > "$git_dir/.aerial-verified-tree"

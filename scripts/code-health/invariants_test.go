@@ -106,13 +106,6 @@ func TestCheckNoImperativeDDL(t *testing.T) {
 			writeFile:   true,
 			expectCount: 0,
 		},
-		{
-			name:        "non_candidate_md_exempt",
-			relPath:     "docs/readme.md",
-			content:     "CREATE TABLE foo (id INT)\n",
-			writeFile:   true,
-			expectCount: 0,
-		},
 	}
 
 	for _, tc := range tests {

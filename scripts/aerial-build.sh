@@ -67,7 +67,10 @@ case "${1:-}" in
         jq empty "$pf" >/dev/null 2>&1 || { echo "ERROR: Invalid JSON in $pf" >&2; exit 1; }
         jq -e '(.chunks | type == "array" and length > 0) and all(.chunks[]; (.depends_on | type) == "array")' "$pf" >/dev/null 2>&1 || { echo "ERROR: depends_on array required for every chunk" >&2; exit 1; }
         payload="$(cat "$pf")"; tid="$(jq -r '.thread_id // ""' "$pf" 2>/dev/null || true)"
-        [ -n "$tid" ] || { env_tid="$(resolve_tid)"; [ -n "$env_tid" ] && payload="$(printf '%s' "$payload" | jq -c --arg t "$env_tid" '.thread_id = $t')"; }
+        if [ -z "$tid" ]; then
+            env_tid="$(resolve_tid)"
+            [ -z "$env_tid" ] || payload="$(printf '%s' "$payload" | jq -c --arg t "$env_tid" '.thread_id = $t')"
+        fi
         resp="$(vanadis_req "POST" "/builds" "$payload")"
         if printf '%s' "$resp" | jq empty >/dev/null 2>&1; then
             printf '%s\n' "$resp" | jq 'if .chunks then .chunks |= map({id, chunk_index, mode, repo, title, effort, status, depends_on}) else . end + {"turn_action": "end_turn"}'
