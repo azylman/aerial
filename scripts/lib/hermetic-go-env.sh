@@ -72,7 +72,11 @@ ensure_bazel_build_files() {
     fi
     [ "$tidy" = "1" ] && { (cd "$root" && bazel mod tidy) || return $?; }
 
-    command -v gazelle >/dev/null 2>&1 && (cd "$root" && gazelle) || (cd "$root" && bazel run //:gazelle) || return $?
+    if command -v gazelle >/dev/null 2>&1; then
+        (cd "$root" && gazelle) || return $?
+    else
+        (cd "$root" && bazel run //:gazelle) || return $?
+    fi
     grep -q 'schema.sql' "$root/services/eri/pkg/db/BUILD.bazel" 2>/dev/null || printf '\nexports_files(["schema.sql"], visibility = ["//visibility:public"])\n' >> "$root/services/eri/pkg/db/BUILD.bazel"
 }
 
