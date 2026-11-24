@@ -499,10 +499,6 @@ func (s *fakeStore) LookupChunkBuildID(context.Context, string) (store.BuildRout
 	return store.BuildRoute{}, s.unimplemented("LookupChunkBuildID")
 }
 
-func (s *fakeStore) LookupUnattachedChunkByThreadAndRepo(context.Context, string, string) (store.BuildRoute, string, error) {
-	return store.BuildRoute{}, "", s.unimplemented("LookupUnattachedChunkByThreadAndRepo")
-}
-
 func (s *fakeStore) UpdateBuild(context.Context, string, store.UpdateBuildRequest) (*model.VanadisBuild, error) {
 	return nil, s.unimplemented("UpdateBuild")
 }

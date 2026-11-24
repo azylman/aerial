@@ -3,7 +3,7 @@ package store
 // PR lookup persistence for vanadis-restate.
 //
 // GetChunkByPR, LookupPRChunk, LookupChunkBuildID,
-// LookupUnattachedChunkByThreadAndRepo, findChunkPRMatch, RecordPRRolloutState
+// findChunkPRMatch, RecordPRRolloutState
 // and UpdateChunkBannerAndStatus plus the chunkPRMatch helper moved here from
 // the root package so they promote through the embedded *Store. SQL text,
 // repo normalization, rollout JSON encoding and error behavior are
@@ -24,7 +24,6 @@ import (
 	"github.com/jackc/pgx/v5"
 
 	"github.com/azylman/aerial/pkg/pubsub"
-	"github.com/azylman/aerial/services/vanadis-restate/internal/model"
 )
 
 // ErrPRTransitionSkipped means the persisted row rejected a stale lifecycle transition.
@@ -151,45 +150,6 @@ func (s *Store) LookupChunkBuildID(ctx context.Context, chunkID string) (BuildRo
 		return BuildRoute{}, fmt.Errorf("lookup chunk build id: %w", err)
 	}
 	return route, nil
-}
-
-// LookupUnattachedChunkByThreadAndRepo resolves the single running unattached
-// PR chunk for a thread and repo, with its build route.
-func (s *Store) LookupUnattachedChunkByThreadAndRepo(ctx context.Context, threadID, repo string) (BuildRoute, string, error) {
-	if s == nil || s.db == nil {
-		return BuildRoute{}, "", errors.New("database connection is nil")
-	}
-	threadID = model.NormalizeDiscordThreadID(threadID)
-	candidates := RepoMatchCandidates(s.gitHubOwner, repo)
-	if threadID == "" || len(candidates) == 0 {
-		return BuildRoute{}, "", ErrChunkNotFound
-	}
-	const query = `SELECT c.build_id, c.id FROM vanadis_chunks c JOIN vanadis_builds b ON c.build_id = b.id WHERE b.thread_id = $1 AND b.status != 'cancelled' AND c.mode = 'pr' AND c.repo = ANY($2) AND COALESCE(c.pr_number, 0) = 0 AND c.status IN ('running', 'coding') AND c.started_at IS NOT NULL ORDER BY c.chunk_index ASC LIMIT 2;`
-	rows, err := s.db.Query(ctx, query, threadID, candidates)
-	if err != nil {
-		return BuildRoute{}, "", fmt.Errorf("lookup unattached chunk by thread %s and repo %s: %w", threadID, repo, err)
-	}
-	defer rows.Close()
-
-	type chunkMatch struct {
-		buildID string
-		chunkID string
-	}
-	var matches []chunkMatch
-	for rows.Next() {
-		var m chunkMatch
-		if err := rows.Scan(&m.buildID, &m.chunkID); err != nil {
-			return BuildRoute{}, "", fmt.Errorf("scan unattached chunk: %w", err)
-		}
-		matches = append(matches, m)
-	}
-	if err := rows.Err(); err != nil {
-		return BuildRoute{}, "", fmt.Errorf("iterate unattached chunks: %w", err)
-	}
-	if len(matches) == 1 {
-		return BuildRoute{BuildID: matches[0].buildID}, matches[0].chunkID, nil
-	}
-	return BuildRoute{}, "", ErrChunkNotFound
 }
 
 func (s *Store) findChunkPRMatch(ctx context.Context, candidates []string, prNumber int) (chunkPRMatch, bool, error) {
