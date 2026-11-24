@@ -1,0 +1,28 @@
+{
+  "permissions": {
+    "deny": [
+      "Read(/local/**)",
+      "Read(//local/**)",
+      "Read(/secrets/**)",
+      "Read(//secrets/**)",
+      "Read(/root/.roborev/**)",
+      "Read(//root/.roborev/**)",
+      "Read(/root/.claude/**)",
+      "Read(//root/.claude/**)",
+      "Read(/root/.config/muse/**)",
+      "Read(//root/.config/muse/**)",
+      "Read(/root/.local/share/muse/**)",
+      "Read(//root/.local/share/muse/**)",
+      "Read(/home/ubuntu/.roborev/**)",
+      "Read(//home/ubuntu/.roborev/**)",
+      "Read(/home/ubuntu/.claude/**)",
+      "Read(//home/ubuntu/.claude/**)",
+      "Read(/home/ubuntu/.config/muse/**)",
+      "Read(//home/ubuntu/.config/muse/**)",
+      "Read(/home/ubuntu/.local/share/muse/**)",
+      "Read(//home/ubuntu/.local/share/muse/**)",
+      "Read(/actions-runner/.env)",
+      "Read(//actions-runner/.env)"
+    ]
+  }
+}

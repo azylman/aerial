@@ -19,6 +19,7 @@ RUN --mount=type=cache,target=/root/.npm \
 COPY --from=mcp-proxy /go/bin/mcp-proxy /usr/local/bin/mcp-proxy
 
 WORKDIR /app
+COPY standby.js /usr/local/bin/standby.js
 COPY entrypoint.sh /usr/local/bin/entrypoint.sh
 RUN chmod +x /usr/local/bin/entrypoint.sh
 
