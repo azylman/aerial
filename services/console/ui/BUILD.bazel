@@ -1,0 +1,11 @@
+filegroup(
+    name = "ui_srcs",
+    srcs = glob(
+        ["**"],
+        exclude = [
+            "node_modules/**",
+            "dist/**",
+        ],
+    ),
+    visibility = ["//visibility:public"],
+)

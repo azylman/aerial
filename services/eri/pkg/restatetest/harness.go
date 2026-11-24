@@ -24,7 +24,41 @@ import (
 	"github.com/restatedev/sdk-go/server"
 )
 
-var restateServerBin = flag.String("restate-server-bin", "", "path to the restate-server binary (set by scripts/restate-integration-test.sh)")
+var restateServerBin = flag.String("restate-server-bin", "", "path to the restate-server binary")
+
+func resolveRestateServerBin() string {
+	if *restateServerBin != "" {
+		return *restateServerBin
+	}
+	if env := os.Getenv("RESTATE_SERVER_BIN"); env != "" {
+		return env
+	}
+	for _, root := range []string{os.Getenv("RUNFILES_DIR"), os.Getenv("TEST_SRCDIR")} {
+		if root == "" {
+			continue
+		}
+		var found string
+		walkErr := filepath.Walk(root, func(path string, info os.FileInfo, err error) error {
+			if err != nil {
+				return err
+			}
+			if found != "" {
+				return nil
+			}
+			if !info.IsDir() && filepath.Base(path) == "restate-server" && (info.Mode()&0o111 != 0) {
+				found = path
+			}
+			return nil
+		})
+		if walkErr == nil && found != "" {
+			return found
+		}
+	}
+	if path, err := exec.LookPath("restate-server"); err == nil {
+		return path
+	}
+	return ""
+}
 
 const (
 	readyTimeout   = 60 * time.Second
@@ -93,9 +127,9 @@ func Start(t testing.TB, defs ...restate.ServiceDefinition) *Harness {
 // StartWithOptions is Start with server options (extra environment).
 func StartWithOptions(t testing.TB, opts Options, defs ...restate.ServiceDefinition) *Harness {
 	t.Helper()
-	bin := *restateServerBin
+	bin := resolveRestateServerBin()
 	if bin == "" {
-		t.Fatal("restatetest: -restate-server-bin is required under the restateintegration tag (run scripts/restate-integration-test.sh)")
+		t.Fatal("restatetest: restate-server binary not found (set -restate-server-bin, RESTATE_SERVER_BIN, or run via bazel test with @restate_server_linux_amd64)")
 	}
 	ports := freePorts(t, 5)
 	base := t.TempDir()

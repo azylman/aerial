@@ -1,0 +1,16 @@
+load("@rules_shell//shell:sh_test.bzl", "sh_test")
+
+filegroup(
+    name = "migrations",
+    srcs = glob(["**"]),
+    visibility = ["//visibility:public"],
+)
+
+sh_test(
+    name = "atlas_validate_test",
+    srcs = ["//build:tests/atlas_validate_test.sh"],
+    data = [
+        ":migrations",
+        "//services/eri/pkg/db:schema.sql",
+    ],
+)

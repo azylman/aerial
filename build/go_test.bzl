@@ -27,11 +27,15 @@ def go_test(name, data = [], **kwargs):
 
     # Console static assets for console server tests
     if pkg.startswith("services/console"):
-        extra_data.append("//services/console:static")
+        extra_data.append("//services/console/static:static")
 
     # Synapse testdata for synapse internal subpackages
     if pkg.startswith("services/synapse") and pkg != "services/synapse":
-        extra_data.append("//services/synapse:testdata")
+        extra_data.append("//services/synapse/testdata:testdata")
+
+    # Restate server binary for integration tests
+    if pkg in ("services/eri/pkg/restatetest", "services/eri/pkg/queue"):
+        extra_data.append("@restate_server_linux_amd64//:restate-server")
 
     # Schema.sql only for packages running database tests with pgtest
     if (

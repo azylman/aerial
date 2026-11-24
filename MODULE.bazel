@@ -45,3 +45,13 @@ use_repo(
     "nginx_base",
     "nginx_base_linux_amd64",
 )
+
+http_archive = use_repo_rule("@bazel_tools//tools/build_defs/repo:http.bzl", "http_archive")
+
+http_archive(
+    name = "restate_server_linux_amd64",
+    build_file_content = 'exports_files(["restate-server"], visibility = ["//visibility:public"])',
+    sha256 = "57d4496453104ce3a02cdd5b520db14de9086cce20f1483795b6b9b3f65cde03",
+    strip_prefix = "restate-server-x86_64-unknown-linux-musl",
+    urls = ["https://github.com/restatedev/restate/releases/download/v1.8.1-hotfix.2/restate-server-x86_64-unknown-linux-musl.tar.xz"],
+)

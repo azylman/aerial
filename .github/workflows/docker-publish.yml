@@ -100,13 +100,13 @@ jobs:
       - name: Verify Monorepo Test Coverage & Gating
         run: |
           set -euo pipefail
-          sh scripts/check-coverage.sh --check --summary
+          ./scripts/verify.sh
 
       # Real-Restate tests (build tag restateintegration) run against a pinned
       # restate-server binary; the script fetches and sha256-checks it.
       - name: Run Real-Restate Integration Tests
         if: needs.changes.outputs.eri == 'true' || needs.changes.outputs.eri-restate == 'true' || inputs.force_all == true
-        run: bash scripts/restate-integration-test.sh
+        run: bazel test --@rules_go//go/config:tags=restateintegration --test_arg=-test.v //services/eri/pkg/restatetest:... //services/eri/pkg/queue:...
 
   lint:
     name: Lint Microservices & Frontend
@@ -148,41 +148,7 @@ jobs:
           set -euo pipefail
           . scripts/lib/hermetic-go-env.sh
           ensure_bazel_build_files "$GITHUB_WORKSPACE"
-          GO_MODULES=$(discover_go_services)
-          if [ "${{ github.event_name }}" = "pull_request" ]; then
-            git fetch origin +refs/heads/main:refs/remotes/origin/main 2>/dev/null || true
-            CHANGED_FILES=$(git diff --name-only origin/main...HEAD 2>/dev/null || git diff --name-only HEAD^1 HEAD 2>/dev/null || true)
-          else
-            CHANGED_FILES=$(git diff --name-only HEAD^1 HEAD 2>/dev/null || true)
-          fi
-          LINT_ALL=0
-          if [ "$FORCE_ALL" = "true" ] || [ -z "$CHANGED_FILES" ]; then
-            LINT_ALL=1
-          fi
-          if [ "$LINT_ALL" -eq 1 ]; then
-            LINT_MODULES="$GO_MODULES"
-          else
-            AFFECTED_SVCS=$(discover_affected_services "$CHANGED_FILES")
-            if [ "$AFFECTED_SVCS" = "ALL" ]; then
-              LINT_MODULES="$GO_MODULES"
-            else
-              NEW_LINT_MODULES=""
-              for mod in $GO_MODULES; do
-                svc_name=$(basename "$mod")
-                for aff in $AFFECTED_SVCS; do
-                  if [ "$aff" = "$svc_name" ] || [ "$aff" = "$mod" ]; then
-                    NEW_LINT_MODULES="${NEW_LINT_MODULES} ${mod}"
-                    break
-                  fi
-                done
-              done
-              LINT_MODULES=$(echo "$NEW_LINT_MODULES" | xargs)
-              if [ -z "$LINT_MODULES" ]; then
-                echo "No Go module changes detected for linting; skipping."
-                exit 0
-              fi
-            fi
-          fi
+          LINT_MODULES=$(discover_go_services)
           for svc in $LINT_MODULES; do
             echo "=== Linting & checking deadcode in $svc ==="
             (

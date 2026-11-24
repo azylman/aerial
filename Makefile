@@ -8,10 +8,7 @@ help: ## Display available targets
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "  \033[36m%-15s\033[0m %s\n", $$1, $$2}'
 
 test: ## Run unit tests across all Go microservices and Frontend
-	@for svc in $(SERVICES); do \
-		echo "=== Testing $$svc ==="; \
-		(. ./scripts/lib/hermetic-go-env.sh && cd $$svc && hermetic_go go test -v ./...) || exit 1; \
-	done
+	@. ./scripts/lib/hermetic-go-env.sh && ensure_bazel_build_files && bazel test //...
 	@$(MAKE) --no-print-directory web-theme
 	@$(MAKE) --no-print-directory console-ui
 
@@ -54,11 +51,8 @@ tidy: ## Run go mod tidy across all Go microservices
 		(cd $$svc && go mod tidy) || exit 1; \
 	done
 
-build: ## Build all Go service binaries locally
-	@for svc in $(SERVICES); do \
-		echo "=== Building $$svc ==="; \
-		(cd $$svc && CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" ./...) || exit 1; \
-	done
+build: ## Build all targets via Bazel
+	@. ./scripts/lib/hermetic-go-env.sh && ensure_bazel_build_files && bazel build //...
 
 setup-hooks: ## Configure git to use monorepo .githooks directory
 	@git config core.hooksPath .githooks

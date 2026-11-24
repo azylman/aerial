@@ -27,6 +27,7 @@ const (
 	minCrossPkgCloneGrams    = 6
 	maxFileLines             = 1500
 	maxDepth                 = 5
+	maxShellFileLines        = 100
 	minCloneFuncLines        = 20
 	minCloneTokens           = 12
 	cloneShingleSize         = 3
@@ -146,6 +147,12 @@ func runCheck(absRoot, baselinePath string, targets, testTargets []string, r rul
 		writef(stderr, "code-health: check: %v\n", err)
 		return 1
 	}
+	shellTargets, err := collectShellTargets(absRoot, nil)
+	if err != nil {
+		writef(stderr, "code-health: collect shell targets: %v\n", err)
+		return 1
+	}
+	violations = append(violations, checkShellTargets(absRoot, r.withoutSkipped(shellTargets))...)
 	if len(violations) > 0 {
 		writef(stderr, "🚨 [Code Health] %d ratchet violation(s) detected:\n", len(violations))
 		for _, v := range violations {
@@ -163,6 +170,10 @@ func collectTargets(absRoot string, explicit []string) ([]string, error) {
 
 func collectTestTargets(absRoot string, explicit []string) ([]string, error) {
 	return collectTargetsMatching(absRoot, explicit, isCandidateTestGoFile)
+}
+
+func collectShellTargets(absRoot string, explicit []string) ([]string, error) {
+	return collectTargetsMatching(absRoot, explicit, isCandidateShellFile)
 }
 
 func collectTargetsMatching(absRoot string, explicit []string, match func(string) bool) ([]string, error) {
@@ -242,6 +253,18 @@ func isCandidateTestGoFile(rel string) bool {
 	}
 	for seg := range strings.SplitSeq(rel, "/") {
 		if isExcludedDir(seg) || seg == ".." {
+			return false
+		}
+	}
+	return true
+}
+
+func isCandidateShellFile(rel string) bool {
+	if !strings.HasSuffix(rel, ".sh") {
+		return false
+	}
+	for seg := range strings.SplitSeq(rel, "/") {
+		if isExcludedDir(seg) {
 			return false
 		}
 	}
@@ -437,6 +460,22 @@ func checkFuncMetrics(rel string, fns map[string]FuncMetrics, baseFns map[string
 		bm := baseFns[rel+"::"+fnName]
 		if depthLimit := max(depthCeiling, bm.Depth); m.Depth > depthLimit {
 			violations = append(violations, fmt.Sprintf("%s (%s): nesting depth %d exceeds limit %d (ceiling %d)", rel, fnName, m.Depth, depthLimit, depthCeiling))
+		}
+	}
+	return violations
+}
+
+func checkShellTargets(absRoot string, shellTargets []string) []string {
+	var violations []string
+	for _, rel := range shellTargets {
+		fullPath := filepath.Join(absRoot, filepath.FromSlash(rel))
+		src, err := os.ReadFile(fullPath)
+		if err != nil {
+			violations = append(violations, fmt.Sprintf("%s: read shell script: %v", rel, err))
+			continue
+		}
+		if lines := countLines(src); lines > maxShellFileLines {
+			violations = append(violations, fmt.Sprintf("%s: shell script length %d exceeds ceiling %d", rel, lines, maxShellFileLines))
 		}
 	}
 	return violations

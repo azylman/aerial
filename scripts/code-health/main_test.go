@@ -202,6 +202,26 @@ func testRunBaseCases() []testRunCase {
 			wantOut:  "Checked 3 Go file(s)",
 		},
 		{
+			name: "shell script under hundred line ceiling passes",
+			files: map[string]string{
+				"pkg/clean.go":  "package pkg\n",
+				"scripts/ok.sh": "#!/bin/sh\n" + strings.Repeat("echo hi\n", 90),
+				"vendor/v.sh":   "#!/bin/sh\n" + strings.Repeat("echo hi\n", 150),
+				".hidden/h.sh":  "#!/bin/sh\n" + strings.Repeat("echo hi\n", 150),
+			},
+			wantCode: 0,
+			wantOut:  "Checked 1 Go file(s)",
+		},
+		{
+			name: "shell script exceeding hundred line ceiling fails",
+			files: map[string]string{
+				"pkg/clean.go":    "package pkg\n",
+				"scripts/long.sh": "#!/bin/sh\n" + strings.Repeat("echo hi\n", 105),
+			},
+			wantCode: 1,
+			wantErr:  "scripts/long.sh: shell script length 106 exceeds ceiling 100",
+		},
+		{
 			name: "violations reported when metrics exceed ceilings without baseline",
 			files: map[string]string{
 				"pkg/big.go":     buildLargeGoSource(1505, 155),
