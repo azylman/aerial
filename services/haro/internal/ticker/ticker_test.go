@@ -69,29 +69,33 @@ func (m *fakeDispatcher) Dispatch(_ context.Context, req eriwire.BrainDispatchRe
 	return m.dispatchResponse, m.dispatchErr
 }
 
+type dispatchOutcomeGuardCase struct {
+	name          string
+	rawPayload    string
+	event         *pubsub.DispatchOutcomeEvent
+	nilDatabase   bool
+	nilMessage    bool
+	closeDatabase bool
+	sabotageSQL   string
+	numDelivered  uint64
+	wantErr       bool
+	wantNaked     bool
+}
+
 type dispatchOutcomeTestCase struct {
 	name                string
-	rawPayload          string
 	seedScheduleType    string
 	seedScheduleID      string
 	seedRunID           string
 	seedDispatchID      string
 	seedRunStatus       string
-	seedRunStartedAt    time.Time
 	orphanRun           bool
 	event               *pubsub.DispatchOutcomeEvent
-	nilDatabase         bool
-	nilMessage          bool
-	closeDatabase       bool
-	sabotageSQL         string
-	numDelivered        uint64
-	wantErr             bool
 	wantRunStatus       string
 	wantRunError        string
 	wantDurationMs      int64
 	wantWatermarkTime   *time.Time
 	wantCheckCalculated bool
-	wantNaked           bool
 }
 
 func seedOutcomeHeartbeat(ctx context.Context, t *testing.T, db *sql.DB, scheduleType, scheduleID string, now time.Time) {
@@ -127,7 +131,7 @@ func seedOutcomeRun(ctx context.Context, t *testing.T, db *sql.DB, runID, dispat
 	}
 }
 
-func runDispatchOutcomeCase(t *testing.T, tc dispatchOutcomeTestCase, now time.Time) {
+func runDispatchOutcomeGuardCase(t *testing.T, tc dispatchOutcomeGuardCase, now time.Time) {
 	t.Helper()
 	db := openTickerTestDB(t)
 	if tc.closeDatabase {
@@ -145,21 +149,11 @@ func runDispatchOutcomeCase(t *testing.T, tc dispatchOutcomeTestCase, now time.T
 		msg = nil
 	}
 
-	heartbeatID := tc.seedScheduleID
-	if tc.orphanRun {
-		heartbeatID = ""
-	}
-	if !tc.nilDatabase && !tc.closeDatabase {
-		seedOutcomeHeartbeat(ctx, t, db, tc.seedScheduleType, heartbeatID, now)
-		startedAt := now
-		if !tc.seedRunStartedAt.IsZero() {
-			startedAt = tc.seedRunStartedAt
-		}
-		seedOutcomeRun(ctx, t, db, tc.seedRunID, tc.seedDispatchID, tc.seedScheduleType, tc.seedScheduleID, tc.seedRunStatus, startedAt)
-		if tc.sabotageSQL != "" {
-			if _, err := db.ExecContext(ctx, tc.sabotageSQL); err != nil {
-				t.Fatalf("sabotage SQL failed: %v", err)
-			}
+	if !tc.nilDatabase && !tc.closeDatabase && tc.sabotageSQL != "" {
+		seedOutcomeHeartbeat(ctx, t, db, model.ScheduleTypeHeartbeat, "hb-upd-fail", now)
+		seedOutcomeRun(ctx, t, db, "run-upd-fail", "", model.ScheduleTypeHeartbeat, "hb-upd-fail", "running", now)
+		if _, err := db.ExecContext(ctx, tc.sabotageSQL); err != nil {
+			t.Fatalf("sabotage SQL failed: %v", err)
 		}
 	}
 
@@ -172,6 +166,31 @@ func runDispatchOutcomeCase(t *testing.T, tc dispatchOutcomeTestCase, now time.T
 	}
 	if _, got := om.NakDelay(); got != tc.wantNaked {
 		t.Errorf("msg naked = %v, want %v (calls %v)", got, tc.wantNaked, om.Calls())
+	}
+}
+
+func runDispatchOutcomeCase(t *testing.T, tc dispatchOutcomeTestCase, now time.Time) {
+	t.Helper()
+	db := openTickerTestDB(t)
+	ctx := context.Background()
+
+	om := &pubsubtest.Message{Payload: outcomePayload(t, "", tc.event), Subj: "aerial.dispatch.completed", Delivered: 1}
+
+	heartbeatID := tc.seedScheduleID
+	if tc.orphanRun {
+		heartbeatID = ""
+	}
+	seedOutcomeHeartbeat(ctx, t, db, tc.seedScheduleType, heartbeatID, now)
+	seedOutcomeRun(ctx, t, db, tc.seedRunID, tc.seedDispatchID, tc.seedScheduleType, tc.seedScheduleID, tc.seedRunStatus, now)
+
+	err := HandleDispatchOutcome(ctx, db, om)
+	if err != nil {
+		t.Fatalf("HandleDispatchOutcome() error = %v", err)
+	}
+	if tc.name == "dispatch id equal only to run row id is not resolved and naks" {
+		if _, got := om.NakDelay(); !got {
+			t.Errorf("msg naked = %v, want true", got)
+		}
 	}
 
 	assertOutcomeRun(ctx, t, db, tc)
@@ -233,27 +252,55 @@ func assertOutcomeWatermark(ctx context.Context, t *testing.T, db *sql.DB, tc di
 	}
 }
 
+func TestHandleDispatchOutcome_GuardsAndNak(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, 11, 14, 1, 0, 0, 0, time.UTC)
+
+	tests := []dispatchOutcomeGuardCase{
+		{name: "corrupt json returns nil to ack poison pill", rawPayload: `{"status": corrupt-json`},
+		{name: "unknown dispatch id naks with delay for retry", event: &pubsub.DispatchOutcomeEvent{DispatchID: "disp-unknown", Status: "completed"}, wantNaked: true},
+		{
+			name:         "unknown dispatch id delivered five times is dropped without nak",
+			event:        &pubsub.DispatchOutcomeEvent{DispatchID: "disp-unknown", Status: "completed"},
+			numDelivered: 5,
+		},
+		{
+			name:  "non-heartbeat source like vanadis is ignored without nak",
+			event: &pubsub.DispatchOutcomeEvent{DispatchID: "disp-vanadis-chunk", Source: "vanadis", Status: "completed"},
+		},
+		{name: "nil database returns error", nilDatabase: true, wantErr: true},
+		{name: "nil message returns error", nilMessage: true, wantErr: true},
+		{
+			name:          "closed database returns query error",
+			closeDatabase: true,
+			event:         &pubsub.DispatchOutcomeEvent{DispatchID: "run-on-closed-db", Status: "completed"},
+			wantErr:       true,
+		},
+		{
+			name:        "outcome update failure returns error",
+			event:       &pubsub.DispatchOutcomeEvent{DispatchID: "run-upd-fail", Status: "completed", StartedAt: now, CompletedAt: now.Add(time.Second)},
+			sabotageSQL: failTriggerSQL("schedule_runs", "UPDATE", "forced update failure"),
+			wantErr:     true,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			runDispatchOutcomeGuardCase(t, tc, now)
+		})
+	}
+}
+
 func TestHandleDispatchOutcome(t *testing.T) {
 	t.Parallel()
 	now := time.Date(2026, 11, 14, 1, 0, 0, 0, time.UTC)
 
 	tests := []dispatchOutcomeTestCase{
-		{name: "corrupt json returns nil to ack poison pill", rawPayload: `{"status": corrupt-json`, wantDurationMs: -1},
 		{
 			name: "healthcheck ping is ignored", seedScheduleType: "heartbeat", seedScheduleID: "hb-ping", seedRunID: "healthcheck-ping",
 			event:         &pubsub.DispatchOutcomeEvent{DispatchID: "healthcheck-ping", Status: "completed"},
 			wantRunStatus: "running", wantDurationMs: -1,
-		},
-		{name: "unknown dispatch id naks with delay for retry", event: &pubsub.DispatchOutcomeEvent{DispatchID: "disp-unknown", Status: "completed"}, wantNaked: true, wantDurationMs: -1},
-		{
-			name:         "unknown dispatch id delivered five times is dropped without nak",
-			event:        &pubsub.DispatchOutcomeEvent{DispatchID: "disp-unknown", Status: "completed"},
-			numDelivered: 5, wantDurationMs: -1,
-		},
-		{
-			name:           "non-heartbeat source like vanadis is ignored without nak",
-			event:          &pubsub.DispatchOutcomeEvent{DispatchID: "disp-vanadis-chunk", Source: "vanadis", Status: "completed"},
-			wantDurationMs: -1,
 		},
 		{
 			name:             "heartbeat completed updates run and advances watermark",
@@ -307,21 +354,7 @@ func TestHandleDispatchOutcome(t *testing.T) {
 			name:             "dispatch id equal only to run row id is not resolved and naks",
 			seedScheduleType: "heartbeat", seedScheduleID: "hb-id-only", seedRunID: "run-hb-id-only", seedDispatchID: "heartbeat:hb-id-only:2026-11-14T01:00:00Z",
 			event:         &pubsub.DispatchOutcomeEvent{DispatchID: "run-hb-id-only", Source: "heartbeat", Status: "completed", StartedAt: now},
-			wantRunStatus: "running", wantNaked: true, wantDurationMs: -1,
-		},
-		{name: "nil database returns error", nilDatabase: true, wantErr: true, wantDurationMs: -1},
-		{name: "nil message returns error", nilMessage: true, wantErr: true, wantDurationMs: -1},
-		{
-			name: "closed database returns query error", closeDatabase: true,
-			event:   &pubsub.DispatchOutcomeEvent{DispatchID: "run-on-closed-db", Status: "completed"},
-			wantErr: true, wantDurationMs: -1,
-		},
-		{
-			name:             "outcome update failure returns error",
-			seedScheduleType: "heartbeat", seedScheduleID: "hb-upd-fail", seedRunID: "run-upd-fail",
-			event:       &pubsub.DispatchOutcomeEvent{DispatchID: "run-upd-fail", Status: "completed", StartedAt: now, CompletedAt: now.Add(time.Second)},
-			sabotageSQL: failTriggerSQL("schedule_runs", "UPDATE", "forced update failure"),
-			wantErr:     true, wantDurationMs: -1,
+			wantRunStatus: "running", wantDurationMs: -1,
 		},
 		{name: "empty dispatch id returns nil", event: &pubsub.DispatchOutcomeEvent{DispatchID: "   "}, wantDurationMs: -1},
 		{
