@@ -42,7 +42,7 @@ else
     for m in $(discover_go_services); do echo "$CHANGED_FILES" | grep -q "^$m/" && MODS="$MODS $m"; done
 fi
 
-for m in $MODS; do (cd "$m" && golangci-lint run ./...); done
+for m in $MODS; do (cd "$m" && GOTOOLCHAIN="${GOTOOLCHAIN:-go1.27.3}" golangci-lint run --concurrency "${AERIAL_LINT_CONCURRENCY:-4}" --allow-parallel-runners --path-prefix="$m/" --config "$REPO_ROOT/.golangci.yml" ./...); done
 [ -x scripts/check-deadcode.sh ] && ./scripts/check-deadcode.sh $MODS
 
 M_TESTS="//web/theme:theme_test //services/docs-service:syntax_test //services/homepage:homepage_test //services/grafana:dashboards_test"
@@ -84,7 +84,7 @@ if [ -n "$TEST_TARGETS" ]; then
 fi
 
 if [ "$MODE" = "full" ] || echo "$CHANGED_FILES" | grep -q -E "^(services/console/ui|web/theme)/"; then
-    [ -f services/console/ui/package.json ] && command -v npm >/dev/null 2>&1 && (cd services/console/ui && { [ -d node_modules ] || npm ci --no-audit --no-fund --silent; } && npm run --silent typecheck && npm run --silent test:coverage && npm run --silent build)
+    [ -f services/console/ui/package.json ] && command -v npm >/dev/null 2>&1 && (cd services/console/ui && { { [ -d node_modules ] && [ ! package-lock.json -nt node_modules/.package-lock.json ]; } || npm ci --no-audit --no-fund --silent; } && npm run --silent typecheck && npm run --silent test:coverage && npm run --silent build)
 fi
 if [ "$MODE" = "full" ] || echo "$CHANGED_FILES" | grep -q -E "^services/console/(ui|static)/"; then
     [ -f services/console/ui/playwright.config.ts ] && command -v npm >/dev/null 2>&1 && command -v go >/dev/null 2>&1 && \

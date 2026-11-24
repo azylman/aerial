@@ -17,6 +17,7 @@ OCI_SVCS=("eri" "haro" "coven" "docket-mcp" "kernel-mcp" "synapse" "transcripts"
 DOCKER_CFG=("eri-restate:.:./services/eri-restate/Dockerfile:services/eri-restate/Dockerfile:eri_restate_base" "github-runner:.:./services/github-runner/Dockerfile:services/github-runner/Dockerfile:github_runner_base" "discord-mcp:.:./mcp/discord-mcp/Dockerfile:mcp/discord-mcp/Dockerfile:discord_mcp_base" "infisical-mcp:./mcp/infisical-mcp:./mcp/infisical-mcp/Dockerfile:mcp/infisical-mcp/Dockerfile:infisical_mcp_base")
 PKG_CHANGED="false"; for f in "${CHANGED_FILES[@]}"; do [[ "$f" == pkg/* ]] && { PKG_CHANGED="true"; break; }; done
 declare -A AFF SEL D_TRIG; for s in "${OCI_SVCS[@]}"; do AFF["$s"]="false"; SEL["$s"]="false"; D_TRIG["$s"]="false"; done
+. "$REPO_ROOT/scripts/lib/hermetic-go-env.sh" && ensure_bazel_build_files "$REPO_ROOT"
 for f in "${CHANGED_FILES[@]}"; do
     case "$f" in
         .github/workflows/docker-publish.yml|.dockerignore) FORCE_ALL="true" ;;
@@ -26,7 +27,6 @@ for f in "${CHANGED_FILES[@]}"; do
         services/*|mcp/*) sd=$(echo "$f" | cut -d/ -f2); [ -n "${AFF[$sd]+_}" ] && AFF["$sd"]="true" ;;
     esac
 done
-[ "$PKG_CHANGED" = "true" ] && for s in "${OCI_SVCS[@]}"; do AFF["$s"]="true"; done
 for ent in "${DOCKER_CFG[@]}"; do
     IFS=":" read -r s _ _ df_f brepo <<< "$ent"
     for f in "${CHANGED_FILES[@]}"; do [ "$f" = "$df_f" ] && { D_TRIG["$s"]="true"; AFF["$s"]="true"; SEL["$s"]="true"; break; }; done
@@ -44,7 +44,7 @@ if [ "$FORCE_ALL" = "true" ]; then CAND_OCI=("${OCI_SVCS[@]}"); else
     b_pkgs=(); chk_all="false"; [ ${#CHANGED_FILES[@]} -eq 0 ] && chk_all="true"
     for f in "${CHANGED_FILES[@]}"; do
         case "$f" in
-            images/BUILD.bazel|build/*|MODULE.bazel*|BUILD.bazel|go.mod|go.sum) chk_all="true" ;;
+            images/BUILD.bazel|build/BUILD.bazel|build/oci.bzl|MODULE.bazel*|BUILD.bazel|go.mod|go.sum) chk_all="true" ;;
             scripts/*|rules/*|.agents/*) b_pkgs+=("//:all") ;;
             services/docs-service/*) [ -f "$REPO_ROOT/services/docs-service/BUILD.bazel" ] && b_pkgs+=("//services/docs-service:all") ;;
             services/eri/pkg/db/migrations/*) [ -f "$REPO_ROOT/services/eri/pkg/db/BUILD.bazel" ] && b_pkgs+=("//services/eri/pkg/db:all") ;;
@@ -54,19 +54,15 @@ if [ "$FORCE_ALL" = "true" ]; then CAND_OCI=("${OCI_SVCS[@]}"); else
                 [ -n "$pkg" ] && b_pkgs+=("//${pkg}:all") || chk_all="true" ;;
             web/theme/*) [ -f "$REPO_ROOT/web/theme/BUILD.bazel" ] && b_pkgs+=("//web/theme:all") ;;
             images/*) [ -f "$REPO_ROOT/images/BUILD.bazel" ] && b_pkgs+=("//images:all") ;;
-            docs/*|k8s/*|*.md|.gitignore|.git*|channels/*|custom-skills/*|Makefile|.code-health-baseline.json|.golangci.yml) ;;
-            *) chk_all="true" ;;
         esac
     done
     if [ "$chk_all" = "true" ]; then CAND_OCI=("${OCI_SVCS[@]}"); elif [ ${#b_pkgs[@]} -gt 0 ]; then
-        . "$REPO_ROOT/scripts/lib/hermetic-go-env.sh" && ensure_bazel_build_files "$REPO_ROOT"
         p_set=$(printf '%s ' "${b_pkgs[@]}")
         q_out=$(bazel query "kind(oci_image, rdeps(//images:all, set($p_set)))" 2>/dev/null) || CAND_OCI=("${OCI_SVCS[@]}")
         if [ ${#CAND_OCI[@]} -eq 0 ]; then
             while IFS= read -r m || [ -n "$m" ]; do c="${m#//images:}"; [ -n "$c" ] && { CAND_OCI+=("$c"); [ -n "${AFF[$c]+_}" ] && AFF["$c"]="true"; }; done <<< "$q_out"
         fi
     fi
-    for s in "${OCI_SVCS[@]}"; do [ "${AFF[$s]}" = "true" ] && [ "${D_TRIG[$s]}" != "true" ] && CAND_OCI+=("$s"); done
     [ ${#CAND_OCI[@]} -gt 0 ] && IFS=" " read -r -a CAND_OCI <<< "$(printf '%s\n' "${CAND_OCI[@]}" | sort -u | tr '\n' ' ')"
 fi
 if [ "$FORCE_ALL" = "true" ]; then

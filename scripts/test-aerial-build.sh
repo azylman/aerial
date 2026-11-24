@@ -68,7 +68,7 @@ assert echo "$res_lg" | jq -e '.turn_action == "end_turn"'
 err_out=$(VANADIS_URL="http://fail7:4025" "$SCRIPT" status b1 2>&1 || true)
 assert echo "$err_out" | grep -q "Failed to connect; acceptance unknown"
 echo "other_key: 1" > "$TMPD/cfg1.yaml"; echo "vanadis_url: http://127.0.0.1:4025" > "$TMPD/cfg2.yaml"
-assert_fail env -u VANADIS_URL CONFIG_PATH="$TMPD/cfg1.yaml" AERIAL_LOCAL_CONFIG_PATH="$TMPD/none" AERIAL_SHARED_CONFIG_PATH="$TMPD/none" "$SCRIPT" status b1
-assert [ "$(env -u VANADIS_URL CONFIG_PATH="$TMPD/cfg1.yaml" AERIAL_LOCAL_CONFIG_PATH="$TMPD/cfg2.yaml" "$SCRIPT" status b1 | jq -r .status)" = "running" ]
+assert_fail env -u VANADIS_URL CONFIG_PATH="$TMPD/cfg1.yaml" AERIAL_LOCAL_CONFIG_PATH="$TMPD/cfg2.yaml" AERIAL_SHARED_CONFIG_PATH="$TMPD/none" "$SCRIPT" status b1
+assert [ "$(env -u VANADIS_URL AERIAL_LOCAL_CONFIG_PATH="$TMPD/cfg1.yaml" AERIAL_SHARED_CONFIG_PATH="$TMPD/cfg2.yaml" "$SCRIPT" status b1 | jq -r .status)" = "running" ]
 bash "$DIR/test-aerial-build-edge.sh"
 echo "ok - aerial-build hermetic tests passed"
