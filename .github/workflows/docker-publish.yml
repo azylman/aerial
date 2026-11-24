@@ -69,9 +69,10 @@ jobs:
             FORCE_FLAG="--force-all"
           fi
           if [ "${{ github.event_name }}" = "pull_request" ]; then
-            git diff --name-only origin/main...HEAD > "$RUNNER_TEMP/changed-files.txt"
+            git fetch origin +refs/heads/main:refs/remotes/origin/main 2>/dev/null || true
+            (git diff --name-only origin/main...HEAD 2>/dev/null || git diff --name-only HEAD^1 HEAD 2>/dev/null || true) > "$RUNNER_TEMP/changed-files.txt"
           else
-            git diff --name-only HEAD^1 HEAD > "$RUNNER_TEMP/changed-files.txt"
+            (git diff --name-only HEAD^1 HEAD 2>/dev/null || true) > "$RUNNER_TEMP/changed-files.txt"
           fi
           ./scripts/bazel-select-images.sh $FORCE_FLAG --github-output "$GITHUB_OUTPUT" < "$RUNNER_TEMP/changed-files.txt"
 
@@ -152,6 +153,7 @@ jobs:
           ensure_bazel_build_files "$GITHUB_WORKSPACE"
           GO_MODULES=$(discover_go_services)
           if [ "${{ github.event_name }}" = "pull_request" ]; then
+            git fetch origin +refs/heads/main:refs/remotes/origin/main 2>/dev/null || true
             CHANGED_FILES=$(git diff --name-only origin/main...HEAD 2>/dev/null || git diff --name-only HEAD^1 HEAD 2>/dev/null || true)
           else
             CHANGED_FILES=$(git diff --name-only HEAD^1 HEAD 2>/dev/null || true)
