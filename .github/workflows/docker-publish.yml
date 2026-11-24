@@ -352,7 +352,7 @@ jobs:
         uses: ./.github/actions/setup-buildx-builder
 
       - name: Stage Pre-Built Binaries for eri-restate
-        if: matrix.service == 'eri-restate'
+        if: matrix.service == 'eri-restate' && matrix.type == 'docker'
         run: |
           set -euo pipefail
           bazel build --remote_download_toplevel \

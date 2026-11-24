@@ -37,6 +37,65 @@ func findRunfile(relPath string) (string, error) {
 	return "", fmt.Errorf("runfile %q not found", relPath)
 }
 
+func TestTarLayers(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name            string
+		tarRelPath      string
+		requiredEntries []string
+	}{
+		{
+			name:            "coverage ingest tools layer",
+			tarRelPath:      "images/coverage_ingest_tools_layer.tar",
+			requiredEntries: []string{"usr/local/bin/go", "usr/local/bin/covdata"},
+		},
+		{
+			name:       "eri restate scripts layer preserves paths",
+			tarRelPath: "images/eri_restate_scripts_layer.tar",
+			requiredEntries: []string{
+				"usr/local/bin/aerial-pr.sh",
+				"usr/local/bin/lib/hermetic-go-env.sh",
+			},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			tarPath, err := findRunfile(tc.tarRelPath)
+			if err != nil {
+				t.Fatalf("resolve %s: %v", tc.tarRelPath, err)
+			}
+			tarFile, err := os.Open(tarPath)
+			if err != nil {
+				t.Fatalf("open %s: %v", tc.tarRelPath, err)
+			}
+			defer tarFile.Close()
+
+			tr := tar.NewReader(tarFile)
+			tarEntries := make(map[string]bool)
+			for {
+				hdr, err := tr.Next()
+				if err == io.EOF {
+					break
+				}
+				if err != nil {
+					t.Fatalf("read tar entry: %v", err)
+				}
+				tarEntries[strings.TrimLeft(hdr.Name, "./")] = true
+			}
+
+			for _, required := range tc.requiredEntries {
+				if !tarEntries[required] {
+					t.Fatalf("expected %s to package %q, got entries: %v", tc.tarRelPath, required, tarEntries)
+				}
+			}
+		})
+	}
+}
+
 func TestProdCoverBinaryFlush(t *testing.T) {
 	t.Parallel()
 

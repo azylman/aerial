@@ -37,7 +37,7 @@ for f in "${CHANGED_FILES[@]}"; do
     case "$f" in .github/workflows/docker-publish.yml|.dockerignore) FORCE_ALL="true" ;; esac
 done
 
-OCI_SERVICES=("eri" "haro" "coven" "docket-mcp" "kernel-mcp" "synapse" "transcripts" "vanadis" "vanadis-restate" "vanadis-nats" "prospera" "console" "redact-pattern" "coverage-ingest" "docs" "migrator")
+OCI_SERVICES=("eri" "haro" "coven" "docket-mcp" "kernel-mcp" "synapse" "transcripts" "vanadis" "vanadis-restate" "vanadis-nats" "prospera" "console" "redact-pattern" "coverage-ingest" "docs" "migrator" "eri-restate" "github-runner" "discord-mcp" "infisical-mcp")
 DOCKER_SERVICES=("eri-restate" "github-runner" "discord-mcp" "infisical-mcp")
 
 PKG_CHANGED="false"
@@ -82,6 +82,9 @@ fi
 bazel_targets=()
 for f in "${CHANGED_FILES[@]}"; do
     case "$f" in
+        scripts/*|rules/*|.agents/*)
+            bazel_targets+=("//:all")
+            ;;
         services/docs-service/*)
             AFFECTED_SERVICES["docs"]="true"
             [ -f "$REPO_ROOT/services/docs-service/BUILD.bazel" ] && bazel_targets+=("//services/docs-service:all")
@@ -133,8 +136,30 @@ elif [ ${#bazel_targets[@]} -gt 0 ]; then
     rm -f "$q_out"
 fi
 
+DOCKER_CFG=(
+    "eri-restate:.:./services/eri-restate/Dockerfile:services/eri-restate/Dockerfile"
+    "github-runner:.:./services/github-runner/Dockerfile:services/github-runner/Dockerfile"
+    "discord-mcp:.:./mcp/discord-mcp/Dockerfile:mcp/discord-mcp/Dockerfile"
+    "infisical-mcp:./mcp/infisical-mcp:./mcp/infisical-mcp/Dockerfile:mcp/infisical-mcp/Dockerfile"
+)
+
+declare -A DOCKER_TRIGGERED
+for entry in "${DOCKER_CFG[@]}"; do
+    IFS=":" read -r svc ctx df df_file <<< "$entry"
+    DOCKER_TRIGGERED["$svc"]="false"
+    for f in "${CHANGED_FILES[@]}"; do
+        if [ "$f" = "$df_file" ]; then
+            DOCKER_TRIGGERED["$svc"]="true"
+            AFFECTED_SERVICES["$svc"]="true"
+            SELECTED_SERVICES["$svc"]="true"
+            break
+        fi
+    done
+done
+
 if [ "$FORCE_ALL" = "true" ]; then
     for svc in "${OCI_SERVICES[@]}"; do
+        [ "${DOCKER_TRIGGERED[$svc]:-false}" = "true" ] && continue
         echo "Forced rebuild for $svc" >&2
         SELECTED_SERVICES["$svc"]="true"
         AFFECTED_SERVICES["$svc"]="true"
@@ -143,6 +168,7 @@ elif [ ${#CANDIDATE_OCI[@]} -gt 0 ]; then
     declare -A IS_CANDIDATE
     build_targets=()
     for svc in "${OCI_SERVICES[@]}"; do
+        [ "${DOCKER_TRIGGERED[$svc]:-false}" = "true" ] && continue
         for cand in "${CANDIDATE_OCI[@]}"; do
             if [ "$svc" = "$cand" ] && [ -z "${IS_CANDIDATE[$svc]+_}" ]; then
                 IS_CANDIDATE["$svc"]="true"
@@ -192,31 +218,17 @@ elif [ ${#CANDIDATE_OCI[@]} -gt 0 ]; then
 fi
 
 for svc in "${OCI_SERVICES[@]}"; do
+    if [ "${DOCKER_TRIGGERED[$svc]:-false}" = "true" ]; then
+        continue
+    fi
     if [ "${SELECTED_SERVICES[$svc]}" = "true" ]; then
         SELECTED_MATRIX+=("{\"service\":\"${svc}\",\"image_name\":\"aerial-${svc}\",\"type\":\"bazel\"}")
     fi
 done
 
-DOCKER_CFG=(
-    "eri-restate:.:./services/eri-restate/Dockerfile:services/eri-restate/*|services/eri/*|scripts/*|rules/*|.agents/*|pkg/*|go.mod|go.sum"
-    "github-runner:.:./services/github-runner/Dockerfile:services/github-runner/*"
-    "discord-mcp:.:./mcp/discord-mcp/Dockerfile:mcp/discord-mcp/*"
-    "infisical-mcp:./mcp/infisical-mcp:./mcp/infisical-mcp/Dockerfile:mcp/infisical-mcp/*"
-)
 for entry in "${DOCKER_CFG[@]}"; do
-    IFS=":" read -r svc ctx df pat <<< "$entry"
-    sel="$FORCE_ALL"
-    if [ "$sel" = "false" ]; then
-        for f in "${CHANGED_FILES[@]}"; do
-            eval "case \"\$f\" in $pat) AFFECTED_SERVICES[\"\$svc\"]=\"true\"; is_test_file \"\$f\" || sel=\"true\" ;; esac"
-            [ "$sel" = "true" ] && break
-        done
-    else
-        AFFECTED_SERVICES["$svc"]="true"
-    fi
-    if [ "$sel" = "true" ]; then
-        SELECTED_SERVICES["$svc"]="true"
-        AFFECTED_SERVICES["$svc"]="true"
+    IFS=":" read -r svc ctx df df_file <<< "$entry"
+    if [ "${DOCKER_TRIGGERED[$svc]:-false}" = "true" ]; then
         SELECTED_MATRIX+=("{\"service\":\"${svc}\",\"image_name\":\"aerial-${svc}\",\"type\":\"docker\",\"context\":\"${ctx}\",\"file\":\"${df}\"}")
     fi
 done
