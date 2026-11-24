@@ -1,3 +1,5 @@
+load("@rules_shell//shell:sh_test.bzl", "sh_test")
+
 filegroup(
     name = "ui_srcs",
     srcs = glob(
@@ -9,4 +11,17 @@ filegroup(
         ],
     ),
     visibility = ["//visibility:public"],
+)
+
+sh_test(
+    name = "ui_test",
+    srcs = ["//build:tests/console_ui_test.sh"],
+    data = [
+        ":ui_srcs",
+        "//web/theme",
+    ],
+    tags = [
+        "no-sandbox",
+        "requires-network",
+    ],
 )

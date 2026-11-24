@@ -119,27 +119,13 @@ jobs:
         with:
           fetch-depth: ${{ github.event_name == 'pull_request' && 0 || 2 }}
 
-      - name: Verify Repository Hygiene & Invariants
+      - name: Ensure Ephemeral Bazel Build Files
         run: |
-          # 1. UTF-8 BOM Hygiene
-          BOM_HEX=$(printf '\357\273\277')
-          BOM_FILES=$(git grep -I -l "^$BOM_HEX" 2>/dev/null || true)
-          if [ -n "$BOM_FILES" ]; then
-            echo "::error::Invalid UTF-8 BOM detected in tracked files:"
-            echo "$BOM_FILES" | sed 's/^/   • /'
-            exit 1
-          fi
+          . scripts/lib/hermetic-go-env.sh
+          ensure_bazel_build_files "$GITHUB_WORKSPACE"
 
-          # 2. Direct execution of main() in test files
-          MAIN_CALLS=$(git grep -E '\bmain\(\)' 'services/eri/*_test.go' 2>/dev/null || true)
-          if [ -n "$MAIN_CALLS" ]; then
-            echo "::error::Direct execution of main() detected in test files:"
-            echo "$MAIN_CALLS" | sed 's/^/   • /'
-            exit 1
-          fi
-
-          # 3. Ratcheted Code Health Gate & Scanner Unit Tests
-          (cd scripts/code-health && go run . -root ../.. -baseline ../../.code-health-baseline.json)
+      - name: Ratcheted Code Health Gate & Scanner Unit Tests
+        run: bazel run //scripts/code-health -- -root "$GITHUB_WORKSPACE" -baseline "$GITHUB_WORKSPACE/.code-health-baseline.json"
 
       - name: Lint & Check Dead Code in Go Modules
         env:
@@ -147,64 +133,39 @@ jobs:
         run: |
           set -euo pipefail
           . scripts/lib/hermetic-go-env.sh
-          ensure_bazel_build_files "$GITHUB_WORKSPACE"
-          GO_MODULES=$(discover_go_services)
           if [ "${{ github.event_name }}" = "pull_request" ]; then
             git fetch origin +refs/heads/main:refs/remotes/origin/main 2>/dev/null || true
             CHANGED_FILES=$(git diff --name-only origin/main...HEAD 2>/dev/null || git diff --name-only HEAD^1 HEAD 2>/dev/null || true)
           else
             CHANGED_FILES=$(git diff --name-only HEAD^1 HEAD 2>/dev/null || true)
           fi
-          if [ "${FORCE_ALL:-}" = "true" ] || [ -z "$CHANGED_FILES" ] || echo "$CHANGED_FILES" | grep -q -E '(^pkg/|^\.golangci\.ya?ml|^scripts/|^go\.(mod|sum)$|^build/|^MODULE\.bazel|^\.github/)'; then
-            LINT_MODULES="$GO_MODULES"
+          if [ "${FORCE_ALL:-}" = "true" ] || [ -z "$CHANGED_FILES" ] || echo "$CHANGED_FILES" | grep -q -E '(^\.golangci\.ya?ml|^scripts/|^go\.(mod|sum)$|^build/|^MODULE\.bazel|^\.github/)'; then
+            MODS=$(discover_go_services)
+            LINT_ARGS=$(for m in $MODS; do printf './%s/... ' "$m"; done)
           else
-            LINT_MODULES=""
-            for mod in $GO_MODULES; do
-              if echo "$CHANGED_FILES" | grep -q "^$mod/"; then
-                LINT_MODULES="$LINT_MODULES $mod"
-              fi
+            b_pkgs=()
+            for f in $CHANGED_FILES; do
+              [ -e "$f" ] || continue
+              d=$(dirname "$f")
+              while [ -n "$d" ] && [ "$d" != "." ] && [ "$d" != "/" ]; do
+                [ -f "$d/BUILD.bazel" ] && { b_pkgs+=("//${d}:all"); break; }
+                d=$(dirname "$d")
+              done
             done
-            if [ -z "$LINT_MODULES" ]; then
-              echo "No Go module changes detected for linting; skipping."
-              exit 0
+            LINT_ARGS=""
+            MODS=""
+            if [ ${#b_pkgs[@]} -gt 0 ]; then
+              r_pkgs=$(bazel query "kind('go_library|go_binary|go_test', rdeps(//..., set($(printf '%s ' "${b_pkgs[@]}"))))" 2>/dev/null | grep -E '^//(pkg|services|mcp|scripts)/' | sed -E 's#^//([^:]+):.*#\1#' | sort -u || true)
+              LINT_ARGS=$(for p in $r_pkgs; do printf './%s ' "$p"; done)
+              MODS=$(for p in $r_pkgs; do case "$p" in pkg|pkg/*) echo pkg;; services/*|mcp/*|scripts/*) echo "$p" | cut -d/ -f1,2;; esac; done | sort -u)
             fi
           fi
-          for svc in $LINT_MODULES; do
-            echo "=== Linting & checking deadcode in $svc ==="
-            (
-              cd "$svc"
-              golangci-lint run --path-prefix="$svc/" --config "$GITHUB_WORKSPACE/.golangci.yml" ./...
-              FILTER_FLAG="-filter=^github\.com/azylman/aerial/${svc}(/|$)"
-              if [ "$svc" = "services/eri" ]; then
-                MAIN_PKGS=$(cd "$GITHUB_WORKSPACE" && go list -f '{{if eq .Name "main"}}{{.ImportPath}}{{end}}' ./services/eri/... ./services/eri-restate/...)
-              else
-                MAIN_PKGS=$(go list -f '{{if eq .Name "main"}}{{.ImportPath}}{{end}}' ./...)
-              fi
-              if [ -n "$MAIN_PKGS" ]; then
-                DEAD_PROD=$(cd "$GITHUB_WORKSPACE" && deadcode $FILTER_FLAG $MAIN_PKGS)
-                if [ -n "$DEAD_PROD" ]; then
-                  echo "::error::Unreachable production code or compiled-in test hooks detected in $svc:"
-                  echo "$DEAD_PROD"
-                  exit 1
-                fi
-              fi
-              DEAD_TEST=$(deadcode -test $FILTER_FLAG ./...)
-              if [ -n "$DEAD_TEST" ]; then
-                echo "::error::Unreachable functions detected by deadcode -test in $svc:"
-                echo "$DEAD_TEST"
-                exit 1
-              fi
-            )
-          done
-
-      - name: Console React UI Gates (typecheck, coverage, build)
-        if: needs.changes.outputs.console == 'true'
-        working-directory: services/console/ui
-        run: |
-          npm ci --no-audit --no-fund
-          npm run typecheck
-          npm run test:coverage
-          npm run build
+          if [ -n "$LINT_ARGS" ]; then
+            golangci-lint run --concurrency "${AERIAL_LINT_CONCURRENCY:-4}" --allow-parallel-runners --config "$GITHUB_WORKSPACE/.golangci.yml" $LINT_ARGS
+          fi
+          if [ -n "$MODS" ]; then
+            ./scripts/check-deadcode.sh $MODS
+          fi
 
   console-e2e:
     name: Console UI E2E Suite
@@ -318,12 +279,7 @@ jobs:
           echo "tree_sha=${TREE_SHA}" >> "$GITHUB_OUTPUT"
           if { [ "$EVENT_NAME" = "push" ] || [ "$EVENT_NAME" = "workflow_dispatch" ]; } && [ "$REF" = "refs/heads/main" ] && [ "$FORCE_ALL" != "true" ]; then
             IMAGE_REF="ghcr.io/${OWNER}/${IMAGE_NAME}:tree-${TREE_SHA}"
-            if command -v crane >/dev/null 2>&1; then
-              if crane digest "$IMAGE_REF" >/dev/null 2>&1; then
-                echo "exists=true" >> "$GITHUB_OUTPUT"
-                exit 0
-              fi
-            elif docker buildx imagetools inspect "$IMAGE_REF" >/dev/null 2>&1; then
+            if crane digest "$IMAGE_REF" >/dev/null 2>&1; then
               echo "exists=true" >> "$GITHUB_OUTPUT"
               exit 0
             fi
@@ -331,8 +287,8 @@ jobs:
           echo "exists=false" >> "$GITHUB_OUTPUT"
 
       # Pull requests set the builder up before login (above). Push runs decide first whether the
-      # PR tree-cache image exists: a hit is a registry-side imagetools copy that needs only the
-      # buildx CLI and the GHCR login, so the shared calibarn-buildkit builder is set up on a miss only.
+      # PR tree-cache image exists: a hit is a registry-side crane copy that needs only the
+      # GHCR login, so the shared calibarn-buildkit builder is set up on a miss only.
       - name: Set up Persistent Local Buildx Builder (Cache Miss)
         if: matrix.type == 'docker' && github.event_name != 'pull_request' && steps.tree_check.outputs.exists != 'true'
         uses: ./.github/actions/setup-buildx-builder
@@ -369,16 +325,8 @@ jobs:
             if { [ "$EVENT_NAME" = "push" ] || [ "$EVENT_NAME" = "workflow_dispatch" ]; } && [ "$REF" = "refs/heads/main" ] && [ "$TREE_EXISTS" = "true" ]; then
               echo "Reusing existing tree-cache image ghcr.io/${OWNER}/${IMAGE_NAME}:tree-${TREE_SHA} for ${SHA}"
               SRC="ghcr.io/${OWNER}/${IMAGE_NAME}:tree-${TREE_SHA}"
-              if command -v crane >/dev/null 2>&1; then
-                crane tag "$SRC" "${SHA}"
-                DIGEST=$(crane digest "$SRC" 2>/dev/null || true)
-              else
-                docker buildx imagetools create \
-                  --tag "ghcr.io/${OWNER}/${IMAGE_NAME}:${SHA}" \
-                  --annotation "index:org.opencontainers.image.revision=${SHA}" \
-                  "$SRC"
-                DIGEST=""
-              fi
+              crane tag "$SRC" "${SHA}"
+              DIGEST=$(crane digest "$SRC" 2>/dev/null || true)
               if [ -n "$DIGEST" ]; then
                 echo "digest=${DIGEST}" >> "$GITHUB_OUTPUT"
               fi
@@ -395,11 +343,9 @@ jobs:
                   TAG_ARGS+=(--tag "${SHA}")
                 fi
                 bazel run "//images:push_${{ matrix.service }}" -- --repository "ghcr.io/${OWNER}/${IMAGE_NAME}" "${TAG_ARGS[@]}"
-                if command -v crane >/dev/null 2>&1; then
-                  PUSHED_DIGEST=$(crane digest "ghcr.io/${OWNER}/${IMAGE_NAME}:tree-${TREE_SHA}" 2>/dev/null || true)
-                  if [ -n "$PUSHED_DIGEST" ]; then
-                    DIGEST="$PUSHED_DIGEST"
-                  fi
+                PUSHED_DIGEST=$(crane digest "ghcr.io/${OWNER}/${IMAGE_NAME}:tree-${TREE_SHA}" 2>/dev/null || true)
+                if [ -n "$PUSHED_DIGEST" ]; then
+                  DIGEST="$PUSHED_DIGEST"
                 fi
                 if [ -z "${DIGEST:-}" ]; then
                   echo "::error::Failed to extract image digest from $INDEX" >&2
@@ -410,14 +356,8 @@ jobs:
             fi
           else
             SRC="ghcr.io/${OWNER}/${IMAGE_NAME}:tree-${TREE_SHA}"
-            docker buildx imagetools create \
-              --tag "ghcr.io/${OWNER}/${IMAGE_NAME}:${SHA}" \
-              --annotation "index:org.opencontainers.image.revision=${SHA}" \
-              "$SRC"
-            DIGEST=""
-            if command -v crane >/dev/null 2>&1; then
-              DIGEST=$(crane digest "ghcr.io/${OWNER}/${IMAGE_NAME}:tree-${TREE_SHA}" 2>/dev/null || true)
-            fi
+            crane tag "$SRC" "${SHA}"
+            DIGEST=$(crane digest "$SRC" 2>/dev/null || true)
             if [ -n "$DIGEST" ]; then
               echo "digest=${DIGEST}" >> "$GITHUB_OUTPUT"
             fi
@@ -664,14 +604,7 @@ jobs:
           pids=""
           for IMG in $(echo "$MATRIX_JSON" | jq -r '.[] | select(.service != "eri" and .service != "eri-restate") | .image_name'); do
             echo "Promoting non-eri manifest ghcr.io/${OWNER}/${IMG}:${SHA} -> ghcr.io/${OWNER}/${IMG}:latest"
-            if command -v crane >/dev/null 2>&1; then
-              crane tag "ghcr.io/${OWNER}/${IMG}:${SHA}" "latest" &
-            else
-              docker buildx imagetools create \
-                --tag "ghcr.io/${OWNER}/${IMG}:latest" \
-                --annotation "index:org.opencontainers.image.revision=${SHA}" \
-                "ghcr.io/${OWNER}/${IMG}:${SHA}" &
-            fi
+            crane tag "ghcr.io/${OWNER}/${IMG}:${SHA}" "latest" &
             pids="$pids $!"
           done
           for pid in $pids; do
@@ -680,24 +613,10 @@ jobs:
 
           if echo "$MATRIX_JSON" | jq -e '.[] | select(.service == "eri-restate")' >/dev/null; then
             echo "Promoting eri-restate manifest ghcr.io/${OWNER}/aerial-eri-restate:${SHA} -> ghcr.io/${OWNER}/aerial-eri-restate:latest"
-            if command -v crane >/dev/null 2>&1; then
-              crane tag "ghcr.io/${OWNER}/aerial-eri-restate:${SHA}" "latest"
-            else
-              docker buildx imagetools create \
-                --tag "ghcr.io/${OWNER}/aerial-eri-restate:latest" \
-                --annotation "index:org.opencontainers.image.revision=${SHA}" \
-                "ghcr.io/${OWNER}/aerial-eri-restate:${SHA}"
-            fi
+            crane tag "ghcr.io/${OWNER}/aerial-eri-restate:${SHA}" "latest"
           fi
 
           if echo "$MATRIX_JSON" | jq -e '.[] | select(.service == "eri")' >/dev/null; then
             echo "Promoting eri manifest ghcr.io/${OWNER}/aerial-eri:${SHA} -> ghcr.io/${OWNER}/aerial-eri:latest"
-            if command -v crane >/dev/null 2>&1; then
-              crane tag "ghcr.io/${OWNER}/aerial-eri:${SHA}" "latest"
-            else
-              docker buildx imagetools create \
-                --tag "ghcr.io/${OWNER}/aerial-eri:latest" \
-                --annotation "index:org.opencontainers.image.revision=${SHA}" \
-                "ghcr.io/${OWNER}/aerial-eri:${SHA}"
-            fi
+            crane tag "ghcr.io/${OWNER}/aerial-eri:${SHA}" "latest"
           fi

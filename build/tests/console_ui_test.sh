@@ -53,4 +53,6 @@ if [ "$extracted" -eq 0 ]; then
     fi
 fi
 
+npm run --silent typecheck
 npm run --silent test:coverage
+npm run --silent build

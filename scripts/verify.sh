@@ -1,10 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
-REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-cd "$REPO_ROOT"
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)" && cd "$REPO_ROOT"
 export PATH="$(go env GOPATH 2>/dev/null || echo "$HOME/go")/bin:$HOME/go/bin:${GOPATH:-$HOME/go}/bin:$PATH"
-. "$REPO_ROOT/scripts/lib/hermetic-go-env.sh"
-ensure_bazel_build_files "$REPO_ROOT"
+. "$REPO_ROOT/scripts/lib/hermetic-go-env.sh" && ensure_bazel_build_files "$REPO_ROOT"
 
 MODE="full"
 for a in "$@"; do case "$a" in --staged) MODE="staged";; --full) MODE="full";; esac; done
@@ -26,51 +24,48 @@ if command -v buildifier >/dev/null 2>&1; then
 fi
 
 for f in rules/*/*.md rules/*/*/*.md GEMINI.md AGENTS.md; do
-    if [ -f "$f" ] && [ "$(wc -c < "$f")" -gt 23040 ]; then
-        echo "🚨 [Aerial Verify] $f exceeds 23040 bytes" >&2
-        exit 1
-    fi
+    [ -f "$f" ] && [ "$(wc -c < "$f")" -gt 23040 ] && { echo "🚨 [Aerial Verify] $f exceeds 23040 bytes" >&2; exit 1; }
 done
 
 [ -x scripts/check-cnpg-immutability.sh ] && ./scripts/check-cnpg-immutability.sh "$REPO_ROOT"
-(cd scripts/code-health && go run . -root ../.. -baseline ../../.code-health-baseline.json)
+bazel run //scripts/code-health -- -root "$REPO_ROOT" -baseline "$REPO_ROOT/.code-health-baseline.json"
 
-MODS=""
-if [ "$MODE" = "full" ] || echo "$CHANGED_FILES" | grep -q -E '(^pkg/|^\.golangci\.ya?ml|^scripts/|^go\.(mod|sum)$|^build/|^MODULE\.bazel|^\.github/)'; then
+TARGET_PKGS=""
+if [ "$MODE" = "full" ] || echo "$CHANGED_FILES" | grep -q -E '(^\.golangci\.ya?ml|^scripts/|^go\.(mod|sum)$|^build/|^MODULE\.bazel|^\.github/)'; then
     MODS=$(discover_go_services)
-else
-    for m in $(discover_go_services); do echo "$CHANGED_FILES" | grep -q "^$m/" && MODS="$MODS $m"; done
-fi
-
-for m in $MODS; do (cd "$m" && GOTOOLCHAIN="${GOTOOLCHAIN:-go1.27.3}" golangci-lint run --concurrency "${AERIAL_LINT_CONCURRENCY:-4}" --allow-parallel-runners --path-prefix="$m/" --config "$REPO_ROOT/.golangci.yml" ./...); done
-[ -x scripts/check-deadcode.sh ] && ./scripts/check-deadcode.sh $MODS
-
-M_TESTS="//web/theme:theme_test //services/docs-service:syntax_test //services/homepage:homepage_test //services/grafana:dashboards_test"
-if command -v kubectl >/dev/null 2>&1 && command -v atlas >/dev/null 2>&1; then
-    bazel test //k8s:manifests_test //services/eri/pkg/db/migrations:atlas_validate_test $M_TESTS
-elif [ -n "${CI:-}" ]; then
-    echo "🚨 [Aerial Verify] kubectl and atlas are required in CI" >&2; exit 1
-else
-    echo "⚠️  [Aerial Verify] kubectl or atlas missing; skipping manifest and atlas tests outside CI." >&2
-    bazel test $M_TESTS
-fi
-
-TEST_TARGETS=""; TARGET_PKGS=""
-if [ "$MODE" = "full" ]; then
-    TEST_TARGETS=$(bazel query "kind('go_test rule', //...)")
+    LINT_ARGS=$(for m in $MODS; do printf './%s/... ' "$m"; done)
+    SH_TESTS=$(bazel query "kind('sh_test rule', //...)" 2>/dev/null)
+    TEST_TARGETS=$(bazel query "kind('go_test rule', //...)" 2>/dev/null)
 else
     b_pkgs=()
     for f in $CHANGED_FILES; do
-        case "$f" in *.go)
-            [ -f "$f" ] || continue
-            d=$(dirname "$f"); TARGET_PKGS="$TARGET_PKGS $d"
-            while [ -n "$d" ] && [ "$d" != "." ] && [ "$d" != "/" ]; do
-                [ -f "$d/BUILD.bazel" ] && { b_pkgs+=("//${d}:all"); break; }; d=$(dirname "$d")
-            done ;;
-        esac
+        [ -e "$f" ] || continue
+        case "$f" in *.go) TARGET_PKGS="$TARGET_PKGS $(dirname "$f")" ;; esac
+        d=$(dirname "$f")
+        while [ -n "$d" ] && [ "$d" != "." ] && [ "$d" != "/" ]; do
+            [ -f "$d/BUILD.bazel" ] && { b_pkgs+=("//${d}:all"); break; }
+            d=$(dirname "$d")
+        done
     done
-    [ ${#b_pkgs[@]} -gt 0 ] && TEST_TARGETS=$(bazel query "kind('go_test rule', set($(printf '%s ' "${b_pkgs[@]}")))")
+    MODS=""; LINT_ARGS=""; SH_TESTS=""; TEST_TARGETS=""
+    if [ ${#b_pkgs[@]} -gt 0 ]; then
+        RDEPS=$(bazel query "rdeps(//..., set($(printf '%s ' "${b_pkgs[@]}")))" 2>/dev/null || true)
+        r_pkgs=$(bazel query "kind('go_library|go_binary|go_test', set($RDEPS))" 2>/dev/null | grep -E '^//(pkg|services|mcp|scripts)/' | sed -E 's#^//([^:]+):.*#\1#' | sort -u || true)
+        LINT_ARGS=$(for p in $r_pkgs; do printf './%s ' "$p"; done)
+        MODS=$(for p in $r_pkgs; do case "$p" in pkg|pkg/*) echo pkg;; services/*|mcp/*|scripts/*) echo "$p" | cut -d/ -f1,2;; esac; done | sort -u)
+        SH_TESTS=$(bazel query "kind('sh_test rule', set($RDEPS))" 2>/dev/null || true)
+        TEST_TARGETS=$(bazel query "kind('go_test rule', set($RDEPS))" 2>/dev/null || true)
+    fi
 fi
+
+[ -n "$LINT_ARGS" ] && GOTOOLCHAIN="${GOTOOLCHAIN:-go1.27.3}" golangci-lint run --concurrency "${AERIAL_LINT_CONCURRENCY:-4}" --allow-parallel-runners --config "$REPO_ROOT/.golangci.yml" $LINT_ARGS
+[ -x scripts/check-deadcode.sh ] && [ -n "$MODS" ] && ./scripts/check-deadcode.sh $MODS
+
+if [ -z "${CI:-}" ] && (! command -v kubectl >/dev/null 2>&1 || ! command -v atlas >/dev/null 2>&1); then
+    SH_TESTS=$(echo "$SH_TESTS" | grep -v -E '^(//k8s:manifests_test|//services/eri/pkg/db/migrations:atlas_validate_test)$' || true)
+fi
+# shellcheck disable=SC2086
+[ -n "$SH_TESTS" ] && bazel test $SH_TESTS
 
 if [ -n "$TEST_TARGETS" ]; then
     rm -rf bazel-testlogs && cov_status=0
@@ -83,9 +78,6 @@ if [ -n "$TEST_TARGETS" ]; then
     [ "$cov_status" -eq 0 ] || { echo "🚨 [Aerial Verify] One or more test targets failed." >&2; exit 1; }
 fi
 
-if [ "$MODE" = "full" ] || echo "$CHANGED_FILES" | grep -q -E "^(services/console/ui|web/theme)/"; then
-    [ -f services/console/ui/package.json ] && command -v npm >/dev/null 2>&1 && (cd services/console/ui && { { [ -d node_modules ] && [ ! package-lock.json -nt node_modules/.package-lock.json ]; } || npm ci --no-audit --no-fund --silent; } && npm run --silent typecheck && npm run --silent test:coverage && npm run --silent build)
-fi
 if [ "$MODE" = "full" ] || echo "$CHANGED_FILES" | grep -q -E "^services/console/(ui|static)/"; then
     [ -f services/console/ui/playwright.config.ts ] && command -v npm >/dev/null 2>&1 && command -v go >/dev/null 2>&1 && \
         { ! (cd services/console/ui && node -e "require('@playwright/test').chromium.launch().then(b => b.close()).catch(() => process.exit(1))" >/dev/null 2>&1) || (cd services/console/ui && npm run --silent build && npm run --silent e2e); }
