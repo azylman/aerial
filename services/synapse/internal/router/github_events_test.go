@@ -2,6 +2,7 @@ package router
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -10,8 +11,11 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/prometheus/client_golang/prometheus/testutil"
+
 	"github.com/azylman/aerial/pkg/prwire"
 	"github.com/azylman/aerial/pkg/pubsub"
+	"github.com/azylman/aerial/services/synapse/internal/metrics"
 	"github.com/azylman/aerial/services/synapse/internal/model"
 	"github.com/azylman/aerial/services/synapse/internal/restateclient"
 )
@@ -655,5 +659,71 @@ func restateOwnedPushCases() []restateOwnedGitHubCase {
 		{name: "malformed check_run fails", event: ghEventCheckRun, body: []byte(`{`), wantErr: true},
 		{name: "malformed workflow_run fails", event: ghEventWorkflowRun, body: []byte(`{`), wantErr: true},
 		{name: "malformed push fails", event: "push", body: []byte(`{`), wantErr: true},
+	}
+}
+
+func TestHandleGitHubWebhookIngressOutcomes(t *testing.T) {
+	pingBody := `{"zen":"Keep it simple"}`
+	badSig := "sha256=0000000000000000000000000000000000000000000000000000000000000000"
+
+	tests := []struct {
+		name        string
+		eventHeader string
+		body        string
+		errBody     bool
+		signature   string
+		noSecret    bool
+		busMode     string
+		wantStatus  int
+		wantEvent   string
+		wantOutcome string
+	}{
+		{name: "missing event header", body: pingBody, signature: "none", busMode: "ok", wantStatus: http.StatusBadRequest, wantEvent: "unknown", wantOutcome: "missing_event_header"},
+		{name: "body read failure", eventHeader: "ping", errBody: true, signature: "none", busMode: "ok", wantStatus: http.StatusBadRequest, wantEvent: "ping", wantOutcome: "body_read_failed"},
+		{name: "signature rejected", eventHeader: "ping", body: pingBody, signature: "invalid", busMode: "ok", wantStatus: http.StatusUnauthorized, wantEvent: "ping", wantOutcome: "signature_rejected"},
+		{name: "bus unavailable", eventHeader: "ping", body: pingBody, signature: "valid", busMode: "nil", wantStatus: http.StatusInternalServerError, wantEvent: "ping", wantOutcome: "bus_unavailable"},
+		{name: "publish failed", eventHeader: "ping", body: pingBody, signature: "valid", busMode: "err", wantStatus: http.StatusInternalServerError, wantEvent: "ping", wantOutcome: "publish_failed"},
+		{name: "accepted", eventHeader: "ping", body: pingBody, signature: "valid", busMode: "ok", wantStatus: http.StatusOK, wantEvent: "ping", wantOutcome: "accepted"},
+		{name: "unhandled event buckets to unknown", eventHeader: "issues", body: pingBody, signature: "valid", busMode: "ok", wantStatus: http.StatusOK, wantEvent: "unknown", wantOutcome: "accepted"},
+	}
+
+	// Sequential on purpose: every arrival outcome shares the process-wide
+	// ingress counter, so exact +1 deltas need no concurrent arrivals.
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			var body io.Reader = strings.NewReader(tc.body)
+			if tc.errBody {
+				body = errReader{}
+			}
+			headers := map[string]string{}
+			if tc.eventHeader != "" {
+				headers["X-GitHub-Event"] = tc.eventHeader
+			}
+			switch tc.signature {
+			case "valid":
+				headers["X-Hub-Signature-256"] = signTestGitHubWebhook(testGitHubWebhookSecret, tc.body)
+			case "invalid":
+				headers["X-Hub-Signature-256"] = badSig
+			}
+			secret := testGitHubWebhookSecret
+			if tc.noSecret {
+				secret = ""
+			}
+			srv := NewRouterServer(fixedConfig(Config{GitHubWebhookSecret: secret}), nil)
+			switch tc.busMode {
+			case "ok":
+				srv.SetEventBus(&mockEventBus{})
+			case "err":
+				srv.SetEventBus(&mockEventBus{err: errors.New("simulated publish failure")})
+			}
+			counter := metrics.GitHubIngressTotal.WithLabelValues(tc.wantEvent, tc.wantOutcome)
+			before := testutil.ToFloat64(counter)
+			if rec := doHTTPRequest(srv.Routes(), http.MethodPost, "/api/webhooks/github", body, headers); rec.Code != tc.wantStatus {
+				t.Fatalf("status = %d, want %d", rec.Code, tc.wantStatus)
+			}
+			if got := testutil.ToFloat64(counter); got != before+1 {
+				t.Errorf("GitHubIngressTotal{%q %q} = %v, want %v", tc.wantEvent, tc.wantOutcome, got, before+1)
+			}
+		})
 	}
 }
