@@ -459,32 +459,46 @@ func TestHaroSchedule_FinalizeStep(t *testing.T) {
 	}
 }
 
-type fireTestCase struct {
+type fireSkipCase struct {
 	name           string
 	scheduleType   string
 	seedType       string
-	generation     int64
+	gen            int64
 	reqGen         int64
-	enabled        bool
+	disabled       bool
 	stale          bool
 	hasActiveHB    bool
 	skippedActive  bool
+	wantErr        bool
+	wantDispatched bool
+	wantCleared    bool
+	wantCode       int
+}
+
+type fireFailureCase struct {
+	name           string
+	scheduleType   string
+	seedType       string
 	nilDispatcher  bool
 	dispatchErr    error
 	wantErr        bool
 	wantDispatched bool
-	wantDeleted    bool
-	wantFenced     bool
 	wantCleared    bool
-	wantCode       int
-	wantRunStatus  string
 	wantRearmed    bool
-	superseded     bool
 }
 
-func verifyFireDispatches(t *testing.T, tc fireTestCase, disp dispatch.PromptDispatcher) {
+type fireSuccessCase struct {
+	name         string
+	scheduleType string
+	seedType     string
+	wantCleared  bool
+	wantDeleted  bool
+	superseded   bool
+}
+
+func verifyDispatches(t *testing.T, wantDispatched bool, disp dispatch.PromptDispatcher) {
 	t.Helper()
-	if tc.nilDispatcher || disp == nil {
+	if disp == nil {
 		return
 	}
 	fDisp, ok := disp.(*fakeDispatcher)
@@ -492,23 +506,20 @@ func verifyFireDispatches(t *testing.T, tc fireTestCase, disp dispatch.PromptDis
 		t.Fatal("expected *fakeDispatcher")
 	}
 	dispatchedCount := len(fDisp.dispatched) + len(fDisp.dispatchedRequests)
-	if tc.wantDispatched && dispatchedCount == 0 {
+	if wantDispatched && dispatchedCount == 0 {
 		t.Error("expected prompt dispatch, got none")
 	}
-	if !tc.wantDispatched && dispatchedCount > 0 {
+	if !wantDispatched && dispatchedCount > 0 {
 		t.Errorf("expected no prompt dispatch, got %d", dispatchedCount)
 	}
 }
 
-func buildFireDispatcher(tc fireTestCase, runAt *time.Time) dispatch.PromptDispatcher {
-	if tc.nilDispatcher {
-		return nil
-	}
+func buildSkipDispatcher(tc fireSkipCase) dispatch.PromptDispatcher {
 	hbStatus := model.StatusCompleted
 	if tc.skippedActive {
 		hbStatus = eriwire.StatusSkippedActive
 	}
-	fDisp := &fakeDispatcher{
+	return &fakeDispatcher{
 		response: dispatch.PromptDispatchResponse{
 			Status:    model.StatusCompleted,
 			ChannelID: "100000000000000001",
@@ -518,10 +529,41 @@ func buildFireDispatcher(tc fireTestCase, runAt *time.Time) dispatch.PromptDispa
 			Status:     hbStatus,
 			DispatchID: "disp-hb-1",
 		},
+	}
+}
+
+func buildFailureDispatcher(tc fireFailureCase) dispatch.PromptDispatcher {
+	if tc.nilDispatcher {
+		return nil
+	}
+	return &fakeDispatcher{
+		response: dispatch.PromptDispatchResponse{
+			Status:    model.StatusCompleted,
+			ChannelID: "100000000000000001",
+			MessageID: "msg-1",
+		},
+		dispatchResponse: eriwire.DispatchEnqueueResponse{
+			Status:     model.StatusCompleted,
+			DispatchID: "disp-hb-1",
+		},
 		dispatchErr: tc.dispatchErr,
 		err:         tc.dispatchErr,
 	}
-	if tc.name == "cron response with empty channel and message ID and zero dueAt" {
+}
+
+func buildSuccessDispatcher(name string, runAt *time.Time) dispatch.PromptDispatcher {
+	fDisp := &fakeDispatcher{
+		response: dispatch.PromptDispatchResponse{
+			Status:    model.StatusCompleted,
+			ChannelID: "100000000000000001",
+			MessageID: "msg-1",
+		},
+		dispatchResponse: eriwire.DispatchEnqueueResponse{
+			Status:     model.StatusCompleted,
+			DispatchID: "disp-hb-1",
+		},
+	}
+	if name == "cron response with empty channel and message ID and zero dueAt" {
 		fDisp.response.ChannelID = ""
 		fDisp.response.MessageID = ""
 		*runAt = time.Time{}
@@ -529,7 +571,113 @@ func buildFireDispatcher(tc fireTestCase, runAt *time.Time) dispatch.PromptDispa
 	return fDisp
 }
 
-func assertFireOutcome(ctx context.Context, t *testing.T, tc fireTestCase, err error, h *restatetest.ObjectHarness, db *sql.DB, scheduleID string, disp dispatch.PromptDispatcher) {
+func TestScheduleObject_Fire_Skips(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, 11, 22, 10, 0, 0, 0, time.UTC)
+
+	tests := []fireSkipCase{
+		{
+			name:         "generation mismatch is no-op",
+			scheduleType: model.ScheduleTypeCron,
+			seedType:     "cron",
+			gen:          2,
+			reqGen:       1,
+		},
+		{
+			name:         "schedule missing clears state and ends terminally with 404",
+			scheduleType: model.ScheduleTypeCron,
+			seedType:     "",
+			wantErr:      true,
+			wantCleared:  true,
+			wantCode:     http.StatusNotFound,
+		},
+		{
+			name:         "schedule disabled is fenced and ends terminally with 412",
+			scheduleType: model.ScheduleTypeCron,
+			seedType:     "cron",
+			disabled:     true,
+			wantErr:      true,
+			wantCode:     http.StatusPreconditionFailed,
+		},
+		{
+			name:         "stale cron schedule >24h records skipped_stale and advances without dispatching",
+			scheduleType: model.ScheduleTypeCron,
+			seedType:     "cron",
+			stale:        true,
+		},
+		{
+			name:         "stale heartbeat schedule >24h records skipped_stale and advances without dispatching",
+			scheduleType: model.ScheduleTypeHeartbeat,
+			seedType:     "heartbeat",
+			stale:        true,
+		},
+		{
+			name:         "stale oneshot schedule >24h records skipped_stale and deletes",
+			scheduleType: model.ScheduleTypeOneShot,
+			seedType:     "oneshot",
+			stale:        true,
+			wantCleared:  true,
+		},
+		{
+			name:         "heartbeat with active run records skipped_active and advances without dispatching",
+			scheduleType: model.ScheduleTypeHeartbeat,
+			seedType:     "heartbeat",
+			hasActiveHB:  true,
+		},
+		{
+			name:           "heartbeat dispatch returns skipped_active status",
+			scheduleType:   model.ScheduleTypeHeartbeat,
+			seedType:       "heartbeat",
+			skippedActive:  true,
+			wantDispatched: true,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			runFireSkipCase(t, tc, now)
+		})
+	}
+}
+
+func runFireSkipCase(t *testing.T, tc fireSkipCase, now time.Time) {
+	t.Helper()
+	db := openTickerTestDB(t)
+	ctx := context.Background()
+	scheduleID := "fire-skip-" + tc.name
+
+	runAt := now.Add(-time.Minute)
+	if tc.stale {
+		runAt = now.Add(-25 * time.Hour)
+	}
+
+	seedSchedule(ctx, t, db, tc.seedType, scheduleID, runAt, !tc.disabled, false, tc.hasActiveHB)
+
+	gen := tc.gen
+	if gen == 0 {
+		gen = 1
+	}
+	reqGen := tc.reqGen
+	if reqGen == 0 {
+		reqGen = 1
+	}
+
+	h := restatetest.NewObjectHarness(t, scheduleID, restatetest.WithInitialState("gen", gen))
+	disp := buildSkipDispatcher(tc)
+	s := NewHaroSchedule(db, disp)
+	s.nowFn = func() time.Time { return now }
+
+	_, err := s.Fire(h.ObjCtx, FireRequest{
+		Generation:   reqGen,
+		ScheduleType: tc.scheduleType,
+		DueAt:        runAt,
+	})
+
+	assertSkipOutcome(ctx, t, tc, err, h, db, scheduleID, disp, gen)
+}
+
+func assertSkipOutcome(ctx context.Context, t *testing.T, tc fireSkipCase, err error, h *restatetest.ObjectHarness, db *sql.DB, scheduleID string, disp dispatch.PromptDispatcher, gen int64) {
 	t.Helper()
 	if tc.wantErr && err == nil {
 		t.Fatal("expected error, got nil")
@@ -541,137 +689,30 @@ func assertFireOutcome(ctx context.Context, t *testing.T, tc fireTestCase, err e
 		t.Errorf("terminal code = %d, want %d (err %v)", got, tc.wantCode, err)
 	}
 
-	verifyFireDispatches(t, tc, disp)
+	verifyDispatches(t, tc.wantDispatched, disp)
 
-	if tc.wantRunStatus != "" {
-		run, runErr := store.GetScheduleRunByDispatchID(ctx, db, deterministicScheduleRunID(tc.scheduleType, scheduleID, time.Date(2026, 11, 22, 9, 59, 0, 0, time.UTC)))
-		if runErr != nil {
-			t.Fatalf("expected recorded run: %v", runErr)
-		}
-		if run.Status != tc.wantRunStatus {
-			t.Errorf("run status = %q, want %q", run.Status, tc.wantRunStatus)
-		}
-	}
-	if tc.wantRearmed && len(fireKeys(h.Client)) != 1 {
-		t.Errorf("expected next Fire to be armed, got %v", fireKeys(h.Client))
-	}
-
-	assertFireState(t, tc, h)
-
-	if tc.wantDeleted && tc.seedType == "oneshot" {
-		_, getErr := store.GetOneShotSchedule(ctx, db, scheduleID)
-		if getErr == nil {
-			t.Error("expected one-shot schedule to be deleted, still found")
-		}
-	}
-
-	if !tc.wantErr && tc.wantDispatched && (tc.scheduleType == model.ScheduleTypeCron || tc.scheduleType == model.ScheduleTypeHeartbeat) && len(fireKeys(h.Client)) == 0 {
-		t.Error("expected next Fire to be armed, got none")
-	}
-}
-
-// assertFireState checks whether Fire fenced the generation or cleared all state.
-func assertFireState(t *testing.T, tc fireTestCase, h *restatetest.ObjectHarness) {
-	t.Helper()
-	if tc.wantFenced {
-		h.Context.AssertCalled(t, "Set", "gen", tc.generation+1)
+	if tc.disabled {
+		h.Context.AssertCalled(t, "Set", "gen", gen+1)
 	}
 	if got := h.ClearedAll(); got != tc.wantCleared {
 		t.Errorf("state cleared = %v, want %v", got, tc.wantCleared)
 	}
+	if tc.scheduleType == model.ScheduleTypeOneShot && tc.stale {
+		if _, getErr := store.GetOneShotSchedule(ctx, db, scheduleID); getErr == nil {
+			t.Error("expected one-shot schedule to be deleted, still found")
+		}
+	}
 }
 
-func fireSkipAndErrorTestCases() []fireTestCase {
-	return []fireTestCase{
-		{
-			name:           "generation mismatch is no-op",
-			scheduleType:   model.ScheduleTypeCron,
-			seedType:       "cron",
-			generation:     2,
-			reqGen:         1,
-			enabled:        true,
-			wantDispatched: false,
-		},
-		{
-			name:         "schedule missing clears state and ends terminally with 404",
-			scheduleType: model.ScheduleTypeCron,
-			seedType:     "",
-			generation:   1,
-			reqGen:       1,
-			wantCleared:  true,
-			wantErr:      true,
-			wantCode:     http.StatusNotFound,
-		},
-		{
-			name:         "schedule disabled is fenced and ends terminally with 412",
-			scheduleType: model.ScheduleTypeCron,
-			seedType:     "cron",
-			generation:   1,
-			reqGen:       1,
-			enabled:      false,
-			wantFenced:   true,
-			wantErr:      true,
-			wantCode:     http.StatusPreconditionFailed,
-		},
-		{
-			name:           "stale cron schedule >24h records skipped_stale and advances without dispatching",
-			scheduleType:   model.ScheduleTypeCron,
-			seedType:       "cron",
-			generation:     1,
-			reqGen:         1,
-			enabled:        true,
-			stale:          true,
-			wantDispatched: false,
-		},
-		{
-			name:           "stale heartbeat schedule >24h records skipped_stale and advances without dispatching",
-			scheduleType:   model.ScheduleTypeHeartbeat,
-			seedType:       "heartbeat",
-			generation:     1,
-			reqGen:         1,
-			enabled:        true,
-			stale:          true,
-			wantDispatched: false,
-		},
-		{
-			name:           "stale oneshot schedule >24h records skipped_stale and deletes",
-			scheduleType:   model.ScheduleTypeOneShot,
-			seedType:       "oneshot",
-			generation:     1,
-			reqGen:         1,
-			enabled:        true,
-			stale:          true,
-			wantDispatched: false,
-			wantDeleted:    true,
-			wantCleared:    true,
-		},
-		{
-			name:           "heartbeat with active run records skipped_active and advances without dispatching",
-			scheduleType:   model.ScheduleTypeHeartbeat,
-			seedType:       "heartbeat",
-			generation:     1,
-			reqGen:         1,
-			enabled:        true,
-			hasActiveHB:    true,
-			wantDispatched: false,
-		},
-		{
-			name:           "heartbeat dispatch returns skipped_active status",
-			scheduleType:   model.ScheduleTypeHeartbeat,
-			seedType:       "heartbeat",
-			generation:     1,
-			reqGen:         1,
-			enabled:        true,
-			skippedActive:  true,
-			wantDispatched: true,
-		},
+func TestScheduleObject_Fire_Failures(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, 11, 22, 10, 0, 0, 0, time.UTC)
+
+	tests := []fireFailureCase{
 		{
 			name:          "cron with nil dispatcher returns error",
 			scheduleType:  model.ScheduleTypeCron,
 			seedType:      "cron",
-			generation:    1,
-			reqGen:        1,
-			enabled:       true,
 			nilDispatcher: true,
 			wantErr:       true,
 		},
@@ -679,9 +720,6 @@ func fireSkipAndErrorTestCases() []fireTestCase {
 			name:          "heartbeat with nil dispatcher returns error",
 			scheduleType:  model.ScheduleTypeHeartbeat,
 			seedType:      "heartbeat",
-			generation:    1,
-			reqGen:        1,
-			enabled:       true,
 			nilDispatcher: true,
 			wantErr:       true,
 		},
@@ -689,9 +727,6 @@ func fireSkipAndErrorTestCases() []fireTestCase {
 			name:           "dispatch error returns error to retry Step 2",
 			scheduleType:   model.ScheduleTypeCron,
 			seedType:       "cron",
-			generation:     1,
-			reqGen:         1,
-			enabled:        true,
 			dispatchErr:    errors.New("eri connection failed"),
 			wantErr:        true,
 			wantDispatched: true,
@@ -700,48 +735,22 @@ func fireSkipAndErrorTestCases() []fireTestCase {
 			name:           "heartbeat dispatch error returns error",
 			scheduleType:   model.ScheduleTypeHeartbeat,
 			seedType:       "heartbeat",
-			generation:     1,
-			reqGen:         1,
-			enabled:        true,
 			dispatchErr:    errors.New("heartbeat eri dispatch failed"),
 			wantErr:        true,
 			wantDispatched: true,
-		},
-	}
-}
-
-// firePermanentFailureTestCases cover superseded ticks and eri 4xx rejections, which
-// must neither retry nor strand the schedule.
-func firePermanentFailureTestCases() []fireTestCase {
-	return []fireTestCase{
-		{
-			name:         "fire for a superseded due tick is a no-op",
-			scheduleType: model.ScheduleTypeCron,
-			seedType:     "cron",
-			generation:   1,
-			reqGen:       1,
-			enabled:      true,
-			superseded:   true,
 		},
 		{
 			name:           "cron eri 4xx records a failed run and arms the next tick",
 			scheduleType:   model.ScheduleTypeCron,
 			seedType:       "cron",
-			generation:     1,
-			reqGen:         1,
-			enabled:        true,
 			dispatchErr:    restate.ToTerminalError(errors.New("restate prompt dispatch error (400): bad channel"), restate.WithErrorCode(http.StatusBadRequest)),
 			wantDispatched: true,
-			wantRunStatus:  model.StatusFailed,
 			wantRearmed:    true,
 		},
 		{
 			name:           "heartbeat eri 4xx records a failed run and arms the next tick",
 			scheduleType:   model.ScheduleTypeHeartbeat,
 			seedType:       "heartbeat",
-			generation:     1,
-			reqGen:         1,
-			enabled:        true,
 			dispatchErr:    restate.ToTerminalError(errors.New("restate dispatch error (404): unknown agent"), restate.WithErrorCode(http.StatusNotFound)),
 			wantDispatched: true,
 			wantRearmed:    true,
@@ -750,119 +759,186 @@ func firePermanentFailureTestCases() []fireTestCase {
 			name:           "one-shot eri 4xx records a failed run and deletes the schedule",
 			scheduleType:   model.ScheduleTypeOneShot,
 			seedType:       "oneshot",
-			generation:     1,
-			reqGen:         1,
-			enabled:        true,
 			dispatchErr:    restate.ToTerminalError(errors.New("restate prompt dispatch error (400): bad channel"), restate.WithErrorCode(http.StatusBadRequest)),
 			wantDispatched: true,
-			wantRunStatus:  model.StatusFailed,
-			wantDeleted:    true,
 			wantCleared:    true,
 		},
 	}
-}
 
-func fireSuccessTestCases() []fireTestCase {
-	return []fireTestCase{
-		{
-			name:           "cron response with empty channel and message ID and zero dueAt",
-			scheduleType:   model.ScheduleTypeCron,
-			seedType:       "cron",
-			generation:     1,
-			reqGen:         1,
-			enabled:        true,
-			wantDispatched: true,
-		},
-		{
-			name:           "cron with invalid cron expr in DB advances with 24h fallback",
-			scheduleType:   model.ScheduleTypeCron,
-			seedType:       "cron",
-			generation:     1,
-			reqGen:         1,
-			enabled:        true,
-			wantDispatched: true,
-		},
-		{
-			name:           "heartbeat with invalid cron expr in DB advances with 24h fallback",
-			scheduleType:   model.ScheduleTypeHeartbeat,
-			seedType:       "heartbeat",
-			generation:     1,
-			reqGen:         1,
-			enabled:        true,
-			wantDispatched: true,
-		},
-		{
-			name:           "one-shot schedule success deletes schedule and clears state",
-			scheduleType:   model.ScheduleTypeOneShot,
-			seedType:       "oneshot",
-			generation:     1,
-			reqGen:         1,
-			enabled:        true,
-			wantDispatched: true,
-			wantDeleted:    true,
-			wantCleared:    true,
-		},
-		{
-			name:           "cron schedule success advances next_run_at and arms next Fire",
-			scheduleType:   model.ScheduleTypeCron,
-			seedType:       "cron",
-			generation:     1,
-			reqGen:         1,
-			enabled:        true,
-			wantDispatched: true,
-		},
-		{
-			name:           "heartbeat schedule success advances next_run_at and arms next Fire",
-			scheduleType:   model.ScheduleTypeHeartbeat,
-			seedType:       "heartbeat",
-			generation:     1,
-			reqGen:         1,
-			enabled:        true,
-			wantDispatched: true,
-		},
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			runFireFailureCase(t, tc, now)
+		})
 	}
 }
 
-func fireTestCases() []fireTestCase {
-	cases := append(fireSkipAndErrorTestCases(), firePermanentFailureTestCases()...)
-	return append(cases, fireSuccessTestCases()...)
+func runFireFailureCase(t *testing.T, tc fireFailureCase, now time.Time) {
+	t.Helper()
+	db := openTickerTestDB(t)
+	ctx := context.Background()
+	scheduleID := "fire-fail-" + tc.name
+	runAt := now.Add(-time.Minute)
+
+	seedSchedule(ctx, t, db, tc.seedType, scheduleID, runAt, true, false, false)
+
+	h := restatetest.NewObjectHarness(t, scheduleID, restatetest.WithInitialState("gen", int64(1)))
+	disp := buildFailureDispatcher(tc)
+	s := NewHaroSchedule(db, disp)
+	s.nowFn = func() time.Time { return now }
+
+	_, err := s.Fire(h.ObjCtx, FireRequest{
+		Generation:   1,
+		ScheduleType: tc.scheduleType,
+		DueAt:        runAt,
+	})
+
+	assertFailureOutcome(ctx, t, tc, err, h, db, scheduleID, disp)
 }
 
-func TestHaroSchedule_Fire(t *testing.T) {
+func assertFailureOutcome(ctx context.Context, t *testing.T, tc fireFailureCase, err error, h *restatetest.ObjectHarness, db *sql.DB, scheduleID string, disp dispatch.PromptDispatcher) {
+	t.Helper()
+	if tc.wantErr && err == nil {
+		t.Fatal("expected error, got nil")
+	}
+	if !tc.wantErr && err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	verifyDispatches(t, tc.wantDispatched, disp)
+
+	if got := h.ClearedAll(); got != tc.wantCleared {
+		t.Errorf("state cleared = %v, want %v", got, tc.wantCleared)
+	}
+	if tc.wantRearmed && len(fireKeys(h.Client)) != 1 {
+		t.Errorf("expected next Fire to be armed, got %v", fireKeys(h.Client))
+	}
+
+	assertFailureTerminal(ctx, t, tc, db, scheduleID)
+}
+
+func assertFailureTerminal(ctx context.Context, t *testing.T, tc fireFailureCase, db *sql.DB, scheduleID string) {
+	t.Helper()
+	if tc.dispatchErr == nil || !restate.IsTerminalError(tc.dispatchErr) {
+		return
+	}
+	if tc.scheduleType == model.ScheduleTypeCron || tc.scheduleType == model.ScheduleTypeOneShot {
+		run, runErr := store.GetScheduleRunByDispatchID(ctx, db, deterministicScheduleRunID(tc.scheduleType, scheduleID, time.Date(2026, 11, 22, 9, 59, 0, 0, time.UTC)))
+		if runErr != nil {
+			t.Fatalf("expected recorded run: %v", runErr)
+		}
+		if run.Status != model.StatusFailed {
+			t.Errorf("run status = %q, want %q", run.Status, model.StatusFailed)
+		}
+	}
+	if tc.scheduleType == model.ScheduleTypeOneShot {
+		if _, getErr := store.GetOneShotSchedule(ctx, db, scheduleID); getErr == nil {
+			t.Error("expected one-shot schedule to be deleted, still found")
+		}
+	}
+}
+
+func TestScheduleObject_Fire_Success(t *testing.T) {
 	t.Parallel()
 	now := time.Date(2026, 11, 22, 10, 0, 0, 0, time.UTC)
 
-	for _, tc := range fireTestCases() {
+	tests := []fireSuccessCase{
+		{
+			name:         "cron response with empty channel and message ID and zero dueAt",
+			scheduleType: model.ScheduleTypeCron,
+		},
+		{
+			name:         "cron with invalid cron expr in DB advances with 24h fallback",
+			scheduleType: model.ScheduleTypeCron,
+		},
+		{
+			name:         "heartbeat with invalid cron expr in DB advances with 24h fallback",
+			scheduleType: model.ScheduleTypeHeartbeat,
+		},
+		{
+			name:         "one-shot schedule success deletes schedule and clears state",
+			scheduleType: model.ScheduleTypeOneShot,
+			wantCleared:  true,
+			wantDeleted:  true,
+		},
+		{
+			name:         "cron schedule success advances next_run_at and arms next Fire",
+			scheduleType: model.ScheduleTypeCron,
+		},
+		{
+			name:         "heartbeat schedule success advances next_run_at and arms next Fire",
+			scheduleType: model.ScheduleTypeHeartbeat,
+		},
+		{
+			name:         "fire for a superseded due tick is a no-op",
+			scheduleType: model.ScheduleTypeCron,
+			superseded:   true,
+		},
+	}
+
+	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			db := openTickerTestDB(t)
-			ctx := context.Background()
-			scheduleID := "fire-" + tc.name
-
-			runAt := now.Add(-time.Minute)
-			if tc.stale {
-				runAt = now.Add(-25 * time.Hour)
-			}
-
-			seedSchedule(ctx, t, db, tc.seedType, scheduleID, runAt, tc.enabled, strings.Contains(tc.name, "invalid cron expr"), tc.hasActiveHB)
-
-			h := restatetest.NewObjectHarness(t, scheduleID, restatetest.WithInitialState("gen", tc.generation))
-			if tc.superseded {
-				restate.Set(h.ObjCtx, "armed_due_at", runAt.Add(time.Hour).Format(time.RFC3339Nano))
-			}
-
-			disp := buildFireDispatcher(tc, &runAt)
-			s := NewHaroSchedule(db, disp)
-			s.nowFn = func() time.Time { return now }
-
-			_, err := s.Fire(h.ObjCtx, FireRequest{
-				Generation:   tc.reqGen,
-				ScheduleType: tc.scheduleType,
-				DueAt:        runAt,
-			})
-
-			assertFireOutcome(ctx, t, tc, err, h, db, scheduleID, disp)
+			runFireSuccessCase(t, tc, now)
 		})
+	}
+}
+
+func runFireSuccessCase(t *testing.T, tc fireSuccessCase, now time.Time) {
+	t.Helper()
+	db := openTickerTestDB(t)
+	ctx := context.Background()
+	scheduleID := "fire-success-" + tc.name
+
+	runAt := now.Add(-time.Minute)
+	seedType := tc.seedType
+	if seedType == "" {
+		seedType = tc.scheduleType
+		if seedType == model.ScheduleTypeOneShot {
+			seedType = "oneshot"
+		}
+	}
+	seedSchedule(ctx, t, db, seedType, scheduleID, runAt, true, strings.Contains(tc.name, "invalid cron expr"), false)
+
+	h := restatetest.NewObjectHarness(t, scheduleID, restatetest.WithInitialState("gen", int64(1)))
+	if tc.superseded {
+		restate.Set(h.ObjCtx, "armed_due_at", runAt.Add(time.Hour).Format(time.RFC3339Nano))
+	}
+
+	disp := buildSuccessDispatcher(tc.name, &runAt)
+	s := NewHaroSchedule(db, disp)
+	s.nowFn = func() time.Time { return now }
+
+	_, err := s.Fire(h.ObjCtx, FireRequest{
+		Generation:   1,
+		ScheduleType: tc.scheduleType,
+		DueAt:        runAt,
+	})
+	assertSuccessOutcome(ctx, t, tc, err, h, db, scheduleID, disp)
+}
+
+func assertSuccessOutcome(ctx context.Context, t *testing.T, tc fireSuccessCase, err error, h *restatetest.ObjectHarness, db *sql.DB, scheduleID string, disp dispatch.PromptDispatcher) {
+	t.Helper()
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	verifyDispatches(t, !tc.superseded, disp)
+
+	if got := h.ClearedAll(); got != tc.wantCleared {
+		t.Errorf("state cleared = %v, want %v", got, tc.wantCleared)
+	}
+
+	if tc.wantDeleted && tc.scheduleType == model.ScheduleTypeOneShot {
+		if _, getErr := store.GetOneShotSchedule(ctx, db, scheduleID); getErr == nil {
+			t.Error("expected one-shot schedule to be deleted, still found")
+		}
+	}
+
+	if !tc.superseded && (tc.scheduleType == model.ScheduleTypeCron || tc.scheduleType == model.ScheduleTypeHeartbeat) {
+		if len(fireKeys(h.Client)) == 0 {
+			t.Error("expected next Fire to be armed, got none")
+		}
 	}
 }
 

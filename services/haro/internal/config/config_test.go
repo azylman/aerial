@@ -152,14 +152,7 @@ func TestLoadConfig_URLResolution(t *testing.T) {
 	tests := []struct {
 		name             string
 		path             string
-		envEri           string
-		envVanadis       string
-		envRestate       string
-		envRestatePort   string
-		envRestateAdmin  string
-		envRestateAdv    string
-		envAgent         string
-		envDB            string
+		env              map[string]string
 		wantErr          bool
 		wantEriURL       string
 		wantVanadisURL   string
@@ -172,9 +165,7 @@ func TestLoadConfig_URLResolution(t *testing.T) {
 		{
 			name:             "env eri url takes precedence over yaml",
 			path:             pathWithBoth,
-			envEri:           "http://eri.aerial:9001/",
-			envVanadis:       "",
-			envDB:            "postgres://localhost/db",
+			env:              map[string]string{"ERI_URL": "http://eri.aerial:9001/"},
 			wantEriURL:       "http://eri.aerial:9001",
 			wantVanadisURL:   "http://yaml.vanadis:4025",
 			wantRestateURL:   "http://restate.aerial:8080",
@@ -186,9 +177,7 @@ func TestLoadConfig_URLResolution(t *testing.T) {
 		{
 			name:             "env vanadis url takes precedence over yaml",
 			path:             pathWithBoth,
-			envEri:           "",
-			envVanadis:       "http://env.vanadis:4025/",
-			envDB:            "postgres://localhost/db",
+			env:              map[string]string{"VANADIS_URL": "http://env.vanadis:4025/"},
 			wantEriURL:       "http://yaml.eri:8088",
 			wantVanadisURL:   "http://env.vanadis:4025",
 			wantRestateURL:   "http://restate.aerial:8080",
@@ -200,9 +189,6 @@ func TestLoadConfig_URLResolution(t *testing.T) {
 		{
 			name:             "yaml urls used when env empty",
 			path:             pathWithBoth,
-			envEri:           "",
-			envVanadis:       "",
-			envDB:            "postgres://localhost/db",
 			wantEriURL:       "http://yaml.eri:8088",
 			wantVanadisURL:   "http://yaml.vanadis:4025",
 			wantRestateURL:   "http://restate.aerial:8080",
@@ -214,9 +200,6 @@ func TestLoadConfig_URLResolution(t *testing.T) {
 		{
 			name:             "restate url and agent name loaded from yaml",
 			path:             pathWithRestate,
-			envEri:           "",
-			envVanadis:       "",
-			envDB:            "postgres://localhost/db",
 			wantEriURL:       "http://yaml.eri:8088",
 			wantVanadisURL:   "http://yaml.vanadis:4025",
 			wantRestateURL:   "http://yaml.restate:8080",
@@ -226,16 +209,15 @@ func TestLoadConfig_URLResolution(t *testing.T) {
 			wantAgentName:    "agent-alpha",
 		},
 		{
-			name:             "env restate url and agent name take precedence over yaml",
-			path:             pathWithRestate,
-			envEri:           "",
-			envVanadis:       "",
-			envRestate:       "http://env.restate:8080/",
-			envRestatePort:   "9099",
-			envRestateAdmin:  "http://admin.restate:9070/",
-			envRestateAdv:    "http://adv.restate:9080/",
-			envAgent:         "agent-beta",
-			envDB:            "postgres://localhost/db",
+			name: "env restate url and agent name take precedence over yaml",
+			path: pathWithRestate,
+			env: map[string]string{
+				"RESTATE_INGRESS_URL":   "http://env.restate:8080/",
+				"RESTATE_PORT":          "9099",
+				"RESTATE_ADMIN_URL":     "http://admin.restate:9070/",
+				"RESTATE_ADVERTISE_URL": "http://adv.restate:9080/",
+				"AGENT_NAME":            "agent-beta",
+			},
 			wantEriURL:       "http://yaml.eri:8088",
 			wantVanadisURL:   "http://yaml.vanadis:4025",
 			wantRestateURL:   "http://env.restate:8080",
@@ -245,33 +227,31 @@ func TestLoadConfig_URLResolution(t *testing.T) {
 			wantAgentName:    "agent-beta",
 		},
 		{
-			name:       "missing eri url returns error",
-			path:       pathWithoutEri,
-			envEri:     "",
-			envVanadis: "",
-			envDB:      "postgres://localhost/db",
-			wantErr:    true,
+			name:    "missing eri url returns error",
+			path:    pathWithoutEri,
+			wantErr: true,
 		},
 		{
-			name:       "missing vanadis url returns error",
-			path:       pathWithoutVanadis,
-			envEri:     "",
-			envVanadis: "",
-			envDB:      "postgres://localhost/db",
-			wantErr:    true,
+			name:    "missing vanadis url returns error",
+			path:    pathWithoutVanadis,
+			wantErr: true,
 		},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			t.Setenv("ERI_URL", tc.envEri)
-			t.Setenv("VANADIS_URL", tc.envVanadis)
-			t.Setenv("RESTATE_INGRESS_URL", tc.envRestate)
-			t.Setenv("RESTATE_PORT", tc.envRestatePort)
-			t.Setenv("RESTATE_ADMIN_URL", tc.envRestateAdmin)
-			t.Setenv("RESTATE_ADVERTISE_URL", tc.envRestateAdv)
-			t.Setenv("AGENT_NAME", tc.envAgent)
-			t.Setenv("DATABASE_URL", tc.envDB)
+			t.Setenv("ERI_URL", tc.env["ERI_URL"])
+			t.Setenv("VANADIS_URL", tc.env["VANADIS_URL"])
+			t.Setenv("RESTATE_INGRESS_URL", tc.env["RESTATE_INGRESS_URL"])
+			t.Setenv("RESTATE_PORT", tc.env["RESTATE_PORT"])
+			t.Setenv("RESTATE_ADMIN_URL", tc.env["RESTATE_ADMIN_URL"])
+			t.Setenv("RESTATE_ADVERTISE_URL", tc.env["RESTATE_ADVERTISE_URL"])
+			t.Setenv("AGENT_NAME", tc.env["AGENT_NAME"])
+			dbURL := "postgres://localhost/db"
+			if val, ok := tc.env["DATABASE_URL"]; ok {
+				dbURL = val
+			}
+			t.Setenv("DATABASE_URL", dbURL)
 			t.Setenv("POSTGRES_URL", "")
 			t.Setenv("POSTGRES_HOST", "")
 			t.Setenv("POSTGRES_PORT", "")
