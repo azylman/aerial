@@ -91,26 +91,34 @@ type itRow struct {
 	restart int
 }
 
-type itCase struct {
-	name     string
-	dispatch bool     // items are dispatches on itSessionKey, else messages on itThreadKey
-	seed     []string // rows inserted PENDING through the seed helper, then sent in one Append
-	enqueue  []string // items enqueued through Enqueue at the start
-	agent    []itAgent
-	preTurn  []string // scripted pre_turn answers: retry, allow (nil: no hook)
-	faults   []itFault
-	steps    []itStep
+type itThreadCase struct {
+	name            string
+	seed            []string
+	enqueue         []string
+	agent           []itAgent
+	preTurn         []string
+	faults          []itFault
+	steps           []itStep
+	wantRows        map[string]itRow
+	wantRequeued    map[string]int
+	wantDone        []TurnOutcome
+	wantDelivered   []string
+	wantAgentCalls  int
+	wantKilled      int
+	wantMinHookGap  time.Duration
+	wantNoFailWrite bool
+}
 
+type itDispatchCase struct {
+	name              string
+	enqueue           []string
+	agent             []itAgent
+	steps             []itStep
 	wantRows          map[string]itRow
-	wantRequeued      map[string]int // at the waiting point: row PENDING with this retry_count
-	wantDone          []TurnOutcome  // OnTurnDone outcomes in arrival order
-	wantDelivered     []string       // substrings of every Discord delivery, in order
-	wantPublished     []string       // dispatch outcome statuses, in order
+	wantDone          []TurnOutcome
+	wantPublished     []string
 	wantEnqueueStatus map[string]string
 	wantAgentCalls    int
-	wantKilled        int
-	wantMinHookGap    time.Duration
-	wantNoFailWrite   bool // no messages row was ever written FAILED (recorded by itFailedWritesSQL)
 }
 
 func TestCoordinatorRunnerIntegration(t *testing.T) {
@@ -124,10 +132,21 @@ func TestCoordinatorRunnerIntegration(t *testing.T) {
 	}
 }
 
-// turnQueueCases run on one coordinator deployment.
-func turnQueueCases() []itCase {
+func TestCoordinatorRunnerIntegration_Dispatches(t *testing.T) {
+	t.Parallel()
+	tests := turnQueueDispatchCases()
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			runDispatchIntegrationCase(t, tc)
+		})
+	}
+}
+
+// turnQueueCases run on one coordinator deployment for thread bursts.
+func turnQueueCases() []itThreadCase {
 	completed, failed := db.StatusCompleted, db.StatusFailed
-	return []itCase{
+	return []itThreadCase{
 		{
 			name: "BurstHappyPath", enqueue: []string{"a"}, agent: []itAgent{itReply("reply-a")},
 			wantRows:      map[string]itRow{"a": {status: completed, reply: "reply-a", retry: 1}},
@@ -205,16 +224,6 @@ func turnQueueCases() []itCase {
 			wantDelivered: []string{"execution timed out", "reply-b"}, wantAgentCalls: 2,
 		},
 		{
-			name: "DispatchAttemptTimeoutPublishesTimeout", dispatch: true, enqueue: []string{"d1"}, agent: []itAgent{itErr(itWatchdogErr), itReply("reply-d2")},
-			steps: []itStep{{at: "agent:1", do: "enqueue", ids: []string{"d2"}}},
-			wantRows: map[string]itRow{
-				"d1": {status: failed, errSub: attemptTimeoutReason, retry: 1},
-				"d2": {status: completed, retry: 1},
-			},
-			wantDone:      []TurnOutcome{OutcomeTimeout, OutcomeCompleted},
-			wantPublished: []string{"timeout", "completed"}, wantAgentCalls: 2,
-		},
-		{
 			name: "OutageLongerThanOldPolicyResumes", enqueue: []string{"a"}, agent: []itAgent{itBlock, itReply("reply-a")},
 			steps:         []itStep{{at: "agent:1", do: "outage"}},
 			wantRows:      map[string]itRow{"a": {status: completed, reply: "reply-a", retry: 1, restart: 1}},
@@ -253,14 +262,31 @@ func turnQueueCases() []itCase {
 			wantDone:      []TurnOutcome{OutcomeCompleted},
 			wantDelivered: []string{"reply-a"}, wantNoFailWrite: true, wantAgentCalls: 2, wantKilled: 1,
 		},
+	}
+}
+
+// turnQueueDispatchCases run on one coordinator deployment for dispatch sessions.
+func turnQueueDispatchCases() []itDispatchCase {
+	completed, failed := db.StatusCompleted, db.StatusFailed
+	return []itDispatchCase{
 		{
-			name: "DispatchHappyPath", dispatch: true, enqueue: []string{"d1"}, agent: []itAgent{itReply("reply-d1")},
+			name: "DispatchAttemptTimeoutPublishesTimeout", enqueue: []string{"d1"}, agent: []itAgent{itErr(itWatchdogErr), itReply("reply-d2")},
+			steps: []itStep{{at: "agent:1", do: "enqueue", ids: []string{"d2"}}},
+			wantRows: map[string]itRow{
+				"d1": {status: failed, errSub: attemptTimeoutReason, retry: 1},
+				"d2": {status: completed, retry: 1},
+			},
+			wantDone:      []TurnOutcome{OutcomeTimeout, OutcomeCompleted},
+			wantPublished: []string{"timeout", "completed"}, wantAgentCalls: 2,
+		},
+		{
+			name: "DispatchHappyPath", enqueue: []string{"d1"}, agent: []itAgent{itReply("reply-d1")},
 			wantRows:      map[string]itRow{"d1": {status: completed, retry: 1}},
 			wantDone:      []TurnOutcome{OutcomeCompleted},
 			wantPublished: []string{"completed"}, wantAgentCalls: 1,
 		},
 		{
-			name: "DispatchSkipIfActiveAnswersSkipped", dispatch: true, enqueue: []string{"d1"}, agent: []itAgent{itReply("reply-d1")},
+			name: "DispatchSkipIfActiveAnswersSkipped", enqueue: []string{"d1"}, agent: []itAgent{itReply("reply-d1")},
 			steps:             []itStep{{at: "agent:1", do: "enqueue", ids: []string{"d2"}, skip: true}},
 			wantRows:          map[string]itRow{"d1": {status: completed, retry: 1}, "d2": {}},
 			wantEnqueueStatus: map[string]string{"d2": eriwire.StatusSkippedActive},
@@ -270,9 +296,9 @@ func turnQueueCases() []itCase {
 	}
 }
 
-func runIntegrationCase(t *testing.T, tc itCase) {
+func runIntegrationCase(t *testing.T, tc itThreadCase) {
 	t.Helper()
-	env := newITEnv(t, tc)
+	env := newThreadITEnv(t, tc)
 	env.primary = env.definitions()
 	env.h = restatetest.StartWithOptions(t, restatetest.Options{Env: itServerEnv}, env.primary...)
 
@@ -288,11 +314,24 @@ func runIntegrationCase(t *testing.T, tc itCase) {
 	env.assertCase()
 }
 
+func runDispatchIntegrationCase(t *testing.T, tc itDispatchCase) {
+	t.Helper()
+	env := newDispatchITEnv(t, tc)
+	env.primary = env.definitions()
+	env.h = restatetest.StartWithOptions(t, restatetest.Options{Env: itServerEnv}, env.primary...)
+
+	for _, id := range tc.enqueue {
+		env.enqueue(id, false)
+	}
+	env.runSteps()
+	env.awaitIdle("the key to go idle with every row recorded", env.idle)
+	env.assertCase()
+}
+
 // itEnv is one case: the scripted boundaries every deployment's WorkerPool shares, and what the
 // test observed through them.
 type itEnv struct {
 	t     *testing.T
-	tc    itCase
 	h     *restatetest.Harness
 	store *itStore
 	sqlDB *sql.DB // the case's private Postgres database, for seeding and the FAILED-write audit
@@ -312,6 +351,21 @@ type itEnv struct {
 	doneByInv     map[string]TurnDoneRequest
 	doneOrder     []string
 	enqueueStatus map[string]string
+
+	dispatch          bool
+	agent             []itAgent
+	preTurn           []string
+	steps             []itStep
+	wantRows          map[string]itRow
+	wantRequeued      map[string]int
+	wantDone          []TurnOutcome
+	wantDelivered     []string
+	wantPublished     []string
+	wantEnqueueStatus map[string]string
+	wantAgentCalls    int
+	wantKilled        int
+	wantMinHookGap    time.Duration
+	wantNoFailWrite   bool
 }
 
 type itGate struct {
@@ -320,13 +374,25 @@ type itGate struct {
 	once    sync.Once
 }
 
-func newITEnv(t *testing.T, tc itCase) *itEnv {
+func newThreadITEnv(t *testing.T, tc itThreadCase) *itEnv {
 	t.Helper()
 	bus := pubsub.NewMemoryBus()
 	t.Cleanup(func() { _ = bus.Close() })
 	env := &itEnv{
-		t: t, tc: tc, bus: bus, outs: newOutcomeRecorder(t, bus),
+		t: t, bus: bus, outs: newOutcomeRecorder(t, bus),
 		gates: map[string]*itGate{}, doneByInv: map[string]TurnDoneRequest{}, enqueueStatus: map[string]string{},
+		dispatch:        false,
+		agent:           tc.agent,
+		preTurn:         tc.preTurn,
+		steps:           tc.steps,
+		wantRows:        tc.wantRows,
+		wantRequeued:    tc.wantRequeued,
+		wantDone:        tc.wantDone,
+		wantDelivered:   tc.wantDelivered,
+		wantAgentCalls:  tc.wantAgentCalls,
+		wantKilled:      tc.wantKilled,
+		wantMinHookGap:  tc.wantMinHookGap,
+		wantNoFailWrite: tc.wantNoFailWrite,
 	}
 	sqlStore, sqlDB := newTestStore(t)
 	execSQL(t, sqlDB, itFailedWritesSQL)
@@ -335,6 +401,34 @@ func newITEnv(t *testing.T, tc itCase) *itEnv {
 	for _, f := range tc.faults {
 		env.store.faults = append(env.store.faults, &itFaultState{itFault: f, armed: f.armOn == ""})
 	}
+	for _, st := range tc.steps {
+		if isGatePoint(st.at) && env.gates[st.at] == nil {
+			env.gates[st.at] = &itGate{reached: make(chan struct{}), release: make(chan struct{})}
+		}
+	}
+	return env
+}
+
+func newDispatchITEnv(t *testing.T, tc itDispatchCase) *itEnv {
+	t.Helper()
+	bus := pubsub.NewMemoryBus()
+	t.Cleanup(func() { _ = bus.Close() })
+	env := &itEnv{
+		t: t, bus: bus, outs: newOutcomeRecorder(t, bus),
+		gates: map[string]*itGate{}, doneByInv: map[string]TurnDoneRequest{}, enqueueStatus: map[string]string{},
+		dispatch:          true,
+		agent:             tc.agent,
+		steps:             tc.steps,
+		wantRows:          tc.wantRows,
+		wantDone:          tc.wantDone,
+		wantPublished:     tc.wantPublished,
+		wantEnqueueStatus: tc.wantEnqueueStatus,
+		wantAgentCalls:    tc.wantAgentCalls,
+	}
+	sqlStore, sqlDB := newTestStore(t)
+	execSQL(t, sqlDB, itFailedWritesSQL)
+	env.sqlDB = sqlDB
+	env.store = &itStore{Store: sqlStore, env: env, calls: map[string]int{}}
 	for _, st := range tc.steps {
 		if isGatePoint(st.at) && env.gates[st.at] == nil {
 			env.gates[st.at] = &itGate{reached: make(chan struct{}), release: make(chan struct{})}
@@ -361,14 +455,14 @@ func (e *itEnv) pass(point string) bool {
 }
 
 func (e *itEnv) service() string {
-	if e.tc.dispatch {
+	if e.dispatch {
 		return DispatchSessionServiceName("")
 	}
 	return ThreadSessionServiceName("")
 }
 
 func (e *itEnv) key() string {
-	if e.tc.dispatch {
+	if e.dispatch {
 		return itSessionKey
 	}
 	return itThreadKey
@@ -393,7 +487,7 @@ func (e *itEnv) newPool() *WorkerPool {
 		EventBus: e.bus,
 		ResolveChannelPolicy: func(string, string) config.ChannelPolicy {
 			p := config.ChannelPolicy{Mode: "thread"}
-			if len(e.tc.preTurn) > 0 {
+			if len(e.preTurn) > 0 {
 				p.Hooks.PreTurn = preTurn
 			}
 			return p
@@ -414,10 +508,10 @@ func (e *itEnv) runAgent(ctx context.Context, _, _, _, _, _ string, _ int) (stri
 	n := e.agentCalls
 	e.mu.Unlock()
 	e.pass("agent:" + strconv.Itoa(n))
-	if n > len(e.tc.agent) {
+	if n > len(e.agent) {
 		return "", "", 1, fmt.Errorf("unscripted agent run %d", n)
 	}
-	sc := e.tc.agent[n-1]
+	sc := e.agent[n-1]
 	if sc.block && ctx.Err() != nil {
 		// Already killed (stop-turn or a dropped stream) before it got to run.
 		e.mu.Lock()
@@ -460,7 +554,7 @@ func (e *itEnv) preTurnHook(context.Context, *config.WebhookEndpoint, *PreTurnRe
 	e.hookCalls = append(e.hookCalls, time.Now())
 	n := len(e.hookCalls)
 	e.mu.Unlock()
-	if n <= len(e.tc.preTurn) && e.tc.preTurn[n-1] == "retry" {
+	if n <= len(e.preTurn) && e.preTurn[n-1] == "retry" {
 		return &PreTurnResponse{Allow: false, Action: "retry"}, nil
 	}
 	return &PreTurnResponse{Allow: true}, nil
@@ -531,7 +625,7 @@ func (e *itEnv) failedWrites() []string {
 func (e *itEnv) enqueue(id string, skip bool) {
 	e.t.Helper()
 	var status string
-	if e.tc.dispatch {
+	if e.dispatch {
 		var resp eriwire.DispatchEnqueueResponse
 		req := eriwire.BrainDispatchRequest{ID: id, Source: "test", Prompt: "do " + id, SkipIfActive: skip}
 		if code := e.h.Call(e.service(), e.key(), HandlerEnqueue, req, &resp); code != 200 {
@@ -563,7 +657,7 @@ func (e *itEnv) status() CoordinatorStatus {
 // runSteps takes every step at its point; a gate is released once the consecutive steps at it ran.
 func (e *itEnv) runSteps() {
 	e.t.Helper()
-	steps := e.tc.steps
+	steps := e.steps
 	for i := 0; i < len(steps); {
 		at := steps[i].at
 		j := i
@@ -639,7 +733,7 @@ func (e *itEnv) cancel() {
 		prev = st.Active.TurnID
 	}
 	var code int
-	if e.tc.dispatch {
+	if e.dispatch {
 		code = e.h.Call(e.service(), e.key(), HandlerCancel, CancelDispatchRequest{}, nil)
 	} else {
 		code = e.h.Call(e.service(), e.key(), HandlerCancelTurn, CancelTurnRequest{}, nil)
@@ -665,7 +759,7 @@ func containsAll(have, want []string) bool {
 // rowStatus returns an item's status and row, "" when it has no row.
 func (e *itEnv) row(id string) (itRow, bool) {
 	ctx := context.Background()
-	if e.tc.dispatch {
+	if e.dispatch {
 		d, err := e.store.GetDispatch(ctx, id)
 		if err != nil || d == nil {
 			return itRow{}, false
@@ -683,7 +777,7 @@ func (e *itEnv) row(id string) (itRow, bool) {
 // key is quiescent. A runner completes a few ms before Restate creates the OnTurnDone it sent
 // (cross-partition send), so quiescence alone can pass in that window.
 func (e *itEnv) idle() bool {
-	for id, want := range e.tc.wantRows {
+	for id, want := range e.wantRows {
 		if got, ok := e.row(id); ok != (want.status != "") || got.status != want.status {
 			return false
 		}
@@ -691,7 +785,7 @@ func (e *itEnv) idle() bool {
 	e.mu.Lock()
 	done := len(e.doneOrder)
 	e.mu.Unlock()
-	if done < len(e.tc.wantDone) {
+	if done < len(e.wantDone) {
 		return false
 	}
 	return e.quiescent()
@@ -700,7 +794,7 @@ func (e *itEnv) idle() bool {
 // quiescent: no row of the case is still PENDING or PROCESSING, the key holds no Restate state
 // and no invocation of any service is in flight (so nothing is left to happen).
 func (e *itEnv) quiescent() bool {
-	for id := range e.tc.wantRows {
+	for id := range e.wantRows {
 		if got, ok := e.row(id); ok && isActiveStatus(got.status) {
 			return false
 		}
@@ -717,7 +811,7 @@ func (e *itEnv) awaitIdle(what string, cond func() bool) {
 	if restatetest.WaitFor(itWait, cond) {
 		return
 	}
-	for id := range e.tc.wantRows {
+	for id := range e.wantRows {
 		got, ok := e.row(id)
 		e.t.Logf("row %s (exists=%v): %+v", id, ok, got)
 	}
@@ -737,7 +831,7 @@ func (e *itEnv) stateKeys() []string {
 
 func (e *itEnv) assertRequeued() {
 	e.t.Helper()
-	for id, retry := range e.tc.wantRequeued {
+	for id, retry := range e.wantRequeued {
 		got, ok := e.row(id)
 		if !ok || got.status != db.StatusPending || got.retry != retry {
 			e.t.Errorf("row %s while waiting = {%s retry=%d}, want {PENDING retry=%d}", id, got.status, got.retry, retry)
@@ -756,23 +850,23 @@ func (e *itEnv) assertCase() {
 	e.assertDone()
 	e.assertDeliveries()
 	e.assertAgent()
-	for id, want := range e.tc.wantEnqueueStatus {
+	for id, want := range e.wantEnqueueStatus {
 		if got := e.enqueueStatus[id]; got != want {
 			e.t.Errorf("enqueue %s answered %q, want %q", id, got, want)
 		}
 	}
-	if published := e.publishedStatuses(); !slices.Equal(published, e.tc.wantPublished) {
-		e.t.Errorf("published dispatch outcomes = %v, want %v", published, e.tc.wantPublished)
+	if published := e.publishedStatuses(); !slices.Equal(published, e.wantPublished) {
+		e.t.Errorf("published dispatch outcomes = %v, want %v", published, e.wantPublished)
 	}
 	e.store.assertFaults(e.t)
-	if failed := e.failedWrites(); e.tc.wantNoFailWrite && len(failed) > 0 {
+	if failed := e.failedWrites(); e.wantNoFailWrite && len(failed) > 0 {
 		e.t.Errorf("rows %v were written FAILED, want no FAILED write", failed)
 	}
 }
 
 func (e *itEnv) assertRows() {
 	e.t.Helper()
-	for id, want := range e.tc.wantRows {
+	for id, want := range e.wantRows {
 		got, ok := e.row(id)
 		if want.status == "" {
 			if ok {
@@ -780,7 +874,7 @@ func (e *itEnv) assertRows() {
 			}
 			continue
 		}
-		if got.status != want.status || !strings.Contains(got.errSub, want.errSub) || (!e.tc.dispatch && got.reply != want.reply) || got.retry != want.retry || got.restart != want.restart {
+		if got.status != want.status || !strings.Contains(got.errSub, want.errSub) || (!e.dispatch && got.reply != want.reply) || got.retry != want.retry || got.restart != want.restart {
 			e.t.Errorf("row %s = %+v, want %+v", id, got, want)
 		}
 	}
@@ -796,8 +890,8 @@ func (e *itEnv) assertDone() {
 		outcomes = append(outcomes, req.Outcome)
 		perTurn[req.TurnID]++
 	}
-	if !slices.Equal(outcomes, e.tc.wantDone) {
-		e.t.Errorf("OnTurnDone outcomes = %v, want %v", outcomes, e.tc.wantDone)
+	if !slices.Equal(outcomes, e.wantDone) {
+		e.t.Errorf("OnTurnDone outcomes = %v, want %v", outcomes, e.wantDone)
 	}
 	for turn, n := range perTurn {
 		if n != 1 {
@@ -808,11 +902,11 @@ func (e *itEnv) assertDone() {
 
 func (e *itEnv) assertDeliveries() {
 	e.t.Helper()
-	if len(e.delivered) != len(e.tc.wantDelivered) {
-		e.t.Errorf("deliveries = %q, want %d matching %q", e.delivered, len(e.tc.wantDelivered), e.tc.wantDelivered)
+	if len(e.delivered) != len(e.wantDelivered) {
+		e.t.Errorf("deliveries = %q, want %d matching %q", e.delivered, len(e.wantDelivered), e.wantDelivered)
 		return
 	}
-	for i, sub := range e.tc.wantDelivered {
+	for i, sub := range e.wantDelivered {
 		if !strings.Contains(e.delivered[i], sub) {
 			e.t.Errorf("delivery %d = %q, want it to contain %q", i, e.delivered[i], sub)
 		}
@@ -821,13 +915,13 @@ func (e *itEnv) assertDeliveries() {
 
 func (e *itEnv) assertAgent() {
 	e.t.Helper()
-	if e.agentCalls != e.tc.wantAgentCalls || e.killed != e.tc.wantKilled {
-		e.t.Errorf("agent runs = %d (killed %d), want %d (killed %d)", e.agentCalls, e.killed, e.tc.wantAgentCalls, e.tc.wantKilled)
+	if e.agentCalls != e.wantAgentCalls || e.killed != e.wantKilled {
+		e.t.Errorf("agent runs = %d (killed %d), want %d (killed %d)", e.agentCalls, e.killed, e.wantAgentCalls, e.wantKilled)
 	}
 	if e.maxRunning > 1 {
 		e.t.Errorf("%d agent runs overlapped on one key, want at most 1", e.maxRunning)
 	}
-	if gap := e.tc.wantMinHookGap; gap > 0 && (len(e.hookCalls) < 2 || e.hookCalls[1].Sub(e.hookCalls[0]) < gap) {
+	if gap := e.wantMinHookGap; gap > 0 && (len(e.hookCalls) < 2 || e.hookCalls[1].Sub(e.hookCalls[0]) < gap) {
 		e.t.Errorf("pre_turn calls at %v, want the second at least %s after the first", e.hookCalls, gap)
 	}
 }
