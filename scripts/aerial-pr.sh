@@ -9,7 +9,7 @@ gh_call() { local h=(); [ -n "${GITHUB_PAT:-}" ] && h=(-H "Authorization: token 
 git_auth() { export GIT_TERMINAL_PROMPT=0 GIT_CONFIG_COUNT=2 GIT_CONFIG_KEY_0="http.extraHeader" GIT_CONFIG_VALUE_0="AUTHORIZATION: basic $(auth_hdr)" GIT_CONFIG_KEY_1="http.version" GIT_CONFIG_VALUE_1="HTTP/1.1"; }
 get_v() { if [ "$1" = "$2" ]; then [ $3 -ge 2 ] || { echo "ERROR: $1 requires value" >&2; exit 1; }; echo "$4"; else echo "${1#*=}"; fi; }
 is_ok() { [[ "${1:-}" =~ ^[0-9]+$ ]] && [ "$1" -ge 200 ] && [ "$1" -lt 300 ]; }
-[ "${1:-}" = "--source-only" ] || [ "${REPO_TEST_MODE:-0}" = "1" ] && return 0 2>/dev/null || true
+if [ "${1:-}" = "--source-only" ] || [ "${REPO_TEST_MODE:-0}" = "1" ]; then return 0 2>/dev/null || exit 0; fi
 CMD=""; BR=""; BODY=""; BFILE=""; RFILE=""; REB=""; CHUNK="${AERIAL_VANADIS_CHUNK_ID:-${VANADIS_CHUNK_ID:-}}"; ARGS=()
 [ "${AERIAL_NO_VANADIS_CHUNK:-0}" = "1" ] && CHUNK=""
 for a in "$@"; do case "$a" in init|submit|override-roborev|dispute-roborev) CMD="$a"; break;; esac; done
@@ -50,7 +50,7 @@ elif [ "$CMD" = "submit" ]; then
   for df in "$s_dir/PR_DESCRIPTION.md" "$s_dir/.pr_description.md"; do [ -s "$df" ] && s_desc="$df" && s_cont="$(cat "$df")" && break; done; [ -z "$BODY" ] && BODY="$s_cont"; rm -f "$s_dir/PR_DESCRIPTION.md" "$s_dir/.pr_description.md"
   trap 'rc=$?; if [ $rc -ne 0 ]; then [ -n "$s_desc" ] && printf "%s\n" "$s_cont" > "$s_desc"; else rm -rf "$s_dir"; fi' EXIT INT TERM
   cd "$s_dir"; git config user.name "Aerial"; git config user.email "aerial@noreply.github.com"; parse_remote; git_auth
-  cur_b=$(git rev-parse --abbrev-ref HEAD); ex_pr=""; [ -n "$cur_b" ] && [ "$cur_b" != "$DEFAULT_BRANCH" ] && ex_pr=$(gh_call -X GET "$GITHUB_API/repos/$REPO_OWNER/$REPO_NAME/pulls?state=open&head=$REPO_OWNER:$cur_b" | sed '$d' | jq -c '.[0] // empty' 2>/dev/null || true); [ -n "$ex_pr" ] && { [ -z "$BODY" ] && BODY=$(echo "$ex_pr" | jq -r '.body // .title // "Automated update"'); [ -z "$msg" ] && msg=$(echo "$ex_pr" | jq -r '.title // empty'); }
+  cur_b=$(git rev-parse --abbrev-ref HEAD); enc_b=$(jq -rn --arg b "$cur_b" '$b|@uri'); ex_pr=""; [ -n "$cur_b" ] && [ "$cur_b" != "$DEFAULT_BRANCH" ] && ex_pr=$(gh_call -X GET "$GITHUB_API/repos/$REPO_OWNER/$REPO_NAME/pulls?state=open&head=$REPO_OWNER:$enc_b" | sed '$d' | jq -c '.[0] // empty' 2>/dev/null || true); [ -n "$ex_pr" ] && { [ -z "$BODY" ] && BODY=$(echo "$ex_pr" | jq -r '.body // .title // "Automated update"'); [ -z "$msg" ] && msg=$(echo "$ex_pr" | jq -r '.title // empty'); }
   [ "${#BODY}" -gt 60000 ] && BODY="${BODY:0:60000}"$'\n\n> ⚠️ **[Aerial Notice]**: PR description was truncated because it exceeded 60,000 characters.'; [ -z "${BODY//[[:space:]]/}" ] && { echo "ERROR: PR description mandatory" >&2; exit 1; }
   for rf in GEMINI.md AGENTS.md; do [ -f "$rf" ] && [ $(wc -c < "$rf") -gt 23040 ] && { echo "ERROR: $rf exceeds 22.5 KB ceiling" >&2; exit 1; }; done
   git add -A && git rm --cached -f PR_DESCRIPTION.md .pr_description.md 2>/dev/null || true
@@ -70,7 +70,7 @@ elif [ "$CMD" = "submit" ]; then
   if [ -z "$ex_pr" ]; then
     raw=$(gh_call -X POST "$GITHUB_API/repos/$REPO_OWNER/$REPO_NAME/pulls" -d "$(jq -n --arg t "$title" --arg h "$cur_b" --arg b "$DEFAULT_BRANCH" --arg bd "$BODY" '{title:$t,head:$h,base:$b,body:$bd}')")
     p_code=$(echo "$raw" | tail -n1); p_resp=$(echo "$raw" | sed '$d')
-    if is_ok "$p_code"; then ex_pr="$p_resp"; elif [ "$p_code" = "422" ]; then raw_get=$(gh_call -X GET "$GITHUB_API/repos/$REPO_OWNER/$REPO_NAME/pulls?state=open&head=$REPO_OWNER:$cur_b"); is_ok "$(echo "$raw_get" | tail -n1)" && ex_pr=$(echo "$raw_get" | sed '$d' | jq -c '.[0] // empty' 2>/dev/null || true); fi; [ -z "$ex_pr" ] && { echo "ERROR: Failed to create Pull Request (HTTP $p_code): $p_resp" >&2; exit 1; }
+    if is_ok "$p_code"; then ex_pr="$p_resp"; elif [ "$p_code" = "422" ]; then raw_get=$(gh_call -X GET "$GITHUB_API/repos/$REPO_OWNER/$REPO_NAME/pulls?state=open&head=$REPO_OWNER:$enc_b"); is_ok "$(echo "$raw_get" | tail -n1)" && ex_pr=$(echo "$raw_get" | sed '$d' | jq -c '.[0] // empty' 2>/dev/null || true); fi; [ -z "$ex_pr" ] && { echo "ERROR: Failed to create Pull Request (HTTP $p_code): $p_resp" >&2; exit 1; }
   fi
   p_num=$(echo "$ex_pr" | jq -r '.number // empty'); p_url=$(echo "$ex_pr" | jq -r '.html_url // empty'); c_sha=$(git rev-parse HEAD); [ -z "$p_num" ] && { echo "ERROR: Failed PR: $ex_pr" >&2; exit 1; }
   jq -n --arg s "submitted" --arg u "$p_url" --argjson n "$p_num" --arg b "$cur_b" --arg c "$c_sha" --arg r "$REPO_NAME" --arg m "PR #$p_num submitted on $REPO_OWNER/$REPO_NAME. Continuous delivery automated via push events. End active turn now." '{status:$s,pr_url:$u,pr_number:$n,branch:$b,commit_sha:$c,async:true,repo:$r,turn_action:"end_turn",message:$m}'

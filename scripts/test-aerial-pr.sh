@@ -10,6 +10,7 @@ cat << 'CURL_EOF' > "$TMPD/bin/curl"
 #!/usr/bin/env bash
 url=""; for arg in "$@"; do [[ "$arg" =~ http ]] && url="$arg"; done; [[ "$url" =~ /healthz ]] && { printf "\n200"; exit 0; }
 if [[ "$url" =~ /pulls\?state=open ]]; then
+  [[ "$url" =~ test%2Bbranch ]] && touch "$TMPD/seen_encoded_branch"
   [[ "$url" =~ chunk-422 ]] && { [ -f "$TMPD/post_422_seen" ] && echo '[{"number":101,"html_url":"https://github.com/azylman/aerial/pull/101","title":"422 pr"}]' || echo '[]'; } || { [[ "$url" =~ chunk-test ]] && [ -f "$TMPD/has_existing_pr" ] && echo '[{"number":99,"html_url":"https://github.com/azylman/aerial/pull/99","title":"existing"}]' || echo '[]'; }
   printf "\n200"; exit 0
 fi
@@ -30,7 +31,7 @@ chmod +x "$TMPD/bin/curl"
 assert() { "$@" || { echo "ASSERT FAILED: $*" >&2; exit 1; }; }
 assert_fail() { ! "$@" 2>/dev/null || { echo "EXPECTED FAILURE: $*" >&2; exit 1; }; }
 
-assert "$SCRIPT" --source-only; assert_fail "$SCRIPT" init --sync; assert_fail "$SCRIPT" init --target; assert [ "$("$SCRIPT" init --repo=config | jq -r .repo)" = "aerial-config" ]
+assert "$SCRIPT" --source-only; assert env REPO_TEST_MODE=1 "$SCRIPT"; assert_fail "$SCRIPT" init --sync; assert_fail "$SCRIPT" init --target; assert [ "$("$SCRIPT" init --repo=config | jq -r .repo)" = "aerial-config" ]
 res_tid=$(AERIAL_TARGET_ID=123456789012345678 "$SCRIPT" init --repo aerial); assert echo "$res_tid" | jq -e '.branch | contains("-t123456789012345678-")'
 res1=$("$SCRIPT" init --repo aerial --vanadis-chunk chunk-test); s_dir=$(echo "$res1" | jq -r .scratch_dir); br=$(echo "$res1" | jq -r .branch); assert echo "$res1" | jq -e '.status == "initialized" and (.branch | contains("vanadis-chunk-test"))'
 mkdir -p "$s_dir/scripts" && printf '#!/bin/sh\nexit 1\n' > "$s_dir/scripts/verify.sh" && chmod +x "$s_dir/scripts/verify.sh"
@@ -38,6 +39,7 @@ echo "hello" > "$s_dir/hello.txt"; echo "Fix description" > "$s_dir/PR_DESCRIPTI
 assert_fail "$SCRIPT" submit "$s_dir" "feat: fail verify"; assert [ -f "$s_dir/PR_DESCRIPTION.md" ]; assert [ "$(cat "$s_dir/PR_DESCRIPTION.md")" = "Fix description" ]; rm -rf "$s_dir/scripts"
 res2=$("$SCRIPT" submit "$s_dir" "feat: add hello" -b "desc from b"); assert echo "$res2" | jq -e '.status == "submitted" and .pr_number == 99'; assert grep -q "desc from b" "$TMPD/last_post_body"
 s_nc=$("$SCRIPT" init --repo aerial | jq -r .scratch_dir); res_nc=$("$SCRIPT" submit "$s_nc" "feat: no modifications" -b "no change body"); assert echo "$res_nc" | jq -e '.status == "no_changes"'
+s_enc=$("$SCRIPT" init --repo aerial | jq -r .scratch_dir); git -C "$s_enc" checkout -b "feat/test+branch" -q; echo "enc" > "$s_enc/enc.txt"; res_enc=$("$SCRIPT" submit "$s_enc" "feat: encoded branch" -b "encoded body"); assert echo "$res_enc" | jq -e '.status == "submitted"'; assert [ -f "$TMPD/seen_encoded_branch" ]
 old_sha=$(git -C "$TMPD/origin.git" rev-parse "refs/heads/$br"); s_behind=$("$SCRIPT" init --repo aerial --branch "$br" | jq -r .scratch_dir)
 git -C "$TMPD/repo" fetch origin "$br" -q && git -C "$TMPD/repo" checkout "$br" -q && echo "remote advance" > "$TMPD/repo/adv.txt" && git -C "$TMPD/repo" add adv.txt && git -C "$TMPD/repo" commit -m "remote advance" -q && git -C "$TMPD/repo" push origin "$br" -q
 rem_sha=$(git -C "$TMPD/origin.git" rev-parse "refs/heads/$br"); echo "local work" > "$s_behind/local.txt"
