@@ -221,13 +221,25 @@ init_scratch() {
 SCRATCH_DIR_CLEANUP=""
 SAVED_PR_DESC_FILE=""
 SAVED_PR_DESC_CONTENT=""
+PUSH_UPDATED_EXISTING=0
+REBASE_INCORPORATED_REMOTE_SHA=""
 
 push_scratch_branch() {
     local branch="$1"
     PUSH_UPDATED_EXISTING=0
     git fetch origin "+refs/heads/${branch}:refs/remotes/origin/${branch}" >/dev/null 2>&1 && PUSH_UPDATED_EXISTING=1 || true
     git push -u origin "$branch" >/dev/null 2>&1 && return 0
-    git push --force-with-lease -u origin "$branch" >/dev/null 2>&1 && { PUSH_UPDATED_EXISTING=1; return 0; }
+    local remote_sha; remote_sha=$(git rev-parse --verify -q "refs/remotes/origin/${branch}" 2>/dev/null || echo "")
+    if [ -n "$remote_sha" ]; then
+        if ! git merge-base --is-ancestor "$remote_sha" HEAD 2>/dev/null && [ "$remote_sha" != "${REBASE_INCORPORATED_REMOTE_SHA:-}" ]; then
+            echo "ERROR: Remote branch ${branch} has newer commits that are not present in local HEAD. Re-run aerial-pr.sh submit or rebase onto the updated remote branch before pushing." >&2
+            return 1
+        fi
+        git push --force-with-lease="refs/heads/${branch}:${remote_sha}" -u origin "$branch" >/dev/null 2>&1 && { PUSH_UPDATED_EXISTING=1; return 0; }
+    elif git push --force-with-lease -u origin "$branch" >/dev/null 2>&1; then
+        PUSH_UPDATED_EXISTING=1
+        return 0
+    fi
     return 1
 }
 
@@ -241,12 +253,74 @@ lookup_existing_open_pr() {
 
 rebase_staged_changes() {
     local target_branch="${1:-$DEFAULT_BRANCH}" msg="${2:-chore: temporary rebase commit}"
+    REBASE_INCORPORATED_REMOTE_SHA=""
     if ! git fetch origin "+refs/heads/${target_branch}:refs/remotes/origin/${target_branch}" >/dev/null 2>&1; then
         echo "⚠️ [aerial-pr] Warning: Could not fetch origin/${target_branch}; proceeding with current base." >&2
         return 0
     fi
-    local upstream_sha; upstream_sha=$(git rev-parse --verify -q "refs/remotes/origin/${target_branch}" 2>/dev/null || echo "")
+    local head_sha upstream_sha current_branch remote_branch_sha=""
+    head_sha=$(git rev-parse --verify -q HEAD 2>/dev/null || echo "")
+    upstream_sha=$(git rev-parse --verify -q "refs/remotes/origin/${target_branch}" 2>/dev/null || echo "")
     [ -z "$upstream_sha" ] && return 0
+    current_branch=$(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo "")
+    if [ -n "$current_branch" ] && [ "$current_branch" != "$target_branch" ] && [ "$current_branch" != "HEAD" ]; then
+        git fetch origin "+refs/heads/${current_branch}:refs/remotes/origin/${current_branch}" >/dev/null 2>&1 || true
+        remote_branch_sha=$(git rev-parse --verify -q "refs/remotes/origin/${current_branch}" 2>/dev/null || echo "")
+    fi
+    if [ -n "$remote_branch_sha" ]; then
+        if [ "$head_sha" = "$remote_branch_sha" ] && git diff --cached --quiet; then
+            REBASE_INCORPORATED_REMOTE_SHA="$remote_branch_sha"
+            return 0
+        fi
+        if git merge-base --is-ancestor "$remote_branch_sha" "$head_sha" 2>/dev/null; then
+            [ "$head_sha" != "$remote_branch_sha" ] && git reset --soft "$remote_branch_sha" >/dev/null 2>&1
+            if git merge-base --is-ancestor "$upstream_sha" "$remote_branch_sha" 2>/dev/null; then
+                REBASE_INCORPORATED_REMOTE_SHA="$remote_branch_sha"
+                return 0
+            fi
+            local temp_sha=""
+            if ! git diff --cached --quiet; then
+                git commit -q -m "$msg" >/dev/null 2>&1 && temp_sha=$(git rev-parse HEAD 2>/dev/null || echo "")
+                git reset --hard "$remote_branch_sha" >/dev/null 2>&1
+            fi
+            if git merge --no-edit -q "origin/${target_branch}" >/dev/null 2>&1 && \
+               { [ -z "$temp_sha" ] || git cherry-pick -n "$temp_sha" >/dev/null 2>&1; }; then
+                REBASE_INCORPORATED_REMOTE_SHA="$remote_branch_sha"
+                echo "🔄 [aerial-pr] Merged latest origin/${target_branch} (${upstream_sha:0:7}) into ${current_branch}." >&2
+                return 0
+            fi
+            git cherry-pick --abort >/dev/null 2>&1 || true
+            git merge --abort >/dev/null 2>&1 || true
+            [ -n "$temp_sha" ] && git reset --hard "$temp_sha" >/dev/null 2>&1 && git reset --soft "$remote_branch_sha" >/dev/null 2>&1
+            echo "ERROR: Failed to merge origin/${target_branch} into ${current_branch} due to merge conflicts. Aborting submit." >&2
+            return 1
+        fi
+        local fork_point="" temp_sha=""
+        fork_point=$(git merge-base "$head_sha" "$remote_branch_sha" 2>/dev/null || echo "")
+        [ -n "$fork_point" ] && [ "$head_sha" != "$fork_point" ] && git reset --soft "$fork_point" >/dev/null 2>&1
+        if ! git diff --cached --quiet; then
+            git commit -q -m "$msg" >/dev/null 2>&1 && temp_sha=$(git rev-parse HEAD 2>/dev/null || echo "")
+        fi
+        git reset --hard "$remote_branch_sha" >/dev/null 2>&1
+        if ! git merge-base --is-ancestor "$upstream_sha" HEAD 2>/dev/null; then
+            if ! git merge --no-edit -q "origin/${target_branch}" >/dev/null 2>&1; then
+                git merge --abort >/dev/null 2>&1 || true
+                [ -n "$temp_sha" ] && git reset --hard "$temp_sha" >/dev/null 2>&1 && git reset --soft "$head_sha" >/dev/null 2>&1
+                echo "ERROR: Failed to merge origin/${target_branch} into ${current_branch} due to merge conflicts. Aborting submit." >&2
+                return 1
+            fi
+            echo "🔄 [aerial-pr] Merged latest origin/${target_branch} (${upstream_sha:0:7}) into ${current_branch}." >&2
+        fi
+        if [ -n "$temp_sha" ] && ! git cherry-pick -n "$temp_sha" >/dev/null 2>&1; then
+            git cherry-pick --abort >/dev/null 2>&1 || true
+            git reset --hard "$temp_sha" >/dev/null 2>&1 && git reset --soft "$head_sha" >/dev/null 2>&1
+            echo "ERROR: Failed to apply staged changes onto updated remote branch ${current_branch} due to merge conflicts. Aborting submit." >&2
+            return 1
+        fi
+        REBASE_INCORPORATED_REMOTE_SHA="$remote_branch_sha"
+        return 0
+    fi
+    [ "$head_sha" = "$upstream_sha" ] && return 0
     local had_staged=0
     if ! git diff --cached --quiet; then
         had_staged=1
@@ -320,11 +394,12 @@ submit_scratch() {
     [ -z "$pr_body" ] && [ -n "$saved_content" ] && pr_body="$saved_content"
     rm -f "${scratch_dir}/PR_DESCRIPTION.md" "${scratch_dir}/.pr_description.md"
 
-    local current_branch existing_pr=""
+    local current_branch existing_pr="" pr_body_from_existing=0
     current_branch=$(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo "")
     if [ -z "${pr_body//[[:space:]]/}" ] && { [ -n "${GITHUB_PAT:-}" ] || [ "${USE_LOOPBACK_GITHUB:-0}" -eq 1 ]; } && [ -n "$current_branch" ] && [ "$current_branch" != "$DEFAULT_BRANCH" ] && [ "$current_branch" != "HEAD" ]; then
         existing_pr=$(lookup_existing_open_pr "$current_branch")
         if [ -n "$existing_pr" ]; then
+            pr_body_from_existing=1
             pr_body=$(echo "$existing_pr" | jq -r '.body // empty'); [ -z "${pr_body//[[:space:]]/}" ] && pr_body=$(echo "$existing_pr" | jq -r '.title // "Automated update"')
             [ "$commit_msg_explicit" -eq 0 ] && local ex_title && ex_title=$(echo "$existing_pr" | jq -r '.title // empty') && [ -n "$ex_title" ] && commit_msg="$ex_title"
         fi
@@ -338,7 +413,11 @@ submit_scratch() {
     local has_committed=0
     if git rev-parse --verify "origin/${DEFAULT_BRANCH}" >/dev/null 2>&1 && [ "$(git rev-parse HEAD 2>/dev/null || echo "")" != "$(git rev-parse "origin/${DEFAULT_BRANCH}" 2>/dev/null || echo "")" ]; then
         has_committed=1
-        if [ "$commit_msg_explicit" -eq 0 ] && [ -z "$commit_msg" ]; then
+        local base_ref="origin/${DEFAULT_BRANCH}"
+        if [ -n "$current_branch" ] && git rev-parse --verify -q "refs/remotes/origin/${current_branch}" >/dev/null 2>&1; then
+            base_ref="refs/remotes/origin/${current_branch}"
+        fi
+        if [ "$commit_msg_explicit" -eq 0 ] && [ "$(git rev-parse HEAD 2>/dev/null || echo "")" != "$(git rev-parse "$base_ref" 2>/dev/null || echo "")" ]; then
             local prior_msg; prior_msg=$(git log -1 --format=%B HEAD 2>/dev/null || true)
             [ -n "${prior_msg//[[:space:]]/}" ] && commit_msg="$prior_msg"
         fi
@@ -361,7 +440,7 @@ submit_scratch() {
     run_preflight_verification "." || exit 1
 
     local full_commit_msg="$commit_msg"
-    [ -n "$pr_body" ] && [[ "$commit_msg" != *"$pr_body"* ]] && full_commit_msg="${clean_title}"$'\n\n'"${pr_body}"
+    [ "$pr_body_from_existing" -eq 0 ] && [ -n "$pr_body" ] && [[ "$commit_msg" != *"$pr_body"* ]] && full_commit_msg="${clean_title}"$'\n\n'"${pr_body}"
     git commit -m "$full_commit_msg" >/dev/null
 
     local branch commit_sha; branch=$(git rev-parse --abbrev-ref HEAD); commit_sha=$(git rev-parse HEAD)
