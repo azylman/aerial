@@ -58,7 +58,7 @@ func (b *recordingChunkBus) completedTargets() []string {
 // "deploying" of build b1: own-build completion or repair marking, the
 // same-build sweep of earlier merged chunks, and the cross-build sweep that
 // hands every other build to its own runner via a queued Reconcile.
-func TestCompletePRDeploymentMutation(t *testing.T) {
+func TestCompletePRDeploymentMutation_SameBuildSweep(t *testing.T) {
 	t.Parallel()
 	mergeBase := time.Date(2026, 5, 1, 12, 0, 0, 0, time.UTC)
 	dep := func(mode, status string, jobs ...string) model.VanadisChunk {
@@ -73,24 +73,19 @@ func TestCompletePRDeploymentMutation(t *testing.T) {
 	earlier := func(mode string) model.VanadisChunk {
 		return model.VanadisChunk{ID: "earlier", BuildID: "b1", Mode: mode, Repo: "aerial", Status: statusMerged, PRNumber: 9, CompletedAt: mergeBase}
 	}
-	f1 := []store.SweptChunk{{ChunkID: "f1", BuildID: "b2"}}
-	b2 := []store.SweptChunk{{ChunkID: "f1", BuildID: "b2"}}
-	eri := []string{"eri"}
 	tests := []struct {
-		name, buildStatus           string
-		own                         []model.VanadisChunk
-		mutationJobs                []string
-		sweepErr, sweepSkip         string
-		crossSwept                  []store.SweptChunk
-		crossErr                    bool
-		bus                         sweepEventBus
-		wantErr                     string
-		wantCrossCalled             bool
-		wantCompleted, wantRepaired []string
-		wantStatus                  string
-		wantDeployJobs              []string
-		wantReconciles              []store.SweptChunk
-		wantEvents                  []string
+		name            string
+		buildStatus     string
+		own             []model.VanadisChunk
+		sweepErr        string
+		sweepSkip       string
+		bus             sweepEventBus
+		wantErr         string
+		wantCrossCalled bool
+		wantCompleted   []string
+		wantRepaired    []string
+		wantStatus      string
+		wantEvents      []string
 	}{
 		// Same-build sweep of earlier merged chunks.
 		{name: "deploying and earlier merged chunk complete", buildStatus: statusRunning, own: cks(earlier("pr"), dep("pr", statusDeploying)), wantCrossCalled: true, wantCompleted: []string{"deploying", "earlier"}, wantStatus: statusCompleted},
@@ -107,28 +102,90 @@ func TestCompletePRDeploymentMutation(t *testing.T) {
 		{name: "swept action repair skip continues", buildStatus: statusRunning, own: cks(earlier("action"), dep("pr", statusDeploying)), sweepSkip: "earlier", wantCrossCalled: true, wantCompleted: []string{"deploying"}, wantStatus: statusCompleted},
 		{name: "swept action repair error aborts", buildStatus: statusRunning, own: cks(earlier("action"), dep("pr", statusDeploying)), sweepErr: "earlier", wantErr: "repair mark unavailable", wantCompleted: []string{"deploying"}, wantStatus: statusCompleted},
 		// Eligibility of failed deploying chunks.
-		{name: "failed pr chunk with pr number in running build completes", buildStatus: statusRunning, own: cks(dep("pr", statusFailed, "eri")), crossSwept: f1, bus: &recordingChunkBus{}, wantCrossCalled: true, wantCompleted: []string{"deploying"}, wantStatus: statusCompleted, wantDeployJobs: eri, wantReconciles: b2, wantEvents: []string{"deploying"}},
-		{name: "failed pr chunk with pr number in failed build completes", buildStatus: statusFailed, own: cks(dep("pr", statusFailed, "eri")), crossSwept: f1, bus: &recordingChunkBus{}, wantCrossCalled: true, wantCompleted: []string{"deploying"}, wantStatus: statusCompleted, wantDeployJobs: eri, wantReconciles: b2, wantEvents: []string{"deploying"}},
-		{name: "failed pr chunk without pr number returns early", buildStatus: statusRunning, own: cks(noPR), crossSwept: f1, wantStatus: statusFailed},
-		{name: "failed action chunk with pr returns early", buildStatus: statusRunning, own: cks(dep("action", statusFailed, "eri")), crossSwept: f1, wantStatus: statusFailed},
-		// Cross-build sweep: other builds are reconciled by their own runner, never here.
-		{name: "deployed action repair still sweeps other builds", buildStatus: statusRunning, own: cks(dep("action", statusDeploying, "eri")), crossSwept: f1, bus: &recordingChunkBus{}, wantCrossCalled: true, wantRepaired: []string{"deploying"}, wantStatus: statusRunning, wantDeployJobs: eri, wantReconciles: b2},
-		{name: "action repair cross sweep error aborts", buildStatus: statusRunning, own: cks(dep("action", statusDeploying, "eri")), crossErr: true, wantErr: "cross build sweep unavailable", wantCrossCalled: true, wantRepaired: []string{"deploying"}, wantStatus: statusRunning, wantDeployJobs: eri},
-		{name: "foreign swept chunk queues its build reconcile", buildStatus: statusRunning, own: cks(dep("pr", statusDeploying, "eri")), crossSwept: f1, wantCrossCalled: true, wantCompleted: []string{"deploying"}, wantStatus: statusCompleted, wantDeployJobs: eri, wantReconciles: b2},
-		{name: "two swept chunks of one build queue both chunk mutations", buildStatus: statusRunning, own: cks(dep("pr", statusDeploying, "eri")), crossSwept: []store.SweptChunk{{ChunkID: "f1", BuildID: "b2"}, {ChunkID: "f2", BuildID: "b2"}}, wantCrossCalled: true, wantCompleted: []string{"deploying"}, wantStatus: statusCompleted, wantDeployJobs: eri, wantReconciles: []store.SweptChunk{{ChunkID: "f1", BuildID: "b2"}, {ChunkID: "f2", BuildID: "b2"}}},
-		{name: "no foreign sweep queues nothing", buildStatus: statusRunning, own: cks(dep("pr", statusDeploying, "eri")), wantCrossCalled: true, wantCompleted: []string{"deploying"}, wantStatus: statusCompleted, wantDeployJobs: eri},
-		{name: "cross sweep error aborts", buildStatus: statusRunning, own: cks(dep("pr", statusDeploying, "eri")), crossErr: true, wantErr: "cross build sweep unavailable", wantCrossCalled: true, wantCompleted: []string{"deploying"}, wantStatus: statusCompleted, wantDeployJobs: eri},
-		{name: "cancelled own build skips cross sweep", buildStatus: statusCancelled, own: cks(dep("pr", statusDeploying, "eri")), crossSwept: f1, wantStatus: statusDeploying},
-		{name: "swept foreign chunks do not publish local completed events", buildStatus: statusRunning, own: cks(dep("pr", statusDeploying, "eri")), crossSwept: f1, bus: &recordingChunkBus{}, wantCrossCalled: true, wantCompleted: []string{"deploying"}, wantStatus: statusCompleted, wantDeployJobs: eri, wantReconciles: b2, wantEvents: []string{"deploying"}},
-		{name: "duplicate swept chunks are deduplicated", buildStatus: statusRunning, own: cks(dep("pr", statusDeploying, "eri")), crossSwept: []store.SweptChunk{{ChunkID: "f1", BuildID: "b2"}, {ChunkID: "f1", BuildID: "b2"}}, wantCrossCalled: true, wantCompleted: []string{"deploying"}, wantStatus: statusCompleted, wantDeployJobs: eri, wantReconciles: b2},
-		{name: "mutation rollout jobs overlay onto stale snapshot", buildStatus: statusRunning, own: cks(dep("pr", statusDeploying)), mutationJobs: eri, crossSwept: f1, bus: &recordingChunkBus{}, wantCrossCalled: true, wantCompleted: []string{"deploying"}, wantStatus: statusCompleted, wantDeployJobs: eri, wantReconciles: b2, wantEvents: []string{"deploying"}},
-		{name: "absent mutation jobs keep stored jobs", buildStatus: statusRunning, own: cks(dep("pr", statusDeploying, "worker")), crossSwept: f1, bus: &recordingChunkBus{}, wantCrossCalled: true, wantCompleted: []string{"deploying"}, wantStatus: statusCompleted, wantDeployJobs: []string{"worker"}, wantReconciles: b2, wantEvents: []string{"deploying"}},
-		{name: "store error after partial sweep still processes swept chunks", buildStatus: statusRunning, own: cks(dep("pr", statusDeploying, "eri")), crossSwept: f1, crossErr: true, bus: &recordingChunkBus{}, wantErr: "cross build sweep unavailable", wantCrossCalled: true, wantCompleted: []string{"deploying"}, wantStatus: statusCompleted, wantDeployJobs: eri, wantReconciles: b2, wantEvents: []string{"deploying"}},
+		{name: "failed pr chunk with pr number in running build completes", buildStatus: statusRunning, own: cks(dep("pr", statusFailed, "eri")), bus: &recordingChunkBus{}, wantCrossCalled: true, wantCompleted: []string{"deploying"}, wantStatus: statusCompleted, wantEvents: []string{"deploying"}},
+		{name: "failed pr chunk with pr number in failed build completes", buildStatus: statusFailed, own: cks(dep("pr", statusFailed, "eri")), bus: &recordingChunkBus{}, wantCrossCalled: true, wantCompleted: []string{"deploying"}, wantStatus: statusCompleted, wantEvents: []string{"deploying"}},
+		{name: "failed pr chunk without pr number returns early", buildStatus: statusRunning, own: cks(noPR), wantStatus: statusFailed},
+		{name: "failed action chunk with pr returns early", buildStatus: statusRunning, own: cks(dep("action", statusFailed, "eri")), wantStatus: statusFailed},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			spy := &fakeStore{builds: []model.VanadisBuild{{ID: "b1", Status: tc.buildStatus}}, chunks: tc.own, swept: tc.crossSwept, errs: sweepFaults(tc.sweepErr, tc.sweepSkip, tc.crossErr)}
+			spy := &fakeStore{builds: []model.VanadisBuild{{ID: "b1", Status: tc.buildStatus}}, chunks: tc.own, errs: sweepFaults(tc.sweepErr, tc.sweepSkip, false)}
+			var exec *executor.Executor
+			if tc.bus != nil {
+				exec = executor.NewExecutor("", &mockEriClient{}, tc.bus, "token", "example-owner", nil)
+			}
+			mutation := &BuildMutationRequest{Action: mutationChunkDeploySuccess, ChunkID: "deploying"}
+			ctx, crossBuild := withCrossBuildReconciles(context.Background())
+			err := NewBuildObject("", nil).WithAuthority(spy, exec).completePRDeploymentMutation(ctx, "b1", mutation)
+			if tc.wantErr != "" {
+				assert.ErrorContains(t, err, tc.wantErr)
+			} else {
+				assert.NoError(t, err)
+			}
+			calls := spy.snapshotCalls()
+			sweeps := callArgs(spy.attemptedCalls(), "SweepEarlierDeploymentsAcrossBuilds")
+			assert.Equal(t, tc.wantCrossCalled, len(sweeps) > 0)
+			assert.Equal(t, tc.wantCompleted, pickCalls(calls, "CompletePRDeployment", "", 0))
+			assert.Equal(t, tc.wantRepaired, pickCalls(calls, "MarkActionRepairDeployed", "", 0))
+			assert.Equal(t, tc.wantStatus, spy.chunkSnapshot("deploying").Status)
+			assert.Empty(t, crossBuild.list())
+			assert.Empty(t, pickCalls(calls, "UpdateBuildStatus", "=", 0, 1), "other builds must never be evaluated by this runner")
+			assert.Empty(t, spy.foreignReads("b1"), "other builds must never be read for local evaluation")
+			if tc.bus != nil {
+				assert.Equal(t, tc.wantEvents, tc.bus.completedTargets())
+			}
+		})
+	}
+}
+
+func TestCompletePRDeploymentMutation_CrossBuildSweep(t *testing.T) {
+	t.Parallel()
+	mergeBase := time.Date(2026, 5, 1, 12, 0, 0, 0, time.UTC)
+	dep := func(mode, status string, jobs ...string) model.VanadisChunk {
+		c := model.VanadisChunk{ID: "deploying", BuildID: "b1", ChunkIndex: 1, Mode: mode, Repo: "aerial", Status: status, PRNumber: 7, CompletedAt: mergeBase.Add(2 * time.Hour)}
+		if len(jobs) > 0 {
+			c.RolloutState = &pubsub.PRRolloutState{ExpectedJobs: jobs}
+		}
+		return c
+	}
+	f1 := []store.SweptChunk{{ChunkID: "f1", BuildID: "b2"}}
+	b2 := []store.SweptChunk{{ChunkID: "f1", BuildID: "b2"}}
+	eri := []string{"eri"}
+	tests := []struct {
+		name           string
+		buildStatus    string
+		own            []model.VanadisChunk
+		mutationJobs   []string
+		crossSwept     []store.SweptChunk
+		crossErr       bool
+		bus            sweepEventBus
+		wantErr        string
+		wantCompleted  []string
+		wantRepaired   []string
+		wantStatus     string
+		wantDeployJobs []string
+		wantReconciles []store.SweptChunk
+		wantEvents     []string
+	}{
+		// Cross-build sweep: other builds are reconciled by their own runner, never here.
+		{name: "deployed action repair still sweeps other builds", buildStatus: statusRunning, own: cks(dep("action", statusDeploying, "eri")), crossSwept: f1, bus: &recordingChunkBus{}, wantRepaired: []string{"deploying"}, wantStatus: statusRunning, wantDeployJobs: eri, wantReconciles: b2},
+		{name: "action repair cross sweep error aborts", buildStatus: statusRunning, own: cks(dep("action", statusDeploying, "eri")), crossErr: true, wantErr: "cross build sweep unavailable", wantRepaired: []string{"deploying"}, wantStatus: statusRunning, wantDeployJobs: eri},
+		{name: "foreign swept chunk queues its build reconcile", buildStatus: statusRunning, own: cks(dep("pr", statusDeploying, "eri")), crossSwept: f1, wantCompleted: []string{"deploying"}, wantStatus: statusCompleted, wantDeployJobs: eri, wantReconciles: b2},
+		{name: "two swept chunks of one build queue both chunk mutations", buildStatus: statusRunning, own: cks(dep("pr", statusDeploying, "eri")), crossSwept: []store.SweptChunk{{ChunkID: "f1", BuildID: "b2"}, {ChunkID: "f2", BuildID: "b2"}}, wantCompleted: []string{"deploying"}, wantStatus: statusCompleted, wantDeployJobs: eri, wantReconciles: []store.SweptChunk{{ChunkID: "f1", BuildID: "b2"}, {ChunkID: "f2", BuildID: "b2"}}},
+		{name: "no foreign sweep queues nothing", buildStatus: statusRunning, own: cks(dep("pr", statusDeploying, "eri")), wantCompleted: []string{"deploying"}, wantStatus: statusCompleted, wantDeployJobs: eri},
+		{name: "cross sweep error aborts", buildStatus: statusRunning, own: cks(dep("pr", statusDeploying, "eri")), crossErr: true, wantErr: "cross build sweep unavailable", wantCompleted: []string{"deploying"}, wantStatus: statusCompleted, wantDeployJobs: eri},
+		{name: "cancelled own build skips cross sweep", buildStatus: statusCancelled, own: cks(dep("pr", statusDeploying, "eri")), crossSwept: f1, wantStatus: statusDeploying},
+		{name: "swept foreign chunks do not publish local completed events", buildStatus: statusRunning, own: cks(dep("pr", statusDeploying, "eri")), crossSwept: f1, bus: &recordingChunkBus{}, wantCompleted: []string{"deploying"}, wantStatus: statusCompleted, wantDeployJobs: eri, wantReconciles: b2, wantEvents: []string{"deploying"}},
+		{name: "duplicate swept chunks are deduplicated", buildStatus: statusRunning, own: cks(dep("pr", statusDeploying, "eri")), crossSwept: []store.SweptChunk{{ChunkID: "f1", BuildID: "b2"}, {ChunkID: "f1", BuildID: "b2"}}, wantCompleted: []string{"deploying"}, wantStatus: statusCompleted, wantDeployJobs: eri, wantReconciles: b2},
+		{name: "mutation rollout jobs overlay onto stale snapshot", buildStatus: statusRunning, own: cks(dep("pr", statusDeploying)), mutationJobs: eri, crossSwept: f1, bus: &recordingChunkBus{}, wantCompleted: []string{"deploying"}, wantStatus: statusCompleted, wantDeployJobs: eri, wantReconciles: b2, wantEvents: []string{"deploying"}},
+		{name: "absent mutation jobs keep stored jobs", buildStatus: statusRunning, own: cks(dep("pr", statusDeploying, "worker")), crossSwept: f1, bus: &recordingChunkBus{}, wantCompleted: []string{"deploying"}, wantStatus: statusCompleted, wantDeployJobs: []string{"worker"}, wantReconciles: b2, wantEvents: []string{"deploying"}},
+		{name: "store error after partial sweep still processes swept chunks", buildStatus: statusRunning, own: cks(dep("pr", statusDeploying, "eri")), crossSwept: f1, crossErr: true, bus: &recordingChunkBus{}, wantErr: "cross build sweep unavailable", wantCompleted: []string{"deploying"}, wantStatus: statusCompleted, wantDeployJobs: eri, wantReconciles: b2, wantEvents: []string{"deploying"}},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			spy := &fakeStore{builds: []model.VanadisBuild{{ID: "b1", Status: tc.buildStatus}}, chunks: tc.own, swept: tc.crossSwept, errs: sweepFaults("", "", tc.crossErr)}
 			var exec *executor.Executor
 			if tc.bus != nil {
 				exec = executor.NewExecutor("", &mockEriClient{}, tc.bus, "token", "example-owner", nil)
@@ -150,7 +207,7 @@ func TestCompletePRDeploymentMutation(t *testing.T) {
 			if len(sweeps) > 0 && len(sweeps[0]) > 1 {
 				deployJobs = sweeps[0][1:]
 			}
-			assert.Equal(t, tc.wantCrossCalled, len(sweeps) > 0)
+			assert.Equal(t, tc.buildStatus != statusCancelled, len(sweeps) > 0)
 			assert.Equal(t, tc.wantCompleted, pickCalls(calls, "CompletePRDeployment", "", 0))
 			assert.Equal(t, tc.wantRepaired, pickCalls(calls, "MarkActionRepairDeployed", "", 0))
 			assert.Equal(t, tc.wantStatus, spy.chunkSnapshot("deploying").Status)

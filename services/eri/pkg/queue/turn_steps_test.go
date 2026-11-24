@@ -297,13 +297,93 @@ func assertPrep(t *testing.T, got TurnPrep, want prepWant) {
 	}
 }
 
+func TestPrepareBurstTurn_GuardsAndFaults(t *testing.T) {
+	t.Parallel()
+	preTurn := &config.WebhookEndpoint{URL: "http://sidecar.local/pre", TimeoutMs: 1000}
+	requeueResp := &PreTurnResponse{Allow: false, Action: "retry"}
+	tests := []struct {
+		name          string
+		rows          []db.Message
+		mode          string
+		failLease     bool
+		sabotageSQL   string
+		closeDB       bool
+		wantDecision  string
+		wantPromptSub string
+		wantRows      map[string]rowWant
+		wantErr       bool
+	}{
+		{
+			name: "ReadErrorRetryable", mode: "thread", closeDB: true, wantErr: true,
+			rows: []db.Message{stepMsg("a", db.StatusProcessing, 0, 0)},
+		},
+		{
+			name: "RequeueErrorRetryable", mode: "thread", sabotageSQL: failTriggerSQL("messages", "UPDATE", "40001"), wantErr: true,
+			rows:     []db.Message{stepMsg("a", db.StatusProcessing, 0, 0)},
+			wantRows: map[string]rowWant{"a": {status: db.StatusProcessing}},
+		},
+		{
+			name: "IgnoredChannelFinished", mode: "ignore",
+			rows:         []db.Message{stepMsg("a", db.StatusProcessing, 0, 0)},
+			wantDecision: TurnDecisionFinished,
+			wantRows:     map[string]rowWant{"a": {status: db.StatusCompleted, errText: "[IGNORE]"}},
+		},
+		{
+			name: "LeaseErrorDeferredToAttemptRunner", mode: "thread", failLease: true,
+			rows:          []db.Message{stepMsg("a", db.StatusProcessing, 0, 0)},
+			wantDecision:  TurnDecisionRun,
+			wantPromptSub: "hello a",
+			wantRows:      map[string]rowWant{"a": {status: db.StatusProcessing}},
+		},
+		{
+			name: "TerminalRowsFinishedWithoutWrites", mode: "thread",
+			rows:         []db.Message{doneMsg("a", db.StatusCompleted, "", "done")},
+			wantDecision: TurnDecisionFinished,
+			wantRows:     map[string]rowWant{"a": {status: db.StatusCompleted}},
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			store := openStepDB(t, stepFixture{msgs: tc.rows, sabotageSQL: tc.sabotageSQL, closeDB: tc.closeDB}).store
+			policy := config.ChannelPolicy{Mode: tc.mode}
+			if tc.sabotageSQL != "" {
+				policy.Hooks.PreTurn = preTurn
+			}
+			cfg := WorkerPoolConfig{
+				Store: store, MaxAttempts: 3,
+				ResolveChannelPolicy: func(string, string) config.ChannelPolicy { return policy },
+				WebhookDispatcher: &mockWebhookDispatcher{callPreTurnHookFunc: func(context.Context, *config.WebhookEndpoint, *PreTurnRequest) (*PreTurnResponse, error) {
+					return requeueResp, nil
+				}},
+				RunnerFunc: func(context.Context, string, string, string, string, string, int) (string, string, int, error) {
+					return "", "", 0, errors.New("prep must not run the agent")
+				},
+			}
+			if tc.failLease {
+				cfg.ProcessPool = &mockAcquireLeaseFailPool{}
+			}
+			pool := New(nil, cfg)
+			pool.Start()
+			defer pool.Stop()
+			ids := make([]string, len(tc.rows))
+			for i, m := range tc.rows {
+				ids[i] = m.ID
+			}
+			got, err := pool.PrepareBurstTurn(context.Background(), "thread-steps", "turn-1", ids)
+			assertStepErr(t, err, tc.wantErr, false)
+			assertPrep(t, got, prepWant{decision: tc.wantDecision, promptSub: tc.wantPromptSub})
+			assertRows(t, store, tc.wantRows)
+		})
+	}
+}
+
 func TestPrepareBurstTurn(t *testing.T) {
 	t.Parallel()
 	preTurn := &config.WebhookEndpoint{URL: "http://sidecar.local/pre", TimeoutMs: 1000}
 	tests := []struct {
 		name          string
 		rows          []db.Message
-		mode          string
 		hooked        bool
 		preResp       *PreTurnResponse
 		preErr        error
@@ -314,64 +394,45 @@ func TestPrepareBurstTurn(t *testing.T) {
 		wantInjected  string
 		wantMetadata  map[string]string
 		wantRows      map[string]rowWant
-		sabotageSQL   string
-		closeDB       bool
-		failLease     bool
 		wantErr       bool
 	}{
 		{
-			name: "ReadErrorRetryable", mode: "thread", runs: 1, closeDB: true, wantErr: true,
-			rows: []db.Message{stepMsg("a", db.StatusProcessing, 0, 0)},
-		},
-		{
-			name: "RequeueErrorRetryable", mode: "thread", hooked: true, runs: 1, sabotageSQL: failTriggerSQL("messages", "UPDATE", "40001"), wantErr: true,
-			rows:     []db.Message{stepMsg("a", db.StatusProcessing, 0, 0)},
-			preResp:  &PreTurnResponse{Allow: false, Action: "retry"},
-			wantRows: map[string]rowWant{"a": {status: db.StatusProcessing}},
-		},
-		{
-			name: "IgnoredChannelFinished", mode: "ignore", runs: 1,
-			rows:         []db.Message{stepMsg("a", db.StatusProcessing, 0, 0)},
-			wantDecision: TurnDecisionFinished,
-			wantRows:     map[string]rowWant{"a": {status: db.StatusCompleted, errText: "[IGNORE]"}},
-		},
-		{
-			name: "PreTurnRejectedFinished", mode: "thread", hooked: true, runs: 1,
+			name: "PreTurnRejectedFinished", hooked: true, runs: 1,
 			rows:         []db.Message{stepMsg("a", db.StatusProcessing, 0, 0)},
 			preResp:      &PreTurnResponse{Allow: false, Reason: "busy"},
 			wantDecision: TurnDecisionFinished,
 			wantRows:     map[string]rowWant{"a": {status: db.StatusCompleted, errText: "[SKIPPED pre_turn_rejected: busy]"}},
 		},
 		{
-			name: "PreTurnTimeoutDrop", mode: "thread", hooked: true, runs: 1,
+			name: "PreTurnTimeoutDrop", hooked: true, runs: 1,
 			rows:         []db.Message{stepMsg("a", db.StatusProcessing, 0, 0)},
 			preErr:       errors.New("deadline"),
 			wantDecision: TurnDecisionFinished,
 			wantRows:     map[string]rowWant{"a": {status: db.StatusCompleted, errText: "[SKIPPED pre_turn_timeout_drop]"}},
 		},
 		{
-			name: "RetryLaterTwiceBumpsOnce", mode: "thread", hooked: true, runs: 2,
+			name: "RetryLaterTwiceBumpsOnce", hooked: true, runs: 2,
 			rows:         []db.Message{stepMsg("a", db.StatusProcessing, 0, 0), stepMsg("b", db.StatusProcessing, 1, 0)},
 			preResp:      &PreTurnResponse{Allow: false, Action: "retry", RetryAfterSeconds: 7},
 			wantDecision: TurnDecisionReschedule, wantDelayMs: 5000,
 			wantRows: map[string]rowWant{"a": {status: db.StatusPending, errText: "pre_turn_deferred", retry: 1}, "b": {status: db.StatusPending, errText: "pre_turn_deferred", retry: 2}},
 		},
 		{
-			name: "RetryLaterExhaustsLastAttempt", mode: "thread", hooked: true, runs: 1,
+			name: "RetryLaterExhaustsLastAttempt", hooked: true, runs: 1,
 			rows:         []db.Message{stepMsg("a", db.StatusProcessing, 2, 0), stepMsg("b", db.StatusProcessing, 0, 0)},
 			preResp:      &PreTurnResponse{Allow: false, Action: "retry", RetryAfterSeconds: 7},
 			wantDecision: TurnDecisionReschedule, wantDelayMs: 7000,
 			wantRows: map[string]rowWant{"a": {status: db.StatusFailed, errText: "[EXHAUSTED_PRE_TURN_RETRIES]", retry: 2}, "b": {status: db.StatusPending, errText: "pre_turn_deferred", retry: 1}},
 		},
 		{
-			name: "RetryLaterAllExhaustedFinished", mode: "thread", hooked: true, runs: 1,
+			name: "RetryLaterAllExhaustedFinished", hooked: true, runs: 1,
 			rows:         []db.Message{stepMsg("a", db.StatusProcessing, 2, 0)},
 			preResp:      &PreTurnResponse{Allow: false, Action: "retry"},
 			wantDecision: TurnDecisionFinished,
 			wantRows:     map[string]rowWant{"a": {status: db.StatusFailed, errText: "[EXHAUSTED_PRE_TURN_RETRIES]", retry: 2}},
 		},
 		{
-			name: "AllowedBuildsPrompt", mode: "thread", hooked: true, runs: 1,
+			name: "AllowedBuildsPrompt", hooked: true, runs: 1,
 			rows:          []db.Message{stepMsg("a", db.StatusProcessing, 0, 0)},
 			preResp:       &PreTurnResponse{Allow: true, InjectedContext: "be brief", Metadata: map[string]any{"lane": "fast", "n": 2}},
 			wantDecision:  TurnDecisionRun,
@@ -380,26 +441,12 @@ func TestPrepareBurstTurn(t *testing.T) {
 			wantMetadata:  map[string]string{"lane": "fast", "n": "2"},
 			wantRows:      map[string]rowWant{"a": {status: db.StatusProcessing}},
 		},
-		{
-			name: "LeaseErrorDeferredToAttemptRunner", mode: "thread", runs: 1, failLease: true,
-			rows:          []db.Message{stepMsg("a", db.StatusProcessing, 0, 0)},
-			wantDecision:  TurnDecisionRun,
-			wantPromptSub: "hello a",
-			wantRows:      map[string]rowWant{"a": {status: db.StatusProcessing}},
-		},
-		{
-			name: "TerminalRowsFinishedWithoutWrites", mode: "thread", hooked: true, runs: 1,
-			rows:         []db.Message{doneMsg("a", db.StatusCompleted, "", "done")},
-			preResp:      &PreTurnResponse{Allow: false, Reason: "never called"},
-			wantDecision: TurnDecisionFinished,
-			wantRows:     map[string]rowWant{"a": {status: db.StatusCompleted}},
-		},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			store := openStepDB(t, stepFixture{msgs: tc.rows, sabotageSQL: tc.sabotageSQL, closeDB: tc.closeDB}).store
-			policy := config.ChannelPolicy{Mode: tc.mode}
+			store := openStepDB(t, stepFixture{msgs: tc.rows}).store
+			policy := config.ChannelPolicy{Mode: "thread"}
 			if tc.hooked {
 				policy.Hooks.PreTurn = preTurn
 			}
@@ -413,9 +460,6 @@ func TestPrepareBurstTurn(t *testing.T) {
 				RunnerFunc: func(context.Context, string, string, string, string, string, int) (string, string, int, error) {
 					return "", "", 0, errors.New("prep must not run the agent")
 				},
-			}
-			if tc.failLease {
-				cfg.ProcessPool = &mockAcquireLeaseFailPool{}
 			}
 			pool := New(nil, cfg)
 			pool.Start()
