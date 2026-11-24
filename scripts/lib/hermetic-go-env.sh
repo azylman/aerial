@@ -59,16 +59,21 @@ ensure_bazel_build_files() {
         grep -qF 'aerial-bazel-downloader.cfg' "$HOME/.bazelrc" 2>/dev/null || echo 'common --downloader_config=/tmp/aerial-bazel-downloader.cfg' >> "$HOME/.bazelrc"
     fi
     local tidy=0; [ ! -f "$root/MODULE.bazel.lock" ] && tidy=1
-    [ "$tidy" = "0" ] && { if git -C "$root" rev-parse --is-inside-work-tree >/dev/null 2>&1; then [ -n "$(git -C "$root" status --porcelain -- go.mod go.sum MODULE.bazel MODULE.bazel.lock 2>/dev/null)" ] && tidy=1; elif [ "$root/go.mod" -nt "$root/MODULE.bazel.lock" ]; then tidy=1; fi; }
+    if [ "$tidy" = "0" ]; then
+        if git -C "$root" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+            if [ -n "$(git -C "$root" status --porcelain -- go.mod go.sum MODULE.bazel MODULE.bazel.lock 2>/dev/null)" ] || \
+               git -C "$root" diff --name-only origin/main...HEAD -- go.mod go.sum MODULE.bazel 2>/dev/null | grep -q . || \
+               git -C "$root" diff --name-only HEAD~1 HEAD -- go.mod go.sum MODULE.bazel 2>/dev/null | grep -q .; then
+                tidy=1
+            fi
+        elif [ "$root/go.mod" -nt "$root/MODULE.bazel.lock" ]; then
+            tidy=1
+        fi
+    fi
     [ "$tidy" = "1" ] && { (cd "$root" && bazel mod tidy) || return $?; }
 
     command -v gazelle >/dev/null 2>&1 && (cd "$root" && gazelle) || (cd "$root" && bazel run //:gazelle) || return $?
     grep -q 'schema.sql' "$root/services/eri/pkg/db/BUILD.bazel" 2>/dev/null || printf '\nexports_files(["schema.sql"], visibility = ["//visibility:public"])\n' >> "$root/services/eri/pkg/db/BUILD.bazel"
-    local cb="$root/services/console/BUILD.bazel"
-    if [ -d "$root/services/console" ] && [ -f "$cb" ]; then
-        grep -q 'sh_test.bzl' "$cb" 2>/dev/null || printf 'load("@rules_shell//shell:sh_test.bzl", "sh_test")\n%s' "$(cat "$cb" 2>/dev/null)" > "$cb"
-        grep -q 'name = "ui_test"' "$cb" 2>/dev/null || printf '\nsh_test(\n    name = "ui_test",\n    srcs = ["//build:tests/console_ui_test.sh"],\n    data = ["//services/console/ui:ui_srcs", "//web/theme"],\n    tags = ["no-sandbox", "requires-network"],\n)\n' >> "$cb"
-    fi
 }
 
 merge_coverage_profiles() {

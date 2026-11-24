@@ -23,7 +23,7 @@ elif command -v shasum >/dev/null 2>&1; then
 fi
 
 CACHE_DIR=""
-for candidate in /data/cache/console-ui-node-modules /cache/console-ui-node-modules "${TMPDIR:-/tmp}/console-ui-node-modules"; do
+for candidate in "${BAZEL_TEST_CACHE_DIR:-${HOME}/.cache/aerial/console-ui}" "${TEST_TMPDIR:-${TMPDIR:-/tmp}}/console-ui-node-modules"; do
     if mkdir -p "$candidate" 2>/dev/null && [ -w "$candidate" ]; then
         CACHE_DIR="$candidate"
         break
@@ -37,12 +37,19 @@ fi
 
 cd "$WORK/src/services/console/ui"
 
+extracted=0
 if [ -n "$tar_cache" ] && [ -f "$tar_cache" ]; then
-    tar -xf "$tar_cache"
-else
+    if tar -tf "$tar_cache" >/dev/null 2>&1 && tar -xf "$tar_cache"; then
+        extracted=1
+    else
+        rm -f "$tar_cache"
+    fi
+fi
+
+if [ "$extracted" -eq 0 ]; then
     npm ci --no-audit --no-fund --silent
     if [ -n "$tar_cache" ]; then
-        tar -cf "$tar_cache.tmp.$$" node_modules && mv -f "$tar_cache.tmp.$$" "$tar_cache"
+        (tar -cf "$tar_cache.tmp.$$" node_modules && mv -f "$tar_cache.tmp.$$" "$tar_cache") 2>/dev/null || rm -f "$tar_cache.tmp.$$"
     fi
 fi
 

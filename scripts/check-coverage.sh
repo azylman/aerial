@@ -74,11 +74,11 @@ fi
 
 CONSOLE_UI_STATUS="SKIPPED"
 if [ -f "services/console/ui/package.json" ] && { [ -z "$TARGET_SERVICE" ] || [ "$TARGET_SERVICE" = "services/console" ] || [ "$TARGET_SERVICE" = "console" ]; }; then
-    if grep -q -E '(//services/console:ui_test.*(FAILED|TIMEOUT|NO STATUS)|FAIL.*//services/console:ui_test)' "$cov_log" 2>/dev/null; then
+    ui_xml="$REPO_ROOT/bazel-testlogs/services/console/ui_test/test.xml"; ui_log="$REPO_ROOT/bazel-testlogs/services/console/ui_test/test.log"
+    if grep -q -E '(//services/console:ui_test.*(FAILED|TIMEOUT|NO STATUS)|FAIL.*//services/console:ui_test)' "$cov_log" 2>/dev/null || { [ -f "$ui_xml" ] && grep -q -E '<(failure|error)' "$ui_xml" 2>/dev/null; }; then
         CONSOLE_UI_STATUS="FAIL"; record_violation "Console React UI tests failed or coverage below threshold (${COVERAGE_THRESHOLD}%) in services/console/ui"
-    elif [ -f "$REPO_ROOT/bazel-testlogs/services/console/ui_test/test.log" ] || grep -q '//services/console:ui_test' "$cov_log" 2>/dev/null; then CONSOLE_UI_STATUS="PASS"
-    elif [ "$b_stat" -ne 0 ]; then CONSOLE_UI_STATUS="FAIL"; record_violation "Console React UI tests failed in services/console/ui"
-    else CONSOLE_UI_STATUS="PASS"; fi
+    elif [ -f "$ui_xml" ] || [ -f "$ui_log" ]; then CONSOLE_UI_STATUS="PASS"
+    else CONSOLE_UI_STATUS="FAIL"; record_violation "Console React UI tests did not execute in services/console/ui"; fi
 fi
 
 generate_markdown_summary() {
