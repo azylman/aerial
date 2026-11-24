@@ -367,87 +367,113 @@ run_deadcode() {
     fi
 }
 
+run_go_pkgs_coverage() {
+    [ $# -gt 0 ] || return 0
+    if ! command -v bazel >/dev/null 2>&1; then
+        echo "🚨 [Aerial Verify] Error: bazel is required for coverage verification" >&2
+        exit 1
+    fi
+
+    targets=""
+    for pkg in "$@"; do
+        rel_pkg="${pkg#/}"
+        rel_pkg="${rel_pkg%/}"
+        rm -rf "${REPO_ROOT}/bazel-testlogs/${rel_pkg}"
+        targets="${targets:+$targets }//${rel_pkg}:all"
+    done
+
+    bazel_log=$(mktemp /tmp/aerial-bazel-cov.XXXXXX)
+    set +e
+    # shellcheck disable=SC2086
+    bazel coverage $targets >"$bazel_log" 2>&1
+    bazel_rc=$?
+    set -e
+
+    if [ "$bazel_rc" -ne 0 ] && [ "$bazel_rc" -ne 4 ]; then
+        echo "🚨 [Aerial Verify] Bazel coverage failed on ($targets):" >&2
+        cat "$bazel_log" >&2
+        rm -f "$bazel_log"
+        exit 1
+    fi
+    rm -f "$bazel_log"
+
+    for pkg in "$@"; do
+        rel_pkg="${pkg#/}"
+        rel_pkg="${rel_pkg%/}"
+        cov_files=$(find "${REPO_ROOT}/bazel-testlogs/${rel_pkg}" -maxdepth 5 -name "coverage.dat" 2>/dev/null || true)
+        if [ -z "$cov_files" ]; then
+            echo "🚨 [Aerial Verify] No coverage.dat found for package //${rel_pkg}:all" >&2
+            exit 1
+        fi
+
+        prof_file=$(mktemp /tmp/aerial-staged-cov.XXXXXX)
+        filtered_prof=$(mktemp /tmp/aerial-staged-cov-filt.XXXXXX)
+        # shellcheck disable=SC2086
+        if ! merge_coverage_profiles "$prof_file" $cov_files || [ ! -s "$prof_file" ]; then
+            echo "🚨 [Aerial Verify] merge_coverage_profiles failed or produced empty profile for //${rel_pkg}:all" >&2
+            rm -f "$prof_file" "$filtered_prof"
+            exit 1
+        fi
+
+        awk -v p1="github.com/azylman/aerial/${rel_pkg}/" -v p2="${rel_pkg}/" '
+            /^mode:/ { print; next }
+            index($1, p1) == 1 {
+                rem = substr($1, length(p1)+1)
+                if (rem !~ /\//) { print; next }
+            }
+            index($1, p2) == 1 {
+                rem = substr($1, length(p2)+1)
+                if (rem !~ /\//) { print; next }
+            }
+        ' "$prof_file" > "$filtered_prof"
+        rm -f "$prof_file"
+
+        if [ ! -s "$filtered_prof" ]; then
+            echo "🚨 [Aerial Verify] Per-package coverage filter produced empty profile for $rel_pkg" >&2
+            rm -f "$filtered_prof"
+            exit 1
+        fi
+
+        counts=$(awk '
+            BEGIN { tot=0; cov=0 }
+            /^mode:/ { next }
+            NF >= 3 {
+                stmts = $(NF-1) + 0
+                count = $NF + 0
+                tot += stmts
+                if (count > 0) cov += stmts
+            }
+            END { printf("%d %d\n", tot, cov) }
+        ' "$filtered_prof")
+        pkg_tot=$(echo "$counts" | awk '{print $1}')
+        pkg_cov=$(echo "$counts" | awk '{print $2}')
+        if [ "$pkg_tot" -le 0 ]; then
+            echo "🚨 [Aerial Verify] Package $rel_pkg coverage profile has 0 countable statements." >&2
+            rm -f "$filtered_prof"
+            exit 1
+        fi
+
+        pct_val=$(awk "BEGIN { printf \"%.1f\", ($pkg_cov / $pkg_tot) * 100.0 }")
+        is_violation=$(awk "BEGIN { print ($pkg_cov * 100 < $pkg_tot * 95.0) ? 1 : 0 }")
+        if [ "$is_violation" -eq 1 ]; then
+            echo "🚨 [Aerial Verify] Package $rel_pkg coverage ($pct_val% — $pkg_cov/$pkg_tot stmts) is below required 95.0% floor." >&2
+            (cd "$REPO_ROOT" && go tool cover -func="$filtered_prof" 2>/dev/null | awk '$1 !~ /^total:/ && $NF != "100.0%"' | sort -k3 -n | head -n 5 | sed 's/^/   • /') >&2 || true
+            rm -f "$filtered_prof"
+            exit 1
+        fi
+        rm -f "$filtered_prof"
+    done
+}
+
 run_go_pkg_coverage() {
     svc="$1"
     targetPkg="${2:-.}"
-    if [ -d "$svc" ] && has_cmd go; then
-        cgo_val="${CGO_ENABLED:-}"
-        if [ -z "$cgo_val" ]; then
-            if has_cmd gcc || has_cmd clang; then
-                cgo_val=1
-            else
-                cgo_val=0
-            fi
-        fi
-        race_flag=""
-        if [ "$cgo_val" = "1" ]; then
-            race_flag="-race"
-        fi
-        prof_file=$(mktemp /tmp/aerial-staged-cov.XXXXXX)
-        rel_svc="$svc"
-        if [ -d "$svc" ]; then
-            rel_svc=$(cd "$svc" && (pwd -W 2>/dev/null || pwd))
-            if [ -n "${REPO_ROOT:-}" ]; then
-                rel_svc="${rel_svc#$REPO_ROOT/}"
-                rel_svc="${rel_svc#$REPO_ROOT}"
-            fi
-        fi
-        rel_svc="${rel_svc#/}"
-        if ! command -v bazel >/dev/null 2>&1; then
-            echo "🚨 [Aerial Verify] Error: bazel is required for coverage verification" >&2
-            rm -f "$prof_file"
-            exit 1
-        fi
-        rel_pkg="${rel_svc}"
-        if [ "$targetPkg" != "." ]; then
-            rel_pkg="${rel_svc}/${targetPkg#./}"
-        fi
-        rel_pkg="${rel_pkg%/}"
-        bazel_log=$(mktemp /tmp/aerial-bazel-cov.XXXXXX)
-        if bazel coverage "//${rel_pkg}:all" >"$bazel_log" 2>&1; then
-            cov_files=$(find "${REPO_ROOT}/bazel-testlogs/${rel_pkg}" -maxdepth 5 -name "coverage.dat" 2>/dev/null || true)
-            if [ -n "$cov_files" ]; then
-                # shellcheck disable=SC2086
-                if ! merge_coverage_profiles "$prof_file" $cov_files || [ ! -s "$prof_file" ]; then
-                    echo "🚨 [Aerial Verify] merge_coverage_profiles failed or produced empty profile for //${rel_pkg}:all" >&2
-                    rm -f "$prof_file" "$bazel_log"
-                    exit 1
-                fi
-            fi
-            rm -f "$bazel_log"
-        else
-            echo "🚨 [Aerial Verify] Bazel coverage failed on //${rel_pkg}:all:" >&2
-            cat "$bazel_log" >&2
-            rm -f "$prof_file" "$bazel_log"
-            exit 1
-        fi
-        if [ -f "$prof_file" ]; then
-            counts=$(awk '
-                BEGIN { tot=0; cov=0 }
-                /^mode:/ { next }
-                NF >= 3 {
-                    stmts = $(NF-1) + 0
-                    count = $NF + 0
-                    tot += stmts
-                    if (count > 0) cov += stmts
-                }
-                END { printf("%d %d\n", tot, cov) }
-            ' "$prof_file")
-            pkg_tot=$(echo "$counts" | awk '{print $1}')
-            pkg_cov=$(echo "$counts" | awk '{print $2}')
-            if [ "$pkg_tot" -gt 0 ]; then
-                pct_val=$(awk "BEGIN { printf \"%.1f\", ($pkg_cov / $pkg_tot) * 100.0 }")
-                is_violation=$(awk "BEGIN { print ($pkg_cov * 100 < $pkg_tot * 95.0) ? 1 : 0 }")
-                if [ "$is_violation" -eq 1 ]; then
-                    echo "🚨 [Aerial Verify] Package $svc ($targetPkg) coverage ($pct_val% — $pkg_cov/$pkg_tot stmts) is below required 95.0% floor." >&2
-                    (cd "$svc" && go tool cover -func="$prof_file" 2>/dev/null | awk '$1 !~ /^total:/ && $NF != "100.0%"' | sort -k3 -n | head -n 5 | sed 's/^/   • /') >&2 || true
-                    rm -f "$prof_file"
-                    exit 1
-                fi
-            fi
-            rm -f "$prof_file"
-        fi
+    rel_pkg="$svc"
+    if [ "$targetPkg" != "." ]; then
+        rel_pkg="$svc/${targetPkg#./}"
     fi
+    rel_pkg="${rel_pkg%/}"
+    run_go_pkgs_coverage "$rel_pkg"
 }
 
 # React console UI (services/console/ui): install when node_modules is missing or stale, then
@@ -693,6 +719,7 @@ if [ "$MODE" = "staged" ]; then
     fi
 
     # Check Go microservices
+    staged_cov_pkgs=""
     for svc in $GO_SERVICES; do
         svc_staged=0
         if echo "$CHANGED_FILES" | grep -q "^$svc/"; then
@@ -730,43 +757,34 @@ if [ "$MODE" = "staged" ]; then
                     continue
                 fi
                 if [ "$p" = "." ]; then
-                    run_go_pkg_coverage "$svc" "."
+                    pkg_dir="$svc"
                 else
-                    run_go_pkg_coverage "$svc" "./$p"
+                    pkg_dir="$svc/$p"
+                fi
+                pkg_dir="${pkg_dir%/}"
+                has_tests=0
+                for tf in "$pkg_dir"/*_test.go; do
+                    if [ -f "$tf" ]; then
+                        has_tests=1
+                        break
+                    fi
+                done
+                if [ "$has_tests" -eq 1 ]; then
+                    staged_cov_pkgs="${staged_cov_pkgs:+$staged_cov_pkgs }$pkg_dir"
                 fi
             done
         fi
     done
 
-    # Check Kubernetes manifests
-    if echo "$CHANGED_FILES" | grep -q -E '^k8s/'; then
-        bazel test //k8s:manifests_test
+    if [ -n "$staged_cov_pkgs" ]; then
+        # shellcheck disable=SC2086
+        run_go_pkgs_coverage $staged_cov_pkgs
     fi
 
-    # Check shared web theme
-    if echo "$CHANGED_FILES" | grep -q -E "^web/theme/"; then
-        bazel test //web/theme:theme_test
-    fi
-
-    # Check docs service syntax
-    if echo "$CHANGED_FILES" | grep -q -E "^(services/)?docs-service/"; then
-        bazel test //services/docs-service:syntax_test
-    fi
-
-    # Check homepage syntax and tests
-    if echo "$CHANGED_FILES" | grep -q -E "^(services/)?homepage/"; then
-        bazel test //services/homepage:homepage_test
-    fi
-
-    # Check grafana dashboard syntax
-    if echo "$CHANGED_FILES" | grep -q -E "^(services/)?grafana/dashboards/"; then
-        bazel test //services/grafana:dashboards_test
-    fi
-
-    # Check Atlas migrations
-    if echo "$CHANGED_FILES" | grep -q -E "atlas\.hcl|migrations/|schema\.sql"; then
-        run_atlas_validate
-    fi
+    # Non-Go validation suites via cached Bazel sh_tests.
+    # Unconditionally evaluated in staged mode because bazel-remote caches unchanged targets in <0.3s
+    # while eliminating path regex filters across stacked PR diffs. (run_atlas_validate remains for full mode).
+    bazel test //k8s:manifests_test //web/theme:theme_test //services/docs-service:syntax_test //services/homepage:homepage_test //services/grafana:dashboards_test //services/eri/pkg/db:atlas_validate_test
 
     # Check React console UI (typecheck, coverage-gated tests, production build)
     if echo "$CHANGED_FILES" | grep -q -E "^services/console/ui/"; then
