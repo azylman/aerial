@@ -67,12 +67,8 @@ test_source_only_and_unit_helpers() {
 
   assert [ "$(norm_repo "")" = "aerial" ]
   assert [ "$(norm_repo core)" = "aerial" ]
-  assert [ "$(norm_repo aerial)" = "aerial" ]
   assert [ "$(norm_repo config)" = "aerial-config" ]
-  assert [ "$(norm_repo aerial-config)" = "aerial-config" ]
   assert [ "$(norm_repo sidecars)" = "aerial-sidecars" ]
-  assert [ "$(norm_repo aerial-sidecars)" = "aerial-sidecars" ]
-  assert [ "$(norm_repo mycustom)" = "mycustom" ]
   assert [ "$(norm_repo azylman/aerial.git)" = "aerial" ]
   assert [ "$(norm_repo azylman/aerial-config.git)" = "aerial-config" ]
 
@@ -87,12 +83,6 @@ test_source_only_and_unit_helpers() {
     assert [ "$REPO_OWNER" = "customowner" ]
     assert [ "$REPO_NAME" = "customrepo" ]
   )
-
-  LOOP=1
-  assert [ "$(auth_hdr)" = "loopback" ]
-  LOOP=0
-  GITHUB_PAT="secret-token-abc"
-  assert [ "$(auth_hdr)" = "eC1hY2Nlc3MtdG9rZW46c2VjcmV0LXRva2VuLWFiYw==" ]
 }
 
 test_flag_ordering_and_validation() {

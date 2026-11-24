@@ -8,13 +8,12 @@ gh_call() { local h=(); [ -n "${GITHUB_PAT:-}" ] && h=(-H "Authorization: token 
 git_auth() { local h; h="$(auth_hdr)" || exit 1; export GIT_TERMINAL_PROMPT=0 GIT_CONFIG_COUNT=2 GIT_CONFIG_KEY_0="http.extraHeader" GIT_CONFIG_VALUE_0="AUTHORIZATION: basic $h" GIT_CONFIG_KEY_1="http.version" GIT_CONFIG_VALUE_1="HTTP/1.1"; }
 get_v() { if [ "$1" = "$2" ]; then [ $3 -ge 2 ] || { echo "ERROR: $1 requires value" >&2; exit 1; }; echo "$4"; else echo "${1#*=}"; fi; }
 is_ok() { [[ "${1:-}" =~ ^[0-9]+$ ]] && [ "$1" -ge 200 ] && [ "$1" -lt 300 ]; }; anc() { git merge-base --is-ancestor "$1" "$2" 2>/dev/null || { [ -f .git/shallow ] && git fetch --unshallow origin >/dev/null 2>&1 && git merge-base --is-ancestor "$1" "$2" 2>/dev/null; }; }
-if [ "${1:-}" = "--source-only" ] || [ "${REPO_TEST_MODE:-0}" = "1" ]; then return 0 2>/dev/null || exit 0; fi
+if [ "${1:-}" = "--source-only" ]; then return 0 2>/dev/null || exit 0; fi
 if [ -z "${GITHUB_PAT:-}" ] && [ "${REPO_TEST_MODE:-0}" != "1" ] && { [ "${AERIAL_USE_LOOPBACK_GITHUB:-0}" = "1" ] || [ "$(curl -s -o /dev/null -w "%{http_code}" --connect-timeout 1 -m 2 "$PROXY/healthz" || true)" = "200" ]; }; then LOOP=1; GITHUB_API="$PROXY/internal/github-api"; fi
 CMD=""; BR=""; BODY=""; BFILE=""; RFILE=""; REB=""; OPT_BR=""; OPT_BODY=""; OPT_B=""; OPT_BFILE=""; OPT_RFILE=""; OPT_F=""; CHUNK="${AERIAL_VANADIS_CHUNK_ID:-${VANADIS_CHUNK_ID:-}}"; ARGS=(); [ "${AERIAL_NO_VANADIS_CHUNK:-0}" = "1" ] && CHUNK=""
 while [ $# -gt 0 ]; do
   case "$1" in
     init|submit|override-roborev|dispute-roborev) [ -z "$CMD" ] && CMD="$1" || ARGS+=("$1"); shift;;
-    --source-only) return 0 2>/dev/null || exit 0;;
     --repo|-r|--repo=*) REPO_EXP=1; REPO_NAME="$(norm_repo "$(get_v "$1" "${1%%=*}" $# "${2:-}")")"; [ "$1" = "${1%%=*}" ] && shift 2 || shift;;
     --branch|--branch=*) OPT_BR="$(get_v "$1" "${1%%=*}" $# "${2:-}")"; [ "$1" = "${1%%=*}" ] && shift 2 || shift;;
     --body|--body=*) OPT_BODY="$(get_v "$1" "${1%%=*}" $# "${2:-}")"; [ "$1" = "${1%%=*}" ] && shift 2 || shift;;
@@ -66,7 +65,8 @@ elif [ "$CMD" = "submit" ]; then
     [ -n "$temp_sha" ] && { git cherry-pick -n "$temp_sha" >/dev/null 2>&1 || { git cherry-pick --abort >/dev/null 2>&1 || true; git reset --hard "$temp_sha" >/dev/null 2>&1; git reset --soft "$o_head" >/dev/null 2>&1; echo "ERROR: Merge conflict applying staged changes" >&2; exit 1; }; }
   fi
   has_c=0; [ -n "$t_sha" ] && ! git diff --quiet "$t_sha" HEAD 2>/dev/null && has_c=1; [ -z "$t_sha" ] && [ "$(git rev-parse HEAD 2>/dev/null)" != "$(git rev-parse "$DEFAULT_BRANCH" 2>/dev/null || true)" ] && has_c=1; git diff --cached --quiet && [ "$has_c" -eq 0 ] && { jq -n --arg s "no_changes" --arg m "No modifications detected in scratch directory." '{status:$s,message:$m}'; exit 0; }
-  if [ -f .git/.aerial-verified-tree ] && git diff --quiet 2>/dev/null && [ "$(git write-tree 2>/dev/null)" = "$(cat .git/.aerial-verified-tree 2>/dev/null)" ]; then echo "⚡ Skipping duplicate pre-flight verification (staged tree already verified)." >&2; elif [ -f scripts/verify.sh ]; then chmod +x scripts/verify.sh && ./scripts/verify.sh --staged >&2 || { [ -n "$temp_sha" ] && { git reset --hard "$temp_sha" >/dev/null 2>&1; git reset --soft "$o_head" >/dev/null 2>&1; } || { [ "$(git rev-parse HEAD)" != "$o_head" ] && git reset --hard "$o_head" >/dev/null 2>&1 || true; }; echo "ERROR: Pre-flight verification failed" >&2; exit 1; }; fi
+  rb_verify() { if [ -n "$temp_sha" ]; then git reset --hard "$temp_sha" >/dev/null 2>&1; git reset --soft "$o_head" >/dev/null 2>&1; elif [ "$(git rev-parse HEAD)" != "$o_head" ]; then git reset --hard "$o_head" >/dev/null 2>&1; fi; }
+  if [ -f .git/.aerial-verified-tree ] && git diff --quiet 2>/dev/null && [ "$(git write-tree 2>/dev/null)" = "$(cat .git/.aerial-verified-tree 2>/dev/null)" ]; then echo "⚡ Skipping duplicate pre-flight verification (staged tree already verified)." >&2; elif [ -f scripts/verify.sh ]; then chmod +x scripts/verify.sh && ./scripts/verify.sh --staged >&2 || { rb_verify; echo "ERROR: Pre-flight verification failed" >&2; exit 1; }; fi
   title="${msg:-feat($REPO_NAME): automated update by Aerial}"; title=$(printf "%s\n" "$title" | awk 'NF{print;exit}' | cut -c 1-256); c_msg="$title"; [ "$b_from_ex" = "0" ] && [[ "$msg" != *"$BODY"* ]] && c_msg=$(printf "%s\n\n%s" "$title" "$BODY"); ! git diff --cached --quiet && git commit -m "$c_msg" >/dev/null
   [ -n "$r_sha" ] && ! anc "$r_sha" HEAD && { echo "ERROR: Remote branch has commits not in local HEAD" >&2; exit 1; }; f_opt=(); [ -n "$r_sha" ] && f_opt=("--force-with-lease=refs/heads/$cur_b:$r_sha"); if ! p_err=$(git push "${f_opt[@]}" -u origin "$cur_b" 2>&1); then echo "ERROR: push failed: $p_err" >&2; exit 1; fi
   if [ -z "$ex_pr" ]; then
