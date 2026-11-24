@@ -21,6 +21,7 @@ const (
 	fieldKind    = "kind"
 	fieldStatus  = "status"
 	fieldReason  = "reason"
+	fieldOutcome = "outcome"
 
 	statusPending = "pending"
 
@@ -108,6 +109,17 @@ var (
 			Help: "Total number of synapse requests to Restate PRObject/RepoObject ingress by handler and outcome.",
 		},
 		[]string{"handler", fieldStatus},
+	)
+	// GitHubIngressTotal counts every GitHub webhook arrival at the synapse
+	// ingress boundary by bucketed event and outcome. GitHub- or edge-side
+	// loss is proven by absence here against edge gateway counts, not by this
+	// metric alone: a delivery that never reaches synapse emits nothing.
+	GitHubIngressTotal = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "synapse_github_ingress_total",
+			Help: "Total number of GitHub webhook arrivals at the synapse ingress boundary by event and outcome.",
+		},
+		[]string{"event", fieldOutcome},
 	)
 	// RestateMergeRecoveredTotal counts merges synapse recovered for PRObject
 	// from a deploy-path commit lookup that fell back to GitHub, because the
@@ -203,6 +215,7 @@ func registerCollector(c prometheus.Collector) {
 }
 
 func init() {
+	registerCollector(GitHubIngressTotal)
 	registerCollector(RestateSendsTotal)
 	registerCollector(RestateMergeRecoveredTotal)
 	registerCollector(GitHubRequestsBySource)
@@ -278,6 +291,42 @@ func RecordRestateSend(handler, status string) {
 		status = unknownLabel
 	}
 	RestateSendsTotal.WithLabelValues(handler, status).Inc()
+}
+
+// GitHub ingress outcome labels for GitHubIngressTotal. Outcomes are
+// code-controlled constants; the raw X-GitHub-Event header value is
+// attacker-controlled and is bucketed by BucketGitHubIngressEvent, never
+// used as a label directly.
+const (
+	GitHubIngressAccepted           = "accepted"
+	GitHubIngressSignatureRejected  = "signature_rejected"
+	GitHubIngressMissingEventHeader = "missing_event_header"
+	GitHubIngressBodyReadFailed     = "body_read_failed"
+	GitHubIngressBusUnavailable     = "bus_unavailable"
+	GitHubIngressPublishFailed      = "publish_failed"
+)
+
+// knownGitHubIngressEvents are the inbound GitHub event names synapse
+// handles. Every other raw X-GitHub-Event value buckets to unknown so an
+// attacker-controlled header can never explode the event label cardinality.
+var knownGitHubIngressEvents = []string{"ping", "pull_request", "check_run", "workflow_run", "push"}
+
+// BucketGitHubIngressEvent maps a raw X-GitHub-Event header value to the
+// GitHubIngressTotal event label: a known GitHub event name, or unknown.
+func BucketGitHubIngressEvent(event string) string {
+	if slices.Contains(knownGitHubIngressEvents, event) {
+		return event
+	}
+	return unknownLabel
+}
+
+// RecordGitHubIngress increments the GitHubIngressTotal counter for one
+// webhook arrival outcome.
+func RecordGitHubIngress(event, outcome string) {
+	if outcome == "" {
+		outcome = unknownLabel
+	}
+	GitHubIngressTotal.WithLabelValues(BucketGitHubIngressEvent(event), outcome).Inc()
 }
 
 // RecordRestateMergeRecovered increments the RestateMergeRecoveredTotal
