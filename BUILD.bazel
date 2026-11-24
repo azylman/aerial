@@ -5,6 +5,7 @@ load("@gazelle//:def.bzl", "gazelle")
 # gazelle:exclude node_modules
 # gazelle:exclude .git
 # gazelle:map_kind go_test go_test //build:go_test.bzl
+# gazelle:build_tags restateintegration
 
 gazelle(name = "gazelle")
 

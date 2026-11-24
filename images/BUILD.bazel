@@ -108,7 +108,7 @@ aerial_go_image(
 # Console layers
 pkg_tar(
     name = "console_static_layer",
-    srcs = ["//services/console:static"],
+    srcs = ["//services/console/static"],
     package_dir = "/app/static",
     strip_prefix = "services/console/static",
 )
@@ -120,7 +120,7 @@ pkg_tar(
 genrule(
     name = "console_ui_dist",
     srcs = [
-        "//services/console:ui_srcs",
+        "//services/console/ui:ui_srcs",
         "//web/theme",
     ],
     outs = ["console_ui_dist.tar"],
@@ -228,7 +228,7 @@ oci_push(
 
 pkg_tar(
     name = "migrator_layer",
-    srcs = ["//services/eri/pkg/db:migrations"],
+    srcs = ["//services/eri/pkg/db/migrations"],
     package_dir = "/migrations",
     strip_prefix = "services/eri/pkg/db/migrations",
 )

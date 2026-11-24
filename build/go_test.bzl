@@ -27,11 +27,25 @@ def go_test(name, data = [], **kwargs):
 
     # Console static assets for console server tests
     if pkg.startswith("services/console"):
-        extra_data.append("//services/console:static")
+        extra_data.append("//services/console/static:static")
 
     # Synapse testdata for synapse internal subpackages
     if pkg.startswith("services/synapse") and pkg != "services/synapse":
-        extra_data.append("//services/synapse:testdata")
+        extra_data.append("//services/synapse/testdata:testdata")
+
+    restate_data = []
+    restate_env = None
+
+    # Restate server binary for integration tests
+    if pkg in ("services/eri/pkg/restatetest", "services/eri/pkg/queue"):
+        restate_data = select({
+            "@rules_go//go/platform:linux_arm64": ["@restate_server_linux_arm64//:restate-server"],
+            "//conditions:default": ["@restate_server_linux_amd64//:restate-server"],
+        })
+        restate_env = select({
+            "@rules_go//go/platform:linux_arm64": {"RESTATE_SERVER_BIN": "$(rootpath @restate_server_linux_arm64//:restate-server)"},
+            "//conditions:default": {"RESTATE_SERVER_BIN": "$(rootpath @restate_server_linux_amd64//:restate-server)"},
+        })
 
     # Schema.sql only for packages running database tests with pgtest
     if (
@@ -50,6 +64,12 @@ def go_test(name, data = [], **kwargs):
     for d in extra_data:
         if d not in all_data:
             all_data.append(d)
+
+    if restate_data:
+        all_data = all_data + restate_data
+
+    if restate_env != None and "env" not in kwargs:
+        kwargs["env"] = restate_env
 
     _go_test(
         name = name,

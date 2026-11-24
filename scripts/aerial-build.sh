@@ -1,284 +1,95 @@
 #!/usr/bin/env bash
 set -euo pipefail
-
-# scripts/aerial-build.sh - CLI client for Vanadis Autonomous Build Queue Orchestrator
-#
-# Build plans define a directed acyclic graph (DAG) of chunks with explicit depends_on arrays.
-# Each chunk has an explicit mode:
-# - 'pr' (default): requires a non-empty chunk-level 'repo' (e.g. "azylman/aerial")
-# - 'action': operational chunk running against live services; 'repo' must be omitted or empty ("")
-
-read_config_yaml_val() {
-    local key="$1"
-    local config_files=()
-    if [ -n "${CONFIG_PATH:-}" ]; then
-        config_files+=("${CONFIG_PATH}")
-    else
-        config_files+=("/local/config.yaml" "/share/aerial-config/config.yaml")
-    fi
-
-    for f in "${config_files[@]}"; do
-        if [ -f "$f" ] && [ -r "$f" ]; then
-            local val
-            val=$(awk -v k="$key" '
-                $0 ~ "^" k ":[ \t]*" {
-                    sub("^" k ":[ \t]*", "")
-                    sub(/[ \t]*#.*$/, "")
-                    gsub(/^["\x27]|["\x27]$/, "")
-                    print
-                    exit
-                }
-            ' "$f" 2>/dev/null || true)
-            if [ -n "$val" ]; then
-                echo "$val"
-                return 0
-            fi
-        fi
+read_cfg() {
+    local files=("${AERIAL_LOCAL_CONFIG_PATH:-/local/config.yaml}" "${AERIAL_SHARED_CONFIG_PATH:-/share/aerial-config/config.yaml}")
+    [ -n "${CONFIG_PATH:-}" ] && files=("$CONFIG_PATH")
+    for f in "${files[@]}"; do
+        [ -r "$f" ] || continue
+        local v; v=$(awk -v k="$1" '$0 ~ "^" k ":[ \t]*" { sub("^" k ":[ \t]*", ""); sub(/[ \t]*#.*$/, ""); gsub(/^["\x27]|["\x27]$/, ""); print; exit }' "$f" 2>/dev/null || true)
+        [ -n "$v" ] && { echo "$v"; return 0; }
     done
     echo ""
 }
-
-VANADIS_URL="${VANADIS_URL:-$(read_config_yaml_val vanadis_url)}"
-VANADIS_URL="${VANADIS_URL%/}"
-VANADIS_FALLBACK_URL="${VANADIS_FALLBACK_URL:-}"
-VANADIS_FALLBACK_URL="${VANADIS_FALLBACK_URL%/}"
-
-usage() {
-    cat <<EOF
-Usage: $(basename "$0") <command> [args]
-
-Commands:
-  enqueue [--file|-f] <plan.json>   Validate and enqueue a multi-chunk build plan in Vanadis
-  status <build_id>                 Fetch build and chunk status from Vanadis
-  cancel <build_id>                 Cancel an active Vanadis build run
-
-Build Plans:
-  Build plans define a DAG with mandatory explicit depends_on arrays (use [] for root chunks).
-  Chunks support mode 'pr' (default, requires chunk-level repo) and 'action' (omitted/empty repo).
-
-Environment:
-  VANADIS_URL          Vanadis base URL (resolved from config.yaml vanadis_url if unset)
-  DISCORD_THREAD_ID    Automatically injected as thread_id when omitted from plan.json
-  DISCORD_CHANNEL_ID   Fallback thread_id when DISCORD_THREAD_ID is unset
-EOF
-}
-
-resolve_thread_id() {
-    if [ -n "${DISCORD_THREAD_ID:-}" ]; then
-        echo "${DISCORD_THREAD_ID}"
-    elif [ -n "${DISCORD_CHANNEL_ID:-}" ]; then
-        echo "${DISCORD_CHANNEL_ID}"
-    elif [ -n "${AERIAL_TARGET_ID:-}" ]; then
-        echo "${AERIAL_TARGET_ID}"
+VANADIS_URL="${VANADIS_URL:-$(read_cfg vanadis_url)}"; VANADIS_URL="${VANADIS_URL%/}"
+VANADIS_FALLBACK_URL="${VANADIS_FALLBACK_URL:-}"; VANADIS_FALLBACK_URL="${VANADIS_FALLBACK_URL%/}"
+resolve_tid() { echo "${DISCORD_THREAD_ID:-${DISCORD_CHANNEL_ID:-${AERIAL_TARGET_ID:-}}}"; }
+do_curl() {
+    local m="$1" u="$2" b="${3:-}" sa="" auth=()
+    for tok in "${AERIAL_SA_TOKEN_PATH:-/var/run/secrets/kubernetes.io/serviceaccount/token}" "${HOME:-}/.gemini/turn_env/sa-token"; do
+        [ -r "$tok" ] && sa="$(tr -d '[:space:]' < "$tok" 2>/dev/null || true)" && [ -n "$sa" ] && { auth=(-H "Authorization: Bearer $sa"); break; }
+    done
+    if [ -n "$b" ]; then
+        printf '%s' "$b" | curl -sS --connect-timeout 5 --max-time 20 -w "\n%{http_code}" -X "$m" ${auth[@]+"${auth[@]}"} -H "Content-Type: application/json" --data-binary @- "$u"
     else
-        echo ""
+        curl -sS --connect-timeout 5 --max-time 20 -w "\n%{http_code}" -X "$m" ${auth[@]+"${auth[@]}"} "$u"
     fi
 }
-
-do_curl_request() {
-    local method="$1"
-    local url="$2"
-    local body="${3:-}"
-    local auth_args=()
-    local sa_token_path="${AERIAL_SA_TOKEN_PATH:-/var/run/secrets/kubernetes.io/serviceaccount/token}"
-    if [ ! -r "$sa_token_path" ] && [ -n "${HOME:-}" ] && [ -r "${HOME}/.gemini/turn_env/sa-token" ]; then
-        sa_token_path="${HOME}/.gemini/turn_env/sa-token"
+vanadis_req() {
+    local m="$1" p="$2" b="${3:-}" resp="" code="" body="" st=0 err diag
+    [ -n "$VANADIS_URL" ] || { echo "ERROR: VANADIS_URL is not configured" >&2; return 1; }
+    err="$(mktemp)"; resp="$(do_curl "$m" "${VANADIS_URL}${p}" "$b" 2>"$err")" || st=$?
+    if [ "$st" -ne 0 ] && { [ "$m" = GET ] || [ "$st" -eq 6 ] || [ "$st" -eq 7 ]; } && [ -n "$VANADIS_FALLBACK_URL" ] && [ "$VANADIS_URL" != "$VANADIS_FALLBACK_URL" ]; then
+        st=0; resp="$(do_curl "$m" "${VANADIS_FALLBACK_URL}${p}" "$b" 2>"$err")" || st=$?
     fi
-    if [ -r "$sa_token_path" ]; then
-        local sa_token
-        sa_token="$(tr -d '[:space:]' < "$sa_token_path" 2>/dev/null || true)"
-        if [ -n "$sa_token" ]; then
-            auth_args=(-H "Authorization: Bearer ${sa_token}")
-        fi
-    fi
-
-    if [ -n "$body" ]; then
-        { printf '%s' "$body" || true; } | curl -sS --connect-timeout 5 --max-time 20 -w "\n%{http_code}" -X "$method" \
-            ${auth_args[@]+"${auth_args[@]}"} \
-            -H "Content-Type: application/json" \
-            --data-binary @- \
-            "$url"
-    else
-        curl -sS --connect-timeout 5 --max-time 20 -w "\n%{http_code}" -X "$method" \
-            ${auth_args[@]+"${auth_args[@]}"} \
-            "$url"
-    fi
-}
-
-vanadis_request() {
-    local method="$1"
-    local path="$2"
-    local body="${3:-}"
-
-    if [ -z "$VANADIS_URL" ]; then
-        echo "ERROR: VANADIS_URL is not configured (set VANADIS_URL or declare vanadis_url in config.yaml)" >&2
-        return 1
-    fi
-
-    local raw_resp="" curl_status=0 curl_stderr
-    curl_stderr="$(mktemp)"
-    raw_resp="$(do_curl_request "$method" "${VANADIS_URL}${path}" "$body" 2>"$curl_stderr")" || curl_status=$?
-    # DNS/connect failures occur before acceptance. Never replay an ambiguous POST.
-    if [ "$curl_status" -ne 0 ] && { [ "$method" = GET ] || [ "$curl_status" -eq 6 ] || [ "$curl_status" -eq 7 ]; } &&
-        [ -n "$VANADIS_FALLBACK_URL" ] && [ "$VANADIS_URL" != "$VANADIS_FALLBACK_URL" ]; then
-        curl_status=0
-        raw_resp="$(do_curl_request "$method" "${VANADIS_FALLBACK_URL}${path}" "$body" 2>"$curl_stderr")" || curl_status=$?
-    fi
-    # Curl stderr may contain URL credentials; use its exit code for a safe diagnosis.
-    rm -f "$curl_stderr"
-    if [ "$curl_status" -ne 0 ]; then
-        local diagnosis
-        case "$curl_status" in
-            6) diagnosis="Could not resolve host" ;;
-            7) diagnosis="Failed to connect" ;;
-            28) diagnosis="Request timed out" ;;
-            52) diagnosis="Empty reply from server" ;;
-            35|60) diagnosis="TLS connection failed" ;;
-            *) diagnosis="Transport failure (curl exit $curl_status)" ;;
+    rm -f "$err"
+    if [ "$st" -ne 0 ]; then
+        diag="Transport failure (curl exit $st)"
+        case "$st" in
+            6) diag="Could not resolve host" ;;
+            7) diag="Failed to connect" ;;
+            28) diag="Request timed out" ;;
+            52) diag="Empty reply from server" ;;
+            35|60) diag="TLS connection failed" ;;
         esac
-        echo "ERROR: ${diagnosis}; acceptance unknown; check build status before resubmitting" >&2
+        echo "ERROR: ${diag}; acceptance unknown; check build status before resubmitting" >&2
         return 1
     fi
-
-    local http_code
-    http_code="$(printf '%s\n' "$raw_resp" | tail -n 1)"
-    local resp_body
-    resp_body="$(printf '%s\n' "$raw_resp" | sed '$d')"
-
-    if [[ ! "$http_code" =~ ^[0-9]{3}$ ]] || [ "$http_code" = 000 ]; then
+    code="$(printf '%s\n' "$resp" | tail -n 1)"; body="$(printf '%s\n' "$resp" | sed '$d')"
+    if [[ ! "$code" =~ ^[0-9]{3}$ ]] || [ "$code" = "000" ]; then
         echo "ERROR: No valid HTTP response; acceptance unknown; check build status before resubmitting" >&2
         return 1
     fi
-    if [ "$http_code" -lt 200 ] || [ "$http_code" -ge 300 ]; then
-        echo "ERROR: Vanadis request ${method} ${path} failed with HTTP ${http_code}: ${resp_body}" >&2
-        return 1
-    fi
-
-    printf '%s\n' "$resp_body"
+    [ "$code" -ge 200 ] && [ "$code" -lt 300 ] || { echo "ERROR: Vanadis request $m $p failed with HTTP $code: $body" >&2; return 1; }
+    printf '%s\n' "$body"
 }
-
-cmd_enqueue() {
-    local plan_file=""
-    while [ $# -gt 0 ]; do
-        case "$1" in
-            --file|-f)
-                if [ $# -lt 2 ]; then
-                    echo "ERROR: --file requires a path argument" >&2
-                    exit 1
-                fi
-                plan_file="$2"
-                shift 2
-                ;;
-            --file=*)
-                plan_file="${1#*=}"
-                shift
-                ;;
-            -h|--help)
-                usage
-                exit 0
-                ;;
-            -*)
-                echo "ERROR: Unknown option for enqueue: $1" >&2
-                exit 1
-                ;;
-            *)
-                if [ -z "$plan_file" ]; then
-                    plan_file="$1"
-                else
-                    echo "ERROR: Unexpected extra argument: $1" >&2
-                    exit 1
-                fi
-                shift
-                ;;
-        esac
-    done
-
-    if [ -z "$plan_file" ]; then
-        echo "ERROR: Plan JSON file path is required (Usage: aerial-build.sh enqueue <plan.json>)" >&2
-        exit 1
-    fi
-
-    if [ ! -f "$plan_file" ]; then
-        echo "ERROR: Plan file not found: $plan_file" >&2
-        exit 1
-    fi
-
-    if ! jq empty "$plan_file" >/dev/null 2>&1; then
-        echo "ERROR: Invalid JSON in plan file: $plan_file" >&2
-        exit 1
-    fi
-
-    if ! jq -e '(.chunks | type == "array" and length > 0) and all(.chunks[]; (.depends_on | type) == "array")' "$plan_file" >/dev/null 2>&1; then
-        echo "ERROR: Every chunk in plan file must explicitly specify a depends_on array (use [] for root chunks)" >&2
-        exit 1
-    fi
-
-    local payload
-    payload="$(cat "$plan_file")"
-
-    local existing_tid
-    existing_tid="$(printf '%s' "$payload" | jq -r '.thread_id // ""' 2>/dev/null || true)"
-    if [ -z "$existing_tid" ]; then
-        local env_tid
-        env_tid="$(resolve_thread_id)"
-        if [ -n "$env_tid" ]; then
-            payload="$(printf '%s' "$payload" | jq -c --arg tid "$env_tid" '.thread_id = $tid')"
-        fi
-    fi
-
-    local resp
-    resp="$(vanadis_request "POST" "/builds" "$payload")"
-
-    if printf '%s' "$resp" | jq empty >/dev/null 2>&1; then
-        printf '%s\n' "$resp" | jq 'if .chunks then .chunks |= map({id, chunk_index, mode, repo, title, effort, status, depends_on}) else . end + {"turn_action": "end_turn"}'
-    else
-        printf '%s\n' "$resp"
-    fi
-}
-
-cmd_status() {
-    local build_id="${1:-}"
-    if [ -z "$build_id" ]; then
-        echo "ERROR: build_id is required (Usage: aerial-build.sh status <build_id>)" >&2
-        exit 1
-    fi
-    vanadis_request "GET" "/builds/${build_id}"
-}
-
-cmd_cancel() {
-    local build_id="${1:-}"
-    if [ -z "$build_id" ]; then
-        echo "ERROR: build_id is required (Usage: aerial-build.sh cancel <build_id>)" >&2
-        exit 1
-    fi
-    vanadis_request "POST" "/builds/${build_id}/cancel"
-}
-
-if [ $# -eq 0 ]; then
-    usage >&2
-    exit 1
-fi
-
-SUBCOMMAND="$1"
-shift
-
-case "$SUBCOMMAND" in
+usage() { echo "Usage: $(basename "$0") {enqueue <plan.json>|status <build_id>|cancel <build_id>}"; }
+case "${1:-}" in
     enqueue)
-        cmd_enqueue "$@"
+        shift; pf=""
+        while [ $# -gt 0 ]; do
+            case "$1" in
+                --file|-f) [ $# -ge 2 ] || { echo "ERROR: --file requires an argument" >&2; exit 1; }; pf="$2"; shift 2 ;;
+                --file=*) pf="${1#*=}"; shift ;;
+                -h|--help) usage; exit 0 ;;
+                -*) echo "ERROR: Unknown option $1" >&2; exit 1 ;;
+                *) [ -z "$pf" ] && pf="$1" || { echo "ERROR: Extra arg $1" >&2; exit 1; }; shift ;;
+            esac
+        done
+        [ -n "$pf" ] && [ -f "$pf" ] || { echo "ERROR: Plan JSON file required" >&2; exit 1; }
+        jq empty "$pf" >/dev/null 2>&1 || { echo "ERROR: Invalid JSON in $pf" >&2; exit 1; }
+        jq -e '(.chunks | type == "array" and length > 0) and all(.chunks[]; (.depends_on | type) == "array")' "$pf" >/dev/null 2>&1 || { echo "ERROR: depends_on array required for every chunk" >&2; exit 1; }
+        payload="$(cat "$pf")"; tid="$(jq -r '.thread_id // ""' "$pf" 2>/dev/null || true)"
+        if [ -z "$tid" ]; then
+            env_tid="$(resolve_tid)"
+            [ -z "$env_tid" ] || payload="$(printf '%s' "$payload" | jq -c --arg t "$env_tid" '.thread_id = $t')"
+        fi
+        resp="$(vanadis_req "POST" "/builds" "$payload")"
+        if printf '%s' "$resp" | jq empty >/dev/null 2>&1; then
+            printf '%s\n' "$resp" | jq 'if .chunks then .chunks |= map({id, chunk_index, mode, repo, title, effort, status, depends_on}) else . end + {"turn_action": "end_turn"}'
+        else printf '%s\n' "$resp"; fi
         ;;
     status)
-        cmd_status "$@"
+        [ -n "${2:-}" ] || { echo "ERROR: build_id is required" >&2; exit 1; }
+        vanadis_req "GET" "/builds/$2"
         ;;
     cancel)
-        cmd_cancel "$@"
+        [ -n "${2:-}" ] || { echo "ERROR: build_id is required" >&2; exit 1; }
+        vanadis_req "POST" "/builds/$2/cancel"
         ;;
     -h|--help|help)
-        usage
-        exit 0
+        usage; exit 0
         ;;
     *)
-        echo "ERROR: Unknown command: $SUBCOMMAND" >&2
-        usage >&2
-        exit 1
+        usage >&2; exit 1
         ;;
 esac

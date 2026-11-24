@@ -97,6 +97,8 @@ func TestReservedPorts(ctx context.Context) {
 	_, _ = http.Get("http://localhost:8070/call")
 	_, _ = http.Get("http://localhost:9070/status")
 	_, _ = http.Get("http://localhost:8088/alt")
+	_, _ = http.Get("localhost:8080")
+	_, _ = http.Get(` + "`" + `localhost:8080` + "`" + `)
 }
 `,
 			wantViolations: []string{
@@ -110,6 +112,8 @@ func TestReservedPorts(ctx context.Context) {
 				"sample_test.go:16: call to http.Get targeting reserved live daemon port 8070 in tests is prohibited; use httptest.Server or mock transport instead",
 				"sample_test.go:17: call to http.Get targeting reserved live daemon port 9070 in tests is prohibited; use httptest.Server or mock transport instead",
 				"sample_test.go:18: call to http.Get targeting reserved live daemon port 8088 in tests is prohibited; use httptest.Server or mock transport instead",
+				"sample_test.go:19: call to http.Get targeting reserved live daemon port 8080 in tests is prohibited; use httptest.Server or mock transport instead",
+				"sample_test.go:20: call to http.Get targeting reserved live daemon port 8080 in tests is prohibited; use httptest.Server or mock transport instead",
 			},
 		},
 		{
@@ -129,6 +133,7 @@ func TestAllowedCalls(ctx context.Context, srvURL string) {
 	_, _ = http.NewRequest(http.MethodGet, "http://localhost:18080", nil)
 	_ = NewHTTPPromptDispatcher(srvURL)
 	fmt.Println("http://localhost:8080")
+	_, _ = http.Get("http://[invalid-ipv6:8080")
 }
 `,
 		},

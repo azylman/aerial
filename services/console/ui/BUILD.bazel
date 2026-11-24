@@ -1,0 +1,12 @@
+filegroup(
+    name = "ui_srcs",
+    srcs = glob(
+        ["**"],
+        exclude = [
+            "BUILD.bazel",
+            "node_modules/**",
+            "dist/**",
+        ],
+    ),
+    visibility = ["//visibility:public"],
+)

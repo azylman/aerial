@@ -54,4 +54,8 @@ PR_DESCRIPTION.md
 !/services/grafana/BUILD.bazel
 !/services/homepage/BUILD.bazel
 !/web/theme/BUILD.bazel
+!/services/eri/pkg/db/migrations/BUILD.bazel
+!/services/console/static/BUILD.bazel
+!/services/console/ui/BUILD.bazel
+!/services/synapse/testdata/BUILD.bazel
 

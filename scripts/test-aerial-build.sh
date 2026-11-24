@@ -1,267 +1,74 @@
 #!/usr/bin/env bash
 set -euo pipefail
-
-# scripts/test-aerial-build.sh - Hermetic unit & integration tests for scripts/aerial-build.sh
-
-SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-AERIAL_BUILD="${SCRIPT_DIR}/aerial-build.sh"
-
-PASSED=0
-FAILED=0
-
-assert_eq() {
-    local expected="$1"
-    local actual="$2"
-    local msg="$3"
-    if [ "$expected" = "$actual" ]; then
-        echo "✅ PASS: $msg"
-        PASSED=$((PASSED + 1))
-    else
-        echo "❌ FAIL: $msg"
-        echo "   Expected: '$expected'"
-        echo "   Actual:   '$actual'"
-        FAILED=$((FAILED + 1))
-    fi
-}
-
-assert_contains() {
-    local needle="$1"
-    local haystack="$2"
-    local msg="$3"
-    if printf '%s' "$haystack" | grep -Fq -- "$needle"; then
-        echo "✅ PASS: $msg"
-        PASSED=$((PASSED + 1))
-    else
-        echo "❌ FAIL: $msg"
-        echo "   Expected to contain: '$needle'"
-        echo "   Actual:              '$haystack'"
-        FAILED=$((FAILED + 1))
-    fi
-}
-
-echo "🧪 Running hermetic tests for scripts/aerial-build.sh..."
-
-TMP_DIR="$(mktemp -d /tmp/test-aerial-build.XXXXXX)"
-trap 'rm -rf "$TMP_DIR"' EXIT
-
-MOCK_BIN="${TMP_DIR}/bin"
-mkdir -p "$MOCK_BIN"
-CAPTURED_REQ="${TMP_DIR}/captured_req.txt"
-CAPTURED_BODY="${TMP_DIR}/captured_body.json"
-CAPTURED_HEADERS="${TMP_DIR}/captured_headers.txt"
-
-cat << 'EOF' > "${MOCK_BIN}/curl"
+DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"; SCRIPT="${DIR}/aerial-build.sh"
+TMPD="$(mktemp -d)"; trap 'rm -rf "$TMPD"' EXIT
+export PATH="$TMPD/bin:$PATH" VANADIS_URL="http://127.0.0.1:4025" TMPD="$TMPD"
+mkdir -p "$TMPD/bin"
+cat << 'CURL_EOF' > "$TMPD/bin/curl"
 #!/usr/bin/env bash
-set -euo pipefail
-
-if [ -n "${MOCK_CURL_EXIT:-}" ]; then
-    echo 'curl: transport failure https://user:secret@private.invalid' >&2
-    printf '\n000\n'
-    exit "$MOCK_CURL_EXIT"
-fi
-
-METHOD="GET"
-URL=""
-BODY=""
-
-while [ $# -gt 0 ]; do
-    case "$1" in
-        -X)
-            METHOD="$2"
-            shift 2
-            ;;
-        -d|--data-binary)
-            if [ "$2" = "@-" ]; then
-                BODY="$(cat)"
-            else
-                BODY="$2"
-            fi
-            shift 2
-            ;;
-        -H)
-            echo "$2" >> "${MOCK_CAPTURE_HEADERS:-/dev/null}"
-            shift 2
-            ;;
-        -w|--connect-timeout|--max-time)
-            shift 2
-            ;;
-        -s|-S|-sS)
-            shift
-            ;;
-        *)
-            URL="$1"
-            shift
-            ;;
-    esac
+url=""; method="GET"; auth=""
+for ((i=1; i<=$#; i++)); do
+  a="${!i}"; [[ "$a" =~ http:// ]] && url="$a"
+  [[ "$a" =~ ^(POST|GET)$ ]] && method="$a"
+  [ "$a" = "-H" ] && { j=$((i+1)); [[ "${!j}" =~ Authorization ]] && auth="${!j}"; }
 done
-
-if [[ "$URL" == *"vanadis.unreachable"* ]]; then
-    exit 6
+echo "$auth" > "$TMPD/last_auth"
+[ "$method" = "POST" ] && [ ! -t 0 ] && cat > "$TMPD/last_body"
+[[ "$url" =~ fail7 ]] && exit 7
+[[ "$url" =~ unreachable ]] && exit 7
+if [ "$method" = "POST" ] && [[ "$url" =~ /builds$ ]]; then
+  echo '{"id":"b1","chunks":[{"id":"c1","chunk_index":0,"mode":"pr","repo":"aerial","title":"t","effort":"low","status":"pending","depends_on":[]}]}'
+  printf "\n200"; exit 0
 fi
-
-echo "${METHOD} ${URL}" > "${MOCK_CAPTURE_REQ}"
-if [ -n "$BODY" ]; then
-    printf '%s' "$BODY" > "${MOCK_CAPTURE_BODY}"
+if [ "$method" = "GET" ] && [[ "$url" =~ /builds/b1$ ]]; then
+  echo '{"id":"b1","status":"running"}'; printf "\n200"; exit 0
 fi
-
-if [ "${MOCK_HTTP_STATUS:-200}" -ge 400 ]; then
-    printf '{"error":"simulated failure"}\n%s\n' "${MOCK_HTTP_STATUS}"
-    exit 0
+if [ "$method" = "POST" ] && [[ "$url" =~ /builds/b1/cancel$ ]]; then
+  echo '{"id":"b1","status":"cancelled"}'; printf "\n200"; exit 0
 fi
-
-case "${METHOD}:${URL}" in
-    POST:*/builds)
-        printf '{"status":"accepted","build_id":"build-test-101","chunk_count":2,"chunks":[{"id":"c1","chunk_index":0,"title":"Chunk 1","instructions":"huge instructions blob","effort":"high","status":"pending"}]}\n202\n'
-        ;;
-    GET:*/builds/build-test-101)
-        printf '{"build":{"id":"build-test-101","status":"running"},"chunks":[]}\n200\n'
-        ;;
-    POST:*/builds/build-test-101/cancel)
-        printf '{"status":"cancelled","build_id":"build-test-101"}\n200\n'
-        ;;
-    *)
-        printf '{"error":"not found"}\n404\n'
-        ;;
-esac
-EOF
-chmod +x "${MOCK_BIN}/curl"
-
-export PATH="${MOCK_BIN}:${PATH}"
-export MOCK_CAPTURE_REQ="$CAPTURED_REQ"
-export MOCK_CAPTURE_BODY="$CAPTURED_BODY"
-export MOCK_CAPTURE_HEADERS="$CAPTURED_HEADERS"
-export HOME="${TMP_DIR}/home"
-mkdir -p "$HOME"
-unset DISCORD_THREAD_ID DISCORD_CHANNEL_ID AERIAL_TARGET_ID || true
-
-# Test 1: Executable permission and --help
-assert_eq "true" "$([ -x "$AERIAL_BUILD" ] && echo true || echo false)" "aerial-build.sh is executable"
-HELP_OUT="$("$AERIAL_BUILD" --help)"
-assert_contains "Usage:" "$HELP_OUT" "--help displays usage"
-
-# Test 2: Missing file error
-MISSING_ERR="$("$AERIAL_BUILD" enqueue "${TMP_DIR}/does-not-exist.json" 2>&1 || true)"
-assert_contains "Plan file not found" "$MISSING_ERR" "enqueue fails cleanly on missing file"
-
-# Test 3: Invalid JSON error
-BAD_JSON="${TMP_DIR}/bad.json"
-echo "{not valid json" > "$BAD_JSON"
-INVALID_ERR="$("$AERIAL_BUILD" enqueue "$BAD_JSON" 2>&1 || true)"
-assert_contains "Invalid JSON in plan file" "$INVALID_ERR" "enqueue fails cleanly on invalid JSON"
-
-# Test 3b: Missing depends_on array error
-MISSING_DEPENDS_JSON="${TMP_DIR}/missing-depends.json"
-cat << 'EOF' > "$MISSING_DEPENDS_JSON"
-{
-  "repo": "aerial",
-  "tier": 2,
-  "objective": "Missing depends_on",
-  "chunks": [
-    {"title": "Chunk 1", "instructions": "Do chunk 1"}
-  ]
-}
-EOF
-MISSING_DEPENDS_ERR="$("$AERIAL_BUILD" enqueue "$MISSING_DEPENDS_JSON" 2>&1 || true)"
-assert_contains "must explicitly specify a depends_on array" "$MISSING_DEPENDS_ERR" "enqueue fails cleanly when chunk omits depends_on"
-
-# Test 4: Enqueue with automatic DISCORD_THREAD_ID injection and turn_action: end_turn
-PLAN_JSON="${TMP_DIR}/plan.json"
-cat << 'EOF' > "$PLAN_JSON"
-{
-  "repo": "aerial",
-  "tier": 2,
-  "objective": "Implement Vanadis",
-  "chunks": [
-    {"title": "Chunk 1", "instructions": "Do chunk 1", "depends_on": []}
-  ]
-}
-EOF
-
-ENQUEUE_OUT="$(VANADIS_URL="http://127.0.0.1:4025" DISCORD_THREAD_ID="1555888999" "$AERIAL_BUILD" enqueue --file "$PLAN_JSON")"
-assert_eq "end_turn" "$(printf '%s' "$ENQUEUE_OUT" | jq -r '.turn_action')" "enqueue response includes turn_action: end_turn"
-assert_eq "build-test-101" "$(printf '%s' "$ENQUEUE_OUT" | jq -r '.build_id')" "enqueue response includes build_id"
-assert_eq "Chunk 1" "$(printf '%s' "$ENQUEUE_OUT" | jq -r '.chunks[0].title')" "enqueue response retains chunk metadata"
-assert_eq "null" "$(printf '%s' "$ENQUEUE_OUT" | jq -r '.chunks[0].instructions')" "enqueue response strips verbose chunk instructions"
-assert_eq "1555888999" "$(jq -r '.thread_id' "$CAPTURED_BODY")" "DISCORD_THREAD_ID injected into request payload when thread_id is missing"
-assert_eq "POST http://127.0.0.1:4025/builds" "$(cat "$CAPTURED_REQ")" "enqueue dispatches POST /builds"
-
-# Test 5: DNS fallback from vanadis.unreachable to VANADIS_FALLBACK_URL
-FALLBACK_OUT="$(VANADIS_URL="http://vanadis.unreachable:4025" VANADIS_FALLBACK_URL="http://127.0.0.1:4025" DISCORD_CHANNEL_ID="1555000111" "$AERIAL_BUILD" enqueue "$PLAN_JSON")"
-assert_eq "end_turn" "$(printf '%s' "$FALLBACK_OUT" | jq -r '.turn_action')" "enqueue succeeds via fallback URL when primary fails to resolve"
-assert_eq "POST http://127.0.0.1:4025/builds" "$(cat "$CAPTURED_REQ")" "fallback used http://127.0.0.1:4025/builds"
-assert_eq "1555000111" "$(jq -r '.thread_id' "$CAPTURED_BODY")" "DISCORD_CHANNEL_ID injected as fallback thread_id"
-
-# Test 6: status command
-STATUS_OUT="$(VANADIS_URL="http://127.0.0.1:4025" "$AERIAL_BUILD" status build-test-101)"
-assert_eq "running" "$(printf '%s' "$STATUS_OUT" | jq -r '.build.status')" "status command returns build status"
-assert_eq "GET http://127.0.0.1:4025/builds/build-test-101" "$(cat "$CAPTURED_REQ")" "status dispatches GET /builds/<id>"
-
-# Test 7: cancel command
-CANCEL_OUT="$(VANADIS_URL="http://127.0.0.1:4025" "$AERIAL_BUILD" cancel build-test-101)"
-assert_eq "cancelled" "$(printf '%s' "$CANCEL_OUT" | jq -r '.status')" "cancel command returns cancelled status"
-assert_eq "POST http://127.0.0.1:4025/builds/build-test-101/cancel" "$(cat "$CAPTURED_REQ")" "cancel dispatches POST /builds/<id>/cancel"
-
-# Test 8: HTTP failure handling (500 Internal Server Error)
-HTTP_ERR="$(VANADIS_URL="http://127.0.0.1:4025" MOCK_HTTP_STATUS=500 "$AERIAL_BUILD" status build-test-101 2>&1 || true)"
-assert_contains "failed with HTTP 500" "$HTTP_ERR" "HTTP 500 error is reported and exits non-zero"
-
-for scenario in "52:Empty reply" "28:timed out" "6:resolve host"; do
-    code="${scenario%%:*}"
-    expected="${scenario#*:}"
-    set +e
-    RESULT="$(VANADIS_URL="http://primary.invalid" VANADIS_FALLBACK_URL="http://fallback.invalid" MOCK_CURL_EXIT="$code" DISCORD_THREAD_ID="1555888999" "$AERIAL_BUILD" enqueue "$PLAN_JSON" 2>&1)"
-    rc=$?
-    set -e
-    assert_eq "1" "$rc" "transport failure exits nonzero"
-    assert_contains "$expected" "$RESULT" "transport diagnosis retained"
-    assert_contains "acceptance unknown" "$RESULT" "unknown acceptance explained"
-    assert_eq "false" "$( [[ "$RESULT" == *secret* ]] && echo true || echo false)" "credentials withheld"
-done
-
-# Test 9: Missing VANADIS_URL error when unset in env and config.yaml
-NO_URL_ERR="$(CONFIG_PATH="/dev/null" VANADIS_URL="" "$AERIAL_BUILD" status build-test-101 2>&1 || true)"
-assert_contains "VANADIS_URL is not configured" "$NO_URL_ERR" "status fails cleanly when VANADIS_URL is not configured"
-
-# Test 10: CONFIG_PATH resolution
-TEST_CONFIG_YAML="${TMP_DIR}/config.yaml"
-echo 'vanadis_url: "http://127.0.0.1:4025"' > "$TEST_CONFIG_YAML"
-CONFIG_STATUS_OUT="$(CONFIG_PATH="$TEST_CONFIG_YAML" VANADIS_URL="" "$AERIAL_BUILD" status build-test-101)"
-assert_eq "running" "$(printf '%s' "$CONFIG_STATUS_OUT" | jq -r '.build.status')" "status command resolves VANADIS_URL from CONFIG_PATH"
-
-# Test 11: AERIAL_SA_TOKEN_PATH injection
-TOKEN_FILE="${TMP_DIR}/test_sa_token"
-echo "test-bearer-token-xyz" > "$TOKEN_FILE"
-: > "$CAPTURED_HEADERS"
-AERIAL_SA_TOKEN_PATH="$TOKEN_FILE" VANADIS_URL="http://127.0.0.1:4025" "$AERIAL_BUILD" status build-test-101 >/dev/null
-assert_contains "Authorization: Bearer test-bearer-token-xyz" "$(cat "$CAPTURED_HEADERS")" "status passes SA bearer token from AERIAL_SA_TOKEN_PATH"
-
-# Test 12: Missing AERIAL_SA_TOKEN_PATH file gracefully omitted
-: > "$CAPTURED_HEADERS"
-AERIAL_SA_TOKEN_PATH="${TMP_DIR}/nonexistent_token" VANADIS_URL="http://127.0.0.1:4025" "$AERIAL_BUILD" status build-test-101 >/dev/null
-assert_eq "false" "$(grep -q "Authorization: Bearer" "$CAPTURED_HEADERS" && echo true || echo false)" "missing SA token file omits Authorization header"
-
-# Test 13: Large plan payload (>140 KB) streamed over stdin without ARG_MAX failure
-LARGE_PLAN_JSON="${TMP_DIR}/large_plan.json"
-PADDING="$(head -c 145000 /dev/zero | tr '\0' 'x')"
-cat << EOF > "$LARGE_PLAN_JSON"
-{
-  "repo": "aerial",
-  "tier": 2,
-  "objective": "Large payload test",
-  "chunks": [
-    {"title": "Chunk 1", "instructions": "${PADDING}", "depends_on": []}
-  ]
-}
-EOF
-
-LARGE_ENQUEUE_OUT="$(VANADIS_URL="http://127.0.0.1:4025" DISCORD_THREAD_ID="1555888999" "$AERIAL_BUILD" enqueue --file "$LARGE_PLAN_JSON")"
-assert_eq "end_turn" "$(printf '%s' "$LARGE_ENQUEUE_OUT" | jq -r '.turn_action')" "enqueue large payload succeeds with turn_action: end_turn"
-CAPTURED_INSTR_LEN="$(jq -r '.chunks[0].instructions | length' "$CAPTURED_BODY")"
-assert_eq "145000" "$CAPTURED_INSTR_LEN" "mock curl received the full large instructions payload"
-
-echo "--------------------------------------------------------"
-echo "Test results: $PASSED passed, $FAILED failed"
-if [ "$FAILED" -gt 0 ]; then
-    exit 1
-fi
-echo "🎉 All aerial-build.sh tests passed!"
+echo '{"error":"not found"}'; printf "\n404"; exit 0
+CURL_EOF
+chmod +x "$TMPD/bin/curl"
+assert() { "$@" || { echo "ASSERT FAILED: $*" >&2; exit 1; }; }
+assert_fail() { ! "$@" 2>/dev/null || { echo "EXPECTED FAILURE: $*" >&2; exit 1; }; }
+assert "$SCRIPT" --help
+assert "$SCRIPT" -h
+assert "$SCRIPT" help
+assert "$SCRIPT" enqueue --help
+assert "$SCRIPT" enqueue -h
+assert_fail "$SCRIPT"
+assert_fail "$SCRIPT" unknown-cmd
+assert_fail "$SCRIPT" enqueue
+assert_fail "$SCRIPT" enqueue --file
+assert_fail "$SCRIPT" enqueue "$TMPD/nonexistent.json"
+echo "not json" > "$TMPD/bad.json" && assert_fail "$SCRIPT" enqueue "$TMPD/bad.json"
+echo '{"chunks":[{"id":"c1"}]}' > "$TMPD/no_dep.json" && assert_fail "$SCRIPT" enqueue "$TMPD/no_dep.json"
+assert_fail "$SCRIPT" status
+assert_fail "$SCRIPT" cancel
+cat << 'JSON_EOF' > "$TMPD/valid.json"
+{"chunks":[{"id":"c1","chunk_index":0,"mode":"pr","repo":"aerial","title":"t","effort":"low","depends_on":[]}]}
+JSON_EOF
+res_enq=$("$SCRIPT" enqueue --file "$TMPD/valid.json")
+assert echo "$res_enq" | jq -e '.turn_action == "end_turn" and .id == "b1"'
+res_notid=$(env -u DISCORD_THREAD_ID -u DISCORD_CHANNEL_ID -u AERIAL_TARGET_ID "$SCRIPT" enqueue "$TMPD/valid.json")
+assert echo "$res_notid" | jq -e '.turn_action == "end_turn" and .id == "b1"'
+res_stat=$("$SCRIPT" status b1)
+assert echo "$res_stat" | jq -e '.status == "running"'
+res_canc=$("$SCRIPT" cancel b1)
+assert echo "$res_canc" | jq -e '.status == "cancelled"'
+res_fb=$(VANADIS_URL="http://unreachable:4025" VANADIS_FALLBACK_URL="http://127.0.0.1:4025" "$SCRIPT" status b1)
+assert echo "$res_fb" | jq -e '.status == "running"'
+echo "secret-tok-123" > "$TMPD/token"
+AERIAL_SA_TOKEN_PATH="$TMPD/token" "$SCRIPT" status b1 >/dev/null
+assert grep -q "Bearer secret-tok-123" "$TMPD/last_auth"
+pad=$(head -c 145000 /dev/zero | tr '\0' 'x')
+printf '{"chunks":[{"id":"c1","chunk_index":0,"mode":"pr","repo":"aerial","title":"t","effort":"low","depends_on":[],"pad":"%s"}]}' "$pad" > "$TMPD/large.json"
+res_lg=$("$SCRIPT" enqueue "$TMPD/large.json")
+assert echo "$res_lg" | jq -e '.turn_action == "end_turn"'
+err_out=$(VANADIS_URL="http://fail7:4025" "$SCRIPT" status b1 2>&1 || true)
+assert echo "$err_out" | grep -q "Failed to connect; acceptance unknown"
+echo "other_key: 1" > "$TMPD/cfg1.yaml"; echo "vanadis_url: http://127.0.0.1:4025" > "$TMPD/cfg2.yaml"
+assert_fail env -u VANADIS_URL CONFIG_PATH="$TMPD/cfg1.yaml" AERIAL_LOCAL_CONFIG_PATH="$TMPD/cfg2.yaml" AERIAL_SHARED_CONFIG_PATH="$TMPD/none" "$SCRIPT" status b1
+assert [ "$(env -u VANADIS_URL AERIAL_LOCAL_CONFIG_PATH="$TMPD/cfg1.yaml" AERIAL_SHARED_CONFIG_PATH="$TMPD/cfg2.yaml" "$SCRIPT" status b1 | jq -r .status)" = "running" ]
+bash "$DIR/test-aerial-build-edge.sh"
+echo "ok - aerial-build hermetic tests passed"
