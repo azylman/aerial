@@ -895,77 +895,86 @@ func TestPRState_Untracked(t *testing.T) {
 	}
 }
 
+// TestPRState_ApplySelfRegistration_Guards pins nil-state and invalid-target
+// guard behavior: nil receivers and malformed targets write nothing and keep state untracked.
+func TestPRState_ApplySelfRegistration_Guards(t *testing.T) {
+	t.Parallel()
+	t.Run("nil state writes nothing", func(t *testing.T) {
+		t.Parallel()
+		var s *PRState
+		require.False(t, s.ApplySelfRegistration("", "", "100000000000000009", "", ""))
+	})
+	t.Run("invalid target writes nothing", func(t *testing.T) {
+		t.Parallel()
+		var s PRState
+		s.Repo, s.PRNumber = "azylman/aerial", 2329
+		require.False(t, s.ApplySelfRegistration("dependabot/x", "h1", "dispatch-uuid", "T", ""))
+		require.True(t, s.Untracked())
+	})
+}
+
 // TestPRState_ApplySelfRegistration pins the EnsurePRRegistered fill-only
-// upsert: invalid targets write nothing, head/target/title only fill, the
-// branch is replaced, and the owner seeds only when the target was empty.
+// upsert: head/target/title only fill, the branch is replaced, and the owner
+// seeds only when the target was empty.
 func TestPRState_ApplySelfRegistration(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
-		name                       string
-		nilState                   bool
-		stored                     PRState
-		branch, head, target       string
-		title, agent               string
-		want                       bool
-		wantBranch, wantHead       string
-		wantTarget, wantTitle      string
-		wantAgent                  string
-		wantPriorHeads             []string
-		wantRegistered, wantUntrkd bool
+		name      string
+		stored    PRState
+		branch    string
+		head      string
+		target    string
+		title     string
+		agent     string
+		want      bool
+		wantState PRState
 	}{
-		{name: "nil state writes nothing", nilState: true, target: "100000000000000009"},
-		{name: "invalid target writes nothing", branch: "dependabot/x", head: "h1", target: "dispatch-uuid", title: "T", wantUntrkd: true},
 		{
 			name: "unregistered dependabot fills everything without an owner", branch: " dependabot/x ", head: "h1", target: "100000000000000009", title: " T ", want: true,
-			wantBranch: "dependabot/x", wantHead: "h1", wantTarget: "100000000000000009", wantTitle: "T",
+			wantState: PRState{Branch: "dependabot/x", HeadSHA: "h1", TargetID: "100000000000000009", Title: "T"},
 		},
 		{
 			name: "insert seeds the lowercased body owner", head: "h1", target: "100000000000000002", title: "T", agent: " Miorine ", want: true,
-			wantHead: "h1", wantTarget: "100000000000000002", wantTitle: "T", wantAgent: "miorine",
+			wantState: PRState{HeadSHA: "h1", TargetID: "100000000000000002", Title: "T", Agent: "miorine"},
 		},
 		{
 			name: "insert claims over a hinted owner", stored: PRState{Agent: "aerial"}, target: "100000000000000002", agent: "miorine", want: true,
-			wantTarget: "100000000000000002", wantAgent: "miorine",
+			wantState: PRState{TargetID: "100000000000000002", Agent: "miorine"},
 		},
 		{
 			name: "insert after register only fills an empty owner", stored: PRState{Registered: true, Agent: "aerial"}, target: "100000000000000002", agent: "miorine", want: true,
-			wantTarget: "100000000000000002", wantAgent: "aerial", wantRegistered: true,
+			wantState: PRState{Registered: true, TargetID: "100000000000000002", Agent: "aerial"},
 		},
 		{
 			name: "stored target wins and keeps the owner", stored: PRState{Branch: "feat", HeadSHA: "h1", TargetID: "100000000000000001", Title: "Old", Agent: "aerial"},
 			branch: "feat", head: "h2", target: "100000000000000009", title: "New", agent: "miorine",
-			wantBranch: "feat", wantHead: "h1", wantTarget: "100000000000000001", wantTitle: "Old", wantAgent: "aerial",
+			wantState: PRState{Branch: "feat", HeadSHA: "h1", TargetID: "100000000000000001", Title: "Old", Agent: "aerial"},
 		},
 		{
 			name: "tracked PR fills a missing title and replaces the branch", stored: PRState{Branch: "old", HeadSHA: "h1", TargetID: "100000000000000001"},
 			branch: "new", head: "h1", target: "100000000000000009", title: "T", want: true,
-			wantBranch: "new", wantHead: "h1", wantTarget: "100000000000000001", wantTitle: "T",
+			wantState: PRState{Branch: "new", HeadSHA: "h1", TargetID: "100000000000000001", Title: "T"},
 		},
-		{name: "zero head does not fill", head: "0000000000000000000000000000000000000000", target: "100000000000000009", want: true, wantTarget: "100000000000000009"},
+		{name: "zero head does not fill", head: "0000000000000000000000000000000000000000", target: "100000000000000009", want: true, wantState: PRState{TargetID: "100000000000000009"}},
 		{
 			name: "empty head fill keeps no prior head", stored: PRState{TargetID: "100000000000000001"}, head: "h3", target: "100000000000000001", want: true,
-			wantHead: "h3", wantTarget: "100000000000000001",
+			wantState: PRState{HeadSHA: "h3", TargetID: "100000000000000001"},
 		},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			if tc.nilState {
-				var s *PRState
-				require.False(t, s.ApplySelfRegistration(tc.branch, tc.head, tc.target, tc.title, tc.agent))
-				return
-			}
 			s := tc.stored
 			s.Repo, s.PRNumber = "azylman/aerial", 2329
 			require.Equal(t, tc.want, s.ApplySelfRegistration(tc.branch, tc.head, tc.target, tc.title, tc.agent))
-			require.Equal(t, tc.wantBranch, s.Branch)
-			require.Equal(t, tc.wantHead, s.HeadSHA)
-			require.Equal(t, tc.wantTarget, s.TargetID)
-			require.Equal(t, tc.wantTitle, s.Title)
-			require.Equal(t, tc.wantAgent, s.Agent)
-			require.Equal(t, tc.wantPriorHeads, s.PriorHeads)
-			require.Equal(t, tc.wantRegistered, s.Registered)
-			require.Equal(t, tc.wantUntrkd, s.Untracked())
+			require.Equal(t, tc.wantState.Branch, s.Branch)
+			require.Equal(t, tc.wantState.HeadSHA, s.HeadSHA)
+			require.Equal(t, tc.wantState.TargetID, s.TargetID)
+			require.Equal(t, tc.wantState.Title, s.Title)
+			require.Equal(t, tc.wantState.Agent, s.Agent)
+			require.Equal(t, tc.wantState.PriorHeads, s.PriorHeads)
+			require.Equal(t, tc.wantState.Registered, s.Registered)
+			require.Equal(t, tc.wantState.Untracked(), s.Untracked())
 		})
 	}
 }
