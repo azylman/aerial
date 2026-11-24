@@ -6,7 +6,7 @@ common --incompatible_allow_tags_propagation
 build --remote_download_minimal
 build --rewind_lost_inputs
 build --incompatible_strict_action_env
-build --modify_execution_info=PackageTar=+no-remote
+build --modify_execution_info=PackageTar=+no-remote,OCIImage=+no-remote,CopyToDirectory=+no-remote
 
 test --test_env=PATH
 test --sandbox_tmpfs_path=/dev/shm
