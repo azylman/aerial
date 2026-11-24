@@ -195,16 +195,20 @@ type mcpProvisioningCase struct {
 }
 
 type mcpFallbacksAndErrorsCase struct {
-	name        string
-	target      RuleTarget
-	nilCfg      bool
-	servers     config.TargetMcpConfig
-	mcpConfig   string
-	fileConf    string
-	blocker     string
-	wantSyncErr bool
-	wantEmpty   bool
-	wantPresent []string
+	name          string
+	target        RuleTarget
+	nilCfg        bool
+	noDefaults    bool
+	servers       config.TargetMcpConfig
+	mcpConfig     string
+	fileConf      string
+	blocker       string
+	wantSyncErr   bool
+	wantEmpty     bool
+	wantScheduler bool
+	wantDiscord   bool
+	wantGitHub    bool
+	wantPresent   []string
 }
 
 // mcpRaw builds a server map from name, raw-JSON pairs.
@@ -404,7 +408,7 @@ func runMCPFallbacksAndErrorsCase(t *testing.T, tc mcpFallbacksAndErrorsCase) {
 
 	var cfg *config.Config
 	if !tc.nilCfg {
-		cfg = newMCPTestConfig(false, tc.wantEmpty, tc.mcpConfig, tc.servers)
+		cfg = newMCPTestConfig(false, tc.noDefaults, tc.mcpConfig, tc.servers)
 	}
 	if tc.fileConf != "" {
 		writeTestFile(t, filepath.Join(tmpData, "mcp.config.json"), tc.fileConf)
@@ -428,6 +432,13 @@ func runMCPFallbacksAndErrorsCase(t *testing.T, tc mcpFallbacksAndErrorsCase) {
 		t.Fatalf("failed parsing MCP config: %v", err)
 	}
 	servers := parsed["mcpServers"]
+	provCase := mcpProvisioningCase{
+		target:        tc.target,
+		wantScheduler: tc.wantScheduler,
+		wantDiscord:   tc.wantDiscord,
+		wantGitHub:    tc.wantGitHub,
+	}
+	assertTargetStandardServers(t, provCase, servers)
 	for _, name := range tc.wantPresent {
 		if servers[name] == nil {
 			t.Errorf("expected server %q in %s config: %+v", name, tc.target, servers)
@@ -436,9 +447,7 @@ func runMCPFallbacksAndErrorsCase(t *testing.T, tc mcpFallbacksAndErrorsCase) {
 	if tc.wantEmpty && len(servers) != 0 {
 		t.Errorf("expected empty servers when marshal fails on invalid raw JSON, got %v", servers)
 	}
-	if err := p.SyncMCP(context.Background(), cfg); err != nil {
-		t.Fatalf("SyncMCP failed: %v", err)
-	}
+	assertClaudeMCPServers(t, provCase, p, cfg)
 }
 
 func TestMCPProvisioning(t *testing.T) {
@@ -492,15 +501,18 @@ func TestMCPProvisioning_FallbacksAndErrors(t *testing.T) {
 		{name: "nil config yields no servers", target: TargetVoice, nilCfg: true},
 		{
 			name: "discord target overlays file-based mcp configuration", target: TargetDiscord,
+			wantScheduler: true, wantDiscord: true, wantGitHub: true,
 			fileConf:    `{"mcpServers":{"custom_override":{"serverUrl":"http://override:80"}}}`,
 			wantPresent: []string{"custom_override"},
 		},
 		{
 			name: "invalid json raw value is preserved verbatim and fails the marshal", target: TargetDiscord,
-			servers: config.TargetMcpConfig{Discord: mcpRaw("invalid_srv", `{not-valid-json`)}, wantEmpty: true,
+			noDefaults: true,
+			servers:    config.TargetMcpConfig{Discord: mcpRaw("invalid_srv", `{not-valid-json`)}, wantEmpty: true,
 		},
 		{
 			name: "cfg.Current().MCPConfig string fallback", target: TargetDiscord,
+			wantScheduler: true, wantDiscord: true, wantGitHub: true,
 			mcpConfig:   `{"mcpServers":{"fallback_srv":{"serverUrl":"http://fallback:80"}}}`,
 			wantPresent: []string{"fallback_srv"},
 		},

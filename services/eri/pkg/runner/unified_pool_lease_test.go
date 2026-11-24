@@ -79,7 +79,7 @@ type acquireLeaseSuiteCase struct {
 	name, customExistingSessID, respPayload, respErr, respStatus, expectPrevSess, expectSubstantive string
 	existingTurnCount, maxTurns, expectTurnCount                                                    int
 	onRotatedErr                                                                                    error
-	twoAttemptsThrottle                                                                             bool
+	twoAttemptsThrottle, expectCold                                                                 bool
 	expectExecErr, expectReleaseErr, expectRotated                                                  bool
 }
 
@@ -109,7 +109,7 @@ func assertLeaseExecutionState(t *testing.T, res *TurnResult, execErr error, lea
 	if tc.expectSubstantive != "" && (res == nil || !strings.Contains(res.Response, tc.expectSubstantive)) {
 		t.Errorf("expected response containing %q, got: %+v", tc.expectSubstantive, res)
 	}
-	if tc.name == "BasicExecution" && lease.IsCold() {
+	if tc.expectCold && lease.IsCold() {
 		t.Errorf("expected IsCold to be false after execution")
 	}
 	if tc.expectTurnCount > 0 && lease.TurnCount() != tc.expectTurnCount {
@@ -190,7 +190,7 @@ func runAcquireLeaseSuiteCase(t *testing.T, tc acquireLeaseSuiteCase) {
 	if err != nil {
 		t.Fatalf("unexpected AcquireLease error: %v", err)
 	}
-	if tc.name == "BasicExecution" && !lease.IsCold() {
+	if tc.expectCold && !lease.IsCold() {
 		t.Errorf("expected IsCold before execution to be true")
 	}
 	if tc.expectPrevSess != "" && lease.PreviousSessionID() != tc.expectPrevSess {
