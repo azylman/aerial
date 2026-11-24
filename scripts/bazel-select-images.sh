@@ -19,7 +19,7 @@ for f in "${CHANGED_FILES[@]}"; do
     case "$f" in .github/workflows/docker-publish.yml|.dockerignore) FORCE_ALL="true" ;; esac
 done
 OCI_SVCS=("eri" "haro" "coven" "docket-mcp" "kernel-mcp" "synapse" "transcripts" "vanadis" "vanadis-restate" "vanadis-nats" "prospera" "console" "redact-pattern" "coverage-ingest" "docs" "migrator" "eri-restate" "github-runner" "discord-mcp" "infisical-mcp")
-DOCKER_CFG=("eri-restate:.:./services/eri-restate/Dockerfile:services/eri-restate/Dockerfile" "github-runner:.:./services/github-runner/Dockerfile:services/github-runner/Dockerfile" "discord-mcp:.:./mcp/discord-mcp/Dockerfile:mcp/discord-mcp/Dockerfile" "infisical-mcp:./mcp/infisical-mcp:./mcp/infisical-mcp/Dockerfile:mcp/infisical-mcp/Dockerfile")
+DOCKER_CFG=("eri-restate:.:./services/eri-restate/Dockerfile:services/eri-restate/Dockerfile:eri_restate_base" "github-runner:.:./services/github-runner/Dockerfile:services/github-runner/Dockerfile:github_runner_base" "discord-mcp:.:./mcp/discord-mcp/Dockerfile:mcp/discord-mcp/Dockerfile:discord_mcp_base" "infisical-mcp:./mcp/infisical-mcp:./mcp/infisical-mcp/Dockerfile:mcp/infisical-mcp/Dockerfile:infisical_mcp_base")
 PKG_CHANGED="false"; for f in "${CHANGED_FILES[@]}"; do [[ "$f" == pkg/* ]] && { PKG_CHANGED="true"; break; }; done
 declare -A AFF SEL D_TRIG; for s in "${OCI_SVCS[@]}"; do AFF["$s"]="false"; SEL["$s"]="false"; D_TRIG["$s"]="false"; done
 for f in "${CHANGED_FILES[@]}"; do
@@ -32,8 +32,13 @@ for f in "${CHANGED_FILES[@]}"; do
 done
 [ "$PKG_CHANGED" = "true" ] && for s in "${OCI_SVCS[@]}"; do AFF["$s"]="true"; done
 for ent in "${DOCKER_CFG[@]}"; do
-    IFS=":" read -r s _ _ df_f <<< "$ent"
+    IFS=":" read -r s _ _ df_f brepo <<< "$ent"
     for f in "${CHANGED_FILES[@]}"; do [ "$f" = "$df_f" ] && { D_TRIG["$s"]="true"; AFF["$s"]="true"; SEL["$s"]="true"; break; }; done
+    if [ "${D_TRIG[$s]}" != "true" ] && [ -n "${brepo:-}" ] && [ -f "$REPO_ROOT/$df_f" ]; then
+        act_sha=$(sha256sum "$REPO_ROOT/$df_f" | awk '{print $1}')
+        rec_sha=$(awk -v r="$brepo" '/base_dockerfile_sha256:/ {for(i=1;i<=NF;i++) if($i ~ /^[0-9a-f]{64}$/) sha=$i} $0 ~ "name = \"" r "\"" {print sha; exit}' "$REPO_ROOT/MODULE.bazel")
+        [ -z "$rec_sha" ] || [ "$act_sha" != "$rec_sha" ] && { D_TRIG["$s"]="true"; AFF["$s"]="true"; SEL["$s"]="true"; echo "Base Dockerfile hash for $s differs from MODULE.bazel ($brepo); falling back to type=docker" >&2; }
+    fi
 done
 CAND_OCI=()
 if [ "$FORCE_ALL" = "true" ]; then CAND_OCI=("${OCI_SVCS[@]}"); else
