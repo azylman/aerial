@@ -433,56 +433,105 @@ func TestPRObjectService_DeploySuccessMergedStaleHead(t *testing.T) {
 	}
 }
 
-// TestPRObjectService_CheckFailedHeadRecovery pins check-driven head
-// recovery: a stale check_failed event whose head GitHub confirms as the
-// PR live open head adopts it with the synchronize sequence before the
-// check mutation applies; anything GitHub does not confirm still drops
-// stale without persisting, fetching, or erroring to Restate.
-func TestPRObjectService_CheckFailedHeadRecovery(t *testing.T) {
+// TestPRObjectService_CheckFailedHeadRecovery_Adopt pins the adoption
+// branch of check-driven head recovery: empty stored head or GitHub-confirmed
+// open head adopts the event head with synchronize sequencing, resolves any
+// stored conflict, and records ci_failed.
+func TestPRObjectService_CheckFailedHeadRecovery_Adopt(t *testing.T) {
 	t.Parallel()
 	activeH2 := []sentCall{prIndexSend(PRIndexEvent{Repo: "azylman/aerial", PRNumber: 101, HeadSHA: "h2", Lifecycle: IndexActive})}
 	tests := []struct {
 		name         string
 		storedHead   string
 		storedStatus string
-		storedMerge  string
-		storedTerm   TerminalState
-		prior        []string
 		conflictPub  string
 		evHead       string
 		noGitHub     bool
-		fetchNumber  int
 		fetchState   string
 		fetchHead    string
-		fetchStatus  int
-		wantSet      bool
 		wantHead     string
 		wantStatus   string
 		wantFailedCI string
-		wantConflict string
 		wantCalls    []string
 		wantSends    []sentCall
 	}{
-		{name: "empty stored head applies without fetch", evHead: "h2", noGitHub: true, wantSet: true, wantHead: "h2", wantStatus: RegistryStatusCIFailed, wantFailedCI: "h2", wantSends: activeH2},
-		{name: "adopts github-confirmed head and records ci_failed", storedHead: "h1", storedStatus: RegistryStatusOpen, evHead: "h2", fetchState: "open", fetchHead: "h2", wantSet: true, wantHead: "h2", wantStatus: RegistryStatusCIFailed, wantFailedCI: "h2", wantCalls: []string{"fetch 101"}, wantSends: activeH2},
-		{name: "resolves stored conflict on adopt", storedHead: "h1", storedStatus: RegistryStatusConflict, conflictPub: "h1", evHead: "h2", fetchState: "open", fetchHead: "h2", wantSet: true, wantHead: "h2", wantStatus: RegistryStatusCIFailed, wantFailedCI: "h2", wantCalls: []string{"fetch 101"}, wantSends: activeH2},
-		{name: "fetch error drops stale", storedHead: "h1", storedStatus: RegistryStatusOpen, evHead: "h2", fetchStatus: 502, wantCalls: []string{"fetch 101"}},
-		{name: "closed pr on github drops", storedHead: "h1", storedStatus: RegistryStatusOpen, evHead: "h2", fetchState: "closed", fetchHead: "h2", wantCalls: []string{"fetch 101"}},
-		{name: "wrong pr number drops", storedHead: "h1", storedStatus: RegistryStatusOpen, evHead: "h2", fetchNumber: 102, fetchState: "open", fetchHead: "h2", wantCalls: []string{"fetch 101"}},
-		{name: "head mismatch drops", storedHead: "h1", storedStatus: RegistryStatusOpen, evHead: "h2", fetchState: "open", fetchHead: "h9", wantCalls: []string{"fetch 101"}},
-		{name: "prior head redelivers without fetch", storedHead: "h1", storedStatus: RegistryStatusOpen, prior: []string{"h2"}, evHead: "h2", fetchState: "open", fetchHead: "h2"},
-		{name: "nil github drops silently", storedHead: "h1", storedStatus: RegistryStatusOpen, evHead: "h2", noGitHub: true},
-		{name: "terminal absorbs without fetch", storedHead: "h1", storedStatus: RegistryStatusMerged, storedMerge: "m1", storedTerm: TerminalMerged, evHead: "h2", fetchState: "open", fetchHead: "h2"},
+		{name: "empty stored head applies without fetch", evHead: "h2", noGitHub: true, wantHead: "h2", wantStatus: RegistryStatusCIFailed, wantFailedCI: "h2", wantSends: activeH2},
+		{name: "adopts github-confirmed head and records ci_failed", storedHead: "h1", storedStatus: RegistryStatusOpen, evHead: "h2", fetchState: "open", fetchHead: "h2", wantHead: "h2", wantStatus: RegistryStatusCIFailed, wantFailedCI: "h2", wantCalls: []string{"fetch 101"}, wantSends: activeH2},
+		{name: "resolves stored conflict on adopt", storedHead: "h1", storedStatus: RegistryStatusConflict, conflictPub: "h1", evHead: "h2", fetchState: "open", fetchHead: "h2", wantHead: "h2", wantStatus: RegistryStatusCIFailed, wantFailedCI: "h2", wantCalls: []string{"fetch 101"}, wantSends: activeH2},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			seed := NewPRState("azylman/aerial", 101)
-			seed.HeadSHA, seed.MergeSHA, seed.Status, seed.Terminal = tc.storedHead, tc.storedMerge, tc.storedStatus, tc.storedTerm
-			seed.PriorHeads = append([]string(nil), tc.prior...)
+			seed.HeadSHA, seed.Status = tc.storedHead, tc.storedStatus
 			if tc.conflictPub != "" {
 				seed.MarkConflictPublished(tc.conflictPub)
 			}
+			mc, rec := newStateMock(t, seed)
+			stubRun(mc, false)
+			var gh *fakeGitHub
+			if !tc.noGitHub {
+				gh = &fakeGitHub{
+					fetches: map[int]fetchResult{101: {pr: GitHubPR{Number: 101, State: tc.fetchState, Head: GitHubPRRef{SHA: tc.fetchHead}}}},
+				}
+			}
+			svc := NewPRObjectService()
+			if gh != nil {
+				svc = svc.WithGitHub(gh)
+			}
+			err := svc.HandleCheckFailed(restate.WithMockContext(mc), PREvent{Repo: "azylman/aerial", PRNumber: 101, HeadSHA: tc.evHead, CheckName: "ci"})
+			require.NoError(t, err)
+			require.True(t, rec.setCalled)
+			if gh != nil {
+				require.Equal(t, tc.wantCalls, gh.Calls())
+			}
+			require.NotNil(t, rec.saved)
+			require.Equal(t, tc.wantHead, rec.saved.HeadSHA)
+			require.Equal(t, tc.wantStatus, rec.saved.Status)
+			require.Equal(t, tc.wantFailedCI, rec.saved.FailedCISHA)
+			require.Empty(t, rec.saved.ConflictPublished)
+			assertSends(t, rec.sends.snapshot(), tc.wantSends)
+		})
+	}
+}
+
+// TestPRObjectService_CheckFailedHeadRecovery_DropAndAbsorb pins check-driven
+// head recovery drop and absorb paths: unconfirmed heads (fetch errors, closed PR,
+// wrong PR number, head mismatch, prior redeliveries, nil GitHub client) and
+// terminal states drop or absorb without mutating or re-saving state.
+func TestPRObjectService_CheckFailedHeadRecovery_DropAndAbsorb(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name        string
+		storedHead  string
+		storedMerge string
+		storedTerm  TerminalState
+		prior       []string
+		evHead      string
+		noGitHub    bool
+		fetchNumber int
+		fetchState  string
+		fetchHead   string
+		fetchStatus int
+		wantCalls   []string
+	}{
+		{name: "fetch error drops stale", storedHead: "h1", evHead: "h2", fetchStatus: 502, wantCalls: []string{"fetch 101"}},
+		{name: "closed pr on github drops", storedHead: "h1", evHead: "h2", fetchState: "closed", fetchHead: "h2", wantCalls: []string{"fetch 101"}},
+		{name: "wrong pr number drops", storedHead: "h1", evHead: "h2", fetchNumber: 102, fetchState: "open", fetchHead: "h2", wantCalls: []string{"fetch 101"}},
+		{name: "head mismatch drops", storedHead: "h1", evHead: "h2", fetchState: "open", fetchHead: "h9", wantCalls: []string{"fetch 101"}},
+		{name: "prior head redelivers without fetch", storedHead: "h1", prior: []string{"h2"}, evHead: "h2", fetchState: "open", fetchHead: "h2"},
+		{name: "nil github drops silently", storedHead: "h1", evHead: "h2", noGitHub: true},
+		{name: "terminal absorbs without fetch", storedHead: "h1", storedMerge: "m1", storedTerm: TerminalMerged, evHead: "h2", fetchState: "open", fetchHead: "h2"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			seed := NewPRState("azylman/aerial", 101)
+			seed.HeadSHA, seed.MergeSHA, seed.Status, seed.Terminal = tc.storedHead, tc.storedMerge, RegistryStatusOpen, tc.storedTerm
+			if tc.storedTerm != "" {
+				seed.Status = RegistryStatusMerged
+			}
+			seed.PriorHeads = append([]string(nil), tc.prior...)
 			mc, rec := newStateMock(t, seed)
 			stubRun(mc, false)
 			var gh *fakeGitHub
@@ -504,19 +553,10 @@ func TestPRObjectService_CheckFailedHeadRecovery(t *testing.T) {
 			}
 			err := svc.HandleCheckFailed(restate.WithMockContext(mc), PREvent{Repo: "azylman/aerial", PRNumber: 101, HeadSHA: tc.evHead, CheckName: "ci"})
 			require.NoError(t, err)
-			require.Equal(t, tc.wantSet, rec.setCalled)
+			require.False(t, rec.setCalled)
 			if gh != nil {
 				require.Equal(t, tc.wantCalls, gh.Calls())
 			}
-			if !tc.wantSet {
-				return
-			}
-			require.NotNil(t, rec.saved)
-			require.Equal(t, tc.wantHead, rec.saved.HeadSHA)
-			require.Equal(t, tc.wantStatus, rec.saved.Status)
-			require.Equal(t, tc.wantFailedCI, rec.saved.FailedCISHA)
-			require.Equal(t, tc.wantConflict, rec.saved.ConflictPublished)
-			assertSends(t, rec.sends.snapshot(), tc.wantSends)
 		})
 	}
 }
