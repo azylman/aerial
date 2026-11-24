@@ -2,11 +2,11 @@
 set -euo pipefail
 REPO_OWNER="azylman"; REPO_NAME="${AERIAL_REPO_NAME:-aerial}"; REPO_EXP=0; DEFAULT_BRANCH="main"; GITHUB_API="${GITHUB_API_URL:-https://api.github.com}"; PROXY="http://127.0.0.1:4028"; LOOP=0
 if [ -z "${GITHUB_PAT:-}" ] && { [ "${AERIAL_USE_LOOPBACK_GITHUB:-0}" = "1" ] || [ "$(curl -s -o /dev/null -w "%{http_code}" --connect-timeout 1 -m 2 "$PROXY/healthz" || true)" = "200" ]; }; then LOOP=1; GITHUB_API="$PROXY/internal/github-api"; fi
-norm_repo() { case "${1##*/}" in core|aerial|"") echo aerial;; config|aerial-config) echo aerial-config;; sidecars|aerial-sidecars) echo aerial-sidecars;; *) echo "${1%.git}";; esac; }
+norm_repo() { local r="${1##*/}"; r="${r%.git}"; case "$r" in core|aerial|"") echo aerial;; config|aerial-config) echo aerial-config;; sidecars|aerial-sidecars) echo aerial-sidecars;; *) echo "$r";; esac; }
 parse_remote() { local u; u=$(git remote get-url origin 2>/dev/null || true); u="${u%.git}"; if [[ "$u" =~ (github\.com|/internal/github-git)[:/]([^/]+)/([^/]+)$ ]]; then REPO_OWNER="${BASH_REMATCH[2]}"; [ "$REPO_EXP" = "0" ] && REPO_NAME="$(norm_repo "${BASH_REMATCH[3]}")"; fi; }
 auth_hdr() { [ "$LOOP" = "1" ] && echo loopback || { [ -n "${GITHUB_PAT:-}" ] && printf "x-access-token:%s" "$GITHUB_PAT" | base64 | tr -d '\r\n' || { echo "ERROR: GITHUB_PAT required" >&2; exit 1; }; }; }
 gh_call() { local h=(); [ -n "${GITHUB_PAT:-}" ] && h=(-H "Authorization: token $GITHUB_PAT"); curl -s --connect-timeout 3 -m 15 -w "\n%{http_code}" "${h[@]}" -H "Accept: application/vnd.github.v3+json" "$@"; }
-git_auth() { export GIT_TERMINAL_PROMPT=0 GIT_CONFIG_COUNT=2 GIT_CONFIG_KEY_0="http.extraHeader" GIT_CONFIG_VALUE_0="AUTHORIZATION: basic $(auth_hdr)" GIT_CONFIG_KEY_1="http.version" GIT_CONFIG_VALUE_1="HTTP/1.1"; }
+git_auth() { local h; h="$(auth_hdr)" || exit 1; export GIT_TERMINAL_PROMPT=0 GIT_CONFIG_COUNT=2 GIT_CONFIG_KEY_0="http.extraHeader" GIT_CONFIG_VALUE_0="AUTHORIZATION: basic $h" GIT_CONFIG_KEY_1="http.version" GIT_CONFIG_VALUE_1="HTTP/1.1"; }
 get_v() { if [ "$1" = "$2" ]; then [ $3 -ge 2 ] || { echo "ERROR: $1 requires value" >&2; exit 1; }; echo "$4"; else echo "${1#*=}"; fi; }
 is_ok() { [[ "${1:-}" =~ ^[0-9]+$ ]] && [ "$1" -ge 200 ] && [ "$1" -lt 300 ]; }
 anc() { git merge-base --is-ancestor "$1" "$2" 2>/dev/null || { [ -f .git/shallow ] && git fetch --unshallow origin >/dev/null 2>&1 && git merge-base --is-ancestor "$1" "$2" 2>/dev/null; }; }
@@ -70,7 +70,7 @@ elif [ "$CMD" = "submit" ]; then
   if [ -z "$ex_pr" ]; then
     raw=$(gh_call -X POST "$GITHUB_API/repos/$REPO_OWNER/$REPO_NAME/pulls" -d "$(jq -n --arg t "$title" --arg h "$cur_b" --arg b "$DEFAULT_BRANCH" --arg bd "$BODY" '{title:$t,head:$h,base:$b,body:$bd}')")
     p_code=$(echo "$raw" | tail -n1); p_resp=$(echo "$raw" | sed '$d')
-    if is_ok "$p_code"; then ex_pr="$p_resp"; elif [ "$p_code" = "422" ]; then raw_get=$(gh_call -X GET "$GITHUB_API/repos/$REPO_OWNER/$REPO_NAME/pulls?state=open&head=$REPO_OWNER:$enc_b"); is_ok "$(echo "$raw_get" | tail -n1)" && ex_pr=$(echo "$raw_get" | sed '$d' | jq -c '.[0] // empty' 2>/dev/null || true); fi; [ -z "$ex_pr" ] && { [ -z "$r_sha" ] && gh_call -X DELETE "$GITHUB_API/repos/$REPO_OWNER/$REPO_NAME/git/refs/heads/$enc_b" >/dev/null 2>&1 || true; echo "ERROR: Failed to create Pull Request (HTTP $p_code): $p_resp" >&2; exit 1; }
+    if is_ok "$p_code"; then ex_pr="$p_resp"; elif [ "$p_code" = "422" ]; then raw_get=$(gh_call -X GET "$GITHUB_API/repos/$REPO_OWNER/$REPO_NAME/pulls?state=open&head=$REPO_OWNER:$enc_b"); is_ok "$(echo "$raw_get" | tail -n1)" && ex_pr=$(echo "$raw_get" | sed '$d' | jq -c '.[0] // empty' 2>/dev/null || true); fi; [ -z "$ex_pr" ] && { [ -z "$r_sha" ] && gh_call -X DELETE "$GITHUB_API/repos/$REPO_OWNER/$REPO_NAME/git/refs/heads/$cur_b" >/dev/null 2>&1 || true; echo "ERROR: Failed to create Pull Request (HTTP $p_code): $p_resp" >&2; exit 1; }
   fi
   p_num=$(echo "$ex_pr" | jq -r '.number // empty'); p_url=$(echo "$ex_pr" | jq -r '.html_url // empty'); c_sha=$(git rev-parse HEAD); [ -z "$p_num" ] && { echo "ERROR: Failed PR: $ex_pr" >&2; exit 1; }
   jq -n --arg s "submitted" --arg u "$p_url" --argjson n "$p_num" --arg b "$cur_b" --arg c "$c_sha" --arg r "$REPO_NAME" --arg m "PR #$p_num submitted on $REPO_OWNER/$REPO_NAME. Continuous delivery automated via push events. End active turn now." '{status:$s,pr_url:$u,pr_number:$n,branch:$b,commit_sha:$c,async:true,repo:$r,turn_action:"end_turn",message:$m}'

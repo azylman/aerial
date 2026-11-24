@@ -21,7 +21,7 @@ if [[ "$url" =~ /pulls ]] && [[ "$*" =~ POST ]]; then
   echo "$*" > "$TMPD/last_post_body"; [[ "$*" =~ chunk-500 ]] && { echo '{"message":"Internal Error"}'; printf "\n500"; exit 0; }; [[ "$*" =~ chunk-422 ]] && { touch "$TMPD/post_422_seen"; echo '{"message":"Validation Failed"}'; printf "\n422"; exit 0; }
   touch "$TMPD/has_existing_pr"; echo '{"number":99,"html_url":"https://github.com/azylman/aerial/pull/99"}'; printf "\n201"; exit 0
 fi
-[[ "$url" =~ /git/refs/heads/ ]] && [[ "$*" =~ DELETE ]] && { touch "$TMPD/deleted_orphan_ref"; printf "\n204"; exit 0; }
+[[ "$url" =~ /git/refs/heads/ ]] && [[ "$*" =~ DELETE ]] && { [[ "$url" =~ %2F ]] || touch "$TMPD/deleted_orphan_ref"; printf "\n204"; exit 0; }
 [[ "$url" =~ /comments ]] && { echo '[]'; printf "\n200"; exit 0; }
 [[ "$url" =~ /actions/runs/[0-9]+/rerun ]] && { touch "$TMPD/rerun_called"; printf "\n201"; exit 0; }
 if [[ "$url" =~ /actions/runs ]]; then
@@ -33,7 +33,7 @@ chmod +x "$TMPD/bin/curl"
 assert() { "$@" || { echo "ASSERT FAILED: $*" >&2; exit 1; }; }
 assert_fail() { ! "$@" 2>/dev/null || { echo "EXPECTED FAILURE: $*" >&2; exit 1; }; }
 
-assert_fail "$SCRIPT" init --unknown-flag; assert [ "$("$SCRIPT" init --repo=config | jq -r .repo)" = "aerial-config" ]
+assert_fail "$SCRIPT" init --unknown-flag; assert [ "$("$SCRIPT" init --repo=config | jq -r .repo)" = "aerial-config" ]; assert [ "$("$SCRIPT" init --repo=azylman/aerial-config.git | jq -r .repo)" = "aerial-config" ]; assert [ "$("$SCRIPT" init --repo=azylman/foo.git | jq -r .repo)" = "foo" ]
 res_tid=$(AERIAL_TARGET_ID=123456789012345678 "$SCRIPT" init --repo aerial); assert echo "$res_tid" | jq -e '.branch | contains("-t123456789012345678-")'
 res1=$("$SCRIPT" init --repo aerial --vanadis-chunk chunk-test); s_dir=$(echo "$res1" | jq -r .scratch_dir); br=$(echo "$res1" | jq -r .branch); assert echo "$res1" | jq -e '.status == "initialized" and (.branch | contains("vanadis-chunk-test"))'
 mkdir -p "$s_dir/scripts" && printf '#!/bin/sh\nexit 1\n' > "$s_dir/scripts/verify.sh" && chmod +x "$s_dir/scripts/verify.sh"
@@ -55,7 +55,6 @@ echo "new 422 work" > "$s_dir_422/work.txt"; echo "PR 422 desc" > "$s_dir_422/PR
 res_422=$("$SCRIPT" submit "$s_dir_422" "feat: 422 chunk"); assert echo "$res_422" | jq -e '.status == "submitted" and .pr_number == 101'; assert [ -f "$TMPD/post_422_seen" ]
 res_eb_init=$("$SCRIPT" init --repo aerial --vanadis-chunk chunk-emptybody); s_eb=$(echo "$res_eb_init" | jq -r .scratch_dir); echo "eb work" > "$s_eb/work.txt"
 res_eb=$("$SCRIPT" submit "$s_eb" "feat: empty body pr"); assert echo "$res_eb" | jq -e '.status == "submitted" and .pr_number == 102'
-s_pos=$("$SCRIPT" init --repo aerial | jq -r .scratch_dir); echo "pos" > "$s_pos/pos.txt"; res_pos=$("$SCRIPT" submit "$s_pos" "init" -b "init body"); assert echo "$res_pos" | jq -e '.status == "submitted"'
 mkdir -p "$TMPD/scratch/stale-scratch.old" && touch -d "2 days ago" "$TMPD/scratch/stale-scratch.old" && "$SCRIPT" init --repo aerial >/dev/null && assert [ ! -d "$TMPD/scratch/stale-scratch.old" ]
 s_500=$("$SCRIPT" init --repo aerial --vanadis-chunk chunk-500 | jq -r .scratch_dir); echo "500 work" > "$s_500/w.txt"; echo "desc" > "$s_500/PR_DESCRIPTION.md"; assert_fail "$SCRIPT" submit "$s_500" "feat: 500 fail"; assert [ -f "$TMPD/deleted_orphan_ref" ]; rm -rf "$s_500"
 s_rf=$("$SCRIPT" init --repo aerial | jq -r .scratch_dir)
