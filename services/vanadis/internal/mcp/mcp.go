@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
@@ -17,6 +18,7 @@ import (
 	"github.com/azylman/aerial/pkg/discordutil"
 	"github.com/azylman/aerial/pkg/httpkit"
 	"github.com/azylman/aerial/pkg/k8sauth"
+	"github.com/azylman/aerial/pkg/strutil"
 	"github.com/azylman/aerial/services/vanadis/internal/model"
 	"github.com/azylman/aerial/services/vanadis/internal/restate"
 	"github.com/azylman/aerial/services/vanadis/internal/store"
@@ -51,6 +53,39 @@ type MCPChunkBrief struct {
 	Repo       string   `json:"repo"`
 	PRNumber   int      `json:"pr_number"`
 	DependsOn  []string `json:"depends_on"`
+}
+
+// MCPCreateBuildArgs defines arguments for create_build tool.
+type MCPCreateBuildArgs struct {
+	ID            string               `json:"id,omitempty"             jsonschema:"Optional unique build identifier (e.g. 'build-1793405777-309e5517')."`
+	ThreadID      string               `json:"thread_id"                jsonschema:"Discord thread snowflake or normalized identifier."`
+	Tier          int                  `json:"tier,omitempty"           jsonschema:"Build execution tier (default 2)."`
+	Title         string               `json:"title,omitempty"          jsonschema:"High-level build title."`
+	Objective     string               `json:"objective"                jsonschema:"Primary objective of the build."`
+	SharedContext string               `json:"shared_context,omitempty" jsonschema:"Shared context across all chunks."`
+	Agent         string               `json:"agent,omitempty"          jsonschema:"Target execution agent override."`
+	Chunks        []MCPCreateChunkItem `json:"chunks"                   jsonschema:"List of initial chunks forming the build DAG."`
+}
+
+// MCPCreateBuildOutput defines output for create_build tool.
+type MCPCreateBuildOutput struct {
+	Status       string `json:"status"`
+	BuildID      string `json:"build_id"`
+	ThreadID     string `json:"thread_id"`
+	Tier         int    `json:"tier"`
+	ChunkCount   int    `json:"chunk_count"`
+	FirstChunkID string `json:"first_chunk_id"`
+}
+
+// MCPCancelBuildArgs defines arguments for cancel_build tool.
+type MCPCancelBuildArgs struct {
+	BuildID string `json:"build_id" jsonschema:"Vanadis build identifier to cancel."`
+}
+
+// MCPCancelBuildOutput defines output for cancel_build tool.
+type MCPCancelBuildOutput struct {
+	Status  string `json:"status"`
+	BuildID string `json:"build_id"`
 }
 
 // MCPGetBuildArgs defines arguments for get_build tool.
@@ -713,9 +748,131 @@ func (h *Handler) handleMCPCompleteChunk(ctx context.Context, args MCPCompleteCh
 	return MCPCompleteChunkOutput(resp), nil
 }
 
+func (h *Handler) handleMCPCreateBuild(ctx context.Context, args MCPCreateBuildArgs) (MCPCreateBuildOutput, error) {
+	if h.Store == nil {
+		return MCPCreateBuildOutput{}, errors.New("vanadis store not configured")
+	}
+	threadID := discordutil.NormalizeThreadID(args.ThreadID)
+	objective := strings.TrimSpace(args.Objective)
+	if !discordutil.IsSnowflake(threadID) || objective == "" || len(args.Chunks) == 0 {
+		return MCPCreateBuildOutput{}, fmt.Errorf("%w: valid thread_id, objective, and chunks are required", model.ErrInvalidBuildInput)
+	}
+
+	targetAgent := defaultAgent
+	if h.authEnabled() {
+		caller, ok := k8sauth.CallerFromContext(ctx)
+		if !ok {
+			return MCPCreateBuildOutput{}, errors.New("unauthorized: missing caller identity")
+		}
+		resolved, err := h.Auth.AuthorizeTarget(ctx, caller, "builds", "create", args.Agent)
+		if err != nil {
+			return MCPCreateBuildOutput{}, err
+		}
+		targetAgent = resolved
+	} else if a := strings.TrimSpace(args.Agent); a != "" {
+		targetAgent = a
+	}
+
+	inputs := make([]model.CreateChunkInput, len(args.Chunks))
+	for i, c := range args.Chunks {
+		inputs[i] = model.CreateChunkInput{
+			ID:                 c.ID,
+			Mode:               c.Mode,
+			Repo:               c.Repo,
+			Title:              c.Title,
+			Instructions:       c.Instructions,
+			TargetFiles:        c.TargetFiles,
+			TargetSymbols:      c.TargetSymbols,
+			Effort:             c.Effort,
+			AcceptanceCriteria: c.AcceptanceCriteria,
+			DependsOn:          c.DependsOn,
+		}
+	}
+
+	buildID := strutil.FirstNonEmpty(strings.TrimSpace(args.ID), buildplan.GenerateBuildID())
+	tier := args.Tier
+	if tier <= 0 {
+		tier = 2
+	}
+	title := strutil.FirstNonEmpty(strings.TrimSpace(args.Title), objective)
+
+	chunks, err := model.ParseCreateBuildChunks(buildID, time.Now().UTC(), inputs)
+	if err != nil {
+		return MCPCreateBuildOutput{}, fmt.Errorf("%w: %w", model.ErrInvalidBuildInput, err)
+	}
+
+	req := model.CreateBuildRequest{
+		ID:            buildID,
+		Agent:         targetAgent,
+		ThreadID:      threadID,
+		Tier:          tier,
+		Title:         title,
+		Objective:     objective,
+		SharedContext: args.SharedContext,
+		Chunks:        inputs,
+	}
+
+	var created model.VanadisBuild
+	path := h.Restate.ObjectPath(buildplan.BuildServiceName(""), buildID, "Create")
+	if err := h.Restate.CallIngress(ctx, path, req, &created); err != nil {
+		return MCPCreateBuildOutput{}, err
+	}
+
+	outTier := tier
+	if created.Tier > 0 {
+		outTier = created.Tier
+	}
+
+	return MCPCreateBuildOutput{
+		Status:       "accepted",
+		BuildID:      strutil.FirstNonEmpty(created.ID, buildID),
+		ThreadID:     strutil.FirstNonEmpty(created.ThreadID, threadID),
+		Tier:         outTier,
+		ChunkCount:   len(chunks),
+		FirstChunkID: chunks[0].ID,
+	}, nil
+}
+
+func (h *Handler) handleMCPCancelBuild(ctx context.Context, args MCPCancelBuildArgs) (MCPCancelBuildOutput, error) {
+	buildID, err := h.requireStoreAndBuildID(args.BuildID)
+	if err != nil {
+		return MCPCancelBuildOutput{}, err
+	}
+	buildService, err := h.authorizeBuildMutation(ctx, buildID)
+	if err != nil {
+		return MCPCancelBuildOutput{}, err
+	}
+
+	var cancelled model.VanadisBuild
+	if err := h.Restate.CallIngress(ctx, h.Restate.ObjectPath(buildService, buildID, "Cancel"), struct{}{}, &cancelled); err != nil {
+		return MCPCancelBuildOutput{}, err
+	}
+
+	return MCPCancelBuildOutput{
+		Status:  "cancelled",
+		BuildID: buildID,
+	}, nil
+}
+
 // RegisterTools registers every Vanadis MCP tool on the given server.
 func (h *Handler) RegisterTools(mcpServer *mcp.Server) {
 	h.registerRetryActionTool(mcpServer)
+	mcp.AddTool(mcpServer, &mcp.Tool{
+		Name:        "create_build",
+		Description: "Create and enqueue a new multi-chunk Vanadis build DAG.",
+	}, func(ctx context.Context, _ *mcp.CallToolRequest, args MCPCreateBuildArgs) (*mcp.CallToolResult, MCPCreateBuildOutput, error) {
+		out, err := h.handleMCPCreateBuild(ctx, args)
+		return nil, out, err
+	})
+
+	mcp.AddTool(mcpServer, &mcp.Tool{
+		Name:        "cancel_build",
+		Description: "Cancel an active or running Vanadis build.",
+	}, func(ctx context.Context, _ *mcp.CallToolRequest, args MCPCancelBuildArgs) (*mcp.CallToolResult, MCPCancelBuildOutput, error) {
+		out, err := h.handleMCPCancelBuild(ctx, args)
+		return nil, out, err
+	})
+
 	mcp.AddTool(mcpServer, &mcp.Tool{
 		Name:        "get_build",
 		Description: "Get concise build metadata, queue status, and chunk summaries by build ID or Discord thread ID.",
