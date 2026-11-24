@@ -424,31 +424,22 @@ func TestWorkerPool_SessionRotationInjectsToolActions(t *testing.T) {
 	}
 }
 
-// buildTurnPromptCase is one buildTurnPrompt scenario; newBuildTurnPromptFixture turns it into a turnExecution.
-type buildTurnPromptCase struct {
-	name                                    string
-	ambCfg                                  *config.AmbientContextConfig
-	resolverErr                             error
-	resolverText                            string
-	isCold, threadSnapshot                  bool
-	mode                                    string
-	histMsgs                                []HistoryMessage
-	fetchErr                                error
-	cachedSum, cachedMsgID                  string
-	wantResolverCalled, wantSummarizeThread bool
-	wantPromptContains, wantPromptExcludes  []string
-	wantSpans                               []wantPromptSpan
-	wantAbsent                              []string
+// buildTurnPromptAmbientCase is one scenario testing ambient context injection.
+type buildTurnPromptAmbientCase struct {
+	name               string
+	ambCfg             *config.AmbientContextConfig
+	resolverErr        error
+	resolverText       string
+	wantResolverCalled bool
+	wantPromptContains []string
+	wantPromptExcludes []string
+	wantSpans          []wantPromptSpan
+	wantAbsent         []string
 }
 
-func newBuildTurnPromptFixture(t *testing.T, tc buildTurnPromptCase, threadID string, tp trace.TracerProvider, resolverCalled *atomic.Bool) *turnExecution {
+func newAmbientTurnPromptFixture(t *testing.T, tc buildTurnPromptAmbientCase, threadID string, tp trace.TracerProvider, resolverCalled *atomic.Bool) *turnExecution {
 	t.Helper()
 	store := testStore(t)
-	if tc.cachedSum != "" {
-		if err := store.SaveThreadSummary(context.Background(), threadID, tc.cachedSum, tc.cachedMsgID); err != nil {
-			t.Fatalf("seed thread summary: %v", err)
-		}
-	}
 	pool := &WorkerPool{
 		ctx: context.Background(),
 		cfg: WorkerPoolConfig{
@@ -458,9 +449,6 @@ func newBuildTurnPromptFixture(t *testing.T, tc buildTurnPromptCase, threadID st
 				resolverCalled.Store(true)
 				return tc.resolverText, tc.resolverErr
 			},
-			HistoryFetcher: func(ctx context.Context, channelID, beforeID string, limit int) ([]HistoryMessage, error) {
-				return tc.histMsgs, tc.fetchErr
-			},
 			LLMFunc: func(ctx context.Context, model, prompt string) (string, error) {
 				t.Errorf("summarizer called while building the prompt")
 				return "", nil
@@ -468,22 +456,16 @@ func newBuildTurnPromptFixture(t *testing.T, tc buildTurnPromptCase, threadID st
 		},
 	}
 	return &turnExecution{
-		pool: pool, effectiveName: "kitchen", threadID: threadID, currentSessionID: "sess-amb-1", isCold: tc.isCold,
-		policy: config.ChannelPolicy{AmbientContext: tc.ambCfg, Mode: tc.mode},
+		pool: pool, effectiveName: "kitchen", threadID: threadID, currentSessionID: "sess-amb-1",
+		policy: config.ChannelPolicy{AmbientContext: tc.ambCfg},
 		burst:  []db.Message{{ID: "m1", ThreadID: threadID, Content: "turn off kitchen lights", CreatedAt: time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)}},
 	}
 }
 
-func TestBuildTurnPrompt(t *testing.T) {
+func TestBuildTurnPrompt_AmbientContext(t *testing.T) {
 	t.Parallel()
 	ambCfg := &config.AmbientContextConfig{Template: "Kitchen Temp: {{.temp}}"}
-	now := time.Now().UTC()
-	twoMsgs := []HistoryMessage{
-		{ID: "h-1", AuthorName: "Alice", Content: "plan the build", CreatedAt: now.Add(-time.Hour)},
-		{ID: "h-2", AuthorName: "Alice", Content: "ship it", CreatedAt: now.Add(-time.Minute)},
-	}
-	summaryOut := "<THREAD_SUMMARY>Shipping the build</THREAD_SUMMARY>"
-	tests := []buildTurnPromptCase{
+	tests := []buildTurnPromptAmbientCase{
 		{
 			name: "ConfiguredChannel", ambCfg: ambCfg, resolverText: "<ambient_context>\nKitchen Temp: 71F\n</ambient_context>", wantResolverCalled: true,
 			wantPromptContains: []string{"<ambient_context>", "Kitchen Temp: 71F", "turn off kitchen lights"},
@@ -506,6 +488,101 @@ func TestBuildTurnPrompt(t *testing.T) {
 			wantPromptContains: []string{"turn off kitchen lights"}, wantPromptExcludes: []string{"<ambient_context>"},
 			wantSpans: []wantPromptSpan{{name: spanPromptAmbientContext, parent: spanPrompt, errored: true}},
 		},
+	}
+	for i, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			threadID := fmt.Sprintf("t-btp-amb-%d", i)
+
+			var resolverCalled, untracedResolverCalled atomic.Bool
+			rec, tp, ctx, root := newPromptBuildRecorder()
+			te := newAmbientTurnPromptFixture(t, tc, threadID, tp, &resolverCalled)
+			te.buildTurnPrompt(ctx)
+			root.End()
+
+			// Same inputs without a recording tracer must yield byte-identical prompt text.
+			untraced := newAmbientTurnPromptFixture(t, tc, threadID, nil, &untracedResolverCalled)
+			untraced.buildTurnPrompt(context.Background())
+			if te.turnPrompt != untraced.turnPrompt {
+				t.Errorf("traced prompt differs from untraced prompt:\n%s\n---\n%s", te.turnPrompt, untraced.turnPrompt)
+			}
+
+			if called := resolverCalled.Load(); called != tc.wantResolverCalled {
+				t.Errorf("resolverCalled = %t, want %t", called, tc.wantResolverCalled)
+			}
+			for _, sub := range tc.wantPromptContains {
+				if !strings.Contains(te.turnPrompt, sub) {
+					t.Errorf("expected prompt containing %q", sub)
+				}
+			}
+			for _, sub := range tc.wantPromptExcludes {
+				if strings.Contains(te.turnPrompt, sub) {
+					t.Errorf("expected prompt NOT containing %q", sub)
+				}
+			}
+			assertPromptSpans(t, rec.Ended(), tc.wantSpans, tc.wantAbsent)
+		})
+	}
+}
+
+type promptSummaryCache struct {
+	summary string
+	msgID   string
+}
+
+type buildTurnPromptColdStartCase struct {
+	name                string
+	isCold              bool
+	threadSnapshot      bool
+	mode                string
+	histMsgs            []HistoryMessage
+	fetchErr            error
+	cached              promptSummaryCache
+	wantSummarizeThread bool
+	wantPromptContains  []string
+	wantPromptExcludes  []string
+	wantSpans           []wantPromptSpan
+	wantAbsent          []string
+}
+
+func newColdStartTurnPromptFixture(t *testing.T, tc buildTurnPromptColdStartCase, threadID string, tp trace.TracerProvider) *turnExecution {
+	t.Helper()
+	store := testStore(t)
+	if tc.cached.summary != "" {
+		if err := store.SaveThreadSummary(context.Background(), threadID, tc.cached.summary, tc.cached.msgID); err != nil {
+			t.Fatalf("seed thread summary: %v", err)
+		}
+	}
+	pool := &WorkerPool{
+		ctx: context.Background(),
+		cfg: WorkerPoolConfig{
+			Store:          store,
+			TracerProvider: tp,
+			HistoryFetcher: func(ctx context.Context, channelID, beforeID string, limit int) ([]HistoryMessage, error) {
+				return tc.histMsgs, tc.fetchErr
+			},
+			LLMFunc: func(ctx context.Context, model, prompt string) (string, error) {
+				t.Errorf("summarizer called while building the prompt")
+				return "", nil
+			},
+		},
+	}
+	return &turnExecution{
+		pool: pool, effectiveName: "kitchen", threadID: threadID, currentSessionID: "sess-amb-1", isCold: tc.isCold,
+		policy: config.ChannelPolicy{Mode: tc.mode},
+		burst:  []db.Message{{ID: "m1", ThreadID: threadID, Content: "turn off kitchen lights", CreatedAt: time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)}},
+	}
+}
+
+func TestBuildTurnPrompt_ColdStartHistory(t *testing.T) {
+	t.Parallel()
+	now := time.Now().UTC()
+	twoMsgs := []HistoryMessage{
+		{ID: "h-1", AuthorName: "Alice", Content: "plan the build", CreatedAt: now.Add(-time.Hour)},
+		{ID: "h-2", AuthorName: "Alice", Content: "ship it", CreatedAt: now.Add(-time.Minute)},
+	}
+	summaryOut := "<THREAD_SUMMARY>Shipping the build</THREAD_SUMMARY>"
+	tests := []buildTurnPromptColdStartCase{
 		{
 			name: "ColdNewThreadRunsOnRawLookback", isCold: true, threadSnapshot: true, histMsgs: twoMsgs, wantSummarizeThread: true,
 			wantPromptContains: []string{"ship it", "turn off kitchen lights"}, wantPromptExcludes: []string{"<THREAD_SUMMARY>"},
@@ -521,7 +598,7 @@ func TestBuildTurnPrompt(t *testing.T) {
 			wantAbsent: []string{spanPromptAmbientContext, spanPromptPreviousSession, spanPromptSummaryLLM, spanPromptSummarySave},
 		},
 		{
-			name: "ColdThreadCacheHit", isCold: true, threadSnapshot: true, histMsgs: twoMsgs, cachedSum: summaryOut, cachedMsgID: "h-2", wantSummarizeThread: true,
+			name: "ColdThreadCacheHit", isCold: true, threadSnapshot: true, histMsgs: twoMsgs, cached: promptSummaryCache{summary: summaryOut, msgID: "h-2"}, wantSummarizeThread: true,
 			wantPromptContains: []string{"Shipping the build", "ship it"},
 			wantSpans: []wantPromptSpan{
 				{name: spanPromptThreadSummary, parent: spanPrompt, attrs: []attribute.KeyValue{attrPromptSummaryOutcome.String("cache_hit")}},
@@ -530,7 +607,7 @@ func TestBuildTurnPrompt(t *testing.T) {
 			wantAbsent: []string{spanPromptSummaryLLM, spanPromptSummarySave},
 		},
 		{
-			name: "ColdThreadStaleSummaryStillInjected", isCold: true, threadSnapshot: true, histMsgs: twoMsgs, cachedSum: summaryOut, cachedMsgID: "h-0", wantSummarizeThread: true,
+			name: "ColdThreadStaleSummaryStillInjected", isCold: true, threadSnapshot: true, histMsgs: twoMsgs, cached: promptSummaryCache{summary: summaryOut, msgID: "h-0"}, wantSummarizeThread: true,
 			wantPromptContains: []string{"Shipping the build", "ship it"},
 			wantSpans: []wantPromptSpan{
 				{name: spanPromptThreadSummary, parent: spanPrompt, attrs: []attribute.KeyValue{attrPromptSummaryOutcome.String("stale")}},
@@ -538,7 +615,7 @@ func TestBuildTurnPrompt(t *testing.T) {
 			wantAbsent: []string{spanPromptSummaryLLM, spanPromptSummarySave},
 		},
 		{
-			name: "ColdThreadHistoryFetchFails", isCold: true, threadSnapshot: true, fetchErr: errors.New("discord 503"), cachedSum: summaryOut, cachedMsgID: "h-2", wantSummarizeThread: true,
+			name: "ColdThreadHistoryFetchFails", isCold: true, threadSnapshot: true, fetchErr: errors.New("discord 503"), cached: promptSummaryCache{summary: summaryOut, msgID: "h-2"}, wantSummarizeThread: true,
 			wantPromptContains: []string{"Shipping the build"},
 			wantSpans: []wantPromptSpan{
 				{name: spanPromptThreadSummary, parent: spanPrompt, attrs: []attribute.KeyValue{attrPromptSummaryOutcome.String("stale")}},
@@ -547,7 +624,7 @@ func TestBuildTurnPrompt(t *testing.T) {
 			wantAbsent: []string{spanPromptSummaryLLM},
 		},
 		{
-			name: "WarmThreadMarksSummarizeThread", threadSnapshot: true, histMsgs: twoMsgs, cachedSum: summaryOut, cachedMsgID: "h-2", wantSummarizeThread: true,
+			name: "WarmThreadMarksSummarizeThread", threadSnapshot: true, histMsgs: twoMsgs, cached: promptSummaryCache{summary: summaryOut, msgID: "h-2"}, wantSummarizeThread: true,
 			wantPromptContains: []string{"turn off kitchen lights"}, wantPromptExcludes: []string{"<THREAD_SUMMARY>", "ship it"},
 			wantAbsent: []string{spanPromptThreadSummary},
 		},
@@ -557,7 +634,7 @@ func TestBuildTurnPrompt(t *testing.T) {
 				{ID: "h-user", AuthorName: "Alice", Content: "regular thread message", CreatedAt: now.Add(-time.Hour)},
 				{ID: "h-widget", AuthorName: "Aerial", Role: "Assistant", IsWidget: true, Content: "Build #42 passed", CreatedAt: now.Add(-time.Minute)},
 			},
-			cachedSum: summaryOut, cachedMsgID: "h-2", wantSummarizeThread: true,
+			cached: promptSummaryCache{summary: summaryOut, msgID: "h-2"}, wantSummarizeThread: true,
 			wantPromptContains: []string{"Build #42 passed", "<CHANNEL_HISTORY>"},
 			wantPromptExcludes: []string{"regular thread message", "<THREAD_SUMMARY>"},
 			wantSpans: []wantPromptSpan{
@@ -566,7 +643,7 @@ func TestBuildTurnPrompt(t *testing.T) {
 			wantAbsent: []string{spanPromptThreadSummary},
 		},
 		{
-			name: "ChannelModeThreadDoesNotSummarize", isCold: true, threadSnapshot: true, mode: "channel", histMsgs: twoMsgs, cachedSum: summaryOut, cachedMsgID: "h-2",
+			name: "ChannelModeThreadDoesNotSummarize", isCold: true, threadSnapshot: true, mode: "channel", histMsgs: twoMsgs, cached: promptSummaryCache{summary: summaryOut, msgID: "h-2"},
 			wantPromptContains: []string{"ship it"}, wantPromptExcludes: []string{"<THREAD_SUMMARY>"},
 			wantAbsent: []string{spanPromptThreadSummary},
 		},
@@ -582,19 +659,18 @@ func TestBuildTurnPrompt(t *testing.T) {
 	for i, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			threadID := fmt.Sprintf("t-btp-%d", i)
+			threadID := fmt.Sprintf("t-btp-cs-%d", i)
 			if tc.threadSnapshot {
 				CacheDiscordChannel(&discordgo.Channel{ID: threadID, ParentID: "p-" + threadID, Type: discordgo.ChannelTypeGuildPublicThread})
 			}
 
-			var resolverCalled, untracedResolverCalled atomic.Bool
 			rec, tp, ctx, root := newPromptBuildRecorder()
-			te := newBuildTurnPromptFixture(t, tc, threadID, tp, &resolverCalled)
+			te := newColdStartTurnPromptFixture(t, tc, threadID, tp)
 			te.buildTurnPrompt(ctx)
 			root.End()
 
 			// Same inputs without a recording tracer must yield byte-identical prompt text.
-			untraced := newBuildTurnPromptFixture(t, tc, threadID, nil, &untracedResolverCalled)
+			untraced := newColdStartTurnPromptFixture(t, tc, threadID, nil)
 			untraced.buildTurnPrompt(context.Background())
 			if te.turnPrompt != untraced.turnPrompt {
 				t.Errorf("traced prompt differs from untraced prompt:\n%s\n---\n%s", te.turnPrompt, untraced.turnPrompt)
@@ -602,9 +678,6 @@ func TestBuildTurnPrompt(t *testing.T) {
 
 			if te.summarizeThread != tc.wantSummarizeThread {
 				t.Errorf("summarizeThread = %t, want %t", te.summarizeThread, tc.wantSummarizeThread)
-			}
-			if called := resolverCalled.Load(); called != tc.wantResolverCalled {
-				t.Errorf("resolverCalled = %t, want %t", called, tc.wantResolverCalled)
 			}
 			for _, sub := range tc.wantPromptContains {
 				if !strings.Contains(te.turnPrompt, sub) {
@@ -812,6 +885,92 @@ func turnEndHistory(base time.Time, first, last int) []HistoryMessage {
 	return msgs
 }
 
+func TestRefreshThreadSummaryAtTurnEnd_Skips(t *testing.T) {
+	t.Parallel()
+	base := time.Now().UTC().Add(-time.Hour)
+	prior := "<THREAD_SUMMARY>Prior</THREAD_SUMMARY>"
+	window := turnEndHistory(base, 1000, 1008)
+
+	tests := []turnEndRefreshSkipCase{
+		{name: "no history fetched", turnStatus: "success", wantOutcome: "no_history", wantSum: prior, wantMsgID: "1001"},
+		{name: "non-thread turn skipped", histMsgs: window, turnStatus: "success", notThread: true, wantSum: prior, wantMsgID: "1001"},
+		{name: "dispatch turn skipped", histMsgs: window, turnStatus: "success", dispatch: true, wantSum: prior, wantMsgID: "1001"},
+		{name: "ephemeral turn skipped", histMsgs: window, turnStatus: "success", ephem: true, wantSum: prior, wantMsgID: "1001"},
+		{name: "failed turn skipped", histMsgs: window, turnStatus: "failed", wantSum: prior, wantMsgID: "1001"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			runTurnEndRefreshSkipCase(t, tc, prior, "1001", "1007")
+		})
+	}
+}
+
+// turnEndRefreshSkipCase tests bypass conditions that prevent summary generation at turn end.
+type turnEndRefreshSkipCase struct {
+	name        string
+	turnStatus  string
+	notThread   bool
+	dispatch    bool
+	ephem       bool
+	histMsgs    []HistoryMessage
+	wantOutcome string
+	wantSum     string
+	wantMsgID   string
+}
+
+func runTurnEndRefreshSkipCase(t *testing.T, tc turnEndRefreshSkipCase, cachedSum, cachedMsgID, burstID string) {
+	t.Helper()
+	var fetchBeforeIDs []string
+	store := testStore(t)
+	if cachedSum != "" {
+		if err := store.SaveThreadSummary(context.Background(), "th-end", cachedSum, cachedMsgID); err != nil {
+			t.Fatalf("SaveThreadSummary failed: %v", err)
+		}
+	}
+	rec, tp, ctx, root := newPromptBuildRecorder()
+	pool := &WorkerPool{ctx: context.Background(), cfg: WorkerPoolConfig{
+		Store: store, TracerProvider: tp,
+		HistoryFetcher: func(_ context.Context, _, beforeID string, _ int) ([]HistoryMessage, error) {
+			fetchBeforeIDs = append(fetchBeforeIDs, beforeID)
+			return tc.histMsgs, nil
+		},
+		LLMFunc: func(_ context.Context, _, prompt string) (string, error) {
+			t.Errorf("summarizer unexpectedly called on skipped turn")
+			return "", nil
+		},
+	}}
+	te := &turnExecution{
+		pool: pool, threadID: "th-end", burst: []db.Message{{ID: burstID, ThreadID: "th-end"}},
+		turnStatus: tc.turnStatus, summarizeThread: !tc.notThread, isEphemeral: tc.ephem,
+		lease: &testTurnEndSessionLease{},
+	}
+	if tc.dispatch {
+		te.dispatch = &db.Dispatch{ID: "d-1"}
+	}
+	te.refreshThreadSummaryAtTurnEnd(ctx)
+	root.End()
+
+	var wantSpans []wantPromptSpan
+	var wantFetches []string
+	absent := []string{spanTurnSummaryRefresh, spanPromptHistoryFetch}
+	if tc.wantOutcome != "" {
+		wantSpans = []wantPromptSpan{{name: spanTurnSummaryRefresh, parent: spanPrompt, attrs: []attribute.KeyValue{attrPromptSummaryOutcome.String(tc.wantOutcome)}}}
+		wantFetches, absent = []string{""}, nil
+	}
+	assertPromptSpans(t, rec.Ended(), wantSpans, absent)
+	if !slices.Equal(fetchBeforeIDs, wantFetches) {
+		t.Errorf("history fetch beforeIDs = %q, want %q", fetchBeforeIDs, wantFetches)
+	}
+	sum, msgID, err := store.GetThreadSummary(context.Background(), "th-end")
+	if err != nil {
+		t.Fatalf("GetThreadSummary failed: %v", err)
+	}
+	if sum != tc.wantSum || msgID != tc.wantMsgID {
+		t.Errorf("stored summary = (%q, %q), want (%q, %q)", sum, msgID, tc.wantSum, tc.wantMsgID)
+	}
+}
+
 func TestRefreshThreadSummaryAtTurnEnd(t *testing.T) {
 	t.Parallel()
 	base := time.Now().UTC().Add(-time.Hour)
@@ -819,19 +978,14 @@ func TestRefreshThreadSummaryAtTurnEnd(t *testing.T) {
 	window := turnEndHistory(base, 1000, 1008)
 
 	tests := []turnEndRefreshCase{
-		{name: "stale watermark refreshes with prior summary", cachedSum: prior, cachedMsgID: "1001", histMsgs: window, burstID: "1007", turnStatus: "success", wantOutcome: "refreshed", wantLLMPrompts: 1, wantPromptContains: []string{"<prior_thread_summary>", "Prior", "<thread_origin_anchor>", "content-1008"}, wantSum: fresh, wantMsgID: "1008"},
-		{name: "first summary sends whole window", histMsgs: window, burstID: "1007", turnStatus: "success", wantOutcome: "refreshed", wantLLMPrompts: 1, wantPromptContains: []string{"content-1000", "content-1008"}, wantPromptExcludes: []string{"<prior_thread_summary>"}, wantSum: fresh, wantMsgID: "1008"},
-		{name: "watermark at delivered reply is cache hit", cachedSum: prior, cachedMsgID: "1008", histMsgs: window, burstID: "1007", turnStatus: "success", wantOutcome: "cache_hit", wantSum: prior, wantMsgID: "1008"},
-		{name: "watermark among newest five is fresh enough", cachedSum: prior, cachedMsgID: "1004", histMsgs: window, burstID: "1007", turnStatus: "success", wantOutcome: "fresh_enough", wantSum: prior, wantMsgID: "1004"},
-		{name: "watermark among newest five refreshes when lease will rotate", cachedSum: prior, cachedMsgID: "1004", histMsgs: window, burstID: "1007", turnStatus: "success", rotatingLease: true, wantOutcome: "refreshed", wantLLMPrompts: 1, wantSum: fresh, wantMsgID: "1008"},
-		{name: "llm error leaves stored summary untouched", cachedSum: prior, cachedMsgID: "1001", histMsgs: window, burstID: "1007", turnStatus: "success", llmErr: errors.New("ephemeral pool busy"), wantOutcome: "failed", wantLLMPrompts: 1, wantSum: prior, wantMsgID: "1001"},
-		{name: "next burst user message excluded from watermark", cachedSum: prior, cachedMsgID: "1001", histMsgs: turnEndHistory(base, 1000, 1009), burstID: "1007", turnStatus: "success", wantOutcome: "refreshed", wantLLMPrompts: 1, wantPromptContains: []string{"content-1008"}, wantPromptExcludes: []string{"content-1009"}, wantSum: fresh, wantMsgID: "1008"},
-		{name: "mid-turn follow-up keeps watermark before it", cachedSum: prior, cachedMsgID: "1001", histMsgs: append(turnEndHistory(base, 1000, 1007), HistoryMessage{ID: "1009", Role: "User", AuthorName: "User", Content: "content-1009", CreatedAt: base.Add(9 * time.Minute)}, HistoryMessage{ID: "1010", Role: "Assistant", AuthorName: "Assistant", Content: "content-1010", CreatedAt: base.Add(10 * time.Minute)}), burstID: "1007", turnStatus: "success", wantOutcome: "refreshed", wantLLMPrompts: 1, wantPromptContains: []string{"content-1007"}, wantPromptExcludes: []string{"content-1009", "content-1010"}, wantSum: fresh, wantMsgID: "1007"},
-		{name: "no history fetched", cachedSum: prior, cachedMsgID: "1001", burstID: "1007", turnStatus: "success", wantOutcome: "no_history", wantSum: prior, wantMsgID: "1001"},
-		{name: "non-thread turn skipped", cachedSum: prior, cachedMsgID: "1001", histMsgs: window, burstID: "1007", turnStatus: "success", notThread: true, wantSum: prior, wantMsgID: "1001"},
-		{name: "dispatch turn skipped", cachedSum: prior, cachedMsgID: "1001", histMsgs: window, burstID: "1007", turnStatus: "success", dispatch: true, wantSum: prior, wantMsgID: "1001"},
-		{name: "ephemeral turn skipped", cachedSum: prior, cachedMsgID: "1001", histMsgs: window, burstID: "1007", turnStatus: "success", ephem: true, wantSum: prior, wantMsgID: "1001"},
-		{name: "failed turn skipped", cachedSum: prior, cachedMsgID: "1001", histMsgs: window, burstID: "1007", turnStatus: "failed", wantSum: prior, wantMsgID: "1001"},
+		{name: "stale watermark refreshes with prior summary", cachedSum: prior, cachedMsgID: "1001", histMsgs: window, wantOutcome: "refreshed", wantLLMPrompts: 1, wantPromptContains: []string{"<prior_thread_summary>", "Prior", "<thread_origin_anchor>", "content-1008"}, wantSum: fresh, wantMsgID: "1008"},
+		{name: "first summary sends whole window", histMsgs: window, wantOutcome: "refreshed", wantLLMPrompts: 1, wantPromptContains: []string{"content-1000", "content-1008"}, wantPromptExcludes: []string{"<prior_thread_summary>"}, wantSum: fresh, wantMsgID: "1008"},
+		{name: "watermark at delivered reply is cache hit", cachedSum: prior, cachedMsgID: "1008", histMsgs: window, wantOutcome: "cache_hit", wantSum: prior, wantMsgID: "1008"},
+		{name: "watermark among newest five is fresh enough", cachedSum: prior, cachedMsgID: "1004", histMsgs: window, wantOutcome: "fresh_enough", wantSum: prior, wantMsgID: "1004"},
+		{name: "watermark among newest five refreshes when lease will rotate", cachedSum: prior, cachedMsgID: "1004", histMsgs: window, rotatingLease: true, wantOutcome: "refreshed", wantLLMPrompts: 1, wantSum: fresh, wantMsgID: "1008"},
+		{name: "llm error leaves stored summary untouched", cachedSum: prior, cachedMsgID: "1001", histMsgs: window, llmErr: errors.New("ephemeral pool busy"), wantOutcome: "failed", wantLLMPrompts: 1, wantSum: prior, wantMsgID: "1001"},
+		{name: "next burst user message excluded from watermark", cachedSum: prior, cachedMsgID: "1001", histMsgs: turnEndHistory(base, 1000, 1009), wantOutcome: "refreshed", wantLLMPrompts: 1, wantPromptContains: []string{"content-1008"}, wantPromptExcludes: []string{"content-1009"}, wantSum: fresh, wantMsgID: "1008"},
+		{name: "mid-turn follow-up keeps watermark before it", cachedSum: prior, cachedMsgID: "1001", histMsgs: append(turnEndHistory(base, 1000, 1007), HistoryMessage{ID: "1009", Role: "User", AuthorName: "User", Content: "content-1009", CreatedAt: base.Add(9 * time.Minute)}, HistoryMessage{ID: "1010", Role: "Assistant", AuthorName: "Assistant", Content: "content-1010", CreatedAt: base.Add(10 * time.Minute)}), wantOutcome: "refreshed", wantLLMPrompts: 1, wantPromptContains: []string{"content-1007"}, wantPromptExcludes: []string{"content-1009", "content-1010"}, wantSum: fresh, wantMsgID: "1007"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -843,18 +997,18 @@ func TestRefreshThreadSummaryAtTurnEnd(t *testing.T) {
 
 // turnEndRefreshCase is one refreshThreadSummaryAtTurnEnd scenario.
 type turnEndRefreshCase struct {
-	name                       string
-	cachedSum, cachedMsgID     string
-	histMsgs                   []HistoryMessage
-	burstID, turnStatus        string
-	notThread, dispatch, ephem bool
-	rotatingLease              bool
-	llmErr                     error
-	wantOutcome                string // "" when the refresh is skipped and records no span
-	wantLLMPrompts             int
-	wantPromptContains         []string
-	wantPromptExcludes         []string
-	wantSum, wantMsgID         string
+	name               string
+	cachedSum          string
+	cachedMsgID        string
+	histMsgs           []HistoryMessage
+	rotatingLease      bool
+	llmErr             error
+	wantOutcome        string // "" when the refresh is skipped and records no span
+	wantLLMPrompts     int
+	wantPromptContains []string
+	wantPromptExcludes []string
+	wantSum            string
+	wantMsgID          string
 }
 
 type testTurnEndSessionLease struct {
@@ -904,12 +1058,9 @@ func runTurnEndRefreshCase(t *testing.T, tc turnEndRefreshCase, llmOut string) {
 		},
 	}}
 	te := &turnExecution{
-		pool: pool, threadID: "th-end", burst: []db.Message{{ID: tc.burstID, ThreadID: "th-end"}},
-		turnStatus: tc.turnStatus, summarizeThread: !tc.notThread, isEphemeral: tc.ephem,
+		pool: pool, threadID: "th-end", burst: []db.Message{{ID: "1007", ThreadID: "th-end"}},
+		turnStatus: "success", summarizeThread: true, isEphemeral: false,
 		lease: &testTurnEndSessionLease{rotating: tc.rotatingLease},
-	}
-	if tc.dispatch {
-		te.dispatch = &db.Dispatch{ID: "d-1"}
 	}
 	te.refreshThreadSummaryAtTurnEnd(ctx)
 	root.End()
