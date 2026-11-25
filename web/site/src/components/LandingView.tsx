@@ -63,7 +63,7 @@ export function LandingView() {
             <h2 className="feature-title">Autonomous Software Factory</h2>
           </div>
           <p className="feature-desc">
-            Vikunja DAG backlog, tiered multi-agent review panel, Vanadis multi-PR DAG builds,
+            Vikunja DAG backlog, tiered multi-agent review panel, Restate multi-PR DAG builds,
             scale-to-zero in-cluster ARC runners, and proactive CI failure remediation wakes.
           </p>
         </div>
@@ -76,7 +76,7 @@ export function LandingView() {
             <h2 className="feature-title">Multimodal AI Agent</h2>
           </div>
           <p className="feature-desc">
-            Stateless Eri ingress, Coven ACT-R memory decay & procedural skill synthesis, Haro persistent scheduler,
+            Stateless HTTP ingress, ACT-R cognitive memory with procedural skill synthesis, persistent cron and event-watch scheduling,
             Discord Gateway, real-time voice, and headful browser control.
           </p>
         </div>

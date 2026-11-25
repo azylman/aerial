@@ -15,34 +15,34 @@ export const SHOWCASE_TABS: readonly ShowcaseTabInfo[] = [
   {
     id: 'console',
     title: 'Operator Console',
-    badge: 'HUD :8084',
+    badge: 'Live HUD',
     icon: '🎛️',
     route: 'http://<node-ip>/console/',
-    description: 'Real-time mission control HUD for active agent turns, Vanadis multi-PR builds, schedules, and memory facts.',
+    description: 'Real-time mission control HUD displays active agent turns, multi-PR builds, schedules, and memory facts.',
   },
   {
     id: 'agentsview',
     title: 'Session & Trace Inspector',
-    badge: 'AgentsView :4030',
+    badge: 'AgentsView',
     icon: '🔍',
     route: 'http://<node-ip>/agentsview/',
-    description: 'Full multi-turn conversation transcripts, subagent execution trees, and tool call span timelines.',
+    description: 'Inspect full multi-turn conversation transcripts, subagent execution trees, and tool call span timelines.',
   },
   {
     id: 'restate',
     title: 'Restate Durable Execution',
-    badge: 'Admin UI :9070',
+    badge: 'Restate UI',
     icon: '⚡',
     route: 'http://<node-ip>/restate/',
-    description: 'RocksDB virtual object state machines, invocation replay logs, and durable workflow journals.',
+    description: 'Monitor RocksDB virtual object state machines, invocation replay logs, and durable workflow journals.',
   },
   {
     id: 'vikunja',
     title: 'DAG Backlog Board',
-    badge: 'Vikunja :3456',
+    badge: 'Vikunja',
     icon: '📋',
-    route: 'Service/docket-store',
-    description: 'Visual Kanban, Gantt, and dependency DAG board with hybrid PostgreSQL 19 RRF text and vector search.',
+    route: 'Service/vikunja',
+    description: 'Manage Kanban, Gantt, and dependency task graphs with hybrid PostgreSQL 19 text and vector search.',
   },
   {
     id: 'observability',
@@ -50,7 +50,7 @@ export const SHOWCASE_TABS: readonly ShowcaseTabInfo[] = [
     badge: 'Grafana & VMUI',
     icon: '📊',
     route: 'http://<node-ip>/grafana/',
-    description: 'Pre-provisioned Grafana dashboards, VictoriaLogs LogsQL analytics, and VictoriaTraces OTLP waterfalls.',
+    description: 'Query pre-provisioned Grafana dashboards, VictoriaLogs LogsQL analytics, and VictoriaTraces OTLP waterfalls.',
   },
 ];
 
@@ -80,8 +80,7 @@ export function GlassBoxShowcase() {
         <div className="section-eyebrow">Glass-Box Operations</div>
         <h2 className="section-title">Built-In Web Observability</h2>
         <p className="section-subtitle">
-          Never fly blind with opaque black-box background scripts. Aerial pairs every subsystem with dedicated,
-          first-class web interfaces accessible over your homelab LAN.
+          Aerial provides dedicated web interfaces for every subsystem across your local network.
         </p>
 
         {/* Tab Selection Bar */}
@@ -164,7 +163,7 @@ export function GlassBoxShowcase() {
                   onClick={() => setConsoleView('builds')}
                   data-testid="console-btn-builds"
                 >
-                  Vanadis Build Queue (1 Active)
+                  Multi-PR Build Queue (1 Active)
                 </button>
               </div>
 
@@ -178,7 +177,7 @@ export function GlassBoxShowcase() {
                     </div>
                     <div className="turn-prompt-preview">
                       <span className="prompt-label">USER DIRECTIVE:</span>
-                      <code>[VANADIS BUILD CHUNK EXECUTION] Chunk 6: Build Interactive Landing Page Showcase</code>
+                      <code>[BUILD CHUNK EXECUTION] Chunk 6: Build Interactive Landing Page Showcase</code>
                     </div>
                     <div className="turn-stats-grid">
                       <div className="turn-stat-item">
@@ -186,7 +185,7 @@ export function GlassBoxShowcase() {
                         <span className="stat-value">12.4k tokens</span>
                       </div>
                       <div className="turn-stat-item">
-                        <span className="stat-label">Coven Memory</span>
+                        <span className="stat-label">Cognitive Memory</span>
                         <span className="stat-value">4 facts retrieved (ACT-R 0.5)</span>
                       </div>
                       <div className="turn-stat-item">
@@ -232,7 +231,7 @@ export function GlassBoxShowcase() {
                   <div className="timeline-title">TURN EXECUTION TIMELINE</div>
                   {[
                     { step: 1, name: 'User Directive Received', type: 'event', duration: '12ms' },
-                    { step: 2, name: 'Tool: docket_ready', type: 'tool', duration: '18ms' },
+                    { step: 2, name: 'Tool: issue_ready', type: 'tool', duration: '18ms' },
                     { step: 3, name: 'Tool: aerial_pr_init', type: 'tool', duration: '210ms' },
                     { step: 4, name: 'Subagent: Multi-Agent Review', type: 'subagent', duration: '1,420ms' },
                     { step: 5, name: 'Tool: verify_and_submit', type: 'tool', duration: '450ms' },
@@ -261,16 +260,16 @@ export function GlassBoxShowcase() {
                   {activeStepIndex === 0 && (
                     <div className="step-body">
                       <h4>Event: User Directive Ingress</h4>
-                      <p>Received directive from channel #aerial-dev via synapse WebSocket gateway.</p>
+                      <p>Received directive from channel #aerial-dev via webhook gateway.</p>
                       <pre>
-                        <code>{`{\n  "channel": "aerial-dev",\n  "directive": "[VANADIS BUILD CHUNK EXECUTION] ...",\n  "author": "operator (admin: true)"\n}`}</code>
+                        <code>{`{\n  "channel": "aerial-dev",\n  "directive": "[BUILD CHUNK EXECUTION] ...",\n  "author": "operator (admin: true)"\n}`}</code>
                       </pre>
                     </div>
                   )}
                   {activeStepIndex === 1 && (
                     <div className="step-body">
-                      <h4>Tool Execution: docket_ready</h4>
-                      <p>Queried Vikunja task graph via docket-mcp for unblocked backlog items.</p>
+                      <h4>Tool Execution: issue_ready</h4>
+                      <p>Queried Vikunja task graph via issue-tracker-mcp for unblocked backlog items.</p>
                       <pre>
                         <code>{`{\n  "query": "unblocked_tasks",\n  "result_count": 1,\n  "next_task": "chunk-6-site-interactive-landing-views"\n}`}</code>
                       </pre>
@@ -281,7 +280,7 @@ export function GlassBoxShowcase() {
                       <h4>Tool Execution: aerial_pr_init</h4>
                       <p>Initialized isolated ephemeral scratch clone in /data/scratch/ for safe branch authoring.</p>
                       <pre>
-                        <code>{`{\n  "repo": "aerial",\n  "scratch_dir": "/data/scratch/vanadis-chunk-6-site-interactive-landing-views-aerial",\n  "branch": "feat/aerial-pr-vanadis-chunk-6..."\n}`}</code>
+                        <code>{`{\n  "repo": "aerial",\n  "scratch_dir": "/data/scratch/chunk-6-site-interactive-landing-views-aerial",\n  "branch": "feat/chunk-6..."\n}`}</code>
                       </pre>
                     </div>
                   )}
@@ -297,7 +296,7 @@ export function GlassBoxShowcase() {
                   {activeStepIndex === 4 && (
                     <div className="step-body">
                       <h4>Tool Execution: verify_and_submit</h4>
-                      <p>Ran ./scripts/verify.sh --staged and submitted scratch PR to Vanadis build queue.</p>
+                      <p>Ran ./scripts/verify.sh --staged and submitted scratch PR to multi-PR build queue.</p>
                       <pre>
                         <code>{`{\n  "verify_status": "PASS",\n  "pr_number": 1466,\n  "turn_action": "end_turn"\n}`}</code>
                       </pre>
@@ -338,31 +337,31 @@ export function GlassBoxShowcase() {
               {restateViewMode === 'journal' ? (
                 <div className="restate-journal" data-testid="restate-journal-content">
                   <div className="journal-entry">
-                    <span className="journal-time">00:00:00.012</span>
+                    <span className="journal-time">+0.012s</span>
                     <span className="journal-fn">startBuild()</span>
                     <span className="journal-status val-ok">COMPLETED</span>
                     <span className="journal-note">Initialized state in RocksDB persistent storage</span>
                   </div>
                   <div className="journal-entry">
-                    <span className="journal-time">00:00:00.045</span>
+                    <span className="journal-time">+0.045s</span>
                     <span className="journal-fn">appendChunk(chunk-1)</span>
                     <span className="journal-status val-ok">COMPLETED</span>
                     <span className="journal-note">Enqueued chunk-1-arc-adoption (repo: aerial-config)</span>
                   </div>
                   <div className="journal-entry">
-                    <span className="journal-time">00:00:00.089</span>
+                    <span className="journal-time">+0.089s</span>
                     <span className="journal-fn">dispatchChunk(chunk-1)</span>
                     <span className="journal-status val-ok">COMPLETED</span>
-                    <span className="journal-note">Dispatched wake to eri-restate execution engine</span>
+                    <span className="journal-note">Dispatched wake to agent-worker execution engine</span>
                   </div>
                   <div className="journal-entry">
-                    <span className="journal-time">00:00:04.120</span>
+                    <span className="journal-time">+4.120s</span>
                     <span className="journal-fn">onChunkCompleted(chunk-1)</span>
                     <span className="journal-status val-ok">COMPLETED</span>
                     <span className="journal-note">GitHub PR #1462 auto-squashed; NATS aerial.pr.completed published</span>
                   </div>
                   <div className="journal-entry active">
-                    <span className="journal-time">00:00:08.540</span>
+                    <span className="journal-time">+8.540s</span>
                     <span className="journal-fn">dispatchChunk(chunk-6)</span>
                     <span className="journal-status val-warn">RUNNING</span>
                     <span className="journal-note">chunk-6-site-interactive-landing-views executing</span>
@@ -517,25 +516,25 @@ export function GlassBoxShowcase() {
               {telemetryMode === 'logs' && (
                 <div className="obs-logs-container" data-testid="obs-logs-content">
                   <div className="logsql-query-bar">
-                    <code>_stream:{'{app="eri-restate"}'} level:info OR "wake"</code>
+                    <code>_stream:{'{app="agent-worker"}'} level:info OR "wake"</code>
                   </div>
                   <div className="log-entries-list">
                     <div className="log-line">
-                      <span className="log-ts">23:23:14.210</span>
+                      <span className="log-ts">+14.210s</span>
                       <span className="log-level info">INFO</span>
-                      <span className="log-app">[eri-restate]</span>
+                      <span className="log-app">[agent-worker]</span>
                       <span className="log-msg">TurnSession initialized: turn_id=turn-42 session=ThreadSession</span>
                     </div>
                     <div className="log-line">
-                      <span className="log-ts">23:23:14.480</span>
+                      <span className="log-ts">+14.480s</span>
                       <span className="log-level info">INFO</span>
-                      <span className="log-app">[eri-restate]</span>
-                      <span className="log-msg">coven_memory_query matched 4 active ACT-R declarative chunks</span>
+                      <span className="log-app">[agent-worker]</span>
+                      <span className="log-msg">memory_hybrid_query matched 4 active ACT-R declarative chunks</span>
                     </div>
                     <div className="log-line">
-                      <span className="log-ts">23:23:15.110</span>
+                      <span className="log-ts">+15.110s</span>
                       <span className="log-level info">INFO</span>
-                      <span className="log-app">[vanadis-restate]</span>
+                      <span className="log-app">[build-orchestrator]</span>
                       <span className="log-msg">Building chunk chunk-6-site-interactive-landing-views</span>
                     </div>
                   </div>
@@ -551,7 +550,7 @@ export function GlassBoxShowcase() {
                   <div className="trace-waterfall">
                     <div className="trace-span root-span">
                       <div className="span-info">
-                        <span className="span-name">synapse.edge_webhook</span>
+                        <span className="span-name">gateway.edge_webhook</span>
                         <span className="span-dur">1,842 ms</span>
                       </div>
                       <div className="span-bar" style={{ width: '100%' }} />
@@ -565,7 +564,7 @@ export function GlassBoxShowcase() {
                     </div>
                     <div className="trace-span child-2">
                       <div className="span-info">
-                        <span className="span-name">eri.turn_runner</span>
+                        <span className="span-name">agent.turn_runner</span>
                         <span className="span-dur">1,790 ms</span>
                       </div>
                       <div className="span-bar" style={{ width: '92%', marginLeft: '5%' }} />
