@@ -534,7 +534,7 @@ func (c *Classifier) classifyWithPrompt(ctx context.Context, prompt string) Clas
 const MaxSystemOneMessageRunes = 500
 
 // MaxSystemOneStateRunes is the maximum number of runes preserved across all formatted messages in ModernBERT dialogue state.
-// Capped at 3200 runes (~750-800 state tokens + ~154 instruction tokens) to fit cleanly within Laya's 1024-token ONNX GPU context window.
+// Capped at 3200 runes (~750-800 state tokens + ~154 instruction tokens) to fit cleanly within ModernBERT's 1024-token ONNX GPU context window.
 const MaxSystemOneStateRunes = 3200
 
 // ModernBERTTruncationIndicator is inserted into the middle of a message when it exceeds MaxSystemOneMessageRunes,
@@ -542,7 +542,7 @@ const MaxSystemOneStateRunes = 3200
 const ModernBERTTruncationIndicator = " ... [snip] ... "
 
 // BuildSystemOneState formats target message(s) and recent channel context into clean dialogue
-// for non-autoregressive encoder models like ModernBERT (Laya).
+// for non-autoregressive encoder models like ModernBERT (ModernBERT).
 // It strips XML tags and RFC3339 timestamps to avoid degrading attention weights,
 // while preserving speaker identity and replying-to relationships.
 // fitMessagesTail accumulates formatted messages backwards (newest to oldest) up to budget runes.

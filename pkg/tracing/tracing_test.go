@@ -368,10 +368,10 @@ func TestNewResource(t *testing.T) {
 		},
 		{
 			name: "OTEL_RESOURCE_ATTRIBUTES added", agent: "aerial",
-			env: map[string]string{"OTEL_RESOURCE_ATTRIBUTES": "k8s.pod.name=haro-7d9,k8s.namespace.name=default,k8s.node.name=calibarn,service.version=v1.2.3"},
+			env: map[string]string{"OTEL_RESOURCE_ATTRIBUTES": "k8s.pod.name=haro-7d9,k8s.namespace.name=default,k8s.node.name=node-1,service.version=v1.2.3"},
 			want: map[string]string{
 				"service.name": "haro", "service.namespace": "aerial", "aerial.agent": "aerial", "aerial.stack": "aerial", "k8s.pod.name": "haro-7d9",
-				"k8s.namespace.name": "default", "k8s.node.name": "calibarn", "service.version": "v1.2.3",
+				"k8s.namespace.name": "default", "k8s.node.name": "node-1", "service.version": "v1.2.3",
 			},
 		},
 		{

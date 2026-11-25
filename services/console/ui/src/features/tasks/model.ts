@@ -46,7 +46,7 @@ export interface QueueKpis {
   readonly queued: string;
 }
 
-/** Tasks cockpit KPI texts (tasks-kpi-workers, tasks-kpi-workers-sub, tasks-kpi-queued). */
+/** Tasks dashboard KPI texts (tasks-kpi-workers, tasks-kpi-workers-sub, tasks-kpi-queued). */
 export function queueKpis({ running, pending }: QueueCounts): QueueKpis {
   return {
     workers: `${running} / 4 WORKERS`,

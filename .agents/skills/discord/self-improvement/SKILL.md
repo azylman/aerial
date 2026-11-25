@@ -1,6 +1,6 @@
 ---
 name: self-improvement
-description: Tiered engineering workflow (Tiers 0-3), Girl Gang multi-agent review orchestration, Subagent-Driven Development (SDD), Dynamic Scope Re-Tiering, and CI/RoboRev remediation across Aerial repositories. Load for Tier 1-3 planning and reviews, Vanadis builds, schema migrations, or CI/RoboRev failure wakes.
+description: Tiered engineering workflow (Tiers 0-3), multi-agent review orchestration, Subagent-Driven Development (SDD), Dynamic Scope Re-Tiering, and CI/RoboRev remediation across Aerial repositories. Load for Tier 1-3 planning and reviews, Vanadis builds, schema migrations, or CI/RoboRev failure wakes.
 ---
 
 # Aerial Self-Improvement & Tiered Engineering Workflow
@@ -31,7 +31,7 @@ Scale review rigor and subagent orchestration dynamically by blast radius:
   - **Execution**: Routed through Vanadis single-chunk builds (`scripts/aerial-build.sh enqueue <plan.json>`) by default to keep the primary channel daemon and root transcript featherweight. Verify via targeted package unit tests and `./scripts/verify.sh --staged`.
 
 - **Tier 2 (50–200 LOC, multi-PR/cross-repo rollouts, standard features & multi-package refactors)**:
-  - **Plan Review**: The Girl Gang review panel audits the plan in a single isolated subagent across 4 disciplines (~45s).
+  - **Plan Review**: The multi-agent review panel audits the plan in a single isolated subagent across 4 disciplines (~45s).
   - **Execution**:
     - **Multi-PR / Cross-Repo Plans (≥ 2 PRs)**: Enqueue as a single multi-chunk Vanadis build via `scripts/aerial-build.sh enqueue <plan.json>` (see [`references/vanadis-build-authoring.md`](references/vanadis-build-authoring.md)).
     - **Single-PR Plans (1 PR in 1 repo)**: Continuous autonomous execution inline or via scoped implementation subagents, followed by Consolidated Devil's Advocate diff review (~30s) before `scripts/aerial-pr.sh submit`.
@@ -43,12 +43,12 @@ Scale review rigor and subagent orchestration dynamically by blast radius:
     - Touches to **core runner logic and turn resolution** (`services/eri/pkg/runner`, streaming daemons, process pools, turn sinks/resolvers).
     - Database schema migrations (`schema.sql`, SQL migrations) or service topology changes (`k8s/*.yaml`, Dockerfiles).
     - Cross-cutting architectural overhauls or breaking API changes.
-  - **Plan Review**: The Girl Gang audits the plan in an isolated subagent across 4 disciplines (~45s).
+  - **Plan Review**: The multi-agent review panel audits the plan in an isolated subagent across 4 disciplines (~45s).
   - **Human Checkpoint**: **MANDATORY HUMAN REVIEW CHECKPOINT (STOP)**—synthesize panel findings and wait for explicit user approval before touching code or enqueueing a Vanadis build.
-  - **Execution**: Once approved, enqueue multi-PR/multi-chunk plans via `scripts/aerial-build.sh enqueue <plan.json>` (default), or execute single-PR changes with a full 4-discipline Girl Gang diff audit before `scripts/aerial-pr.sh submit`.
+  - **Execution**: Once approved, enqueue multi-PR/multi-chunk plans via `scripts/aerial-build.sh enqueue <plan.json>` (default), or execute single-PR changes with a full 4-discipline multi-agent review panel diff audit before `scripts/aerial-pr.sh submit`.
 
 ### Review Panel Composition & Subagent Execution Invariants
-- **The Girl Gang (4 Disciplines)**: 3 domain specialists dynamically tailored to the change (e.g., Systems/Concurrency, Architecture, Security, Data Integrity, or PWA/Frontend when user-facing UI is touched) + 1 mandatory Adversarial Devil's Advocate. For plans or diffs touching Restate services, Virtual Objects, or durable workflows (`github.com/restatedev/sdk-go`), the Systems/Concurrency and Devil's Advocate reviewers must audit against [`references/restate-workflows.md`](references/restate-workflows.md) (enforcing dedicated `*-restate` `RestateDeployment` worker service separation vs in-process `:9080` Restate servers, zero pre-ingress Postgres state tracking, RunContext isolation, replay determinism, non-blocking exclusive lock hygiene, and recoverable pause state invariants).
+- **The Multi-Agent Review Panel (4 Disciplines)**: 3 domain specialists dynamically tailored to the change (e.g., Systems/Concurrency, Architecture, Security, Data Integrity, or PWA/Frontend when user-facing UI is touched) + 1 mandatory Adversarial Devil's Advocate. For plans or diffs touching Restate services, Virtual Objects, or durable workflows (`github.com/restatedev/sdk-go`), the Systems/Concurrency and Devil's Advocate reviewers must audit against [`references/restate-workflows.md`](references/restate-workflows.md) (enforcing dedicated `*-restate` `RestateDeployment` worker service separation vs in-process `:9080` Restate servers, zero pre-ingress Postgres state tracking, RunContext isolation, replay determinism, non-blocking exclusive lock hygiene, and recoverable pause state invariants).
 - **DAG Disjointness, Non-Mutating Pre-Cutover Action Gate & Control-Plane Continuity Checks**:
   During Tier 2/3 plan audits, the Devil's Advocate and Architecture reviewers MUST explicitly verify the following invariants across any proposed Vanadis build plan:
   1. **Parallel-First DAG Decomposition & Same-Repo PR Disjointness**: The Devil's Advocate and Architecture reviewers must:
@@ -58,7 +58,7 @@ Scale review rigor and subagent orchestration dynamically by blast radius:
   2. **Non-Mutating Pre-Cutover Action Gate**: Any multi-chunk migration or cutover plan that flips live entrypoints, replaces queue consumers, or purges legacy paths includes a preceding `"mode": "action"` readiness gate chunk. Ensure action chunks adhere strictly to the **Hermeticity Boundary**: live operational probes must be read-only / non-mutating (health checks, `/deployments` inspection, `400 Bad Request` validation rejection tests) and NEVER inject synthetic builds, fake PR numbers (e.g. `999901`), or synthetic NATS events into production services.
   3. **In-Flight Control-Plane Continuity**: Any plan modifying `vanadis`, `synapse`, `eri`, `haro`, or `nats` preserves compatibility and fallback paths for already-running builds initiated under the prior state so active builds never strand themselves mid-flight.
   4. **Phase 1 Seam Isolation (Zero Half-Wired Callers)**: Verify that Phase 1 (additive/dark-launch) chunks in multi-chunk builds register and unit-test new components without partially wiring existing caller entrypoints when downstream lifecycle events are deferred to Phase 3; reject any plan that splits caller entrypoint wiring across Phase 1 and Phase 3.
-- **Single Consolidated Review Subagent**: Always run The Girl Gang inside a **single `research` subagent** (`role: "TheGirlGangReviewer"`, `TypeName: "research"`). Never spawn multiple parallel review subagents or emit intermediate waiting prose while a subagent is running. Once parallel work is complete, stop calling tools with empty text so `agy` suspends until the reactive `<SYSTEM_MESSAGE>` wakeup arrives (never busy-poll `manage_subagents list` or read a running subagent's `transcript.jsonl` to check status).
+- **Single Consolidated Review Subagent**: Always run the multi-agent review panel inside a **single `research` subagent** (`role: "PlanAndDiffReviewer"`, `TypeName: "research"`). Never spawn multiple parallel review subagents or emit intermediate waiting prose while a subagent is running. Once parallel work is complete, stop calling tools with empty text so `agy` suspends until the reactive `<SYSTEM_MESSAGE>` wakeup arrives (never busy-poll `manage_subagents list` or read a running subagent's `transcript.jsonl` to check status).
 
 ---
 
@@ -74,7 +74,7 @@ Scale review rigor and subagent orchestration dynamically by blast radius:
    - Initialize the scratch workspace via `/share/aerial/scripts/aerial-pr.sh init [repo]` and decompose Tier 2/3 work into discrete, self-contained tasks sized to **~15 minutes** (1 failing test + minimal implementation + local verification + atomic commit).
 
 ### Stage 2–3: Plan Audit & Tier 3 Checkpoint
-- Run the Tier 2/3 Girl Gang plan review subagent and fold valid objections into the plan.
+- Run the Tier 2/3 multi-agent plan review subagent and fold valid objections into the plan.
 - **User-visible plan contract**: Substantial builds require a concise user-facing explanation of intended behavior, affected components, chunk order and dependencies, material risks, validation criteria, and review findings that changed the design (when applicable). Explain consequential choices as **problem -> decision -> observable effect**. Worker instructions and build JSON do not substitute for this deliverable.
 - Judge substance by behavior, dependencies, and risk, not only LOC or tier: consequential Tier 1 changes need this explanation; routine tweaks stay brief. An already-presented approved plan suffices unless materially changed.
 - **Delivery**: Present the explanation before enqueue where the transport supports it. On final-only transports, prepare it before enqueue and include it in the same final handoff; do not claim pre-execution visibility or introduce an extra checkpoint. This delivery branch does not apply to Tier 3 approval.
@@ -93,7 +93,7 @@ Scale review rigor and subagent orchestration dynamically by blast radius:
    - **Tier 0 -> Tier 1/2**: Diff > 5 LOC escalates to Tier 1 (> 50 LOC to Tier 2).
    - **Tier 1 -> Tier 2/3**: Diff > 50 LOC escalates to Tier 2 (requires Devil's Advocate diff audit).
    - **Auto-Escalation to Tier 3**: If cumulative diff exceeds **200 LOC** OR touches **core queue logic** (`services/eri/pkg/queue`), **core runner logic** (`services/eri/pkg/runner`), or **database schemas**:
-     - Run the full 4-discipline **Girl Gang** diff review subagent.
+     - Run the full 4-discipline **multi-agent review panel** diff review subagent.
      - **MANDATORY HUMAN ESCALATION CHECKPOINT (STOP BEFORE AUTO-MERGE)**: Do NOT submit with auto-merge armed. Pause, report the scope escalation and diff metrics to Discord with the panel's review synthesis, and await explicit user authorization.
 
 ### Stage 6–7: Pre-Flight Verification & Asynchronous PR Submission
