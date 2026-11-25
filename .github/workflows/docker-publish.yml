@@ -264,7 +264,7 @@ jobs:
 
       - name: Set up Docker Buildx (Hosted Runner)
         if: matrix.type == 'docker' && runner.environment != 'self-hosted'
-        uses: docker/setup-buildx-action@v3
+        uses: docker/setup-buildx-action@v4
 
       - name: Lowercase Repository Owner
         id: repo_owner
