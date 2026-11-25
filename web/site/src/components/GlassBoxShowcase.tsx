@@ -41,7 +41,7 @@ export const SHOWCASE_TABS: readonly ShowcaseTabInfo[] = [
     title: 'DAG Backlog Board',
     badge: 'Vikunja',
     icon: '📋',
-    route: 'http://<node-ip>/tasks/',
+    route: 'Service/vikunja',
     description: 'Manage Kanban, Gantt, and dependency task graphs with hybrid PostgreSQL 19 text and vector search.',
   },
   {

@@ -28,10 +28,10 @@ export const QUICKSTART_STEPS: readonly QuickstepItem[] = [
     title: 'Fork Config & Bootstrap via Flux CD',
     badge: 'Two-Repo GitOps',
     summary:
-      'Fork the configuration repository, customize user settings, and bootstrap Flux CD.',
+      'Fork azylman/aerial-config-example to create your private config repository and bootstrap Flux CD.',
     command: `export GITHUB_PAT="your-github-pat"\n\ncurl -s https://fluxcd.io/install.sh | sudo bash\nGITHUB_TOKEN="$GITHUB_PAT" flux bootstrap github \\\n  --owner=your-username \\\n  --repository=my-aerial-config \\\n  --branch=main \\\n  --path=k8s \\\n  --personal`,
     notes: [
-      'Set your administrator ID and persona rules in configuration before bootstrap.',
+      'Set admin_users in config.yaml to your Discord user ID before running bootstrap.',
       'Pass tokens in memory to prevent writing plaintext secrets to disk.',
       'Flux reconciles base operators, databases, and platform services automatically.',
     ],
@@ -54,7 +54,7 @@ export const QUICKSTART_STEPS: readonly QuickstepItem[] = [
     badge: 'Engine Auth & Verify',
     summary:
       'Authenticate your preferred execution engine and verify cluster and GitOps health.',
-    command: `# 1. Authenticate agy via Google OAuth inside the execution worker pod\nkubectl exec -it $(kubectl get pod -l app.kubernetes.io/component=agent-worker -o name | head -n1) -c agent-worker -- agy\n\n# 2. Verify all pods and Flux Kustomizations are healthy\nkubectl get pods -o wide\nflux get kustomizations`,
+    command: `# 1. Authenticate agy via Google OAuth inside the execution worker pod\nkubectl exec -it $(kubectl get pod -l app.kubernetes.io/name=eri-restate -o name | head -n1) -c eri-restate -- agy\n\n# 2. Verify all pods and Flux Kustomizations are healthy\nkubectl get pods -o wide\nflux get kustomizations`,
     notes: [
       'Store credentials in runtime directories and mount static secrets with read-only permissions.',
       'Message the assistant in Discord or initiate voice interactions.',
