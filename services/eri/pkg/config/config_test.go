@@ -61,7 +61,6 @@ type loadConfigIngestionCase struct {
 	wantModel         string
 	wantTimezone      string
 	wantSystemChannel string
-	wantBotID         string
 	wantEngine        string
 	wantCodexBin      string
 	wantTx            TranscriptsConfig
@@ -84,9 +83,6 @@ func assertLoadConfigIngestionCase(t *testing.T, tc loadConfigIngestionCase) {
 	}
 	if tc.wantSystemChannel != "" && cur.SystemChannel != tc.wantSystemChannel {
 		t.Errorf("SystemChannel = %q, want %q", cur.SystemChannel, tc.wantSystemChannel)
-	}
-	if tc.wantBotID != "" && cur.BotID != tc.wantBotID {
-		t.Errorf("BotID = %q, want %q", cur.BotID, tc.wantBotID)
 	}
 	if tc.wantEngine != "" && cur.Engine != tc.wantEngine {
 		t.Errorf("Engine = %q, want %q", cur.Engine, tc.wantEngine)
@@ -165,7 +161,7 @@ func loadConfigIngestionCases() []loadConfigIngestionCase {
 		},
 		{
 			name:    "transcripts indexer url and batch budget",
-			content: "transcripts:\n  stack: \"stack-b\"\n  indexer_url: \"  http://indexer.internal:4060/  \"\n  max_batch_bytes: 65536\nchannels:\n  default:\n    mode: \"threads\"\n",
+			content: "transcripts:\n  stack: \" stack-b \"\n  indexer_url: \"  http://indexer.internal:4060/  \"\n  max_batch_bytes: 65536\nchannels:\n  default:\n    mode: \"threads\"\n",
 			wantTx:  TranscriptsConfig{Stack: "stack-b", IndexerURL: "http://indexer.internal:4060", MaxBatchBytes: 65536},
 		},
 	}
@@ -227,7 +223,7 @@ func loadConfigURLAndErrorCases() []loadConfigURLAndErrorCase {
 	return []loadConfigURLAndErrorCase{
 		{
 			name:           "service urls trimming and bot id",
-			content:        "model: \"gemini-1.5-pro\"\nbot_id: \"  aerial-prime  \"\nsynapse_url: \"  http://synapse.internal:4020///  \"\nvanadis_url: \"http://vanadis.internal:4025/  \"\nharo_url: \"  http://haro.internal:4026  \"\ncoven_url: \"http://coven.internal:4027/\"\nnats_url: \"  nats://nats-cluster:4222/  \"\ntranscripts:\n  stack: \" stack-b \"\nchannels:\n  default:\n    mode: \"threads\"\n",
+			content:        "bot_id: \"  aerial-prime  \"\nsynapse_url: \"  http://synapse.internal:4020///  \"\nvanadis_url: \"http://vanadis.internal:4025/  \"\nharo_url: \"  http://haro.internal:4026  \"\ncoven_url: \"http://coven.internal:4027/\"\nnats_url: \"  nats://nats-cluster:4222/  \"\nchannels:\n  default:\n    mode: \"threads\"\n",
 			wantBotID:      "aerial-prime",
 			wantSynapseURL: "http://synapse.internal:4020",
 			wantVanadisURL: "http://vanadis.internal:4025",
