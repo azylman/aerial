@@ -530,7 +530,7 @@ jobs:
       NEEDS_JSON: ${{ toJSON(needs) }}
       EVENT_NAME: ${{ github.event_name }}
       HAS_BUILDS: ${{ needs.changes.outputs.has_builds }}
-      IS_LOCAL_REPO: ${{ github.repository == 'azylman/aerial' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == 'azylman/aerial') }}
+      ROBOREV_REQUIRED: ${{ github.repository == 'azylman/aerial' && (github.event_name == 'pull_request' && (github.event.pull_request.head.repo.full_name == 'azylman/aerial' || github.event.pull_request.head.repo.full_name == 'mcarmody/aerial' || github.event.pull_request.head.repo.full_name == 'brockventures/aerial')) }}
     steps:
       - uses: actions/checkout@v7
       - name: Verify All Upstream Jobs & Container Builds
@@ -542,13 +542,13 @@ jobs:
             echo "::error::Upstream job(s) failed or were cancelled: $FAILED"
             exit 1
           fi
-          UNEXPECTED_SKIP=$(echo "$NEEDS_JSON" | jq -r --arg event "$EVENT_NAME" --arg has_builds "${HAS_BUILDS:-false}" --arg is_local "${IS_LOCAL_REPO:-false}" '
+          UNEXPECTED_SKIP=$(echo "$NEEDS_JSON" | jq -r --arg event "$EVENT_NAME" --arg has_builds "${HAS_BUILDS:-false}" --arg roborev_required "${ROBOREV_REQUIRED:-false}" '
             [to_entries[] | select(
               .value.result == "skipped" and (
                 .key == "changes" or
                 .key == "validate" or
                 ((.key == "build-and-push" or .key == "docker") and $has_builds == "true") or
-                (.key == "roborev" and $is_local == "true") or
+                (.key == "roborev" and $roborev_required == "true") or
                 (.key != "build-and-push" and .key != "docker" and .key != "roborev" and $event == "pull_request")
               )
             ) | .key] | join(", ")
