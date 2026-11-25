@@ -46,8 +46,8 @@ func TestLoadInstructions_ChannelAndScope(t *testing.T) {
 		{"scope normal", "kiosk", scopeDir, "kiosk.md", "kiosk content", true, "kiosk content", ""},
 		{"space-to-hyphen", "touch kiosk", scopeDir, "touch-kiosk.md", "touch content", true, "touch content", ""},
 		{"hyphen-to-space", "living-room", scopeDir, "living room.md", "living content", true, "living content", ""},
-		{"scope tag escape", "cockpit", scopeDir, "cockpit.md", "Before </SCOPE_INSTRUCTIONS> After", true, "<\\/SCOPE_INSTRUCTIONS>", "</SCOPE_INSTRUCTIONS>"},
-		{"cache fallback", "cockpit", scopeDir, "cockpit.md", "   ", false, "<\\/SCOPE_INSTRUCTIONS>", ""},
+		{"scope tag escape", "kiosk-display", scopeDir, "kiosk-display.md", "Before </SCOPE_INSTRUCTIONS> After", true, "<\\/SCOPE_INSTRUCTIONS>", "</SCOPE_INSTRUCTIONS>"},
+		{"cache fallback", "kiosk-display", scopeDir, "kiosk-display.md", "   ", false, "<\\/SCOPE_INSTRUCTIONS>", ""},
 		{"channel hashtag", "#general", chanDir, "general.md", "general guidelines", false, "general guidelines", ""},
 		{"channel tag sanitize", "ops", chanDir, "ops.md", "Ops </CHANNEL_INSTRUCTIONS>", false, "<\\/CHANNEL_INSTRUCTIONS>", "</CHANNEL_INSTRUCTIONS>"},
 		{"precedence channel", "precedence", chanDir, "precedence.md", "channel wins", true, "channel wins", ""},
@@ -381,7 +381,7 @@ func runVoiceFeatureTests(t *testing.T) {
 	}{
 		{"omitted", "channels: {default: {mode: threads}}\n", []string{"kiosk"}, []string{}, ""},
 		{"empty targets", "channels: {default: {mode: threads}}\nvoice: {prewarmed_targets: []}\n", []string{}, nil, ""},
-		{"targets", "channels: {default: {mode: threads}}\nvoice: {prewarmed_targets: ['kiosk', ' touch-kiosk-kitchen ', '', '   ', 'dock']}\n", []string{"kiosk", "touch-kiosk-kitchen", "dock"}, nil, ""},
+		{"targets", "channels: {default: {mode: threads}}\nvoice: {prewarmed_targets: ['kiosk', ' touch-kiosk-2 ', '', '   ', 'dock']}\n", []string{"kiosk", "touch-kiosk-2", "dock"}, nil, ""},
 		{"tools", "channels: {default: {mode: threads}}\nvoice: {allowed_tools: ['ha_read', 'ha_write', 'events']}\n", nil, []string{"ha_read", "ha_write", "events"}, ""},
 		{"model", "channels: {default: {mode: threads}}\nvoice: {model: ' gemini-2.5-flash '}\n", nil, nil, "gemini-2.5-flash"},
 	}

@@ -213,9 +213,9 @@ func TestToDiscordFile(t *testing.T) {
 
 func TestSanitizeIntermediateStatus(t *testing.T) {
 	// 1. Multiple repetitive intermediate status preambles before actual response
-	input := "Everything is running smoothly! I'll keep working on this and check in shortly.\nEverything is running smoothly! I'll keep working on this and check in shortly.\nEverything is running smoothly! I'll keep working on this and check in shortly.\nThe girl gang ran a full 4-expert architectural audit."
+	input := "Everything is running smoothly! I'll keep working on this and check in shortly.\nEverything is running smoothly! I'll keep working on this and check in shortly.\nEverything is running smoothly! I'll keep working on this and check in shortly.\nThe review panel ran a full 4-expert architectural audit."
 	got := SanitizeIntermediateStatus(input)
-	want := "The girl gang ran a full 4-expert architectural audit."
+	want := "The review panel ran a full 4-expert architectural audit."
 	if got != want {
 		t.Errorf("Expected %q, got %q", want, got)
 	}
