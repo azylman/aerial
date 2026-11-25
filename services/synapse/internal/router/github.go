@@ -175,20 +175,38 @@ func ExtractChunkIDFromBranch(repo, branch string) string {
 }
 
 // ExtractTargetIDFromBranch recovers the Discord target snowflake encoded in a
-// feat/<repo>-pr-t<target_id>-<6hex> or feat/<repo>-pr-...-t<target_id>-<6hex>
-// branch name, or "" when absent.
+// feat/<repo>-pr-t<target_id>-<6hex>, feat/<repo>-pr-...-t<target_id>-<6hex>, or
+// legacy feat/<repo>-pr-t<target_id>-<14digits>-<6hex> branch name, or "" when absent.
 func ExtractTargetIDFromBranch(repo, branch string) string {
 	rem, ok := parseAerialBranchRemainder(repo, branch, "")
 	if !ok {
 		return ""
 	}
-	if strings.HasPrefix(rem, "t") && model.IsValidDiscordSnowflake(rem[1:]) {
-		return rem[1:]
+	if strings.HasPrefix(rem, "t") {
+		candidate := rem[1:]
+		if model.IsValidDiscordSnowflake(candidate) {
+			return candidate
+		}
+		if target, ts, ok := strings.Cut(candidate, "-"); ok && model.IsValidDiscordSnowflake(target) && is14DigitTimestamp(ts) {
+			return target
+		}
 	}
 	if _, candidate, hasT := strings.CutLast(rem, "-t"); hasT && model.IsValidDiscordSnowflake(candidate) {
 		return candidate
 	}
 	return ""
+}
+
+func is14DigitTimestamp(s string) bool {
+	if len(s) != 14 {
+		return false
+	}
+	for i := range s {
+		if s[i] < '0' || s[i] > '9' {
+			return false
+		}
+	}
+	return true
 }
 
 // ResolveAerialPRMetadata extracts the Aerial PR metadata from a PR body,

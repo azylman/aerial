@@ -92,6 +92,8 @@ func TestExtractTargetIDFromBranch(t *testing.T) {
 		{name: "standalone with 17 digit target", repo: "aerial", branch: "feat/aerial-pr-t12345678901234567-012345", want: "12345678901234567"},
 		{name: "standalone with 18 digit target", repo: "aerial", branch: "feat/aerial-pr-t123456789012345678-012345", want: "123456789012345678"},
 		{name: "standalone with 20 digit target", repo: "aerial", branch: "feat/aerial-pr-t12345678901234567890-012345", want: "12345678901234567890"},
+		{name: "standalone branch with timestamp before target id", repo: "aerial", branch: "feat/aerial-pr-20261124203346-t1574989632892829757-8bb0f1", want: "1574989632892829757"},
+		{name: "legacy standalone branch with target id before timestamp", repo: "aerial", branch: "feat/aerial-pr-t1574989632892829757-20261124203346-8bb0f1", want: "1574989632892829757"},
 		{name: "standalone with refs heads", repo: "azylman/aerial", branch: "refs/heads/feat/aerial-pr-t123456789012345678-012345", want: "123456789012345678"},
 		{name: "vanadis branch with 18 digit target", repo: "aerial", branch: "feat/aerial-pr-vanadis-c1-t123456789012345678-012345", want: "123456789012345678"},
 		{name: "vanadis branch without target", repo: "aerial", branch: "feat/aerial-pr-vanadis-c1-012345", want: ""},

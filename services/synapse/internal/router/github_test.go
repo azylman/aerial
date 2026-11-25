@@ -584,6 +584,8 @@ func TestExtractTargetIDFromBranch(t *testing.T) {
 		{name: "empty repo", repo: "", branch: "feat/aerial-pr-t111111111111111111-012345", want: ""},
 		{name: "empty branch", repo: "aerial", branch: "", want: ""},
 		{name: "standalone branch with target id", repo: "aerial", branch: "feat/aerial-pr-t111111111111111111-a1b2c3", want: "111111111111111111"},
+		{name: "standalone branch with timestamp before target id", repo: "aerial", branch: "feat/aerial-pr-20261124203346-t1574989632892829757-8bb0f1", want: "1574989632892829757"},
+		{name: "legacy standalone branch with target id before timestamp", repo: "aerial", branch: "feat/aerial-pr-t1574989632892829757-20261124203346-8bb0f1", want: "1574989632892829757"},
 		{name: "standalone branch with refs/heads and target id", repo: "azylman/aerial", branch: "refs/heads/feat/aerial-pr-t111111111111111111-a1b2c3", want: "111111111111111111"},
 		{name: "standalone branch timestamp without target", repo: "aerial", branch: "feat/aerial-pr-20261116-123456", want: ""},
 		{name: "chunk branch with target id", repo: "aerial", branch: "feat/aerial-pr-" + testChunkTag + "-chunk-1-t111111111111111111-a1b2c3", want: "111111111111111111"},
