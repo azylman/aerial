@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
-	"strconv"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -111,6 +110,7 @@ type prCIFailRemediationCase struct {
 	wantDispatchID string
 	wantSkipActive *bool
 	wantSHA        string
+	wantPrompt     string
 }
 
 func prCIFailRemediationCases() []prCIFailRemediationCase {
@@ -164,7 +164,7 @@ func prCIFailRemediationCases() []prCIFailRemediationCase {
 			name:      "completed run with multiple failed jobs coalesces into single wake",
 			ev:        pubsub.PRLifecycleEvent{Event: "ci_failed", CheckName: "lint", HeadSHA: "abcdef1234", Repo: "aerial", PRNumber: 42, CheckURL: "https://github.com/example-owner/aerial/actions/runs/123/job/10", Details: "lint failure"},
 			apiRoutes: coalescedJobs, failCount: 1,
-			wantChecks: []string{"c1:abcdef1234:lint:failed", "c1:abcdef1234:test:failed"}, wantBanners: []string{`c1:ci_failed:CI check "lint" failed`, `c1:ci_failed:CI check "lint, test" failed`}, wantDispatchID: "vanadis-c1-cifail-abcdef1234-2", wantSkipActive: &no, wantWidget: `CI check "lint, test" failed — remediation in progress`,
+			wantChecks: []string{"c1:abcdef1234:lint:failed", "c1:abcdef1234:test:failed"}, wantBanners: []string{`c1:ci_failed:CI check "lint" failed`, `c1:ci_failed:CI check "lint, test" failed`}, wantDispatchID: "vanadis-c1-cifail-abcdef1234-2", wantSkipActive: &no, wantPrompt: "lint, test", wantWidget: `CI check "lint, test" failed — remediation in progress`,
 		},
 		{
 			name: "workflow run failure does not record workflow name in ci checks",
@@ -176,8 +176,46 @@ func prCIFailRemediationCases() []prCIFailRemediationCase {
 				"GET /repos/example-owner/aerial/actions/jobs/10/logs": {{Status: http.StatusOK, Body: "lint syntax error"}},
 			},
 			failCount:  1,
-			wantChecks: []string{"c1:abcdef1234:lint:failed"}, wantBanners: []string{`c1:ci_failed:CI check "Continuous Delivery" failed`, `c1:ci_failed:CI check "lint" failed`}, wantDispatchID: "vanadis-c1-cifail-abcdef1234-2", wantSkipActive: &no, wantWidget: `CI check "lint" failed — remediation in progress`,
+			wantChecks: []string{"c1:abcdef1234:lint:failed"}, wantBanners: []string{`c1:ci_failed:CI check "Continuous Delivery" failed`, `c1:ci_failed:CI check "lint" failed`}, wantDispatchID: "vanadis-c1-cifail-abcdef1234-2", wantSkipActive: &no, wantPrompt: "lint", wantWidget: `CI check "lint" failed — remediation in progress`,
 		},
+	}
+}
+
+func assertRemediationStoreResult(t *testing.T, spy *checkStatusSpyStore, tc prCIFailRemediationCase) {
+	t.Helper()
+	assert.Equal(t, tc.wantBanners, spy.banners)
+	if tc.wantChecks != nil {
+		assert.ElementsMatch(t, tc.wantChecks, spy.calls)
+	}
+	wantFailCalls := 0
+	if tc.wantDispatchID != "" && tc.dispatchErr == nil {
+		wantFailCalls = 1
+	}
+	assert.Len(t, spy.failCountCalls, wantFailCalls)
+	if tc.wantSHA != "" {
+		assert.Equal(t, tc.wantSHA, spy.chunk("c1").RemediatedSHA)
+	}
+}
+
+func assertRemediationEriResult(t *testing.T, eri *eritest.Client, tc prCIFailRemediationCase) {
+	t.Helper()
+	if tc.wantWidget != "" && assert.NotNil(t, eri.LastWidget) {
+		assert.Equal(t, tc.wantWidget, eri.LastWidget.Banner)
+	}
+	if tc.wantDispatchID == "" {
+		assert.Nil(t, eri.LastDispatch)
+		return
+	}
+	require.NotNil(t, eri.LastDispatch)
+	assert.Equal(t, "vanadis-c1", eri.LastDispatch.SessionID)
+	assert.Equal(t, "c1", eri.LastDispatch.VanadisChunkID)
+	assert.Equal(t, "th-1", eri.LastDispatch.TargetID)
+	assert.Equal(t, tc.wantDispatchID, eri.LastDispatch.ID)
+	if tc.wantSkipActive != nil {
+		assert.Equal(t, *tc.wantSkipActive, eri.LastDispatch.SkipIfActive)
+	}
+	if tc.wantPrompt != "" {
+		assert.Contains(t, eri.LastDispatch.Prompt, tc.wantPrompt)
 	}
 }
 
@@ -201,50 +239,27 @@ func TestFlow_HandlePREventType_CIFailedRemediation(t *testing.T) {
 				err = f.HandlePREventType(ctx, "b1", "c1", extra.Event, extra)
 			}
 			require.NoError(t, err)
-			assert.Equal(t, tc.wantBanners, spy.banners)
-			if tc.wantChecks != nil {
-				assert.ElementsMatch(t, tc.wantChecks, spy.calls)
-			}
-			wantFailCalls := 0
-			if tc.wantDispatchID != "" && tc.dispatchErr == nil {
-				wantFailCalls = 1
-			}
-			assert.Len(t, spy.failCountCalls, wantFailCalls)
-			if tc.wantSHA != "" {
-				assert.Equal(t, tc.wantSHA, spy.chunk("c1").RemediatedSHA)
-			}
-			if tc.wantWidget != "" && assert.NotNil(t, eri.LastWidget) {
-				assert.Equal(t, tc.wantWidget, eri.LastWidget.Banner)
-			}
-			if tc.wantDispatchID != "" {
-				require.NotNil(t, eri.LastDispatch)
-				assert.Equal(t, "vanadis-c1", eri.LastDispatch.SessionID)
-				assert.Equal(t, "c1", eri.LastDispatch.VanadisChunkID)
-				assert.Equal(t, "th-1", eri.LastDispatch.TargetID)
-				assert.Equal(t, tc.wantDispatchID, eri.LastDispatch.ID)
-				if tc.wantSkipActive != nil {
-					assert.Equal(t, *tc.wantSkipActive, eri.LastDispatch.SkipIfActive)
-				}
-				assert.NotEmpty(t, eri.LastDispatch.Prompt)
-			} else {
-				assert.Nil(t, eri.LastDispatch)
-			}
+			assertRemediationStoreResult(t, spy, tc)
+			assertRemediationEriResult(t, eri, tc)
 		})
 	}
 }
 
 type prCIFailRemediationErrorCase struct {
-	name         string
-	ev           pubsub.PRLifecycleEvent
-	apiStatus    int
-	apiRoutes    map[string][]githubapitest.Response
-	dispatchErr  error
-	bannerErr    error
-	checkErr     error
-	getBuildErr  error
-	failCountErr error
-	wantErr      string
-	wantBanners  []string
+	name           string
+	ev             pubsub.PRLifecycleEvent
+	apiStatus      int
+	apiRoutes      map[string][]githubapitest.Response
+	dispatchErr    error
+	bannerErr      error
+	checkErr       error
+	getBuildErr    error
+	failCountErr   error
+	wantErr        string
+	wantBanners    []string
+	wantChecks     []string
+	wantDispatchID string
+	wantFailCalls  int
 }
 
 func prCIFailRemediationErrorCases() []prCIFailRemediationErrorCase {
@@ -258,7 +273,7 @@ func prCIFailRemediationErrorCases() []prCIFailRemediationErrorCase {
 	return []prCIFailRemediationErrorCase{
 		{
 			name: "ci_failed dispatch transport error propagates without consuming remediation attempt budget", ev: ciFailEv("unit-tests", "abcdef1234"), dispatchErr: errLifecycleDB,
-			wantErr: "db error", wantBanners: []string{lifecycleCIBanner},
+			wantErr: "db error", wantBanners: []string{lifecycleCIBanner}, wantDispatchID: "vanadis-c1-cifail-abcdef1234-1", wantFailCalls: 0,
 		},
 		{
 			name: "ci_failed details API error propagates before dispatch", ev: pubsub.PRLifecycleEvent{Event: "ci_failed", CheckName: "roborev", HeadSHA: "abc123", Repo: "aerial", PRNumber: 42, Details: "failure"}, apiStatus: http.StatusInternalServerError,
@@ -274,7 +289,7 @@ func prCIFailRemediationErrorCases() []prCIFailRemediationErrorCase {
 		},
 		{
 			name: "ci_failed increment count error after accepted dispatch propagates", ev: ciFailEv("unit-tests", "abcdef1234"), failCountErr: errLifecycleDB,
-			wantErr: "db error", wantBanners: []string{lifecycleCIBanner},
+			wantErr: "db error", wantBanners: []string{lifecycleCIBanner}, wantDispatchID: "vanadis-c1-cifail-abcdef1234-1", wantFailCalls: 1,
 		},
 		{
 			name:      "coalesced check record error propagates",
@@ -286,7 +301,7 @@ func prCIFailRemediationErrorCases() []prCIFailRemediationErrorCase {
 			name:      "coalesced banner update error propagates",
 			ev:        pubsub.PRLifecycleEvent{Event: "ci_failed", CheckName: "Continuous Delivery", HeadSHA: "abcdef1234", Repo: "aerial", PRNumber: 42, CheckURL: "https://github.com/example-owner/aerial/actions/runs/123", Details: "workflow concluded with failure"},
 			apiRoutes: cdRoutes, bannerErr: errLifecycleDB,
-			wantErr: "db error", wantBanners: []string{`c1:ci_failed:CI check "Continuous Delivery" failed`},
+			wantErr: "db error", wantBanners: []string{`c1:ci_failed:CI check "Continuous Delivery" failed`}, wantChecks: []string{},
 		},
 	}
 }
@@ -309,10 +324,19 @@ func TestFlow_HandlePREventType_CIFailedRemediationErrors(t *testing.T) {
 			err := f.HandlePREventType(context.Background(), "b1", "c1", "ci_failed", tc.ev)
 			assertLifecycleErr(t, tc.wantErr, err)
 			assert.Equal(t, tc.wantBanners, spy.banners)
-			if tc.failCountErr != nil {
-				assert.Len(t, spy.failCountCalls, 1)
+			if tc.wantChecks != nil {
+				assert.ElementsMatch(t, tc.wantChecks, spy.calls)
+			}
+			assert.Len(t, spy.failCountCalls, tc.wantFailCalls)
+			if tc.wantDispatchID != "" {
 				require.NotNil(t, eri.LastDispatch)
+				assert.Equal(t, "vanadis-c1", eri.LastDispatch.SessionID)
+				assert.Equal(t, "c1", eri.LastDispatch.VanadisChunkID)
+				assert.Equal(t, "th-1", eri.LastDispatch.TargetID)
+				assert.Equal(t, tc.wantDispatchID, eri.LastDispatch.ID)
 				assert.False(t, eri.LastDispatch.SkipIfActive)
+			} else {
+				assert.Nil(t, eri.LastDispatch)
 			}
 		})
 	}
@@ -453,137 +477,145 @@ func TestFlow_HandlePREventType_CIFailedCapReached(t *testing.T) {
 }
 
 type prCIFailCapErrorCase struct {
-	name         string
-	ev           pubsub.PRLifecycleEvent
-	chunk        *model.VanadisChunk
-	failCount    int
-	failBanner   string
-	apiStatus    int
-	checkErr     error
-	bannerErr    error
-	getBuildErr  error
-	failCountErr error
-	failErr      error
-	notifyErr    error
-	cancelErr    error
-	widgetErr    error
+	name          string
+	ev            pubsub.PRLifecycleEvent
+	chunk         *model.VanadisChunk
+	failCount     int
+	unapplied     bool
+	apiStatus     int
+	checkErr      error
+	getBuildErr   error
+	failCountErr  error
+	failErr       error
+	wantErr       string
+	wantFailed    []string
+	wantBanners   []string
+	wantFailCalls int
 }
 
 func prCIFailCapErrorCases() []prCIFailCapErrorCase {
 	return []prCIFailCapErrorCase{
 		{
 			name: "ci_failed increment count error at cap propagates", ev: ciFailEv("unit-tests", "abcdef1234"), failCount: 5, failCountErr: errLifecycleDB,
-		},
-		{
-			name: "ci_failed record check skipped on already failed chunk resumes cap reached notifications", ev: ciFailEv("unit-tests", "abcdef1234"),
-			chunk: &model.VanadisChunk{Status: "failed", Banner: lifecycleCapText, HeadSHA: "abcdef1234"}, failBanner: lifecycleCapText, checkErr: ErrPRTransitionSkipped,
-		},
-		{
-			name: "ci_failed update banner skipped on already failed chunk resumes cap reached notifications", ev: ciFailEv("unit-tests", "abcdef1234"),
-			chunk: &model.VanadisChunk{Status: "failed", Banner: lifecycleCapText, HeadSHA: "abcdef1234"}, failBanner: lifecycleCapText, bannerErr: ErrPRTransitionSkipped,
+			wantErr: "db error", wantBanners: []string{lifecycleCIBanner}, wantFailCalls: 1,
 		},
 		{
 			name: "ci_failed record check skipped with stale head does not re-notify", ev: ciFailEv("unit-tests", "stale-sha"),
 			chunk: &model.VanadisChunk{Status: "failed", Banner: lifecycleCapText, HeadSHA: "current-sha"}, checkErr: ErrPRTransitionSkipped,
+			wantErr: lifecycleSkipped,
 		},
 		{
 			name: "ci_failed record check skipped with lookup error propagates", ev: ciFailEv("unit-tests", "abcdef1234"), checkErr: ErrPRTransitionSkipped, getBuildErr: errLifecycleDB,
-		},
-		{
-			name: "ci_failed exceeding cap preserves chunk failure and propagates notification error", ev: ciFailEv("unit-tests", "abcdef1234"), failCount: 5, notifyErr: errLifecycleDB,
-		},
-		{
-			name: "ci_failed exceeding cap retry with matching banner completes notifications", ev: ciFailEv("unit-tests", "abcdef1234"), failCount: 5, failBanner: lifecycleCapText,
+			wantErr: "db error",
 		},
 		{
 			name: "ci_failed exceeding cap fail chunk error propagates", ev: ciFailEv("unit-tests", "abcdef1234"), failCount: 5, failErr: errLifecycleDB,
+			wantErr: "db error", wantFailed: []string{lifecycleCapFail}, wantBanners: []string{lifecycleCIBanner}, wantFailCalls: 1,
 		},
 		{
-			name: "ci_failed at cap with unapplied fail chunk skips cap without cancelling", ev: ciFailEv("unit-tests", "abcdef1234"), failCount: 5, failBanner: "unapplied",
+			name: "ci_failed at cap with unapplied fail chunk skips cap without cancelling", ev: ciFailEv("unit-tests", "abcdef1234"), failCount: 5, unapplied: true,
+			wantFailed: []string{lifecycleCapFail}, wantBanners: []string{lifecycleCIBanner}, wantFailCalls: 1,
 		},
 		{
 			name: "ci_failed exceeding cap failure details error propagates", ev: pubsub.PRLifecycleEvent{Event: "ci_failed", CheckName: "roborev", HeadSHA: "abc123", Repo: "aerial", PRNumber: 42, Details: "failure"}, failCount: 5, apiStatus: http.StatusInternalServerError,
-		},
-		{
-			name: "ci_failed exceeding cap cancel warning logged and continues", ev: ciFailEv("unit-tests", "abcdef1234"), failCount: 5, cancelErr: errors.New("cancel down"),
-		},
-		{
-			name: "ci_failed exceeding cap widget warning logged and continues", ev: ciFailEv("unit-tests", "abcdef1234"), failCount: 5, widgetErr: errors.New("widget down"),
+			wantErr: "500", wantFailed: []string{lifecycleCapFail}, wantBanners: []string{`c1:ci_failed:CI check "roborev" failed`}, wantFailCalls: 1,
 		},
 	}
 }
 
-func resolveCapErrorExpectation(tc prCIFailCapErrorCase) string {
-	switch {
-	case tc.apiStatus != 0:
-		return strconv.Itoa(tc.apiStatus)
-	case tc.checkErr != nil && tc.chunk != nil && tc.chunk.HeadSHA != tc.ev.HeadSHA:
-		return lifecycleSkipped
-	case tc.failCountErr != nil || tc.failErr != nil || tc.notifyErr != nil || tc.getBuildErr != nil:
-		return "db error"
-	default:
-		return ""
-	}
-}
-
-func assertCapErrorStore(t *testing.T, spy *checkStatusSpyStore, tc prCIFailCapErrorCase) {
-	t.Helper()
-	var wantFailed []string
-	if (tc.failCount == 5 && tc.failCountErr == nil) || (tc.chunk != nil && tc.chunk.Status == "failed" && tc.failBanner == lifecycleCapText) {
-		wantFailed = []string{lifecycleCapFail}
-	}
-	assert.Equal(t, wantFailed, spy.failed)
-
-	var wantBanners []string
-	if tc.failCount == 5 {
-		if tc.ev.CheckName == "roborev" {
-			wantBanners = []string{`c1:ci_failed:CI check "roborev" failed`}
-		} else {
-			wantBanners = []string{lifecycleCIBanner}
-		}
-	} else if tc.bannerErr != nil {
-		wantBanners = []string{lifecycleCIBanner}
-	}
-	assert.Equal(t, wantBanners, spy.banners)
-
-	if tc.failCount == 5 {
-		assert.Len(t, spy.failCountCalls, 1)
-	} else {
-		assert.Empty(t, spy.failCountCalls)
-	}
-}
-
-func assertCapErrorEri(t *testing.T, eri *eritest.Client, tc prCIFailCapErrorCase, capPrompt, capProgress string) {
-	t.Helper()
-	if tc.failBanner == lifecycleCapText || (tc.failCount == 5 && tc.failCountErr == nil && tc.failErr == nil && tc.apiStatus == 0 && tc.failBanner != "unapplied") {
-		assert.Equal(t, "c1", eri.LastCancel)
-		assert.Equal(t, "th-1", eri.LastThreadID)
-		assert.Contains(t, eri.LastPrompt, capPrompt)
-		if tc.notifyErr == nil && assert.NotNil(t, eri.LastWidget) {
-			assert.Equal(t, capProgress, eri.LastWidget.Banner)
-		}
-	}
-}
-
-func TestFlow_HandlePREventType_CIFailedCapErrorsAndSkips(t *testing.T) {
+func TestFlow_HandlePREventType_CIFailedCapErrors(t *testing.T) {
 	t.Parallel()
-	capProgress := fmt.Sprintf("CI remediation cap (%d/%d) reached — inline thread remediation in progress", executor.MaxCIRemediationAttempts, executor.MaxCIRemediationAttempts)
-	capPrompt := "[VANADIS INLINE THREAD CI REMEDIATION — MANDATORY]"
 	for _, tc := range prCIFailCapErrorCases() {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			spy := &checkStatusSpyStore{
 				getBuildErr:   tc.getBuildErr,
-				bannerErr:     tc.bannerErr,
 				failErr:       tc.failErr,
 				failCount:     tc.failCount,
 				failCountErr:  tc.failCountErr,
+				skipFailApply: tc.unapplied,
+				err:           tc.checkErr,
+			}
+			spy.chunks = newSpyChunk(tc.chunk, tc.failCount)
+			eri := &eritest.Client{SimulateActive: true}
+			exec := newLifecycleExecutor(t, eri, nil, tc.apiStatus, "")
+			f := NewFlow(spy, exec)
+			err := f.HandlePREventType(context.Background(), "b1", "c1", "ci_failed", tc.ev)
+
+			assertLifecycleErr(t, tc.wantErr, err)
+			assert.Equal(t, tc.wantFailed, spy.failed)
+			assert.Equal(t, tc.wantBanners, spy.banners)
+			assert.Len(t, spy.failCountCalls, tc.wantFailCalls)
+			assert.Empty(t, eri.LastCancel)
+			assert.Empty(t, eri.LastThreadID)
+			assert.Empty(t, eri.LastPrompt)
+			assert.Nil(t, eri.LastWidget)
+			assert.Nil(t, eri.LastDispatch)
+		})
+	}
+}
+
+type prCIFailCapResumeCase struct {
+	name          string
+	ev            pubsub.PRLifecycleEvent
+	chunk         *model.VanadisChunk
+	failCount     int
+	failBanner    string
+	checkErr      error
+	bannerErr     error
+	notifyErr     error
+	cancelErr     error
+	widgetErr     error
+	wantErr       string
+	wantFailed    []string
+	wantBanners   []string
+	wantFailCalls int
+}
+
+func prCIFailCapResumeCases() []prCIFailCapResumeCase {
+	return []prCIFailCapResumeCase{
+		{
+			name: "ci_failed record check skipped on already failed chunk resumes cap reached notifications", ev: ciFailEv("unit-tests", "abcdef1234"),
+			chunk: &model.VanadisChunk{Status: "failed", Banner: lifecycleCapText, HeadSHA: "abcdef1234"}, failBanner: lifecycleCapText, checkErr: ErrPRTransitionSkipped,
+			wantFailed: []string{lifecycleCapFail},
+		},
+		{
+			name: "ci_failed update banner skipped on already failed chunk resumes cap reached notifications", ev: ciFailEv("unit-tests", "abcdef1234"),
+			chunk: &model.VanadisChunk{Status: "failed", Banner: lifecycleCapText, HeadSHA: "abcdef1234"}, failBanner: lifecycleCapText, bannerErr: ErrPRTransitionSkipped,
+			wantFailed: []string{lifecycleCapFail}, wantBanners: []string{lifecycleCIBanner},
+		},
+		{
+			name: "ci_failed exceeding cap retry with matching banner completes notifications", ev: ciFailEv("unit-tests", "abcdef1234"), failCount: 5, failBanner: lifecycleCapText,
+			wantFailed: []string{lifecycleCapFail}, wantBanners: []string{lifecycleCIBanner}, wantFailCalls: 1,
+		},
+		{
+			name: "ci_failed exceeding cap preserves chunk failure and propagates notification error", ev: ciFailEv("unit-tests", "abcdef1234"), failCount: 5, notifyErr: errLifecycleDB,
+			wantErr: "db error", wantFailed: []string{lifecycleCapFail}, wantBanners: []string{lifecycleCIBanner}, wantFailCalls: 1,
+		},
+		{
+			name: "ci_failed exceeding cap cancel warning logged and continues", ev: ciFailEv("unit-tests", "abcdef1234"), failCount: 5, cancelErr: errors.New("cancel down"),
+			wantFailed: []string{lifecycleCapFail}, wantBanners: []string{lifecycleCIBanner}, wantFailCalls: 1,
+		},
+		{
+			name: "ci_failed exceeding cap widget warning logged and continues", ev: ciFailEv("unit-tests", "abcdef1234"), failCount: 5, widgetErr: errors.New("widget down"),
+			wantFailed: []string{lifecycleCapFail}, wantBanners: []string{lifecycleCIBanner}, wantFailCalls: 1,
+		},
+	}
+}
+
+func TestFlow_HandlePREventType_CIFailedCapResumedNotifications(t *testing.T) {
+	t.Parallel()
+	capProgress := fmt.Sprintf("CI remediation cap (%d/%d) reached — inline thread remediation in progress", executor.MaxCIRemediationAttempts, executor.MaxCIRemediationAttempts)
+	capPrompt := "[VANADIS INLINE THREAD CI REMEDIATION — MANDATORY]"
+	for _, tc := range prCIFailCapResumeCases() {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			spy := &checkStatusSpyStore{
+				bannerErr:     tc.bannerErr,
+				failCount:     tc.failCount,
 				skipFailApply: tc.failBanner != "",
 				failBanner:    tc.failBanner,
 				err:           tc.checkErr,
-			}
-			if tc.failBanner == "unapplied" {
-				spy.failBanner = ""
 			}
 			spy.chunks = newSpyChunk(tc.chunk, tc.failCount)
 			eri := &eritest.Client{
@@ -593,13 +625,21 @@ func TestFlow_HandlePREventType_CIFailedCapErrorsAndSkips(t *testing.T) {
 				WidgetErr:      tc.widgetErr,
 				PromptErr:      tc.notifyErr,
 			}
-			exec := newLifecycleExecutor(t, eri, tc.notifyErr, tc.apiStatus, "")
+			exec := newLifecycleExecutor(t, eri, tc.notifyErr, 0, "")
 			f := NewFlow(spy, exec)
 			err := f.HandlePREventType(context.Background(), "b1", "c1", "ci_failed", tc.ev)
 
-			assertLifecycleErr(t, resolveCapErrorExpectation(tc), err)
-			assertCapErrorStore(t, spy, tc)
-			assertCapErrorEri(t, eri, tc, capPrompt, capProgress)
+			assertLifecycleErr(t, tc.wantErr, err)
+			assert.Equal(t, tc.wantFailed, spy.failed)
+			assert.Equal(t, tc.wantBanners, spy.banners)
+			assert.Len(t, spy.failCountCalls, tc.wantFailCalls)
+			assert.Equal(t, "c1", eri.LastCancel)
+			assert.Equal(t, "th-1", eri.LastThreadID)
+			assert.Contains(t, eri.LastPrompt, capPrompt)
+			if tc.notifyErr == nil && assert.NotNil(t, eri.LastWidget) {
+				assert.Equal(t, capProgress, eri.LastWidget.Banner)
+			}
+			assert.Nil(t, eri.LastDispatch)
 		})
 	}
 }
@@ -682,6 +722,10 @@ func TestFlow_HandlePREventType_ConflictAndDeployFailure(t *testing.T) {
 			err := f.HandlePREventType(context.Background(), "b1", "c1", tc.event, tc.ev)
 			assertLifecycleErr(t, tc.wantErr, err)
 			assert.Equal(t, tc.wantBanners, spy.banners)
+			assert.Empty(t, eri.LastCancel)
+			assert.Empty(t, spy.failed)
+			assert.Empty(t, spy.resets)
+			assert.Empty(t, spy.lifecycleStatus)
 			if !tc.wantDispatch {
 				assert.Nil(t, eri.LastDispatch)
 				return
