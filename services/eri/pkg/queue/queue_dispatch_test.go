@@ -672,6 +672,16 @@ func TestExtractVanadisDispatchInfo(t *testing.T) {
 			wantBuildID: "",
 		},
 		{
+			name: "custom chunk id with chunk in name does not extract bogus build id",
+			d: &db.Dispatch{
+				VanadisChunkID: "ste100-clean-chunk-5-navbar",
+				SessionID:      "vanadis-ste100-clean-chunk-5-navbar",
+				TargetID:       "1575025193959690322",
+			},
+			wantChunkID: "ste100-clean-chunk-5-navbar",
+			wantBuildID: "",
+		},
+		{
 			name: "standalone PR remediation pattern 1",
 			d: &db.Dispatch{
 				Prompt: "Remediate PR #42 on azylman/aerial please",
@@ -717,6 +727,7 @@ func TestExtractVanadisBuildID(t *testing.T) {
 		{name: "target ID with chunk suffix", targetID: "build-3-ghi-chunk-4", want: "build-3-ghi"},
 		{name: "bare build target ID", targetID: "build-4-jkl", want: "build-4-jkl"},
 		{name: "chunk ID prefix without suffix falls through", chunkID: "build-5-mno", sessionID: "vanadis-c06a", want: ""},
+		{name: "custom chunk ID with chunk infix does not extract bogus build ID", chunkID: "ste100-clean-chunk-5-navbar", sessionID: "vanadis-ste100-clean-chunk-5-navbar", targetID: "1575025193959690322", want: ""},
 		{name: "no build reference", chunkID: "c06a", sessionID: "heartbeat-1", targetID: "1234567890", want: ""},
 	}
 	for _, tc := range tests {

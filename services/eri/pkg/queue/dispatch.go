@@ -31,7 +31,7 @@ func extractVanadisBuildID(chunkID, sessionID, targetID string) string {
 			return chunkID[:idx]
 		}
 	}
-	if after, ok := strings.CutPrefix(sessionID, "vanadis-"); ok {
+	if after, ok := strings.CutPrefix(sessionID, "vanadis-"); ok && strings.HasPrefix(after, "build-") {
 		if idx := strings.LastIndex(after, "-chunk-"); idx > 0 {
 			return after[:idx]
 		}
