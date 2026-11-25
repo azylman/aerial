@@ -110,7 +110,7 @@ bazel test //services/... //pkg/...`,
           {
             language: 'logsql',
             caption: 'VictoriaLogs LogsQL query for scoped container log forensics',
-            code: `_stream:{kubernetes.container_name="agent-worker"} level:in(WARN, ERROR)
+            code: `_stream:{kubernetes.container_name="<container-name>"} level:in(WARN, ERROR)
 | fields _time, kubernetes.container_name, level, _msg
 | sort by (_time) desc
 | limit 50`,
@@ -259,8 +259,8 @@ infisical secrets set --env=default \\
           {
             language: 'bash',
             caption: 'Authenticate agent CLI and verify cluster rollout',
-            code: `# 1. Authenticate execution engine in agent-worker pod
-kubectl exec -it $(kubectl get pod -l app.kubernetes.io/component=agent-worker -o name | head -n1) -c agent-worker -- agy
+            code: `# 1. Authenticate execution engine in eri-restate pod
+kubectl exec -it $(kubectl get pod -l app.kubernetes.io/name=eri-restate -o name | head -n1) -c eri-restate -- agy
 
 # 2. Verify all pods and Flux Kustomizations are healthy
 kubectl get pods -o wide
