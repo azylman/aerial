@@ -70,7 +70,7 @@ describe('filterChapters helper', () => {
     expect(byCalloutTitle[0]!.id).toBe('software-factory');
 
     // Callout text
-    const byCalloutText = filterChapters(HANDBOOK_CHAPTERS, 'kustomize.toolkit.fluxcd.io/prune');
+    const byCalloutText = filterChapters(HANDBOOK_CHAPTERS, 'prevent Flux kustomize-controller');
     expect(byCalloutText.length).toBeGreaterThan(0);
     expect(byCalloutText.some((c) => c.id === 'getting-started')).toBe(true);
   });
@@ -233,15 +233,28 @@ describe('HandbookView component', () => {
     expect(copyBtn.textContent).toContain('Copied to Clipboard!');
     expect(copyBtn.classList.contains('copied')).toBe(true);
 
+    // Advance 1500ms (timer 1 has 1000ms remaining)
+    act(() => {
+      vi.advanceTimersByTime(1500);
+    });
+    expect(copyBtn.textContent).toContain('Copied to Clipboard!');
+
     // Trigger second copy while timeout is active to cover timeout reset
     await act(async () => {
       fireEvent.click(copyBtn);
     });
     expect(copyBtn.textContent).toContain('Copied to Clipboard!');
 
-    // Fast forward timer to verify copied state resets
+    // Advance another 1500ms (3000ms since first click; ensures timer 1 was cleared and did not reset state)
     act(() => {
-      vi.advanceTimersByTime(2600);
+      vi.advanceTimersByTime(1500);
+    });
+    expect(copyBtn.textContent).toContain('Copied to Clipboard!');
+    expect(copyBtn.classList.contains('copied')).toBe(true);
+
+    // Fast forward past the second timer's deadline
+    act(() => {
+      vi.advanceTimersByTime(1100);
     });
 
     expect(copyBtn.textContent).toContain('Copy Code');

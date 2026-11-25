@@ -58,7 +58,7 @@ export const HANDBOOK_CHAPTERS: readonly HandbookChapter[] = [
             code: `# Run staged verification before any commit or PR creation
 ./scripts/verify.sh --staged
 
-# Execute full package test suite with race detector and coverage
+# Execute full package test suite
 bazel test //services/... //pkg/...`,
           },
         ],
@@ -109,10 +109,11 @@ bazel test //services/... //pkg/...`,
         codeSnippets: [
           {
             language: 'logsql',
-            caption: 'VictoriaLogs LogsQL query for agent tool execution',
-            code: `_stream:{service="eri-restate"} AND "tool_call" 
-| unpack_json 
-| stats by (tool_name) count() as invocations, avg(duration_ms) as avg_latency`,
+            caption: 'VictoriaLogs LogsQL query for scoped container log forensics',
+            code: `_stream:{kubernetes.container_name="eri"} level:in(WARN, ERROR)
+| fields _time, kubernetes.container_name, level, _msg
+| sort by (_time) desc
+| limit 50`,
           },
         ],
       },

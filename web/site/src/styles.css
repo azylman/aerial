@@ -601,8 +601,8 @@ a:hover {
 }
 
 .handbook-callout.callout-warning {
-  border-left-color: var(--ae-warning, #f9e2af);
-  background-color: rgb(var(--ae-warning-rgb, 249 226 175) / 0.08);
+  border-left-color: var(--ae-warn, #f9e2af);
+  background-color: rgb(var(--ae-warn-rgb, 249 226 175) / 0.08);
 }
 
 .handbook-callout.callout-important {
