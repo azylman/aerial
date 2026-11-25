@@ -56,7 +56,7 @@ export const QUICKSTART_STEPS: readonly QuickstepItem[] = [
       'Authenticate your preferred execution engine (agy, Claude Code, Codex, or Muse) and verify pod and GitOps health.',
     command: `# 1. Authenticate agy via Google OAuth inside the execution worker pod\nkubectl exec -it $(kubectl get pod -l app.kubernetes.io/name=eri-restate -o name | head -n1) -c eri-restate -- agy\n\n# 2. Verify all pods and Flux Kustomizations are healthy\nkubectl get pods -o wide\nflux get kustomizations`,
     notes: [
-      'OAuth tokens stored in memory/mounted read-only (:ro) inside eri-restate container',
+      'Interactive login credentials persist in /data/runtimes/ on the worker hostPath; static tokens mount read-only (:ro) via eri-secret',
       'Ready to message @Aerial in Discord or trigger voice interactions!',
     ],
   },

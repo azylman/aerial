@@ -267,10 +267,18 @@ export function ComparisonMatrix() {
             <input
               type="search"
               className="search-input"
-              placeholder="Filter by keyword or competitor..."
+              placeholder={
+                viewMode === 'matrix'
+                  ? 'Filter comparison dimensions by keyword...'
+                  : 'Filter by keyword or competitor...'
+              }
               value={searchQuery}
               onChange={(e) => setSearchQuery(e.target.value)}
-              aria-label="Filter competitors by keyword"
+              aria-label={
+                viewMode === 'matrix'
+                  ? 'Filter comparison dimensions by keyword'
+                  : 'Filter competitors by keyword'
+              }
               data-testid="comp-search-input"
             />
             <div className="view-mode-toggle" role="group" aria-label="Comparison view mode">

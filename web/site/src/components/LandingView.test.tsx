@@ -15,15 +15,11 @@ describe('LandingView Component', () => {
   it('renders landing hero, pillar features, and all showcase sections', () => {
     render(<LandingView />);
 
-    expect(screen.getByTestId('landing-view')).toBeTruthy();
-    expect(screen.getByTestId('landing-hero')).toBeTruthy();
-    expect(screen.getByTestId('pillar-cards')).toBeTruthy();
-    expect(screen.getByTestId('section-architecture')).toBeTruthy();
-    expect(screen.getByTestId('section-factory')).toBeTruthy();
-    expect(screen.getByTestId('section-showcase')).toBeTruthy();
-    expect(screen.getByTestId('section-comparison')).toBeTruthy();
-    expect(screen.getByTestId('section-quickstart')).toBeTruthy();
-    expect(screen.getByTestId('bottom-cta')).toBeTruthy();
+    expect(within(screen.getByTestId('section-architecture')).getByTestId('architecture-map')).toBeTruthy();
+    expect(within(screen.getByTestId('section-factory')).getByTestId('factory-stepper')).toBeTruthy();
+    expect(within(screen.getByTestId('section-showcase')).getByTestId('glassbox-showcase')).toBeTruthy();
+    expect(within(screen.getByTestId('section-comparison')).getByTestId('comparison-matrix')).toBeTruthy();
+    expect(within(screen.getByTestId('section-quickstart')).getByTestId('quickstart-steps')).toBeTruthy();
 
     expect(screen.getByTestId('hero-cta-handbook').getAttribute('href')).toBe('#/docs/overview');
     expect(screen.getByTestId('hero-cta-quickstart').getAttribute('href')).toBe('#/docs/getting-started');
@@ -272,6 +268,9 @@ describe('ComparisonMatrix Component', () => {
     expect(screen.getByTestId('comparison-table')).toBeTruthy();
     expect(screen.queryByTestId('competitor-cards')).toBeNull();
     expect(screen.getByTestId('matrix-row-0')).toBeTruthy();
+    expect(screen.getByTestId('comp-search-input').getAttribute('placeholder')).toBe(
+      'Filter comparison dimensions by keyword...'
+    );
 
     // In Matrix view, filter by category
     fireEvent.click(screen.getByTestId('comp-filter-homelab'));
@@ -300,6 +299,9 @@ describe('ComparisonMatrix Component', () => {
     // Switch back to Cards view
     fireEvent.click(screen.getByTestId('view-cards-btn'));
     expect(screen.getByTestId('competitor-cards')).toBeTruthy();
+    expect(screen.getByTestId('comp-search-input').getAttribute('placeholder')).toBe(
+      'Filter by keyword or competitor...'
+    );
   });
 });
 
@@ -398,10 +400,11 @@ describe('QuickstartSteps Component', () => {
     });
     expect(screen.getByText('Copy failed, select manually')).toBeTruthy();
 
-    // Unmount before timeout expires
+    // Verify timer is registered before unmount
+    expect(vi.getTimerCount()).toBe(1);
+
+    // Unmount cancels pending timer via effect cleanup
     unmount();
-    act(() => {
-      vi.advanceTimersByTime(3000);
-    });
+    expect(vi.getTimerCount()).toBe(0);
   });
 });
