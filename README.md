@@ -57,7 +57,7 @@ GITHUB_TOKEN="$GITHUB_PAT" flux bootstrap github \
 ```
 
 ### Step 3: Bootstrap Infisical & Populate Application Secrets
-Once Flux boots Infisical, initialize the instance from the CLI (`infisical bootstrap` creates the admin account, organization, and Instance Admin Machine Identity and returns a **Token Auth** access token), store `INFISICAL_TOKEN` for **External Secrets Operator**, and populate your external application secrets in project `aerial-8-jn8` (`default` environment). External Secrets Operator automatically generates database, Infisical, VictoriaMetrics, NATS, and GitHub webhook (`GITHUB_WEBHOOK_SECRET`) credentials and syncs them into Infisical via `PushSecret`:
+Once Flux boots Infisical, initialize the instance from the CLI (`infisical bootstrap` creates the admin account, organization, and Instance Admin Machine Identity and returns a **Token Auth** access token), store `INFISICAL_TOKEN` for **External Secrets Operator**, and populate your external application secrets in project `aerial` (`default` environment). External Secrets Operator automatically generates database, Infisical, VictoriaMetrics, NATS, and GitHub webhook (`GITHUB_WEBHOOK_SECRET`) credentials and syncs them into Infisical via `PushSecret`:
 
 ```bash
 # 1. Bootstrap Infisical and store the returned Machine Identity Token Auth token
@@ -71,7 +71,7 @@ export INFISICAL_TOKEN="$(infisical bootstrap \
 kubectl create secret generic infisical-universal-auth \
   --from-literal=INFISICAL_TOKEN="$INFISICAL_TOKEN"
 
-# 2. Populate external application secrets in Infisical (project slug aerial-8-jn8, default environment)
+# 2. Populate external application secrets in Infisical (project slug aerial, default environment)
 infisical secrets set --env=default \
   DISCORD_BOT_TOKEN="your-discord-bot-token" \
   GITHUB_PAT="$GITHUB_PAT"
