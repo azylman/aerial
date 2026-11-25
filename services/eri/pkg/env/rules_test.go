@@ -12,19 +12,6 @@ import (
 	"github.com/azylman/aerial/services/eri/pkg/config"
 )
 
-type compileAndDiscoverRulesCase struct {
-	name               string
-	target             RuleTarget
-	engine             string
-	prompt             string
-	fault              string
-	wantErr            bool
-	wantPromptMD       bool
-	wantPersona        bool
-	wantPrefixOrder    []string
-	wantExcludedPrefix string
-}
-
 func TestResolveDir(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
@@ -99,50 +86,15 @@ func TestDiscoverRuleFiles(t *testing.T) {
 	}
 }
 
-func setupCompileRuleBlockers(t *testing.T, aerialDir, configDir string, tc compileAndDiscoverRulesCase) {
-	t.Helper()
-	switch tc.fault {
-	case "aerial_engine_is_file":
-		path := filepath.Join(aerialDir, "discord", "claude")
-		_ = os.RemoveAll(path)
-		if err := os.WriteFile(path, []byte("file-not-dir"), 0o644); err != nil {
-			t.Fatalf("WriteFile: %v", err)
-		}
-	case "user_engine_is_file":
-		path := filepath.Join(configDir, "discord", "claude")
-		_ = os.RemoveAll(path)
-		if err := os.WriteFile(path, []byte("file-not-dir"), 0o644); err != nil {
-			t.Fatalf("WriteFile: %v", err)
-		}
-	case "aerial_engine_torn":
-		writeTestFile(t, filepath.Join(aerialDir, "discord", "claude", "torn.md"), "")
-	case "user_engine_oversized":
-		writeTestFile(t, filepath.Join(configDir, "discord", "claude", "oversized.md"), strings.Repeat("B", MaxSourceRuleFileSizeBytes+200))
-	case "dir_is_file":
-		path := filepath.Join(aerialDir, "common")
-		_ = os.RemoveAll(path)
-		if err := os.WriteFile(path, []byte("file-not-dir"), 0o644); err != nil {
-			t.Fatalf("WriteFile: %v", err)
-		}
-	case "user_sub_is_file":
-		path := filepath.Join(configDir, "discord")
-		_ = os.RemoveAll(path)
-		if err := os.WriteFile(path, []byte("file-not-dir"), 0o644); err != nil {
-			t.Fatalf("WriteFile: %v", err)
-		}
-	case "aerial_persona_is_file":
-		path := filepath.Join(aerialDir, "persona")
-		_ = os.RemoveAll(path)
-		if err := os.WriteFile(path, []byte("file-not-dir"), 0o644); err != nil {
-			t.Fatalf("WriteFile: %v", err)
-		}
-	case "config_persona_is_file":
-		path := filepath.Join(configDir, "persona")
-		_ = os.RemoveAll(path)
-		if err := os.WriteFile(path, []byte("file-not-dir"), 0o644); err != nil {
-			t.Fatalf("WriteFile: %v", err)
-		}
-	}
+type compileRulesCase struct {
+	name               string
+	target             RuleTarget
+	engine             string
+	prompt             string
+	wantPromptMD       bool
+	wantPersona        bool
+	wantPrefixOrder    []string
+	wantExcludedPrefix string
 }
 
 func assertPrefixOrder(t *testing.T, wantPrefixOrder []string, rules []ruleSourceFile) {
@@ -165,7 +117,7 @@ func assertPrefixOrder(t *testing.T, wantPrefixOrder []string, rules []ruleSourc
 	}
 }
 
-func assertCompileDiscoveryOutput(t *testing.T, tc compileAndDiscoverRulesCase, rules []ruleSourceFile) {
+func assertCompileDiscoveryOutput(t *testing.T, tc compileRulesCase, rules []ruleSourceFile) {
 	t.Helper()
 	hasPrompt := false
 	hasPersona := false
@@ -191,16 +143,8 @@ func assertCompileDiscoveryOutput(t *testing.T, tc compileAndDiscoverRulesCase, 
 	}
 }
 
-func runCompileAndDiscoverRulesCase(t *testing.T, tc compileAndDiscoverRulesCase) {
+func runCompileRulesCase(t *testing.T, tc compileRulesCase) {
 	t.Helper()
-	content := "Standard rule body"
-	switch tc.fault {
-	case "file_size_limit":
-		content = strings.Repeat("A", MaxSourceRuleFileSizeBytes+100)
-	case "torn_zero_byte":
-		content = ""
-	}
-
 	p := newTestProvisioner(t, map[string]string{
 		"common/01_identity.md":     "Aerial core identity",
 		"discord/01_chat.md":        "Discord chat handling",
@@ -210,13 +154,11 @@ func runCompileAndDiscoverRulesCase(t *testing.T, tc compileAndDiscoverRulesCase
 		"ephemeral/01_temp.md":      "Ephemeral worker rules",
 	}, map[string]string{
 		"common/10_persona_style.md":  "Config persona override",
-		"common/20_facts.md":          content,
+		"common/20_facts.md":          "Standard rule body",
 		"discord/30_user_chat.md":     "Config discord settings",
 		"discord/claude/10_custom.md": "User claude customizations",
 		"discord/codex/10_custom.md":  "User codex customizations",
 	})
-
-	setupCompileRuleBlockers(t, p.aerialRulesDir, p.configRulesDir, tc)
 
 	var rules []ruleSourceFile
 	var err error
@@ -226,25 +168,31 @@ func runCompileAndDiscoverRulesCase(t *testing.T, tc compileAndDiscoverRulesCase
 		rules, err = p.compileTargetRules(tc.target, tc.prompt)
 	}
 
-	if (err != nil) != tc.wantErr {
-		t.Fatalf("compileTargetRules() error = %v, wantErr %v", err, tc.wantErr)
+	if err != nil {
+		t.Fatalf("compileTargetRules() error = %v", err)
 	}
-	if !tc.wantErr {
-		assertCompileDiscoveryOutput(t, tc, rules)
-	}
+	assertCompileDiscoveryOutput(t, tc, rules)
 }
 
 func TestCompileAndDiscoverRules(t *testing.T) {
-	tests := []compileAndDiscoverRulesCase{
-		{name: "discord target with custom prompt", target: TargetDiscord, prompt: "Do not compromise invariants", wantPromptMD: true, wantPersona: true},
-		{name: "voice target includes persona and target rules", target: TargetVoice, wantPersona: true},
-		{name: "ephemeral target compiles isolated rules and filters out persona", target: TargetEphemeral, wantPersona: false},
-		{name: "rule file exceeding size limit triggers error", target: TargetDiscord, fault: "file_size_limit", wantErr: true},
-		{name: "torn zero byte rule file triggers discovery error", target: TargetDiscord, fault: "torn_zero_byte", wantErr: true},
-		{name: "aerial common subfolder is regular file triggers discovery error", target: TargetDiscord, fault: "dir_is_file", wantErr: true},
-		{name: "user target subfolder is regular file triggers discovery error", target: TargetDiscord, fault: "user_sub_is_file", wantErr: true},
-		{name: "aerial persona subfolder is regular file triggers error", target: TargetDiscord, fault: "aerial_persona_is_file", wantErr: true},
-		{name: "config persona subfolder is regular file triggers error", target: TargetDiscord, fault: "config_persona_is_file", wantErr: true},
+	tests := []compileRulesCase{
+		{
+			name:         "discord target with custom prompt",
+			target:       TargetDiscord,
+			prompt:       "Do not compromise invariants",
+			wantPromptMD: true,
+			wantPersona:  true,
+		},
+		{
+			name:        "voice target includes persona and target rules",
+			target:      TargetVoice,
+			wantPersona: true,
+		},
+		{
+			name:        "ephemeral target compiles isolated rules and filters out persona",
+			target:      TargetEphemeral,
+			wantPersona: false,
+		},
 		{
 			name:               "discord target with claude engine compiles engine rules in prefix order",
 			target:             TargetDiscord,
@@ -275,39 +223,141 @@ func TestCompileAndDiscoverRules(t *testing.T) {
 			wantPersona:        false,
 			wantExcludedPrefix: "25_aerial_discord_claude_",
 		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			runCompileRulesCase(t, tc)
+		})
+	}
+}
+
+type compileRulesFaultCase struct {
+	name             string
+	target           RuleTarget
+	engine           string
+	aerialBlockerRel string
+	configBlockerRel string
+	fileBody         string
+	oversized        bool
+}
+
+func runCompileRulesFaultCase(t *testing.T, tc compileRulesFaultCase) {
+	t.Helper()
+	p := newTestProvisioner(t, map[string]string{
+		"common/01_identity.md":     "Aerial core identity",
+		"discord/01_chat.md":        "Discord chat handling",
+		"discord/claude/01_exec.md": "Claude discord instructions",
+		"discord/codex/01_exec.md":  "Codex discord instructions",
+		"voice/01_audio.md":         "Voice audio handling",
+		"ephemeral/01_temp.md":      "Ephemeral worker rules",
+	}, map[string]string{
+		"common/10_persona_style.md":  "Config persona override",
+		"common/20_facts.md":          "Standard rule body",
+		"discord/30_user_chat.md":     "Config discord settings",
+		"discord/claude/10_custom.md": "User claude customizations",
+		"discord/codex/10_custom.md":  "User codex customizations",
+	})
+
+	content := tc.fileBody
+	if tc.oversized {
+		content = strings.Repeat("B", MaxSourceRuleFileSizeBytes+200)
+	}
+
+	if tc.aerialBlockerRel != "" {
+		path := filepath.Join(p.aerialRulesDir, tc.aerialBlockerRel)
+		_ = os.RemoveAll(path)
+		writeTestFile(t, path, content)
+	}
+	if tc.configBlockerRel != "" {
+		path := filepath.Join(p.configRulesDir, tc.configBlockerRel)
+		_ = os.RemoveAll(path)
+		writeTestFile(t, path, content)
+	}
+
+	var err error
+	if tc.engine != "" {
+		_, err = p.compileTargetRules(tc.target, "", tc.engine)
+	} else {
+		_, err = p.compileTargetRules(tc.target, "")
+	}
+
+	if err == nil {
+		t.Fatalf("compileTargetRules() error = nil, wantErr true")
+	}
+}
+
+func TestCompileAndDiscoverRules_DiscoveryFaults(t *testing.T) {
+	tests := []compileRulesFaultCase{
 		{
-			name:    "aerial engine subfolder is regular file triggers discovery error",
-			target:  TargetDiscord,
-			engine:  config.EngineClaude,
-			fault:   "aerial_engine_is_file",
-			wantErr: true,
+			name:             "rule file exceeding size limit triggers error",
+			target:           TargetDiscord,
+			configBlockerRel: "common/20_facts.md",
+			oversized:        true,
 		},
 		{
-			name:    "user engine subfolder is regular file triggers discovery error",
-			target:  TargetDiscord,
-			engine:  config.EngineClaude,
-			fault:   "user_engine_is_file",
-			wantErr: true,
+			name:             "torn zero byte rule file triggers discovery error",
+			target:           TargetDiscord,
+			configBlockerRel: "common/20_facts.md",
+			fileBody:         "",
 		},
 		{
-			name:    "aerial engine torn zero byte file triggers error",
-			target:  TargetDiscord,
-			engine:  config.EngineClaude,
-			fault:   "aerial_engine_torn",
-			wantErr: true,
+			name:             "aerial common subfolder is regular file triggers discovery error",
+			target:           TargetDiscord,
+			aerialBlockerRel: "common",
+			fileBody:         "file-not-dir",
 		},
 		{
-			name:    "user engine oversized rule file triggers error",
-			target:  TargetDiscord,
-			engine:  config.EngineClaude,
-			fault:   "user_engine_oversized",
-			wantErr: true,
+			name:             "user target subfolder is regular file triggers discovery error",
+			target:           TargetDiscord,
+			configBlockerRel: "discord",
+			fileBody:         "file-not-dir",
+		},
+		{
+			name:             "aerial persona subfolder is regular file triggers error",
+			target:           TargetDiscord,
+			aerialBlockerRel: "persona",
+			fileBody:         "file-not-dir",
+		},
+		{
+			name:             "config persona subfolder is regular file triggers error",
+			target:           TargetDiscord,
+			configBlockerRel: "persona",
+			fileBody:         "file-not-dir",
+		},
+		{
+			name:             "aerial engine subfolder is regular file triggers discovery error",
+			target:           TargetDiscord,
+			engine:           config.EngineClaude,
+			aerialBlockerRel: "discord/claude",
+			fileBody:         "file-not-dir",
+		},
+		{
+			name:             "user engine subfolder is regular file triggers discovery error",
+			target:           TargetDiscord,
+			engine:           config.EngineClaude,
+			configBlockerRel: "discord/claude",
+			fileBody:         "file-not-dir",
+		},
+		{
+			name:             "aerial engine torn zero byte file triggers error",
+			target:           TargetDiscord,
+			engine:           config.EngineClaude,
+			aerialBlockerRel: "discord/claude/torn.md",
+			fileBody:         "",
+		},
+		{
+			name:             "user engine oversized rule file triggers error",
+			target:           TargetDiscord,
+			engine:           config.EngineClaude,
+			configBlockerRel: "discord/claude/oversized.md",
+			oversized:        true,
 		},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			runCompileAndDiscoverRulesCase(t, tc)
+			runCompileRulesFaultCase(t, tc)
 		})
 	}
 }
@@ -418,23 +468,14 @@ func TestAtomicSwapRulesDir(t *testing.T) {
 	}
 }
 
-type syncRulesCase struct {
-	name              string
-	emptyHome         bool
-	zeroRules         bool
-	primaryFail       bool
-	configFail        bool
-	voiceFail         bool
-	ephemeralFail     bool
-	runtimeFail       bool
-	concurrent        bool
-	noDataDir         bool
-	staleClaudeMD     bool
-	claudeDiscordFail bool
-	codexDiscordFail  bool
-	checkIsolation    bool
-	wantErr           bool
-	wantPrimaryMD     bool
+type syncRulesProvisionCase struct {
+	name           string
+	emptyHome      bool
+	noDataDir      bool
+	staleClaudeMD  bool
+	concurrent     bool
+	checkIsolation bool
+	wantPrimaryMD  bool
 }
 
 func assertNonEmptyWithoutFrontmatter(t *testing.T, path, label string) {
@@ -469,12 +510,12 @@ func assertTargetDirectoryOrSymlink(t *testing.T, path, label string, isEphemera
 	}
 }
 
-func assertPrimaryRulesMD(t *testing.T, p *Provisioner, tc syncRulesCase) {
+func assertPrimaryRulesMD(t *testing.T, p *Provisioner, wantPrimaryMD, checkIsolation bool) {
 	t.Helper()
 	claudeMD := filepath.Join(p.homeDir, ".claude", "CLAUDE.md")
 	codexMD := filepath.Join(p.homeDir, ".codex", "AGENTS.md")
 	museMD := filepath.Join(p.homeDir, ".config", "muse", "AGENTS.md")
-	if !tc.wantPrimaryMD {
+	if !wantPrimaryMD {
 		assertFileNotExist(t, claudeMD, "CLAUDE.md")
 		assertFileNotExist(t, codexMD, "AGENTS.md")
 		assertFileNotExist(t, museMD, "muse AGENTS.md")
@@ -484,7 +525,7 @@ func assertPrimaryRulesMD(t *testing.T, p *Provisioner, tc syncRulesCase) {
 	assertNonEmptyWithoutFrontmatter(t, codexMD, "AGENTS.md")
 	assertNonEmptyWithoutFrontmatter(t, museMD, "muse AGENTS.md")
 
-	if tc.checkIsolation {
+	if checkIsolation {
 		assertPrimaryRulesIsolation(t, claudeMD, codexMD, museMD)
 	}
 }
@@ -620,14 +661,14 @@ func assertRuleEngineIsolation(t *testing.T, p *Provisioner) {
 	assertVoiceAndEphemeralIsolation(t, p)
 }
 
-func assertSyncRulesOutput(t *testing.T, tc syncRulesCase, p *Provisioner) {
+func assertSyncRulesProvisionOutput(t *testing.T, tc syncRulesProvisionCase, p *Provisioner) {
 	t.Helper()
 	rulesDir := filepath.Join(p.homeDir, ".gemini", "rules")
 	entries, rErr := os.ReadDir(rulesDir)
 	if rErr != nil || len(entries) == 0 {
 		t.Fatalf("expected rules in %s: %v", rulesDir, rErr)
 	}
-	assertPrimaryRulesMD(t, p, tc)
+	assertPrimaryRulesMD(t, p, tc.wantPrimaryMD, tc.checkIsolation)
 	if !tc.noDataDir {
 		assertRuntimeRulesMD(t, p)
 		if tc.checkIsolation {
@@ -636,7 +677,7 @@ func assertSyncRulesOutput(t *testing.T, tc syncRulesCase, p *Provisioner) {
 	}
 }
 
-func runSyncRulesCase(t *testing.T, tc syncRulesCase) {
+func runSyncRulesProvisionCase(t *testing.T, tc syncRulesProvisionCase) {
 	t.Helper()
 	if tc.emptyHome {
 		p := newDisabledProvisioner(t, "", "")
@@ -668,33 +709,6 @@ func runSyncRulesCase(t *testing.T, tc syncRulesCase) {
 		writeTestFile(t, filepath.Join(p.homeDir, ".config", "muse", "AGENTS.md"), "stale")
 	}
 
-	if tc.zeroRules {
-		p.SetAerialRulesDir(t.TempDir())
-		p.SetConfigRulesDir(t.TempDir())
-	}
-
-	if tc.voiceFail {
-		writeTestFile(t, filepath.Join(p.aerialRulesDir, "voice", "torn.md"), "")
-	}
-	if tc.ephemeralFail {
-		writeTestFile(t, filepath.Join(p.aerialRulesDir, "ephemeral", "torn.md"), "")
-	}
-	if tc.claudeDiscordFail {
-		writeTestFile(t, filepath.Join(p.aerialRulesDir, "discord", "claude", "torn.md"), "")
-	}
-	if tc.codexDiscordFail {
-		writeTestFile(t, filepath.Join(p.aerialRulesDir, "discord", "codex", "torn.md"), "")
-	}
-	if tc.primaryFail {
-		writeTestFile(t, filepath.Join(p.homeDir, ".gemini", "rules"), "file blocker")
-	}
-	if tc.configFail {
-		writeTestFile(t, filepath.Join(p.homeDir, ".gemini", "config", "rules"), "file blocker")
-	}
-	if tc.runtimeFail {
-		writeTestFile(t, filepath.Join(p.dataDir, "runtimes", "discord", ".gemini", "rules"), "file blocker")
-	}
-
 	if tc.concurrent {
 		var wg sync.WaitGroup
 		errCh := make(chan error, 5)
@@ -716,37 +730,153 @@ func runSyncRulesCase(t *testing.T, tc syncRulesCase) {
 	}
 
 	err := p.SyncRules("Custom System Prompt")
+	if err != nil {
+		t.Fatalf("SyncRules() error = %v", err)
+	}
+
+	assertSyncRulesProvisionOutput(t, tc, p)
+}
+
+func TestSyncRules_ProvisioningAndIsolation(t *testing.T) {
+	tests := []syncRulesProvisionCase{
+		{
+			name:      "empty home returns nil",
+			emptyHome: true,
+		},
+		{
+			name: "successful sync compiles and provisions all runtimes",
+		},
+		{
+			name:           "successful sync compiles and provisions all runtimes with strict engine isolation",
+			checkIsolation: true,
+		},
+		{
+			name:          "stale primary CLAUDE.md removed when runtimes exist",
+			staleClaudeMD: true,
+		},
+		{
+			name:          "no dataDir writes primary CLAUDE.md",
+			noDataDir:     true,
+			wantPrimaryMD: true,
+		},
+		{
+			name:           "no dataDir writes primary CLAUDE.md and AGENTS.md with per-engine content",
+			noDataDir:      true,
+			checkIsolation: true,
+			wantPrimaryMD:  true,
+		},
+		{
+			name:       "concurrent sync execution safe under systemRulesMu",
+			concurrent: true,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			runSyncRulesProvisionCase(t, tc)
+		})
+	}
+}
+
+type syncRulesFaultCase struct {
+	name           string
+	zeroRules      bool
+	tornAerialRel  string
+	homeBlockerRel string
+	dataBlockerRel string
+	wantErr        bool
+}
+
+func runSyncRulesFaultCase(t *testing.T, tc syncRulesFaultCase) {
+	t.Helper()
+	p := newTestProvisioner(t, map[string]string{
+		"common/01_rule.md":           "Common content",
+		"discord/01_rule.md":          "Discord content",
+		"discord/agy/01_agy.md":       "Agy Discord Content",
+		"discord/claude/01_claude.md": "Claude Discord Content",
+		"discord/codex/01_codex.md":   "Codex Discord Content",
+		"discord/muse/01_muse.md":     "Muse Discord Content",
+		"voice/01_rule.md":            "Voice content",
+		"ephemeral/01_rule.md":        "Ephemeral content",
+	}, nil)
+
+	if tc.zeroRules {
+		p.SetAerialRulesDir(t.TempDir())
+		p.SetConfigRulesDir(t.TempDir())
+	}
+	if tc.tornAerialRel != "" {
+		writeTestFile(t, filepath.Join(p.aerialRulesDir, tc.tornAerialRel), "")
+	}
+	if tc.homeBlockerRel != "" {
+		writeTestFile(t, filepath.Join(p.homeDir, tc.homeBlockerRel), "file blocker")
+	}
+	if tc.dataBlockerRel != "" {
+		writeTestFile(t, filepath.Join(p.dataDir, tc.dataBlockerRel), "file blocker")
+	}
+
+	err := p.SyncRules("Custom System Prompt")
 	if (err != nil) != tc.wantErr {
 		t.Fatalf("SyncRules() error = %v, wantErr %v", err, tc.wantErr)
 	}
 
 	if !tc.wantErr {
-		assertSyncRulesOutput(t, tc, p)
+		rulesDir := filepath.Join(p.homeDir, ".gemini", "rules")
+		entries, rErr := os.ReadDir(rulesDir)
+		if rErr != nil || len(entries) == 0 {
+			t.Fatalf("expected rules in %s: %v", rulesDir, rErr)
+		}
+		assertPrimaryRulesMD(t, p, false, false)
+		assertRuntimeRulesMD(t, p)
 	}
 }
 
-func TestSyncRules(t *testing.T) {
-	tests := []syncRulesCase{
-		{name: "empty home returns nil", emptyHome: true, wantErr: false},
-		{name: "successful sync compiles and provisions all runtimes", wantErr: false},
-		{name: "successful sync compiles and provisions all runtimes with strict engine isolation", checkIsolation: true, wantErr: false},
-		{name: "stale primary CLAUDE.md removed when runtimes exist", staleClaudeMD: true, wantErr: false},
-		{name: "no dataDir writes primary CLAUDE.md", noDataDir: true, wantErr: false, wantPrimaryMD: true},
-		{name: "no dataDir writes primary CLAUDE.md and AGENTS.md with per-engine content", noDataDir: true, checkIsolation: true, wantErr: false, wantPrimaryMD: true},
-		{name: "zero rules aborts swap under lobotomy protection", zeroRules: true, wantErr: true},
-		{name: "voice rules compilation failure returns error", voiceFail: true, wantErr: true},
-		{name: "ephemeral rules compilation failure returns error", ephemeralFail: true, wantErr: true},
-		{name: "claude discord rules compilation failure returns error", claudeDiscordFail: true, wantErr: true},
-		{name: "codex discord rules compilation failure returns error", codexDiscordFail: true, wantErr: true},
-		{name: "primary rules write failure returns error", primaryFail: true, wantErr: true},
-		{name: "config rules write failure logs warning but succeeds", configFail: true, wantErr: false},
-		{name: "runtime rules write failure logs warning and continues", runtimeFail: true, wantErr: false},
-		{name: "concurrent sync execution safe under systemRulesMu", concurrent: true, wantErr: false},
+func TestSyncRules_CompilationAndWriteFaults(t *testing.T) {
+	tests := []syncRulesFaultCase{
+		{
+			name:      "zero rules aborts swap under lobotomy protection",
+			zeroRules: true,
+			wantErr:   true,
+		},
+		{
+			name:          "voice rules compilation failure returns error",
+			tornAerialRel: "voice/torn.md",
+			wantErr:       true,
+		},
+		{
+			name:          "ephemeral rules compilation failure returns error",
+			tornAerialRel: "ephemeral/torn.md",
+			wantErr:       true,
+		},
+		{
+			name:          "claude discord rules compilation failure returns error",
+			tornAerialRel: "discord/claude/torn.md",
+			wantErr:       true,
+		},
+		{
+			name:          "codex discord rules compilation failure returns error",
+			tornAerialRel: "discord/codex/torn.md",
+			wantErr:       true,
+		},
+		{
+			name:           "primary rules write failure returns error",
+			homeBlockerRel: ".gemini/rules",
+			wantErr:        true,
+		},
+		{
+			name:           "config rules write failure logs warning but succeeds",
+			homeBlockerRel: ".gemini/config/rules",
+			wantErr:        false,
+		},
+		{
+			name:           "runtime rules write failure logs warning and continues",
+			dataBlockerRel: "runtimes/discord/.gemini/rules",
+			wantErr:        false,
+		},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			runSyncRulesCase(t, tc)
+			runSyncRulesFaultCase(t, tc)
 		})
 	}
 }
