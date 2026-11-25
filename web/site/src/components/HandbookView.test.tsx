@@ -140,16 +140,34 @@ describe('HandbookView component', () => {
     expect(onSelect).toHaveBeenCalledWith('software-factory');
   });
 
-  it('renders last chapter with no next button', () => {
-    render(<HandbookView chapterId="customization-day2" />);
+  it('clears active search and displays routed chapter when chapterId changes', () => {
+    const { rerender } = render(<HandbookView chapterId="overview" />);
 
-    expect(screen.getByText('CHAPTER 7')).toBeTruthy();
+    const searchInput = screen.getByTestId('handbook-search-input');
+    fireEvent.change(searchInput, { target: { value: 'Ariga Atlas' } });
+
+    // Displays software factory chapter from search
     expect(screen.getByRole('heading', { level: 1 }).textContent).toBe(
-      'Customization & Day-2 Operations'
+      'The Autonomous Software Factory'
     );
 
-    expect(screen.getByTestId('prev-chapter-btn')).toBeTruthy();
-    expect(screen.queryByTestId('next-chapter-btn')).toBeNull();
+    // Changing chapterId to a non-matching chapter clears search and renders that chapter
+    rerender(<HandbookView chapterId="getting-started" />);
+
+    expect(screen.getByRole('heading', { level: 1 }).textContent).toBe(
+      'Getting Started & Two-Repo GitOps'
+    );
+    expect(screen.queryByTestId('handbook-clear-search-btn')).toBeNull();
+  });
+
+  it('triggers onSelectChapter when search matches a different chapter', () => {
+    const onSelect = vi.fn();
+    render(<HandbookView chapterId="overview" onSelectChapter={onSelect} />);
+
+    const searchInput = screen.getByTestId('handbook-search-input');
+    fireEvent.change(searchInput, { target: { value: 'Ariga Atlas' } });
+
+    expect(onSelect).toHaveBeenCalledWith('software-factory');
   });
 
   it('filters chapters and sections via instant client-side search', () => {

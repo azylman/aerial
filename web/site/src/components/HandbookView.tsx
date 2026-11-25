@@ -21,6 +21,14 @@ export function HandbookView({ chapterId, onSelectChapter }: HandbookViewProps) 
   const [copiedKey, setCopiedKey] = useState<string | null>(null);
   const [copyFailedKey, setCopyFailedKey] = useState<string | null>(null);
   const copyTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const prevChapterIdRef = useRef<string | undefined>(chapterId);
+
+  useEffect(() => {
+    if (prevChapterIdRef.current !== chapterId) {
+      prevChapterIdRef.current = chapterId;
+      setSearchQuery('');
+    }
+  }, [chapterId]);
 
   useEffect(() => {
     return () => {
@@ -57,7 +65,22 @@ export function HandbookView({ chapterId, onSelectChapter }: HandbookViewProps) 
   };
 
   const handleSearchChange = (event: ChangeEvent<HTMLInputElement>) => {
-    setSearchQuery(event.target.value);
+    const query = event.target.value;
+    setSearchQuery(query);
+
+    if (query.trim()) {
+      const matches = filterChapters(HANDBOOK_CHAPTERS, query);
+      const activeId = chapterId || 'overview';
+      if (matches.length > 0 && !matches.some((c) => c.id === activeId)) {
+        const nextId = matches[0]!.id;
+        prevChapterIdRef.current = nextId;
+        if (onSelectChapter) {
+          onSelectChapter(nextId);
+        } else if (typeof window !== 'undefined') {
+          window.location.hash = `#/docs/${nextId}`;
+        }
+      }
+    }
   };
 
   const handleClearSearch = () => {

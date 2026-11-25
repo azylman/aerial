@@ -486,29 +486,30 @@ scripts/aerial-build.sh status <build-id>`,
           'Hot-swap between Google Antigravity (agy), Claude Code, Codex, and Muse CLI engines with identical memory and tool interfaces.',
         paragraphs: [
           'Aerial is not locked into a single proprietary model provider or agent CLI harness. The execution runtime abstracts CLI agents through a unified TurnRunner interface. Whether running Google Antigravity (agy), Anthropic Claude Code, OpenAI Codex, or local open-weights engines, all agents receive identical tools, skills, rules, and memory context.',
-          'Engines can be dynamically switched per channel or even per task based on quota, speed, and reasoning depth requirements.',
+          'The default reasoning engine and models are configured declaratively in config.yaml, while channel policies configure wake triggers, reasoning effort, and ambient classification thresholds.',
         ],
         bullets: [
           'Engine Agnostic: Standardized process orchestration, I/O streaming, and pre-tool interception.',
-          'Dynamic Switching: Seamlessly swap engines in config.yaml without altering skills or prompt rules.',
+          'Declarative Configuration: Seamlessly configure default engine and models in config.yaml.',
           'Process Isolation: Agent CLI processes execute in isolated containers with strict resource quotas.',
         ],
         codeSnippets: [
           {
             language: 'yaml',
-            caption: 'Engine configuration in config.yaml',
+            caption: 'Engine and channel configuration in config.yaml',
             code: `# Configure active default reasoning model and CLI engine
 model: gemini-3.8-flash
 engine: agy
 
-# Per-channel overrides
+# Channels require a default policy and optional per-channel policies
 channels:
+  default:
+    mode: threads
+    wake_mode: mention
   aerial-dev:
-    engine: agy
+    mode: channel
     wake_mode: all
-  general:
-    engine: claude
-    wake_mode: mention`,
+    effort: high`,
           },
         ],
       },
@@ -671,12 +672,12 @@ description: Run hermetic offsite backups of CloudNativePG and Restate journals 
         lead:
           'Integrate third-party tools, hardware bridges, and external APIs using Model Context Protocol (MCP) streamable servers.',
         paragraphs: [
-          'Aerial leverages Model Context Protocol (MCP) to provide agents with typed, schema-validated tool interfaces. In addition to core built-in MCP microservices (docket-mcp, discord-mcp, kernel-mcp, infisical-mcp), users can register custom Streamable HTTP and SSE MCP servers in config.yaml.',
+          'Aerial leverages Model Context Protocol (MCP) to provide agents with typed, schema-validated tool interfaces. In addition to core built-in MCP microservices (docket-mcp, discord-mcp, kernel-mcp, infisical-mcp), users can register custom Streamable HTTP and SSE MCP servers in config.yaml under target categories (common, discord, voice, ephemeral).',
           'Tools are lazily discovered via standard schema endpoints, enabling agents to call custom home automation endpoints, financial APIs, or hardware monitoring tools without modifying application code.',
         ],
         bullets: [
           'Streamable HTTP / SSE: High-performance streaming tool invocations over HTTP.',
-          'Declarative Registration: Add new servers to config.yaml under mcp_servers.',
+          'Declarative Registration: Add new servers to config.yaml under mcp_servers.common (or target categories).',
           'Automatic Schema Generation: Tool definitions and argument validation schemas generate dynamically.',
         ],
         codeSnippets: [
@@ -684,12 +685,11 @@ description: Run hermetic offsite backups of CloudNativePG and Restate journals 
             language: 'yaml',
             caption: 'Registering custom MCP server in config.yaml',
             code: `mcp_servers:
-  home-assistant:
-    url: http://ha-mcp.aerial:8080/sse
-    transport: sse
-  custom-iot:
-    url: http://iot-bridge.aerial:4000/mcp
-    transport: streamable_http`,
+  common:
+    home-assistant:
+      serverUrl: http://ha-mcp.aerial:8080/sse
+    custom-iot:
+      serverUrl: http://iot-bridge.aerial:4000/mcp`,
           },
         ],
       },
