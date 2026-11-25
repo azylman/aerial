@@ -72,6 +72,9 @@ export function HandbookView({ chapterId }: HandbookViewProps) {
   };
 
   const handleTocClick = (event: React.MouseEvent<HTMLAnchorElement>, sectionId: string) => {
+    if (event.metaKey || event.ctrlKey || event.shiftKey || event.altKey || event.button !== 0) {
+      return;
+    }
     event.preventDefault();
     const target = document.getElementById(`section-${sectionId}`);
     if (target && typeof target.scrollIntoView === 'function') {

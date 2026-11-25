@@ -140,7 +140,7 @@ bazel test //services/... //pkg/...`,
     number: 2,
     title: 'Getting Started & Two-Repo GitOps',
     summary:
-      'Single-node k3s bootstrap, aerial vs. aerial-config split, Infisical PushSecret bootstrap, and multi-node scaling via cluster-overrides.yaml.',
+      'Single-node k3s bootstrap, aerial vs. aerial-config split, Infisical PushSecret bootstrap, agent CLI authentication & verification, and multi-node scaling via cluster-overrides.yaml.',
     sections: [
       {
         id: 'k3s-bootstrap',
@@ -210,10 +210,11 @@ GITHUB_TOKEN="$GITHUB_PAT" flux bootstrap github \\
           'Aerial utilizes Infisical and External Secrets Operator for centralized secret management, preventing plaintext secrets from ever touching Git repositories.',
         paragraphs: [
           'All application credentials, Discord bot tokens, and API keys are stored in an in-cluster Infisical instance. External Secrets Operator (ESO) watches Infisical and creates scoped Kubernetes Secrets consumed by microservices.',
-          'Bootstrapping Infisical involves creating a Machine Identity, granting it read access to the aerial project, and saving its credentials as a Kubernetes Secret.',
+          'Bootstrapping Infisical involves creating a Machine Identity, granting it read access to the aerial project (default project slug aerial-8-jn8, configurable via INFISICAL_PROJECT_SLUG), and saving its credentials as a Kubernetes Secret. External Secrets Operator automatically generates database, Infisical, VictoriaMetrics, NATS, and GitHub webhook credentials and syncs them into Infisical via PushSecret.',
         ],
         bullets: [
           'Universal Auth: Kubernetes workloads authenticate to Infisical via Machine Identity tokens.',
+          'Project Slug: Defaults to aerial-8-jn8, overridden via INFISICAL_PROJECT_SLUG in aerial-config/k8s/cluster-overrides.yaml.',
           'Automated Generation: Database passwords, internal webhook secrets, and NATS credentials generate automatically.',
           'Scoped Distribution: Each microservice receives only the environment variables it requires.',
         ],
@@ -233,10 +234,37 @@ export INFISICAL_TOKEN="$(infisical bootstrap \\
 kubectl create secret generic infisical-universal-auth \\
   --from-literal=INFISICAL_TOKEN="$INFISICAL_TOKEN"
 
-# 3. Populate Discord Bot Token and GitHub PAT
+# 3. Populate Discord Bot Token and GitHub PAT in project aerial-8-jn8 (default environment)
 infisical secrets set --env=default \\
   DISCORD_BOT_TOKEN="your-discord-token" \\
   GITHUB_PAT="$GITHUB_PAT"`,
+          },
+        ],
+      },
+      {
+        id: 'cli-auth-verify',
+        title: 'Agent CLI Authentication & Rollout Verification',
+        lead:
+          'Authenticate the agent execution engine inside the worker container and verify Kubernetes pod and GitOps reconciliation status.',
+        paragraphs: [
+          'After bootstrapping Infisical and External Secrets Operator, the platform workloads deploy automatically via Flux CD. The final step is authenticating the execution engine CLI inside the eri-restate execution worker pod and verifying that all services and Flux Kustomizations reach ready state.',
+          'Aerial supports multiple execution engines (such as agy, Claude Code, Codex, or Muse). In the eri-restate container, launch the interactive CLI authentication flow to complete OAuth authorization. Once authenticated, inspect pod readiness and Flux synchronization to confirm a healthy deployment.',
+        ],
+        bullets: [
+          'Execution Engine OAuth: Authenticate agy or your chosen engine directly inside the eri-restate container.',
+          'Pod Health Inspection: Confirm all core microservices and operators are in Running state via kubectl get pods.',
+          'Flux Reconciliation: Verify both aerial-operators and aerial-core Kustomizations are healthy via flux get kustomizations.',
+        ],
+        codeSnippets: [
+          {
+            language: 'bash',
+            caption: 'Authenticate agent CLI and verify cluster rollout',
+            code: `# 1. Authenticate execution engine (e.g. agy via Google OAuth) in eri-restate pod
+kubectl exec -it $(kubectl get pod -l app.kubernetes.io/name=eri-restate -o name | head -n1) -c eri-restate -- agy
+
+# 2. Verify all pods and Flux Kustomizations are healthy
+kubectl get pods -o wide
+flux get kustomizations`,
           },
         ],
       },
@@ -323,13 +351,13 @@ data:
           'CloudNativePG: Automated failover, rolling updates, WAL archiving, and pgvector semantic indexing.',
           'Single Table Ownership: Microservices interact via typed HTTP and MCP APIs rather than shared SQL tables.',
           'Restate Durable Workflows: ThreadSession, BuildRouter, and HaroSchedule virtual objects execute with deterministic replay.',
-          'Crash-Resilient State: Long-running agent reasoning turns resume exactly where they suspended without duplicate tool calls.',
+          'Crash-Resilient State: Completed Restate steps replay from the journal; interrupted agent attempts re-run subject to a crash-loop cap, requiring idempotent side effects.',
         ],
         callout: {
           type: 'note',
           title: 'Durable Execution Guarantee',
           text:
-            'If an agent turn experiences a node reboot or container restart mid-execution, Restate re-hydrates the exact step from its RocksDB journal without re-executing completed side-effecting tool calls.',
+            'Completed Restate steps are replayed from the RocksDB journal across pod or node restarts, but an interrupted agent attempt is re-run in full subject to the crash-loop cap. Unjournaled tool calls made during that interrupted attempt may repeat, so tool actions with external side effects must be idempotent or check state before mutating.',
         },
       },
       {

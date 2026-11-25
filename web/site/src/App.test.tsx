@@ -263,18 +263,34 @@ describe('App component', () => {
     expect(screen.queryByTestId('landing-view')).toBeNull();
   });
 
-  it('opens owning chapter and renders handbook when navigating directly to a section hash', () => {
-    render(<App />);
+  it('opens owning chapter and scrolls to section when navigating directly to a section hash', () => {
+    const scrollSpy = vi.fn();
+    const originalScrollIntoView = Element.prototype.scrollIntoView;
+    Element.prototype.scrollIntoView = function (this: Element, ...args: unknown[]) {
+      scrollSpy(this, ...args);
+    };
 
-    act(() => {
-      window.location.hash = '#section-stateless-ingress';
-      window.dispatchEvent(new HashChangeEvent('hashchange'));
-    });
+    try {
+      render(<App />);
 
-    expect(screen.getByTestId('handbook-view')).toBeTruthy();
-    expect(screen.getByText('CHAPTER 5')).toBeTruthy();
-    expect(screen.getByRole('heading', { level: 1 }).textContent).toBe('The Multimodal AI Agent');
-    expect(screen.getByTestId('section-stateless-ingress')).toBeTruthy();
+      act(() => {
+        window.location.hash = '#section-stateless-ingress';
+        window.dispatchEvent(new HashChangeEvent('hashchange'));
+      });
+
+      expect(screen.getByTestId('handbook-view')).toBeTruthy();
+      expect(screen.getByText('CHAPTER 5')).toBeTruthy();
+      expect(screen.getByRole('heading', { level: 1 }).textContent).toBe('The Multimodal AI Agent');
+      const target = screen.getByTestId('section-stateless-ingress');
+      expect(target).toBeTruthy();
+      expect(scrollSpy).toHaveBeenCalledWith(target, { behavior: 'smooth' });
+    } finally {
+      if (originalScrollIntoView) {
+        Element.prototype.scrollIntoView = originalScrollIntoView;
+      } else {
+        delete (Element.prototype as { scrollIntoView?: unknown }).scrollIntoView;
+      }
+    }
   });
 
   it('toggles theme when clicking the theme button in navbar', () => {

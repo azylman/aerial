@@ -306,4 +306,57 @@ describe('HandbookView component', () => {
     expect(copyBtn.textContent).toContain('Copy failed, select manually');
     expect(copyBtn.classList.contains('failed')).toBe(true);
   });
+
+  it('smooth scrolls on plain left-click in TOC, but preserves default navigation on modified clicks', () => {
+    render(<HandbookView chapterId="overview" />);
+
+    const toc = screen.getByRole('navigation', { name: 'Section table of contents' });
+    const tocLink = within(toc).getByText('The Closed-Loop Thesis');
+
+    const targetSection = document.getElementById('section-closed-loop-thesis');
+    expect(targetSection).toBeTruthy();
+    const scrollSpy = vi.fn();
+    if (targetSection) {
+      targetSection.scrollIntoView = scrollSpy;
+    }
+
+    // 1. Plain left-click: prevents default and calls smooth scrollIntoView
+    const plainClick = new MouseEvent('click', { bubbles: true, cancelable: true, button: 0 });
+    tocLink.dispatchEvent(plainClick);
+    expect(plainClick.defaultPrevented).toBe(true);
+    expect(scrollSpy).toHaveBeenCalledWith({ behavior: 'smooth' });
+
+    // 2. Modified click with metaKey: allows default browser tab/window opening
+    scrollSpy.mockClear();
+    const metaClick = new MouseEvent('click', {
+      bubbles: true,
+      cancelable: true,
+      button: 0,
+      metaKey: true,
+    });
+    tocLink.dispatchEvent(metaClick);
+    expect(metaClick.defaultPrevented).toBe(false);
+    expect(scrollSpy).not.toHaveBeenCalled();
+
+    // 3. Modified click with ctrlKey: allows default browser tab/window opening
+    const ctrlClick = new MouseEvent('click', {
+      bubbles: true,
+      cancelable: true,
+      button: 0,
+      ctrlKey: true,
+    });
+    tocLink.dispatchEvent(ctrlClick);
+    expect(ctrlClick.defaultPrevented).toBe(false);
+    expect(scrollSpy).not.toHaveBeenCalled();
+
+    // 4. Auxiliary click (e.g. middle-click button === 1): allows default navigation
+    const middleClick = new MouseEvent('click', {
+      bubbles: true,
+      cancelable: true,
+      button: 1,
+    });
+    tocLink.dispatchEvent(middleClick);
+    expect(middleClick.defaultPrevented).toBe(false);
+    expect(scrollSpy).not.toHaveBeenCalled();
+  });
 });
