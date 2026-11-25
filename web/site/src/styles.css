@@ -547,6 +547,7 @@ a:hover {
   margin-top: 2.5rem;
   padding-top: 2rem;
   border-top: 1px solid var(--ae-border);
+  scroll-margin-top: 5.5rem;
 }
 
 .handbook-section:first-of-type {

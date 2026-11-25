@@ -13,10 +13,9 @@ export type { ChapterCallout, ChapterSection, CodeSnippet, HandbookChapter };
 
 export interface HandbookViewProps {
   readonly chapterId?: string | undefined;
-  readonly onSelectChapter?: ((chapterId: string) => void) | undefined;
 }
 
-export function HandbookView({ chapterId, onSelectChapter }: HandbookViewProps) {
+export function HandbookView({ chapterId }: HandbookViewProps) {
   const [searchQuery, setSearchQuery] = useState('');
   const [copiedKey, setCopiedKey] = useState<string | null>(null);
   const [copyFailedKey, setCopyFailedKey] = useState<string | null>(null);
@@ -147,7 +146,7 @@ export function HandbookView({ chapterId, onSelectChapter }: HandbookViewProps) 
                       href={`#/docs/${ch.id}`}
                       className={`handbook-nav-link ${isActive ? 'active' : ''}`}
                       aria-current={isActive ? 'page' : undefined}
-                      onClick={() => onSelectChapter?.(ch.id)}
+                      onClick={handleClearSearch}
                       data-testid={`handbook-nav-link-${ch.id}`}
                     >
                       <span>Ch. {ch.number}:</span>
@@ -283,7 +282,7 @@ export function HandbookView({ chapterId, onSelectChapter }: HandbookViewProps) 
                 href={`#/docs/${prevChapter.id}`}
                 className="btn-secondary"
                 aria-label="Previous chapter"
-                onClick={() => onSelectChapter?.(prevChapter.id)}
+                onClick={handleClearSearch}
                 data-testid="prev-chapter-btn"
               >
                 ← Ch. {prevChapter.number}: {prevChapter.title}
@@ -296,7 +295,7 @@ export function HandbookView({ chapterId, onSelectChapter }: HandbookViewProps) 
                 href={`#/docs/${nextChapter.id}`}
                 className="btn-secondary"
                 aria-label="Next chapter"
-                onClick={() => onSelectChapter?.(nextChapter.id)}
+                onClick={handleClearSearch}
                 data-testid="next-chapter-btn"
               >
                 Ch. {nextChapter.number}: {nextChapter.title} →

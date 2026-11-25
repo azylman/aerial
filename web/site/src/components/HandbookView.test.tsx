@@ -121,32 +121,21 @@ describe('HandbookView component', () => {
     expect(nextBtn.getAttribute('href')).toBe('#/docs/getting-started');
   });
 
-  it('renders specific requested chapter and triggers onSelectChapter callbacks', () => {
-    const onSelect = vi.fn();
-    render(<HandbookView chapterId="application-platform" onSelectChapter={onSelect} />);
+  it('renders specific requested chapter and pagination buttons', () => {
+    render(<HandbookView chapterId="application-platform" />);
 
     expect(screen.getByText('CHAPTER 3')).toBeTruthy();
     expect(screen.getByRole('heading', { level: 1 }).textContent).toBe(
       'The Self-Hosted Application Platform'
     );
 
-    // Both prev and next buttons exist for middle chapters
+    // Both prev and next buttons exist for middle chapters with destination hrefs
     const prevBtn = screen.getByTestId('prev-chapter-btn');
     const nextBtn = screen.getByTestId('next-chapter-btn');
     expect(prevBtn).toBeTruthy();
     expect(nextBtn).toBeTruthy();
-
-    fireEvent.click(prevBtn);
-    expect(onSelect).toHaveBeenCalledWith('getting-started');
-
-    fireEvent.click(nextBtn);
-    expect(onSelect).toHaveBeenCalledWith('software-factory');
-
-    // Clicking sidebar nav link triggers onSelectChapter
-    onSelect.mockClear();
-    const ch4Link = screen.getByTestId('handbook-nav-link-software-factory');
-    fireEvent.click(ch4Link);
-    expect(onSelect).toHaveBeenCalledWith('software-factory');
+    expect(prevBtn.getAttribute('href')).toBe('#/docs/getting-started');
+    expect(nextBtn.getAttribute('href')).toBe('#/docs/software-factory');
   });
 
   it('clears active search and displays routed chapter when chapterId changes', () => {
@@ -169,18 +158,26 @@ describe('HandbookView component', () => {
     expect(screen.queryByTestId('handbook-clear-search-btn')).toBeNull();
   });
 
-  it('triggers onSelectChapter when clicking a search result for a different chapter', () => {
-    const onSelect = vi.fn();
-    render(<HandbookView chapterId="overview" onSelectChapter={onSelect} />);
+  it('clears active search when a pagination link is clicked so linked chapter appears', () => {
+    render(<HandbookView chapterId="application-platform" />);
 
     const searchInput = screen.getByTestId('handbook-search-input');
     fireEvent.change(searchInput, { target: { value: 'Ariga Atlas' } });
 
-    expect(onSelect).not.toHaveBeenCalled();
+    // Displays software factory chapter from search fallback
+    expect(screen.getByRole('heading', { level: 1 }).textContent).toBe(
+      'The Autonomous Software Factory'
+    );
 
-    const matchLink = screen.getByTestId('handbook-nav-link-software-factory');
-    fireEvent.click(matchLink);
-    expect(onSelect).toHaveBeenCalledWith('software-factory');
+    // Clicking Previous points to chapter 3 (application-platform, the routed chapter)
+    const prevBtn = screen.getByTestId('prev-chapter-btn');
+    fireEvent.click(prevBtn);
+
+    // Search query is cleared and chapter 3 is shown
+    expect(screen.getByRole('heading', { level: 1 }).textContent).toBe(
+      'The Self-Hosted Application Platform'
+    );
+    expect(screen.queryByTestId('handbook-clear-search-btn')).toBeNull();
   });
 
   it('filters chapters and sections via instant client-side search', () => {

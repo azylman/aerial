@@ -229,7 +229,7 @@ describe('App component', () => {
     expect(window.location.hash).toBe('#/docs/application-platform');
   });
 
-  it('keeps handbook and chapter displayed when clicking a TOC section link', () => {
+  it('keeps handbook and chapter displayed when clicking a TOC section link', async () => {
     render(<App />);
 
     act(() => {
@@ -250,13 +250,17 @@ describe('App component', () => {
       targetSection.scrollIntoView = scrollSpy;
     }
 
-    fireEvent.click(tocLink);
+    await act(async () => {
+      fireEvent.click(tocLink);
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
 
-    // Handbook and chapter are still shown (did not unmount or redirect to landing)
+    // Handbook and chapter are still shown, scrollIntoView was triggered, and route did not change
+    expect(scrollSpy).toHaveBeenCalled();
+    expect(window.location.hash).toBe('#/docs/overview');
     expect(screen.getByTestId('handbook-view')).toBeTruthy();
     expect(screen.getByText('CHAPTER 1')).toBeTruthy();
     expect(screen.queryByTestId('landing-view')).toBeNull();
-    expect(scrollSpy).toHaveBeenCalled();
   });
 
   it('opens owning chapter and renders handbook when navigating directly to a section hash', () => {
