@@ -56,7 +56,7 @@ type Response struct {
 	Response string `json:"response"`
 }
 
-// ServiceName returns the per-agent Restate service name ("LLM", "LLM-miorine").
+// ServiceName returns the per-agent Restate service name ("LLM", "LLM-agent-alpha").
 func ServiceName(agentName string) string {
 	return agent.ScopedServiceName(serviceBase, agentName)
 }
