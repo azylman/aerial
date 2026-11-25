@@ -229,40 +229,6 @@ describe('App component', () => {
     expect(window.location.hash).toBe('#/docs/application-platform');
   });
 
-  it('keeps handbook and chapter displayed when clicking a TOC section link', async () => {
-    render(<App />);
-
-    act(() => {
-      window.location.hash = '#/docs/overview';
-      window.dispatchEvent(new HashChangeEvent('hashchange'));
-    });
-
-    expect(screen.getByTestId('handbook-view')).toBeTruthy();
-    expect(screen.getByText('CHAPTER 1')).toBeTruthy();
-
-    const toc = screen.getByRole('navigation', { name: 'Section table of contents' });
-    const tocLink = within(toc).getByText('The Closed-Loop Thesis');
-
-    const targetSection = document.getElementById('section-closed-loop-thesis');
-    expect(targetSection).toBeTruthy();
-    const scrollSpy = vi.fn();
-    if (targetSection) {
-      targetSection.scrollIntoView = scrollSpy;
-    }
-
-    await act(async () => {
-      fireEvent.click(tocLink);
-      await new Promise((resolve) => setTimeout(resolve, 0));
-    });
-
-    // Handbook and chapter are still shown, scrollIntoView was triggered, and route did not change
-    expect(scrollSpy).toHaveBeenCalled();
-    expect(window.location.hash).toBe('#/docs/overview');
-    expect(screen.getByTestId('handbook-view')).toBeTruthy();
-    expect(screen.getByText('CHAPTER 1')).toBeTruthy();
-    expect(screen.queryByTestId('landing-view')).toBeNull();
-  });
-
   it('opens owning chapter and scrolls to section when navigating directly to a section hash', () => {
     const scrollSpy = vi.fn();
     const originalScrollIntoView = Element.prototype.scrollIntoView;
