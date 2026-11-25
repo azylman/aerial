@@ -72,16 +72,16 @@ VictoriaMetrics is the cluster-wide time-series database (TSDB) collecting metri
   - Prometheus metrics can be Gauges, Counters (requiring `rate(...)`), or Histograms.
   - **The Histogram Trap**: Histograms (such as voice TTFR, runner durations, classifier timings) DO NOT have bare time series. Querying `aerial_brain_voice_ttfr_duration_seconds` directly returns an empty vector `[]`. Histograms only exist as `_bucket`, `_sum`, and `_count`.
 - **Step 1: Check Grafana Dashboards & vmalert Rules for Production-Validated PromQL**:
-  - Grafana dashboards and `vmalert` rules contain tested PromQL formulas, quantile bucket expressions, and rate windows. Note that Grafana uses SQLite in Kubernetes (`GF_DATABASE_TYPE=sqlite3`).
+  - Grafana dashboards and `vmalert` rules contain tested PromQL formulas, quantile bucket expressions, and rate windows. Note that Grafana uses PostgreSQL in Kubernetes (`GF_DATABASE_TYPE=postgres`).
   - Search dashboard definitions directly in mounted git repositories:
     - **Git Dashboard Definitions**: Provisioned dashboards live across both repositories:
-      - System core dashboards: `/share/aerial/services/grafana/dashboards/*.json` (`core-telemetry.json`, `token-usage.json`, `host-system-overview.json`, `postgres-overview.json`, `docker-overview.json`)
+      - System core dashboards: `/share/aerial/services/grafana/dashboards/*.json` (`core-telemetry.json`, `token-usage.json`, `host-system-overview.json`, `postgres-overview.json`, `docker-overview.json`, `engine-comparison-hud.json`)
       - Custom domain dashboards: `/share/aerial-config/services/grafana/dashboards/*.json` (`calibarn-gpu-hud.json`, `home-assistant-telemetry.json`, `unifi-network-hud.json`, `voice-kiosk-hud.json`)
       - Search with:
         ```bash
         grep -i "<keyword>" /share/aerial/services/grafana/dashboards/*.json /share/aerial-config/services/grafana/dashboards/*.json
         ```
-    - **vmalert Rule Definitions**: When triaging active or historical alerts (`ALERTS{alertstate="firing"}`), inspect canonical recording and alert rules in `k8s/observability-and-mcp.yaml` (`ConfigMap/vmalert-rules`) or query rule endpoints via `victoriametrics:alerts` / `victoriametrics:rules`.
+    - **vmalert Rule Definitions**: When triaging active or historical alerts (`ALERTS{alertstate="firing"}`), inspect canonical recording and alert rules in `k8s/observability-and-mcp.yaml` (`VMRule/aerial-observability-rules`) or query rule endpoints via `victoriametrics:alerts` / `victoriametrics:rules`.
   - If a dashboard panel or alert rule exists, extract and reuse the exact PromQL query directly.
 - **Step 2: Live TSDB Series Discovery (VictoriaMetrics MCP)**:
   - If no dashboard panel matches, discover the exact live metric names and suffixes using `victoriametrics:series` or `victoriametrics:metrics` with a regex match:
