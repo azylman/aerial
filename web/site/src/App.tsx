@@ -1,6 +1,8 @@
 import { type ChangeEvent, useEffect, useState } from 'react';
 import { useAerialTheme } from './theme';
 import { LandingView } from './components/LandingView';
+import { HandbookView } from './components/HandbookView';
+import { HANDBOOK_CHAPTERS } from './data/chapters';
 
 export { useAerialTheme };
 
@@ -18,50 +20,7 @@ export interface ChapterInfo {
   summary: string;
 }
 
-export const CHAPTERS: readonly ChapterInfo[] = [
-  {
-    id: 'overview',
-    number: 1,
-    title: 'Overview & Why Aerial',
-    summary: 'The closed-loop thesis, real-world autonomous workflows, glass-box operations, and architecture philosophy.',
-  },
-  {
-    id: 'getting-started',
-    number: 2,
-    title: 'Getting Started & Two-Repo GitOps',
-    summary: 'Single-node k3s bootstrap, aerial vs. aerial-config split, Infisical PushSecret bootstrap, and cluster overrides.',
-  },
-  {
-    id: 'application-platform',
-    number: 3,
-    title: 'The Self-Hosted Application Platform',
-    summary: 'NGINX Gateway Fabric, CoreDNS mesh, CloudNativePG PostgreSQL 19 + pgvector, Restate durable execution, and NATS JetStream.',
-  },
-  {
-    id: 'software-factory',
-    number: 4,
-    title: 'The Autonomous Software Factory',
-    summary: 'Vikunja DAG ready queue, tiered multi-agent review, Vanadis multi-PR DAG orchestration, and push GitOps remediation.',
-  },
-  {
-    id: 'multimodal-agent',
-    number: 5,
-    title: 'The Multimodal AI Agent',
-    summary: 'Eri stateless ingress, Eri-Restate sessions, Coven ACT-R memory & skill synthesis, Haro scheduler, Discord, voice, and browser automation.',
-  },
-  {
-    id: 'security-guardrails',
-    number: 6,
-    title: 'Security & Defense-in-Depth Guardrails',
-    summary: 'Read-only repository mounts, child-process secret scrubbing, hook-guard pre-tool interceptors, and admin RBAC.',
-  },
-  {
-    id: 'customization-day2',
-    number: 7,
-    title: 'Customization & Day-2 Operations',
-    summary: 'Authoring SKILL.md runbooks, registering Streamable HTTP MCP servers, channel lifecycle webhooks, and homelab workloads.',
-  },
-] as const;
+export const CHAPTERS: readonly ChapterInfo[] = HANDBOOK_CHAPTERS;
 
 /**
  * Parses location hash into RouteState.
@@ -117,10 +76,6 @@ export function App() {
   const handleChapterJump = (event: ChangeEvent<HTMLSelectElement>) => {
     window.location.hash = `#/docs/${event.target.value}`;
   };
-
-  const currentIndex = CHAPTERS.findIndex((ch) => ch.id === currentChapter.id);
-  const prevChapter = currentIndex > 0 ? CHAPTERS[currentIndex - 1] : null;
-  const nextChapter = currentIndex < CHAPTERS.length - 1 ? CHAPTERS[currentIndex + 1] : null;
 
   return (
     <div className="site-shell" data-testid="site-shell">
@@ -201,56 +156,7 @@ export function App() {
         {route.view === 'landing' ? (
           <LandingView />
         ) : (
-          <section className="handbook-view" data-testid="handbook-view">
-            <div className="handbook-container">
-              <aside className="handbook-sidebar" aria-label="Handbook chapters">
-                <div className="handbook-sidebar-title">Deep-Dive Handbook</div>
-                <ul className="handbook-nav-list">
-                  {CHAPTERS.map((ch) => (
-                    <li key={ch.id}>
-                      <a
-                        href={`#/docs/${ch.id}`}
-                        className={`handbook-nav-link ${ch.id === currentChapter.id ? 'active' : ''}`}
-                        aria-current={ch.id === currentChapter.id ? 'page' : undefined}
-                      >
-                        <span>Ch. {ch.number}:</span>
-                        <span>{ch.title}</span>
-                      </a>
-                    </li>
-                  ))}
-                </ul>
-              </aside>
-
-              <article className="handbook-content">
-                <div className="chapter-badge">CHAPTER {currentChapter.number}</div>
-                <h1 className="chapter-heading">{currentChapter.title}</h1>
-                <div className="chapter-body">
-                  <p>{currentChapter.summary}</p>
-                  <p>
-                    This chapter provides detailed technical specifications, architectural diagrams, and step-by-step
-                    configuration procedures for Aerial's production systems.
-                  </p>
-                </div>
-
-                <nav className="chapter-nav-buttons" aria-label="Chapter pagination">
-                  {prevChapter ? (
-                    <a href={`#/docs/${prevChapter.id}`} className="btn-secondary" aria-label="Previous chapter">
-                      ← Ch. {prevChapter.number}: {prevChapter.title}
-                    </a>
-                  ) : (
-                    <div />
-                  )}
-                  {nextChapter ? (
-                    <a href={`#/docs/${nextChapter.id}`} className="btn-secondary" aria-label="Next chapter">
-                      Ch. {nextChapter.number}: {nextChapter.title} →
-                    </a>
-                  ) : (
-                    <div />
-                  )}
-                </nav>
-              </article>
-            </div>
-          </section>
+          <HandbookView chapterId={route.chapterId} />
         )}
       </main>
 
