@@ -2152,8 +2152,13 @@ a:hover {
 
 .copy-code-btn.copied {
   background-color: var(--ae-ok);
-  color: #ffffff;
+  color: var(--ae-canvas);
   border-color: var(--ae-ok);
+}
+
+.copy-code-btn.failed {
+  border-color: var(--ae-danger, #f38ba8);
+  color: var(--ae-danger, #f38ba8);
 }
 
 .terminal-summary {

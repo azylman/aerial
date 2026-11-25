@@ -64,6 +64,7 @@ export const QUICKSTART_STEPS: readonly QuickstepItem[] = [
 
 export function QuickstartSteps() {
   const [copiedId, setCopiedId] = useState<number | null>(null);
+  const [copyFailedId, setCopyFailedId] = useState<number | null>(null);
   const [activeStepTab, setActiveStepTab] = useState<number>(1);
   const timeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
@@ -76,19 +77,29 @@ export function QuickstartSteps() {
   }, []);
 
   const handleCopy = async (id: number, text: string) => {
-    try {
-      await navigator.clipboard.writeText(text);
-    } catch {
-      // Fallback in environments without clipboard permissions
-    }
     if (timeoutRef.current) {
       clearTimeout(timeoutRef.current);
-    }
-    setCopiedId(id);
-    timeoutRef.current = setTimeout(() => {
-      setCopiedId(null);
       timeoutRef.current = null;
-    }, 2500);
+    }
+    try {
+      if (!navigator.clipboard?.writeText) {
+        throw new Error('Clipboard API not available');
+      }
+      await navigator.clipboard.writeText(text);
+      setCopyFailedId(null);
+      setCopiedId(id);
+      timeoutRef.current = setTimeout(() => {
+        setCopiedId(null);
+        timeoutRef.current = null;
+      }, 2500);
+    } catch {
+      setCopiedId(null);
+      setCopyFailedId(id);
+      timeoutRef.current = setTimeout(() => {
+        setCopyFailedId(null);
+        timeoutRef.current = null;
+      }, 2500);
+    }
   };
 
   return (
@@ -124,6 +135,7 @@ export function QuickstartSteps() {
       <div className="terminal-steps-list">
         {QUICKSTART_STEPS.filter((s) => s.id === activeStepTab).map((step) => {
           const isCopied = copiedId === step.id;
+          const isFailed = copyFailedId === step.id;
 
           return (
             <div key={step.id} className="terminal-step-card" data-testid={`step-card-${step.id}`}>
@@ -136,13 +148,19 @@ export function QuickstartSteps() {
 
                 <button
                   type="button"
-                  className={`copy-code-btn ${isCopied ? 'copied' : ''}`}
+                  className={`copy-code-btn ${isCopied ? 'copied' : ''} ${isFailed ? 'failed' : ''}`}
                   onClick={() => handleCopy(step.id, step.command)}
                   aria-label={`Copy command for Step ${step.id}`}
                   data-testid={`copy-btn-${step.id}`}
                 >
-                  <span aria-hidden="true">{isCopied ? '✓' : '📋'}</span>
-                  <span>{isCopied ? 'Copied to Clipboard!' : 'Copy Command'}</span>
+                  <span aria-hidden="true">{isCopied ? '✓' : isFailed ? '⚠️' : '📋'}</span>
+                  <span>
+                    {isCopied
+                      ? 'Copied to Clipboard!'
+                      : isFailed
+                        ? 'Copy failed, select manually'
+                        : 'Copy Command'}
+                  </span>
                 </button>
               </div>
 

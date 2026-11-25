@@ -283,6 +283,15 @@ describe('ComparisonMatrix Component', () => {
     const searchInput = screen.getByTestId('comp-search-input');
     fireEvent.change(searchInput, { target: { value: 'orchestration' } });
     expect(screen.getByText('Stateful Orchestration')).toBeTruthy();
+    expect(screen.queryByText('Primary Architecture')).toBeNull();
+
+    // Category-scoped search: 'sqlite' is only present in the AI Agents column, hidden under homelab filter
+    fireEvent.change(searchInput, { target: { value: 'sqlite' } });
+    expect(screen.getByText(/No comparison dimensions matched your search query/i)).toBeTruthy();
+
+    // Reset filter to all: now 'sqlite' matches
+    fireEvent.click(screen.getByTestId('comp-filter-all'));
+    expect(screen.getByText('Stateful Orchestration')).toBeTruthy();
 
     // Unmatched search in Matrix view
     fireEvent.change(searchInput, { target: { value: 'unmatched-matrix-query' } });
@@ -374,7 +383,20 @@ describe('QuickstartSteps Component', () => {
       fireEvent.click(copyBtn);
     });
 
-    expect(screen.getByText('Copied to Clipboard!')).toBeTruthy();
+    expect(screen.queryByText('Copied to Clipboard!')).toBeNull();
+    expect(screen.getByText('Copy failed, select manually')).toBeTruthy();
+
+    // Advance 2500ms -> reverts to Copy Command
+    act(() => {
+      vi.advanceTimersByTime(2500);
+    });
+    expect(screen.getByText('Copy Command')).toBeTruthy();
+
+    // Trigger failure again to test unmount cleanup
+    await act(async () => {
+      fireEvent.click(copyBtn);
+    });
+    expect(screen.getByText('Copy failed, select manually')).toBeTruthy();
 
     // Unmount before timeout expires
     unmount();

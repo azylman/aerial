@@ -189,15 +189,21 @@ export function ComparisonMatrix() {
     const q = searchQuery.toLowerCase().trim();
     if (!q) return DIMENSIONS;
     return DIMENSIONS.filter((dim) => {
-      return (
-        dim.dimension.toLowerCase().includes(q) ||
-        dim.homelab.toLowerCase().includes(q) ||
-        dim.factory.toLowerCase().includes(q) ||
-        dim.agent.toLowerCase().includes(q) ||
-        dim.aerial.toLowerCase().includes(q)
-      );
+      const matchesDim = dim.dimension.toLowerCase().includes(q);
+      const matchesAerial = dim.aerial.toLowerCase().includes(q);
+      const matchesHomelab =
+        (selectedCategory === 'all' || selectedCategory === 'homelab') &&
+        dim.homelab.toLowerCase().includes(q);
+      const matchesFactory =
+        (selectedCategory === 'all' || selectedCategory === 'factory') &&
+        dim.factory.toLowerCase().includes(q);
+      const matchesAgent =
+        (selectedCategory === 'all' || selectedCategory === 'agent') &&
+        dim.agent.toLowerCase().includes(q);
+
+      return matchesDim || matchesAerial || matchesHomelab || matchesFactory || matchesAgent;
     });
-  }, [searchQuery]);
+  }, [searchQuery, selectedCategory]);
 
   const matrixGridCols = selectedCategory === 'all' ? '180px 1fr 1fr 1fr 1.3fr' : '200px 1fr 1.3fr';
 

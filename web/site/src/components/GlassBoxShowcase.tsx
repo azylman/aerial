@@ -263,7 +263,7 @@ export function GlassBoxShowcase() {
                       <h4>Event: User Directive Ingress</h4>
                       <p>Received directive from channel #aerial-dev via synapse WebSocket gateway.</p>
                       <pre>
-                        <code>{`{\n  "channel": "aerial-dev",\n  "directive": "[VANADIS BUILD CHUNK EXECUTION] ...",\n  "author": "arcane103 (admin: true)"\n}`}</code>
+                        <code>{`{\n  "channel": "aerial-dev",\n  "directive": "[VANADIS BUILD CHUNK EXECUTION] ...",\n  "author": "operator (admin: true)"\n}`}</code>
                       </pre>
                     </div>
                   )}
