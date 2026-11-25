@@ -110,16 +110,11 @@ export function App() {
   const currentChapter = CHAPTERS.find((ch) => ch.id === activeChapterId) || CHAPTERS[0]!;
 
   useEffect(() => {
-    if (typeof window.scrollTo === 'function') {
-      window.scrollTo(0, 0);
-    }
+    window.scrollTo(0, 0);
   }, [route.view, route.chapterId]);
 
   const handleChapterJump = (event: ChangeEvent<HTMLSelectElement>) => {
-    const nextChapter = event.target.value;
-    if (nextChapter) {
-      window.location.hash = `#/docs/${nextChapter}`;
-    }
+    window.location.hash = `#/docs/${event.target.value}`;
   };
 
   const currentIndex = CHAPTERS.findIndex((ch) => ch.id === currentChapter.id);

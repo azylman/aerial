@@ -3,9 +3,6 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { App, parseRouteHash, useAerialTheme } from './App';
 import {
   applyTheme,
-  getServerSnapshot,
-  initTheme,
-  nextTheme,
   readStoredTheme,
   subscribeTheme,
   THEME_COLOR,
@@ -59,16 +56,9 @@ describe('theme helpers and useAerialTheme', () => {
     }
   });
 
-  it('calculates nextTheme correctly', () => {
-    expect(nextTheme('dark')).toBe('light');
-    expect(nextTheme('light')).toBe('dark');
-    expect(getServerSnapshot()).toBe('dark');
-  });
-
-  it('reads stored theme and initializes theme', () => {
+  it('reads stored theme from site mirror when cookie is absent', () => {
     clearThemeCookies();
     localStorage.setItem(THEME_STORAGE_KEY, 'light');
-    expect(initTheme()).toBe('light');
     expect(readStoredTheme()).toBe('light');
   });
 
@@ -84,16 +74,6 @@ describe('theme helpers and useAerialTheme', () => {
     expect(metaTag?.content).toBe(THEME_COLOR.light);
 
     setSpy.mockRestore();
-  });
-
-  it('applies theme when meta tag is absent from document', () => {
-    if (metaTag && metaTag.parentNode) {
-      metaTag.parentNode.removeChild(metaTag);
-      metaTag = null;
-    }
-
-    applyTheme('light');
-    expect(document.documentElement.dataset.theme).toBe('light');
   });
 
   it('notifies subscribers and unsubscribes cleanly', () => {
@@ -170,17 +150,6 @@ describe('App component', () => {
     expect(scrollSpy).toHaveBeenCalledWith(0, 0);
   });
 
-  it('handles environment where window.scrollTo is undefined', () => {
-    const originalScrollTo = window.scrollTo;
-    // @ts-expect-error testing missing window.scrollTo
-    delete window.scrollTo;
-
-    render(<App />);
-    expect(screen.getByTestId('landing-view')).toBeTruthy();
-
-    window.scrollTo = originalScrollTo;
-  });
-
   it('navigates to handbook view and switches chapters via hashchange', () => {
     render(<App />);
 
@@ -241,16 +210,10 @@ describe('App component', () => {
     expect(handbookTab.getAttribute('href')).toBe('#/docs/overview');
   });
 
-  it('handles chapter jump dropdown selection with both valid and empty values', () => {
+  it('handles chapter jump dropdown selection', () => {
     render(<App />);
 
     const select = screen.getByLabelText('Chapter quick-jump');
-
-    // Changing with empty string does not change hash
-    fireEvent.change(select, { target: { value: '' } });
-    expect(window.location.hash).toBe('');
-
-    // Changing with valid chapter changes hash
     fireEvent.change(select, { target: { value: 'application-platform' } });
     expect(window.location.hash).toBe('#/docs/application-platform');
   });

@@ -40,12 +40,6 @@ export function applyTheme(theme: ThemeMode): void {
   window.AerialTheme.set(theme);
 }
 
-export function initTheme(): ThemeMode {
-  const theme = readStoredTheme();
-  applyTheme(theme);
-  return theme;
-}
-
 export function nextTheme(theme: ThemeMode): ThemeMode {
   return theme === 'dark' ? 'light' : 'dark';
 }
@@ -56,10 +50,6 @@ export function subscribeTheme(listener: (theme: ThemeMode) => void): () => void
     paintAndMirrorTheme(theme);
     listener(theme);
   });
-}
-
-export function getServerSnapshot(): ThemeMode {
-  return 'dark';
 }
 
 /**
@@ -74,7 +64,6 @@ export function useAerialTheme(): {
   const theme = useSyncExternalStore(
     subscribeTheme,
     readStoredTheme,
-    getServerSnapshot,
   );
 
   const setTheme = useCallback((next: ThemeMode) => {
