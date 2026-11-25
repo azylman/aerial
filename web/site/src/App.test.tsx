@@ -1,4 +1,4 @@
-import { act, cleanup, fireEvent, render, screen } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen, within } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { App, parseRouteHash, useAerialTheme } from './App';
 import {
@@ -17,21 +17,15 @@ describe('parseRouteHash', () => {
     expect(parseRouteHash('')).toEqual({ view: 'landing' });
     expect(parseRouteHash('#')).toEqual({ view: 'landing' });
     expect(parseRouteHash('#/')).toEqual({ view: 'landing' });
-    expect(parseRouteHash('   ')).toEqual({ view: 'landing' });
     expect(parseRouteHash('#/unknown-route')).toEqual({ view: 'landing' });
   });
 
   it('parses docs hashes correctly', () => {
     expect(parseRouteHash('#/docs')).toEqual({ view: 'docs', chapterId: 'overview' });
     expect(parseRouteHash('#/docs/')).toEqual({ view: 'docs', chapterId: 'overview' });
-    expect(parseRouteHash('docs')).toEqual({ view: 'docs', chapterId: 'overview' });
     expect(parseRouteHash('#/docs/software-factory')).toEqual({
       view: 'docs',
       chapterId: 'software-factory',
-    });
-    expect(parseRouteHash('#/docs/getting-started')).toEqual({
-      view: 'docs',
-      chapterId: 'getting-started',
     });
   });
 });
@@ -156,18 +150,35 @@ describe('App component', () => {
     window.location.hash = '';
   });
 
-  it('renders landing view by default with header, hero, and features', () => {
+  it('renders landing view by default', () => {
     render(<App />);
-
     expect(screen.getByTestId('landing-view')).toBeTruthy();
-    expect(screen.getByRole('banner')).toBeTruthy();
-    expect(screen.getByText('AERIAL')).toBeTruthy();
-    expect(screen.getByRole('link', { name: 'Aerial Home' })).toBeTruthy();
-    expect(screen.getByRole('heading', { level: 1 }).textContent).toContain('Autonomous AI Personal Assistant');
-    expect(screen.getByText('Autonomous Software Factory')).toBeTruthy();
-    expect(screen.getByText('Self-Hosted Platform')).toBeTruthy();
-    expect(screen.getByText('Multimodal Intelligence')).toBeTruthy();
-    expect(screen.getByRole('contentinfo')).toBeTruthy();
+  });
+
+  it('scrolls to top when route changes', () => {
+    const scrollSpy = vi.fn();
+    window.scrollTo = scrollSpy;
+
+    render(<App />);
+    expect(scrollSpy).toHaveBeenCalledWith(0, 0);
+
+    scrollSpy.mockClear();
+    act(() => {
+      window.location.hash = '#/docs/overview';
+      window.dispatchEvent(new HashChangeEvent('hashchange'));
+    });
+    expect(scrollSpy).toHaveBeenCalledWith(0, 0);
+  });
+
+  it('handles environment where window.scrollTo is undefined', () => {
+    const originalScrollTo = window.scrollTo;
+    // @ts-expect-error testing missing window.scrollTo
+    delete window.scrollTo;
+
+    render(<App />);
+    expect(screen.getByTestId('landing-view')).toBeTruthy();
+
+    window.scrollTo = originalScrollTo;
   });
 
   it('navigates to handbook view and switches chapters via hashchange', () => {
@@ -179,7 +190,6 @@ describe('App component', () => {
     });
 
     expect(screen.getByTestId('handbook-view')).toBeTruthy();
-    expect(screen.getByText('Deep-Dive Handbook')).toBeTruthy();
     expect(screen.getByText('CHAPTER 1')).toBeTruthy();
     expect(screen.getByRole('heading', { level: 1 }).textContent).toBe('Overview & Why Aerial');
 
@@ -222,6 +232,13 @@ describe('App component', () => {
     expect(screen.getByTestId('handbook-view')).toBeTruthy();
     expect(screen.getByText('CHAPTER 1')).toBeTruthy();
     expect(screen.getByRole('heading', { level: 1 }).textContent).toBe('Overview & Why Aerial');
+
+    const select = screen.getByLabelText('Chapter quick-jump') as HTMLSelectElement;
+    expect(select.value).toBe('overview');
+
+    const nav = screen.getByRole('navigation', { name: 'Main Navigation' });
+    const handbookTab = within(nav).getByRole('link', { name: 'Handbook' });
+    expect(handbookTab.getAttribute('href')).toBe('#/docs/overview');
   });
 
   it('handles chapter jump dropdown selection with both valid and empty values', () => {

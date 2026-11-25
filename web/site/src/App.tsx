@@ -109,6 +109,12 @@ export function App() {
   const activeChapterId = route.chapterId || 'overview';
   const currentChapter = CHAPTERS.find((ch) => ch.id === activeChapterId) || CHAPTERS[0]!;
 
+  useEffect(() => {
+    if (typeof window.scrollTo === 'function') {
+      window.scrollTo(0, 0);
+    }
+  }, [route.view, route.chapterId]);
+
   const handleChapterJump = (event: ChangeEvent<HTMLSelectElement>) => {
     const nextChapter = event.target.value;
     if (nextChapter) {
@@ -142,7 +148,7 @@ export function App() {
               Overview
             </a>
             <a
-              href={`#/docs/${activeChapterId}`}
+              href={`#/docs/${currentChapter.id}`}
               className={`nav-tab ${route.view === 'docs' ? 'active' : ''}`}
               aria-current={route.view === 'docs' ? 'page' : undefined}
             >
@@ -153,7 +159,7 @@ export function App() {
               <select
                 className="chapter-select"
                 aria-label="Chapter quick-jump"
-                value={route.view === 'docs' ? activeChapterId : ''}
+                value={route.view === 'docs' ? currentChapter.id : ''}
                 onChange={handleChapterJump}
               >
                 <option value="" disabled>
