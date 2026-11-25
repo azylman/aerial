@@ -311,7 +311,7 @@ In Vanadis (`services/vanadis-restate`), **`statusFailed` (`"failed"`) is a reco
 ## 7. Multi-Agent Service Naming, Timeout Reconciliation, Versioning & Testing
 
 ### 7.1 Dynamic Multi-Agent Service Naming
-In multi-agent deployments (e.g. Aerial, AgentAlpha, AgentBeta running on the same cluster), avoid service name collisions by naming services deterministically per agent stack:
+In multi-agent deployments (e.g. Aerial, Alpha, Beta running on the same cluster), avoid service name collisions by naming services deterministically per agent stack:
 ```go
 func BuildServiceName(agent string) string {
     norm := strings.ToLower(strings.TrimSpace(agent))
