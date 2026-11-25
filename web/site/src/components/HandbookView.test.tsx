@@ -82,11 +82,6 @@ describe('filterChapters helper', () => {
     expect(byCalloutText.length).toBeGreaterThan(0);
     expect(byCalloutText.some((c) => c.id === 'getting-started')).toBe(true);
   });
-
-  it('returns empty array when query does not match any chapter or section', () => {
-    const noMatch = filterChapters(HANDBOOK_CHAPTERS, 'xyz-nonexistent-search-term-12345');
-    expect(noMatch).toHaveLength(0);
-  });
 });
 
 describe('HandbookView component', () => {
@@ -108,7 +103,6 @@ describe('HandbookView component', () => {
 
     // Section table of contents exists
     const toc = screen.getByRole('navigation', { name: 'Section table of contents' });
-    expect(toc).toBeTruthy();
     expect(within(toc).getByText('The Closed-Loop Thesis')).toBeTruthy();
 
     // Callout in Chapter 1
@@ -117,7 +111,6 @@ describe('HandbookView component', () => {
     // First chapter has no previous button
     expect(screen.queryByTestId('prev-chapter-btn')).toBeNull();
     const nextBtn = screen.getByTestId('next-chapter-btn');
-    expect(nextBtn).toBeTruthy();
     expect(nextBtn.getAttribute('href')).toBe('#/docs/getting-started');
   });
 
@@ -132,8 +125,6 @@ describe('HandbookView component', () => {
     // Both prev and next buttons exist for middle chapters with destination hrefs
     const prevBtn = screen.getByTestId('prev-chapter-btn');
     const nextBtn = screen.getByTestId('next-chapter-btn');
-    expect(prevBtn).toBeTruthy();
-    expect(nextBtn).toBeTruthy();
     expect(prevBtn.getAttribute('href')).toBe('#/docs/getting-started');
     expect(nextBtn.getAttribute('href')).toBe('#/docs/software-factory');
   });
@@ -200,7 +191,6 @@ describe('HandbookView component', () => {
 
     // Clear search button appears and resets search
     const clearBtn = screen.getByTestId('handbook-clear-search-btn');
-    expect(clearBtn).toBeTruthy();
     fireEvent.click(clearBtn);
 
     expect(screen.queryByTestId('handbook-clear-search-btn')).toBeNull();

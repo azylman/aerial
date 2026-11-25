@@ -129,8 +129,8 @@ bazel test //services/... //pkg/...`,
         bullets: [
           'Domain-Agnostic Core: azylman/aerial has zero personal data, real names, or private credentials.',
           'Private Config Repository: All personal persona rules, household runbooks, and cluster-specific overrides live in a private GitOps repository.',
-          'Repository Integrity: Base repositories (/share) are guarded against in-place modification; agents perform all work in isolated scratch clones managed via scripts/aerial-pr.sh.',
-          'Ephemeral Scratch Workspaces: Agents perform all modifications in ephemeral scratch clones managed via scripts/aerial-pr.sh.',
+          'Repository Integrity: Base repositories (/share) are guarded against in-place mutation by compiled pre-tool hooks.',
+          'Ephemeral Scratch Workspaces: Agents perform all modifications in isolated scratch clones managed via scripts/aerial-pr.sh.',
         ],
       },
     ],
@@ -523,9 +523,9 @@ channels:
         id: 'coven-memory',
         title: 'Coven Hybrid RRF + ACT-R Memory & Skill Synthesis',
         lead:
-          'Long-term semantic memory combining keyword BM25 and vector embeddings with human-like cognitive activation decay.',
+          'Long-term semantic memory combining PostgreSQL full-text search (ts_rank_cd) and vector embeddings with human-like cognitive activation decay.',
         paragraphs: [
-          'Coven is Aerial’s cognitive memory and procedural learning service. Unlike naive vector databases that suffer from semantic drift, Coven uses Reciprocal Rank Fusion (RRF) combining BM25 full-text keyword search and pgvector cosine similarity.',
+          'Coven is Aerial’s cognitive memory and procedural learning service. Unlike naive vector databases that suffer from semantic drift, Coven uses Reciprocal Rank Fusion (RRF) combining PostgreSQL full-text search (ts_rank_cd) and pgvector cosine similarity.',
           'Memory items decay over time following cognitive ACT-R activation formulas: frequently retrieved and recently accessed facts remain prominent, while obsolete or transient details naturally fade. Furthermore, Coven periodically analyzes completed execution transcripts to synthesize reusable procedural skills.',
         ],
         bullets: [
@@ -557,7 +557,7 @@ channels:
     number: 6,
     title: 'Security & Defense-in-Depth Guardrails',
     summary:
-      'Read-only repository mounts, child-process secret scrubbing, compiled Go hook-guard pre-tool interceptors, multi-encoding log/span/Discord secret redaction, and admin RBAC.',
+      'Pre-tool repository protection, child-process secret scrubbing, compiled Go hook-guard pre-tool interceptors, multi-encoding log/span/Discord secret redaction, and admin RBAC.',
     sections: [
       {
         id: 'filesystem-immutability',
@@ -566,7 +566,7 @@ channels:
           'Base repositories are protected from direct in-place mutation; all agent work occurs in ephemeral scratch workspaces.',
         paragraphs: [
           'Granting an autonomous AI agent unrestricted write access to your primary codebase or live server working copy is an enormous security hazard. A buggy prompt or hallucinatory command could delete files, corrupt git history, or overwrite critical configuration.',
-          'In Aerial, agents are strictly prohibited from mutating base repositories (/share/aerial and /share/aerial-config) directly. The compiled hook-guard pre-tool interceptor blocks destructive commands and in-place git mutations targeting /share, while read-only mounts protect ingress pods. Agents must clone isolated scratch workspaces via scripts/aerial-pr.sh, test changes in isolation, and submit PRs through standard GitOps pull request workflows.',
+          'In Aerial, agents are strictly prohibited from mutating base repositories (/share/aerial and /share/aerial-config) directly. The compiled hook-guard pre-tool interceptor blocks destructive commands and in-place git mutations targeting /share. Agents must clone isolated scratch workspaces via scripts/aerial-pr.sh, test changes in isolation, and submit PRs through standard GitOps pull request workflows.',
         ],
         bullets: [
           'Pre-Tool Enforcement: hook-guard intercepts and denies direct writes and git mutations targeting /share.',
