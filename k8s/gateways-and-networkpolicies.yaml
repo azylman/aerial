@@ -351,7 +351,6 @@ spec:
                   - console
                   - agentsview
                   - grafana
-                  - aura-farming
                   - vision
                   - gatus
                   - prospera
@@ -499,8 +498,6 @@ spec:
                   - vision
                   - vision-restate
                   - gatus
-                  - scratch-service
-                  - mirrormere-core
                   - eri
                   - eri-restate
                   - transcripts
