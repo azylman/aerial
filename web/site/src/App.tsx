@@ -10,8 +10,8 @@ export type RouteView = 'landing' | 'docs';
 
 export interface RouteState {
   view: RouteView;
-  chapterId?: string;
-  sectionId?: string;
+  chapterId?: string | undefined;
+  sectionId?: string | undefined;
 }
 
 export interface ChapterInfo {
