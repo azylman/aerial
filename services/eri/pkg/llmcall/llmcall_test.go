@@ -161,8 +161,8 @@ func TestServiceName(t *testing.T) {
 	}{
 		{agent: "", want: "LLM"},
 		{agent: "aerial", want: "LLM"},
-		{agent: "miorine", want: "LLM-miorine"},
-		{agent: " Miorine ", want: "LLM-miorine"},
+		{agent: "agent-alpha", want: "LLM-agent-alpha"},
+		{agent: " Agent-Alpha ", want: "LLM-agent-alpha"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.agent, func(t *testing.T) {
