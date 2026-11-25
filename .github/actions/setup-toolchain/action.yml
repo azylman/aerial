@@ -1,0 +1,73 @@
+name: Set up Hermetic Monorepo Toolchain
+description: Hydrates hermetic Go, Bazel, Postgres 19, and CI CLI binaries from the pre-baked runner image on ubuntu-latest runners; 0ms no-op on self-hosted ARC runners.
+runs:
+  using: composite
+  steps:
+    - name: Set up Monorepo Toolchain
+      shell: bash
+      run: |
+        set -euo pipefail
+
+        if [ "${{ runner.environment }}" = "self-hosted" ]; then
+          exit 0
+        fi
+
+        echo "Hydrating toolchain from ghcr.io/azylman/aerial-github-runner:latest on ${{ runner.environment }} runner..."
+        IMAGE="ghcr.io/azylman/aerial-github-runner:latest"
+        docker pull "$IMAGE"
+        CID=$(docker create "$IMAGE")
+
+        sudo rm -rf /usr/local/go
+        sudo docker cp "$CID:/usr/local/go" /usr/local/go
+
+        sudo mkdir -p /usr/local/bin
+        for bin in bazel bazelisk gazelle buildifier crane deadcode golangci-lint atlas oapi-codegen; do
+          sudo docker cp -L "$CID:/usr/local/bin/$bin" "/usr/local/bin/$bin"
+          sudo chmod 0755 "/usr/local/bin/$bin"
+        done
+
+        sudo rm -rf /opt/bazel-cache
+        sudo docker cp "$CID:/opt/bazel-cache" /opt/bazel-cache
+        sudo chown -R "$(id -u):$(id -g)" /opt/bazel-cache
+        sudo chmod -R u+rwX,go+rX /opt/bazel-cache
+
+        sudo mkdir -p /usr/lib/postgresql /usr/share/postgresql
+        sudo rm -rf /usr/lib/postgresql/19 /usr/share/postgresql/19
+        sudo docker cp "$CID:/usr/lib/postgresql/19" /usr/lib/postgresql/19
+        sudo docker cp "$CID:/usr/share/postgresql/19" /usr/share/postgresql/19
+
+        LIBPQ_FILES=$(docker run --rm --entrypoint find "$IMAGE" /usr/lib/x86_64-linux-gnu -maxdepth 1 -name 'libpq*')
+        if [ -z "$LIBPQ_FILES" ]; then
+          echo "::error::Failed to discover libpq files in $IMAGE"
+          exit 1
+        fi
+        sudo mkdir -p /usr/lib/x86_64-linux-gnu
+        for lib in $LIBPQ_FILES; do
+          sudo docker cp -L "$CID:$lib" /usr/lib/x86_64-linux-gnu/
+        done
+        sudo ldconfig
+
+        if [ ! -e /usr/lib/x86_64-linux-gnu/libpq.so.5 ]; then
+          echo "::error::libpq.so.5 was not installed to /usr/lib/x86_64-linux-gnu"
+          exit 1
+        fi
+
+        docker rm -f "$CID" >/dev/null
+
+        echo "/usr/local/go/bin" >> "$GITHUB_PATH"
+        echo "/usr/local/bin" >> "$GITHUB_PATH"
+        echo "BAZELISK_HOME=/opt/bazel-cache" >> "$GITHUB_ENV"
+
+        export PATH="/usr/local/go/bin:/usr/local/bin:$PATH"
+        export BAZELISK_HOME=/opt/bazel-cache
+
+        /usr/lib/postgresql/19/bin/initdb --version
+        bazel --version
+
+        TEST_PGDATA=$(mktemp -d /tmp/pgtest-XXXXXX)
+        if [ "$(id -u)" != "0" ]; then
+          /usr/lib/postgresql/19/bin/initdb -D "$TEST_PGDATA" --no-sync >/dev/null
+          /usr/lib/postgresql/19/bin/pg_ctl -D "$TEST_PGDATA" -o "-k /tmp" -l "$TEST_PGDATA/pg.log" start
+          /usr/lib/postgresql/19/bin/pg_ctl -D "$TEST_PGDATA" stop
+        fi
+        rm -rf "$TEST_PGDATA"
