@@ -76,7 +76,7 @@ VictoriaMetrics is the cluster-wide time-series database (TSDB) collecting metri
   - Search dashboard definitions directly in mounted git repositories:
     - **Git Dashboard Definitions**: Provisioned dashboards live across both repositories:
       - System core dashboards: `/share/aerial/services/grafana/dashboards/*.json` (`core-telemetry.json`, `token-usage.json`, `host-system-overview.json`, `postgres-overview.json`, `docker-overview.json`, `engine-comparison-hud.json`)
-      - Custom domain dashboards: `/share/aerial-config/services/grafana/dashboards/*.json` (`calibarn-gpu-hud.json`, `home-assistant-telemetry.json`, `unifi-network-hud.json`, `voice-kiosk-hud.json`)
+      - Custom domain dashboards: `/share/aerial-config/services/grafana/dashboards/*.json` (`gpu-node-hud.json`, `home-assistant-telemetry.json`, `unifi-network-hud.json`, `voice-kiosk-hud.json`)
       - Search with:
         ```bash
         grep -i "<keyword>" /share/aerial/services/grafana/dashboards/*.json /share/aerial-config/services/grafana/dashboards/*.json
