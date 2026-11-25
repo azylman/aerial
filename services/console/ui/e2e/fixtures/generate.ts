@@ -211,7 +211,7 @@ const FACT_TEMPLATES = [
   'Grafana alerts route to the system channel',
   'The garden irrigation runs at 6 AM',
   'Uses dark mode everywhere',
-  'Avoids cumin in recipes',
+  'Prefers mechanical keyboards',
   'The NAS backup completes around 3 AM',
   'Standup digest should stay under 200 words',
   'Builds ship through the Vanadis queue',
