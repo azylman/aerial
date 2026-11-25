@@ -491,7 +491,7 @@ scripts/aerial-build.sh status <build-id>`,
         lead:
           'Hot-swap between Google Antigravity (agy), Claude Code, Codex, and Muse CLI engines with identical memory and tool interfaces.',
         paragraphs: [
-          'Aerial is not locked into a single proprietary model provider or agent CLI harness. The execution runtime abstracts CLI agents through a unified TurnRunner interface. Whether running Google Antigravity (agy), Anthropic Claude Code, OpenAI Codex, or local open-weights engines, all agents receive identical tools, skills, rules, and memory context.',
+          'Aerial is not locked into a single proprietary model provider or agent CLI harness. The execution runtime abstracts CLI agents through a unified TurnRunner interface. Whether running Google Antigravity (agy), Anthropic Claude Code, OpenAI Codex, or Muse, all agents receive identical tools, skills, rules, and memory context.',
           'The default reasoning engine and models are configured declaratively in config.yaml, while channel policies configure wake triggers, reasoning effort, and ambient classification thresholds.',
         ],
         bullets: [
@@ -591,10 +591,12 @@ channels:
           'Credentials never touch disk in plaintext, and all outbound log streams, trace spans, and chat messages undergo pipeline-specific redaction.',
         paragraphs: [
           'Aerial enforces a Zero Plaintext Token Invariant: authentication tokens (e.g. GITHUB_PAT) are never saved into .git/config on disk. Git authentication uses ephemeral in-memory HTTP basic auth headers injected JIT during network calls.',
+          'Before spawning agent CLI worker processes, Aerial’s runner scrubs sensitive environment variables (such as database credentials, host tokens, API keys, and PATs matching secret suffixes or exact keys) from the child environment, preventing subagents and tool processes from inheriting backend secrets.',
           'Outbound telemetry is sanitized across each pipeline using registered secret values: the OpenTelemetry Collector masks exact token values along with their base64, URL-encoded, and git basic-auth variants in trace spans, while the Fluent Bit log pipeline matches exact raw and JSON-escaped values, sensitive JSON fields, and PEM private keys before logs are stored.',
         ],
         bullets: [
           'Zero Disk Tokens: No tokens stored in git configs, shell histories, or workspace files.',
+          'Child-Process Secret Scrubbing: Strips API keys, database credentials, and token suffixes (_SECRET, _TOKEN, _PASSWORD, _PAT) from child environments before spawning agent CLIs.',
           'Trace Span Masking: Sanitizes sensitive credentials and their base64, URL-encoded, and git basic-auth variants in VictoriaTraces.',
           'Log Pipeline Filtering: Fluent Bit redacts raw tokens, JSON-escaped strings, and PEM blocks before writing to VictoriaLogs.',
           'Redaction Bundle: Shared secrets are mounted in-memory at /secrets to populate pipeline redaction targets dynamically.',
@@ -643,13 +645,13 @@ channels:
         id: 'authoring-skills',
         title: 'Authoring Progressive Disclosure SKILL.md Runbooks',
         lead:
-          'Extend Aerial’s capabilities with custom skills structured with YAML frontmatter, execution triggers, and progressive disclosure.',
+          'Extend Aerial’s capabilities with custom skills structured with YAML frontmatter and progressive disclosure.',
         paragraphs: [
           'Skills are modular folders of instructions, reference documentation, and automation scripts that teach Aerial how to interact with specialized domains, home automation devices, or private APIs.',
-          'Aerial uses progressive disclosure to keep prompt tokens lightweight: skills declare triggers and summaries in SKILL.md frontmatter. Full skill instructions, reference manuals, and helper scripts are loaded into agent context only when relevant to the active user request.',
+          'Aerial uses progressive disclosure to keep prompt tokens lightweight: skills declare a name and usage description in SKILL.md frontmatter. Full skill instructions, reference manuals, and helper scripts are loaded into agent context only when the description indicates relevance to the active user request.',
         ],
         bullets: [
-          'YAML Frontmatter: Defines name, description, and keyword trigger patterns.',
+          'YAML Frontmatter: Defines name and description, indicating when the skill should be activated.',
           'Progressive Disclosure: Heavy instructions and scripts remain on disk until activated.',
           'Custom Skills Directory: Private skills reside in aerial-config/custom-skills/ and take precedence over built-in skills.',
         ],

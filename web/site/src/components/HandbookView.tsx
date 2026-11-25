@@ -65,22 +65,7 @@ export function HandbookView({ chapterId, onSelectChapter }: HandbookViewProps) 
   };
 
   const handleSearchChange = (event: ChangeEvent<HTMLInputElement>) => {
-    const query = event.target.value;
-    setSearchQuery(query);
-
-    if (query.trim()) {
-      const matches = filterChapters(HANDBOOK_CHAPTERS, query);
-      const activeId = chapterId || 'overview';
-      if (matches.length > 0 && !matches.some((c) => c.id === activeId)) {
-        const nextId = matches[0]!.id;
-        prevChapterIdRef.current = nextId;
-        if (onSelectChapter) {
-          onSelectChapter(nextId);
-        } else if (typeof window !== 'undefined') {
-          window.location.hash = `#/docs/${nextId}`;
-        }
-      }
-    }
+    setSearchQuery(event.target.value);
   };
 
   const handleClearSearch = () => {

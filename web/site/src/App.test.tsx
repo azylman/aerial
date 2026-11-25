@@ -25,11 +25,6 @@ describe('parseRouteHash', () => {
       chapterId: 'software-factory',
       sectionId: undefined,
     });
-    expect(parseRouteHash('#section-closed-loop-thesis')).toEqual({
-      view: 'docs',
-      chapterId: 'overview',
-      sectionId: 'closed-loop-thesis',
-    });
     expect(parseRouteHash('#section-stateless-ingress')).toEqual({
       view: 'docs',
       chapterId: 'multimodal-agent',

@@ -169,13 +169,17 @@ describe('HandbookView component', () => {
     expect(screen.queryByTestId('handbook-clear-search-btn')).toBeNull();
   });
 
-  it('triggers onSelectChapter when search matches a different chapter', () => {
+  it('triggers onSelectChapter when clicking a search result for a different chapter', () => {
     const onSelect = vi.fn();
     render(<HandbookView chapterId="overview" onSelectChapter={onSelect} />);
 
     const searchInput = screen.getByTestId('handbook-search-input');
     fireEvent.change(searchInput, { target: { value: 'Ariga Atlas' } });
 
+    expect(onSelect).not.toHaveBeenCalled();
+
+    const matchLink = screen.getByTestId('handbook-nav-link-software-factory');
+    fireEvent.click(matchLink);
     expect(onSelect).toHaveBeenCalledWith('software-factory');
   });
 
