@@ -794,9 +794,9 @@ func TestHandleInternalLLM(t *testing.T) {
 			wantBody: "a cat",
 		},
 		{
-			name: "sibling agent service", method: http.MethodPost, agent: "miorine", callerKey: "coven:extract:miorine:t1:7", body: `{"prompt":"extract"}`,
+			name: "sibling agent service", method: http.MethodPost, agent: "agent-alpha", callerKey: "coven:extract:agent-alpha:t1:7", body: `{"prompt":"extract"}`,
 			stubStatus: http.StatusOK, stubBody: `{"response":"ok"}`,
-			wantStatus: http.StatusOK, wantPath: "/LLM-miorine/Complete", wantReq: &llmcall.Request{Prompt: "extract", CallerKey: "coven:extract:miorine:t1:7"}, wantBody: "ok",
+			wantStatus: http.StatusOK, wantPath: "/LLM-agent-alpha/Complete", wantReq: &llmcall.Request{Prompt: "extract", CallerKey: "coven:extract:agent-alpha:t1:7"}, wantBody: "ok",
 		},
 		{
 			name: "restate 400 stays 400", method: http.MethodPost, agent: "aerial", body: `{"prompt":"extract"}`,

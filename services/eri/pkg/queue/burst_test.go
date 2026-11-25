@@ -471,8 +471,8 @@ func TestAssembleTurnPrompt(t *testing.T) {
 		},
 		{
 			name:         "Scope instructions produces SCOPE_INSTRUCTIONS block",
-			input:        TurnPromptInput{Burst: []db.Message{{AuthorName: "alice", Content: "turn on lights", CreatedAt: now}}, ScopeInstructions: "Spoken brevity for touch-kiosk-kitchen."},
-			wantContains: []string{"<SCOPE_INSTRUCTIONS>", "Spoken brevity for touch-kiosk-kitchen."},
+			input:        TurnPromptInput{Burst: []db.Message{{AuthorName: "alice", Content: "turn on lights", CreatedAt: now}}, ScopeInstructions: "Spoken brevity for touch-kiosk-2."},
+			wantContains: []string{"<SCOPE_INSTRUCTIONS>", "Spoken brevity for touch-kiosk-2."},
 		},
 		{
 			name: "Thread history formatting uses thread header and previous session context",

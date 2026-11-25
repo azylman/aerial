@@ -659,7 +659,7 @@ func TestNewRestateLLMFunc(t *testing.T) {
 		{name: "unkeyed call returns response", agent: "aerial", stubStatus: http.StatusOK, stubBody: `{"response":"title"}`, wantResponse: "title", wantPath: "/LLM/Complete"},
 		{name: "classify caller key sent as idempotency key", agent: "aerial", callerKey: "classify:42:99", wantIdemKey: "llm:classify:42:99:" + summarizeFlashHash, stubStatus: http.StatusOK, stubBody: `{"response":"{}"}`, wantResponse: "{}", wantPath: "/LLM/Complete"},
 		{name: "title caller key sent as idempotency key", agent: "aerial", callerKey: "title:99", wantIdemKey: "llm:title:99:" + summarizeFlashHash, stubStatus: http.StatusOK, stubBody: `{"response":"Cute Title"}`, wantResponse: "Cute Title", wantPath: "/LLM/Complete"},
-		{name: "sibling agent service", agent: "miorine", stubStatus: http.StatusOK, stubBody: `{"response":"ok"}`, wantResponse: "ok", wantPath: "/LLM-miorine/Complete"},
+		{name: "sibling agent service", agent: "agent-alpha", stubStatus: http.StatusOK, stubBody: `{"response":"ok"}`, wantResponse: "ok", wantPath: "/LLM-agent-alpha/Complete"},
 		{name: "restate failure", agent: "aerial", stubStatus: http.StatusInternalServerError, stubBody: `{"message":"boom"}`, wantErrSub: "boom", wantPath: "/LLM/Complete"},
 		{name: "cancelled caller returns promptly", agent: "aerial", cancelCaller: true, wantErrSub: "context canceled", wantPath: "/LLM/Complete"},
 		{name: "oversized response rejected", agent: "aerial", stubStatus: http.StatusOK, stubBody: `{"response":"` + strings.Repeat("a", 1<<20) + `"}`, wantErrSub: "exceeds 1MiB limit", wantPath: "/LLM/Complete"},

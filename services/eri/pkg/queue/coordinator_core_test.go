@@ -346,9 +346,9 @@ func TestCoordinatorServiceNames(t *testing.T) {
 		want    string
 	}{
 		{name: "ThreadDefault", service: NewThreadCoordinator(nil, nil, ""), want: "ThreadSession"},
-		{name: "ThreadMiorine", service: NewThreadCoordinator(nil, nil, "miorine"), want: "ThreadSession-miorine"},
-		{name: "DispatchMiorine", service: NewDispatchCoordinator(nil, "miorine"), want: "DispatchSession-miorine"},
-		{name: "RouterMiorine", service: NewDispatchCancelRouter(nil, "miorine"), want: "SessionManager-miorine"},
+		{name: "ThreadAgentAlpha", service: NewThreadCoordinator(nil, nil, "agent-alpha"), want: "ThreadSession-agent-alpha"},
+		{name: "DispatchAgentAlpha", service: NewDispatchCoordinator(nil, "agent-alpha"), want: "DispatchSession-agent-alpha"},
+		{name: "RouterAgentAlpha", service: NewDispatchCancelRouter(nil, "agent-alpha"), want: "SessionManager-agent-alpha"},
 		{name: "RouterDefault", service: NewDispatchCancelRouter(nil, " "), want: "SessionManager"},
 	}
 	for _, tc := range tests {

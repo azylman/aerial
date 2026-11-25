@@ -334,7 +334,7 @@ func selfRegPayload(t *testing.T, action string, merged bool, branch, body, user
 func TestPullRequestSelfRegistration(t *testing.T) {
 	t.Parallel()
 	dependabotCfg := Config{DefaultOwner: true, SystemChannelID: selfRegSystem}
-	botsCfg := Config{SystemChannelID: selfRegSystem, Bots: map[string]BotConfig{"aerial": {}, "miorine": {}}}
+	botsCfg := Config{SystemChannelID: selfRegSystem, Bots: map[string]BotConfig{"aerial": {}, "agent-alpha": {}}}
 	tests := []struct {
 		name         string
 		cfg          Config
@@ -363,8 +363,8 @@ func TestPullRequestSelfRegistration(t *testing.T) {
 		{name: "dependabot branch by a human does not register", cfg: dependabotCfg, action: ghActionOpened, branch: "dependabot/go/x", user: "octocat"},
 		{name: "dependabot without a system channel does not register", cfg: Config{DefaultOwner: true}, action: ghActionOpened, branch: "dependabot/go/x", user: "dependabot[bot]"},
 		{
-			name: "bot metadata registers under the body target and owner", cfg: botsCfg, action: ghActionOpened, branch: "feat", body: aerialBody("Miorine", selfRegThread), user: "octocat",
-			want: prSelfRegistration{TargetID: selfRegThread, Title: "Fix it", Agent: "miorine"}, wantOK: true,
+			name: "bot metadata registers under the body target and owner", cfg: botsCfg, action: ghActionOpened, branch: "feat", body: aerialBody("Agent-Alpha", selfRegThread), user: "octocat",
+			want: prSelfRegistration{TargetID: selfRegThread, Title: "Fix it", Agent: "agent-alpha"}, wantOK: true,
 		},
 		{
 			name: "headless metadata registers under the headless target", cfg: botsCfg, action: ghActionSynchronize, branch: "feat", body: aerialBody("aerial", "dispatch-uuid-1"), user: "octocat",
