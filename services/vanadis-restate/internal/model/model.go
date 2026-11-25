@@ -112,7 +112,8 @@ func ExtractChunkIDFromBranch(repo, branch string) string {
 }
 
 // ExtractTargetIDFromBranch recovers the 17-20 digit Discord snowflake encoded
-// in a feat/<repo>-pr-t<target_id>-<6hex> or feat/<repo>-pr-vanadis-<chunk>-t<target_id>-<6hex>
+// in a feat/<repo>-pr-t<target_id>-<6hex>, feat/<repo>-pr-vanadis-<chunk>-t<target_id>-<6hex>,
+// feat/<repo>-pr-...-t<target_id>-<6hex>, or legacy feat/<repo>-pr-t<target_id>-<14digits>-<6hex>
 // branch name, or "" when absent.
 func ExtractTargetIDFromBranch(repo, branch string) string {
 	repoName := strings.TrimSuffix(CleanRepoName(repo), ".git")
@@ -134,8 +135,14 @@ func ExtractTargetIDFromBranch(repo, branch string) string {
 			return ""
 		}
 	}
-	if strings.HasPrefix(remainder, "t") && isDiscordSnowflake(remainder[1:]) {
-		return remainder[1:]
+	if strings.HasPrefix(remainder, "t") {
+		candidate := remainder[1:]
+		if isDiscordSnowflake(candidate) {
+			return candidate
+		}
+		if target, ts, ok := strings.Cut(candidate, "-"); ok && isDiscordSnowflake(target) && is14DigitTimestamp(ts) {
+			return target
+		}
 	}
 	if _, candidate, ok := strings.CutLast(remainder, "-t"); ok {
 		if isDiscordSnowflake(candidate) {
@@ -143,4 +150,16 @@ func ExtractTargetIDFromBranch(repo, branch string) string {
 		}
 	}
 	return ""
+}
+
+func is14DigitTimestamp(s string) bool {
+	if len(s) != 14 {
+		return false
+	}
+	for i := range s {
+		if s[i] < '0' || s[i] > '9' {
+			return false
+		}
+	}
+	return true
 }

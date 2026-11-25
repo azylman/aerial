@@ -69,4 +69,8 @@ echo "desc" > "$s_mrg/PR_DESCRIPTION.md"
 assert_fail "$SCRIPT" submit "$s_mrg" "feat: fail verify after merge"
 assert [ "$(git -C "$s_mrg" rev-parse HEAD)" = "$pre_head" ]
 
+# 7. Target ID format in standalone branch
+br_target=$(AERIAL_TARGET_ID=1574989632892829757 "$SCRIPT" init --repo aerial | jq -r .branch)
+[[ "$br_target" =~ ^feat/aerial-pr-[0-9]{14}-t1574989632892829757-[0-9a-f]{6}$ ]] || { echo "ASSERT FAILED: br_target format $br_target" >&2; exit 1; }
+
 echo "ok - aerial-pr edge test suite passed"
