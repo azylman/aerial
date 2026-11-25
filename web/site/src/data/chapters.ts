@@ -178,7 +178,7 @@ kubectl get nodes -o wide`,
           'Fork the configuration template to establish your private configuration repository, customize parameters, and bootstrap Flux CD.',
         paragraphs: [
           'Aerial uses GitOps for continuous delivery. Flux CD reconciles two Kustomization resources: operator infrastructure and core platform services.',
-          'Users fork the configuration template into a private repository. Flux CD continuously reconciles user overrides on top of upstream base manifests.',
+          'Users fork azylman/aerial-config-example into a private configuration repository. Flux CD continuously reconciles user overrides on top of upstream base manifests.',
         ],
         bullets: [
           'Zero Plaintext Tokens: In-memory authentication passes tokens during bootstrap without writing credentials to disk.',
@@ -210,11 +210,11 @@ GITHUB_TOKEN="$GITHUB_PAT" flux bootstrap github \\
           'Aerial centralizes secret management with Infisical and External Secrets Operator, preventing plaintext credentials from entering version control.',
         paragraphs: [
           'An in-cluster Infisical instance stores application credentials, bot tokens, and API keys. External Secrets Operator monitors Infisical and generates scoped Kubernetes Secrets for platform services.',
-          'Bootstrapping Infisical creates a Machine Identity with read access to the project. External Secrets Operator generates database credentials, webhook secrets, and message broker tokens automatically.',
+          'Bootstrapping Infisical creates a Machine Identity with read access to the project. The project slug defaults to aerial and configures through the INFISICAL_PROJECT_SLUG variable. External Secrets Operator provisions database, messaging, and webhook credentials automatically.',
         ],
         bullets: [
           'Universal Authentication: Kubernetes workloads authenticate to Infisical through Machine Identity tokens.',
-          'Project Configuration: Infisical organizes secrets by project slug and synchronizes updates automatically.',
+          'Project Configuration: Infisical defaults to the aerial slug, with overrides configured via INFISICAL_PROJECT_SLUG in cluster overrides.',
           'Automated Generation: External Secrets Operator provisions database and messaging credentials automatically.',
           'Scoped Distribution: Each service pod receives only its declared secret environment variables.',
         ],
@@ -280,13 +280,13 @@ flux get kustomizations`,
         bullets: [
           'Storage Tier: Pin relational databases, event streams, and journal stores to high-speed solid-state drives.',
           'Compute Tier: Route speech recognition, voice synthesis, and embedding models to dedicated GPU nodes.',
-          'Prune Protection: Protect persistent resources during GitOps sync with declarative pruning annotations.',
+          'Prune Protection: Set kustomize.toolkit.fluxcd.io/prune to disabled to protect persistent resources during GitOps sync.',
         ],
         callout: {
           type: 'tip',
           title: 'Resource Adoption Safeguard',
           text:
-            'Set prune annotations to prevent Flux kustomize-controller from deleting active workloads or storage during cluster cutovers.',
+            'When moving resources into cluster overrides, set the annotation kustomize.toolkit.fluxcd.io/prune to disabled. Use this annotation to prevent Flux kustomize-controller from deleting active workloads or storage during cluster cutovers.',
         },
       },
     ],
@@ -351,13 +351,13 @@ data:
           'CloudNativePG: Provides automated failover, rolling updates, write-ahead log archiving, and semantic vector indexing.',
           'Single Table Ownership: Microservices interact through typed APIs rather than shared database tables.',
           'Durable Workflows: Restate virtual objects execute workflows with deterministic replay.',
-          'Crash-Resilient State: Completed execution steps replay from journals, while interrupted agent attempts rerun safely.',
+          'Crash-Resilient State: Completed steps replay from journals. Interrupted attempts rerun in full up to the crash-loop cap, requiring idempotent tools.',
         ],
         callout: {
           type: 'note',
           title: 'Durable Execution Guarantee',
           text:
-            'Restate replays completed workflow steps from journals across restarts. Tool actions with external side effects must remain idempotent to ensure safe execution.',
+            'Restate replays completed steps from journals across restarts. Interrupted attempts rerun in full up to the crash-loop cap. Tool calls may repeat during retries. Side-effecting tools must be idempotent or check state before mutating.',
         },
       },
       {
@@ -382,12 +382,12 @@ data:
           'A self-contained telemetry platform stores system metrics, application logs, and distributed traces with automatic credential redaction.',
         paragraphs: [
           'Observability runs natively on the cluster. VictoriaMetrics stores time-series metrics scraped through the Prometheus operator. VictoriaLogs captures node and container log streams with sixty-day retention.',
-          'An OpenTelemetry Collector routes distributed traces to VictoriaTraces. In-memory redaction processors strip sensitive tokens, API keys, and authorization headers from all spans and log streams before storage.',
+          'An OpenTelemetry Collector routes distributed traces to VictoriaTraces, stripping registered secret tokens and encoded variants from spans. Fluent Bit filters container logs using exact registered values, sensitive JSON fields, and PEM private keys before writing to VictoriaLogs.',
         ],
         bullets: [
           'Self-Hosted Telemetry: The platform provides full observability without recurring cloud monitoring subscriptions.',
           'High-Speed LogsQL: VictoriaLogs executes fast regex and facet queries across millions of log records.',
-          'Automatic Redaction: Telemetry pipelines sanitize sensitive credentials in memory before writing to storage.',
+          'Credential Redaction: Trace processors mask registered tokens and encoded variants, while log filters sanitize registered secrets, JSON fields, and PEM keys.',
         ],
       },
     ],
@@ -450,13 +450,13 @@ data:
         id: 'vanadis-orchestration',
         title: 'Restate Multi-PR Cross-Repository Orchestration',
         lead:
-          'A Restate build pipeline coordinates multi-repository rollouts, dependency ordering, and atomic progress tracking without holding active agent sessions open.',
+          'A Restate build pipeline coordinates multi-repository rollouts, dependency ordering, and staged progress tracking without holding active agent sessions open.',
         paragraphs: [
           'Features often span multiple repositories, such as adding an API endpoint in the engine and updating configuration in the user repository. Executing these steps in one turn risks context window exhaustion.',
           'The multi-PR build orchestrator divides builds into distinct chunks. Each chunk targets a repository, specifies dependencies, and provides instructions. The orchestrator triggers dependent chunks as upstream changes merge.',
         ],
         bullets: [
-          'Multi-Repository Builds: Coordinates atomic changes across core engines and user configuration repositories.',
+          'Multi-Repository Builds: Coordinates dependency-ordered changes across core engines and user configuration repositories.',
           'Non-Blocking Execution: Agent turns end immediately upon plan submission, conserving reasoning tokens.',
           'Dynamic Chunk Amendment: Operators can update pending chunks or append corrective steps during execution.',
         ],

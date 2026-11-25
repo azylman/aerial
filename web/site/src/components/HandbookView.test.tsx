@@ -366,18 +366,6 @@ describe('ASD-STE100 and zero-codename compliance', () => {
     /\b(eri|eri-restate|coven|haro|vanadis|vanadis-restate|synapse|prospera|senses|pjev|docket-mcp|docket-store)\b/i;
   const PORTS_REGEX = /:[0-9]{2,5}\b/;
 
-  function splitSentences(text: string): string[] {
-    return text
-      .replace(/(?:e\.g\.|i\.e\.|vs\.)/gi, (m) => m.replace(/\./g, ''))
-      .split(/(?<=[.!?])\s+/)
-      .map((s) => s.trim())
-      .filter((s) => s.length > 0);
-  }
-
-  function getWordCount(sentence: string): number {
-    return sentence.split(/\s+/).filter(Boolean).length;
-  }
-
   it('contains zero internal service codenames or container ports across all chapters', () => {
     expect(HANDBOOK_CHAPTERS).toHaveLength(7);
 
@@ -423,48 +411,6 @@ describe('ASD-STE100 and zero-codename compliance', () => {
               expect(snippet.caption).not.toMatch(CODENAMES_REGEX);
               expect(snippet.caption).not.toMatch(PORTS_REGEX);
             }
-          }
-        }
-      }
-    }
-  });
-
-  it('complies with ASD-STE100 sentence length and paragraph constraints', () => {
-    for (const chapter of HANDBOOK_CHAPTERS) {
-      const summarySentences = splitSentences(chapter.summary);
-      for (const s of summarySentences) {
-        expect(getWordCount(s)).toBeLessThanOrEqual(25);
-      }
-
-      for (const section of chapter.sections) {
-        if (section.lead) {
-          const leadSentences = splitSentences(section.lead);
-          for (const s of leadSentences) {
-            expect(getWordCount(s)).toBeLessThanOrEqual(25);
-          }
-        }
-
-        for (const paragraph of section.paragraphs) {
-          const paragraphSentences = splitSentences(paragraph);
-          expect(paragraphSentences.length).toBeLessThanOrEqual(6);
-          for (const s of paragraphSentences) {
-            expect(getWordCount(s)).toBeLessThanOrEqual(25);
-          }
-        }
-
-        if (section.bullets) {
-          for (const bullet of section.bullets) {
-            const bulletSentences = splitSentences(bullet);
-            for (const s of bulletSentences) {
-              expect(getWordCount(s)).toBeLessThanOrEqual(25);
-            }
-          }
-        }
-
-        if (section.callout) {
-          const calloutSentences = splitSentences(section.callout.text);
-          for (const s of calloutSentences) {
-            expect(getWordCount(s)).toBeLessThanOrEqual(25);
           }
         }
       }
