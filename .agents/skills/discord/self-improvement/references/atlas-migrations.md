@@ -4,7 +4,7 @@ All database schema modifications across `aerial` and `aerial-sidecars` use decl
 
 ## 1. Declarative Schema Definition (`schema.sql`)
 - Modify the repository's canonical schema file (`services/eri/pkg/db/schema.sql` for `aerial`, `db/schema.sql` for `aerial-sidecars`).
-- Never hand-write migration SQL files or embed imperative DDL (`ALTER TABLE`, `DROP TABLE`, `CREATE INDEX`) in Go/Python/TypeScript application code or startup bootstrap routines. Imperative DDL in application code is mechanically blocked by `scripts/verify.sh` (`check_no_imperative_ddl`).
+- Never hand-write migration SQL files or embed imperative DDL (`ALTER TABLE`, `DROP TABLE`, `CREATE INDEX`) in Go/Python/TypeScript application code or startup bootstrap routines. Imperative DDL in application code is mechanically blocked by `checkNoImperativeDDL` via `bazel run //scripts/code-health` (and `scripts/verify.sh`).
 
 ## 2. Generate Versioned Migration Diff (`scripts/atlas-diff.sh`)
 - From the scratch workspace root, run:
@@ -12,7 +12,7 @@ All database schema modifications across `aerial` and `aerial-sidecars` use decl
   ./scripts/atlas-diff.sh <migration_name>
   ```
   (e.g., `./scripts/atlas-diff.sh flatten_messages_schema`).
-- The script automatically provisions an ephemeral, airgapped PostgreSQL + `pgvector` container, computes the declarative diff against `migrations/`, writes the new timestamped `.sql` migration file, updates `migrations/atlas.sum`, and deterministically cleans up the container on exit.
+- The script automatically provisions an ephemeral, airgapped local throwaway PostgreSQL 19 cluster in `/tmp/atlas.XXXXXX` via `initdb`/`pg_ctl`, computes the declarative diff against `migrations/`, writes the new timestamped `.sql` migration file, updates `migrations/atlas.sum`, and deterministically cleans up the directory on exit.
 - If a migration requires data backfilling prior to a `NOT NULL` or column drop constraint, edit the generated migration `.sql` file and run `atlas migrate hash --dir "file://services/eri/pkg/db/migrations"` to recompute `atlas.sum`.
 
 ## 3. Update Hermetic Test Fixtures & Verify Integrity
