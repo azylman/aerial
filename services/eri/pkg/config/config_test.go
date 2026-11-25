@@ -55,46 +55,133 @@ func mapLookup(kv map[string]string) func(string) string {
 }
 
 type loadConfigIngestionCase struct {
-	name        string
-	content     string
-	envMap      map[string]string
-	wantStrings map[string]string
-	wantTx      TranscriptsConfig
-	wantErr     bool
-	errContains string
+	name              string
+	content           string
+	envMap            map[string]string
+	wantModel         string
+	wantTimezone      string
+	wantSystemChannel string
+	wantEngine        string
+	wantCodexBin      string
+	wantTx            TranscriptsConfig
 }
 
-func assertLoadConfigIngestionStrings(t *testing.T, cur *ConfigData, tc loadConfigIngestionCase) {
+func assertLoadConfigIngestionCase(t *testing.T, tc loadConfigIngestionCase) {
 	t.Helper()
-	gotMap := map[string]string{
-		"Model":         cur.Model,
-		"Timezone":      cur.Timezone,
-		"SystemChannel": cur.SystemChannel,
-		"BotID":         cur.BotID,
-		"SynapseURL":    cur.SynapseURL,
-		"VanadisURL":    cur.VanadisURL,
-		"HaroURL":       cur.HaroURL,
-		"CovenURL":      cur.CovenURL,
-		"NATSURL":       cur.NATSURL,
-		"Engine":        cur.Engine,
-		"CodexBin":      cur.CodexBin,
+	lookup := mapLookup(tc.envMap)
+	p := writeTempYAML(t, tc.content)
+	cfg, err := LoadConfigFromLookup(lookup, p)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
 	}
-	for field, want := range tc.wantStrings {
-		if got := gotMap[field]; got != want {
-			t.Errorf("%s = %q, want %q", field, got, want)
-		}
+	cur := cfg.Current()
+	if tc.wantModel != "" && cur.Model != tc.wantModel {
+		t.Errorf("Model = %q, want %q", cur.Model, tc.wantModel)
 	}
-}
-
-func assertLoadConfigIngestionValues(t *testing.T, cur *ConfigData, tc loadConfigIngestionCase) {
-	t.Helper()
-	assertLoadConfigIngestionStrings(t, cur, tc)
+	if tc.wantTimezone != "" && cur.Timezone != tc.wantTimezone {
+		t.Errorf("Timezone = %q, want %q", cur.Timezone, tc.wantTimezone)
+	}
+	if tc.wantSystemChannel != "" && cur.SystemChannel != tc.wantSystemChannel {
+		t.Errorf("SystemChannel = %q, want %q", cur.SystemChannel, tc.wantSystemChannel)
+	}
+	if tc.wantEngine != "" && cur.Engine != tc.wantEngine {
+		t.Errorf("Engine = %q, want %q", cur.Engine, tc.wantEngine)
+	}
+	if tc.wantCodexBin != "" && cur.CodexBin != tc.wantCodexBin {
+		t.Errorf("CodexBin = %q, want %q", cur.CodexBin, tc.wantCodexBin)
+	}
 	if cur.Transcripts != tc.wantTx {
 		t.Errorf("Transcripts = %+v, want %+v", cur.Transcripts, tc.wantTx)
 	}
 }
 
-func assertLoadConfigIngestionCase(t *testing.T, tc loadConfigIngestionCase) {
+func loadConfigIngestionCases() []loadConfigIngestionCase {
+	return []loadConfigIngestionCase{
+		{
+			name:              "valid modern yaml",
+			content:           "model: \"gemini-1.5-pro\"\ntimezone: \"America/New_York\"\nsystem_channel: \"my-alerts\"\nchannels:\n  default:\n    mode: \"threads\"\nmcp_servers:\n  discord:\n    weather:\n      serverUrl: \"http://weather:8080/mcp\"\n",
+			wantModel:         "gemini-1.5-pro",
+			wantTimezone:      "America/New_York",
+			wantSystemChannel: "my-alerts",
+		},
+		{
+			name:    "env interpolation",
+			content: "model: \"${TEST_EXPAND_MODEL}\"\nsystem_channel: \"${TEST_EXPAND_CHAN}\"\nport: \"${TEST_EXPAND_PORT}\"\nchannels:\n  default:\n    mode: \"threads\"\n",
+			envMap: map[string]string{
+				"TEST_EXPAND_MODEL": "interpolated-gemini-model",
+				"TEST_EXPAND_CHAN":  "interpolated-channel",
+				"TEST_EXPAND_PORT":  "9090",
+			},
+			wantModel:         "interpolated-gemini-model",
+			wantSystemChannel: "interpolated-channel",
+		},
+		{
+			name:              "legacy and unknown keys unmarshal safely",
+			content:           "model: \"gemini-3.7-flash\"\ntimezone: \"America/Los_Angeles\"\nsystem_channel: \"aerial-dev\"\ngit_sync:\n  enabled: true\n  interval: \"30s\"\nclassifier_model: \"gemini-test-deprecated\"\nlow_effort_model: \"gemini-test-lem\"\nchannels:\n  default:\n    mode: \"threads\"\n",
+			wantModel:         "gemini-3.7-flash",
+			wantTimezone:      "America/Los_Angeles",
+			wantSystemChannel: "aerial-dev",
+		},
+		{
+			name:      "hashed default channel normalization",
+			content:   "channels:\n  \"#default\":\n    mode: \"channel\"\n",
+			wantModel: DefaultConfigData().Model,
+		},
+		{
+			name:      "minimal valid channels config",
+			content:   "channels:\n  default:\n    mode: \"threads\"\n",
+			wantModel: DefaultConfigData().Model,
+		},
+		{
+			name:      "isolated config with prompt",
+			content:   "model: \"isolated-model-123\"\nsystem_channel: \"isolated-channel-456\"\nchannels:\n  default:\n    mode: \"threads\"\n",
+			envMap:    map[string]string{"SYSTEM_PROMPT": "prompt from lookup"},
+			wantModel: "isolated-model-123",
+		},
+		{
+			name:      "polymorphic mcp_config string",
+			content:   "channels:\n  default:\n    mode: \"threads\"\nmcp_config: '{\"mcpServers\":{\"s1\":{\"serverUrl\":\"http://s1:1000\"}}}'\n",
+			wantModel: DefaultConfigData().Model,
+		},
+		{
+			name:      "polymorphic mcp_config mapping",
+			content:   "channels:\n  default:\n    mode: \"threads\"\nmcp_config:\n  mcpServers:\n    s2:\n      serverUrl: \"http://s2:2000\"\n",
+			wantModel: DefaultConfigData().Model,
+		},
+		{
+			name:      "stray turn_queue key ignored",
+			content:   "model: \"gemini-1.5-pro\"\nchannels:\n  default:\n    mode: \"threads\"\nturn_queue: coordinator\n",
+			wantModel: "gemini-1.5-pro",
+		},
+		{
+			name:         "codex engine and codex_bin unmarshaling",
+			content:      "engine: \"codex\"\ncodex_bin: \"/opt/codex/bin/codex\"\nchannels:\n  default:\n    mode: \"threads\"\n",
+			wantEngine:   "codex",
+			wantCodexBin: "/opt/codex/bin/codex",
+		},
+		{
+			name:    "transcripts indexer url and batch budget",
+			content: "transcripts:\n  stack: \" stack-b \"\n  indexer_url: \"  http://indexer.internal:4060/  \"\n  max_batch_bytes: 65536\nchannels:\n  default:\n    mode: \"threads\"\n",
+			wantTx:  TranscriptsConfig{Stack: "stack-b", IndexerURL: "http://indexer.internal:4060", MaxBatchBytes: 65536},
+		},
+	}
+}
+
+type loadConfigURLAndErrorCase struct {
+	name           string
+	content        string
+	envMap         map[string]string
+	wantBotID      string
+	wantSynapseURL string
+	wantVanadisURL string
+	wantHaroURL    string
+	wantCovenURL   string
+	wantNATSURL    string
+	wantErr        bool
+	errContains    string
+}
+
+func assertLoadConfigURLAndErrorCase(t *testing.T, tc loadConfigURLAndErrorCase) {
 	t.Helper()
 	lookup := mapLookup(tc.envMap)
 	p := writeTempYAML(t, tc.content)
@@ -111,211 +198,60 @@ func assertLoadConfigIngestionCase(t *testing.T, tc loadConfigIngestionCase) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	assertLoadConfigIngestionValues(t, cfg.Current(), tc)
-}
-
-func loadConfigIngestionCases() []loadConfigIngestionCase {
-	return append(loadConfigIngestionBaseCases(), loadConfigIngestionExtendedCases()...)
-}
-
-func loadConfigIngestionBaseCases() []loadConfigIngestionCase {
-	return []loadConfigIngestionCase{
-		{
-			name: "valid modern yaml",
-			content: `
-model: "gemini-1.5-pro"
-timezone: "America/New_York"
-system_channel: "my-alerts"
-channels:
-  default:
-    mode: "threads"
-mcp_servers:
-  discord:
-    weather:
-      serverUrl: "http://weather:8080/mcp"
-`,
-			wantStrings: map[string]string{"Model": "gemini-1.5-pro", "Timezone": "America/New_York", "SystemChannel": "my-alerts"},
-		},
-		{
-			name: "env interpolation",
-			content: `
-model: "${TEST_EXPAND_MODEL}"
-system_channel: "${TEST_EXPAND_CHAN}"
-port: "${TEST_EXPAND_PORT}"
-channels:
-  default:
-    mode: "threads"
-`,
-			envMap: map[string]string{
-				"TEST_EXPAND_MODEL": "interpolated-gemini-model",
-				"TEST_EXPAND_CHAN":  "interpolated-channel",
-				"TEST_EXPAND_PORT":  "9090",
-			},
-			wantStrings: map[string]string{"Model": "interpolated-gemini-model", "SystemChannel": "interpolated-channel"},
-		},
-		{
-			name: "legacy and unknown keys unmarshal safely",
-			content: `
-model: "gemini-3.7-flash"
-timezone: "America/Los_Angeles"
-system_channel: "aerial-dev"
-git_sync:
-  enabled: true
-  interval: "30s"
-classifier_model: "gemini-test-deprecated"
-low_effort_model: "gemini-test-lem"
-channels:
-  default:
-    mode: "threads"
-`,
-			wantStrings: map[string]string{"Model": "gemini-3.7-flash", "Timezone": "America/Los_Angeles", "SystemChannel": "aerial-dev"},
-		},
-		{
-			name: "hashed default channel normalization",
-			content: `
-channels:
-  "#default":
-    mode: "channel"
-`,
-			wantStrings: map[string]string{"Model": DefaultConfigData().Model},
-		},
-		{name: "invalid yaml syntax", content: `model: [invalid {::`, wantErr: true, errContains: "failed to parse"},
-		{name: "missing channels section", content: `model: "gemini-flash"`, wantErr: true, errContains: "channels.default is required"},
-		{
-			name: "minimal valid channels config",
-			content: `
-channels:
-  default:
-    mode: "threads"
-`,
-			wantStrings: map[string]string{"Model": DefaultConfigData().Model},
-		},
-		{
-			name: "isolated config with prompt",
-			content: `
-model: "isolated-model-123"
-system_channel: "isolated-channel-456"
-channels:
-  default:
-    mode: "threads"
-`,
-			envMap:      map[string]string{"SYSTEM_PROMPT": "prompt from lookup"},
-			wantStrings: map[string]string{"Model": "isolated-model-123"},
-		},
+	cur := cfg.Current()
+	if tc.wantBotID != "" && cur.BotID != tc.wantBotID {
+		t.Errorf("BotID = %q, want %q", cur.BotID, tc.wantBotID)
+	}
+	if tc.wantSynapseURL != "" && cur.SynapseURL != tc.wantSynapseURL {
+		t.Errorf("SynapseURL = %q, want %q", cur.SynapseURL, tc.wantSynapseURL)
+	}
+	if tc.wantVanadisURL != "" && cur.VanadisURL != tc.wantVanadisURL {
+		t.Errorf("VanadisURL = %q, want %q", cur.VanadisURL, tc.wantVanadisURL)
+	}
+	if tc.wantHaroURL != "" && cur.HaroURL != tc.wantHaroURL {
+		t.Errorf("HaroURL = %q, want %q", cur.HaroURL, tc.wantHaroURL)
+	}
+	if tc.wantCovenURL != "" && cur.CovenURL != tc.wantCovenURL {
+		t.Errorf("CovenURL = %q, want %q", cur.CovenURL, tc.wantCovenURL)
+	}
+	if tc.wantNATSURL != "" && cur.NATSURL != tc.wantNATSURL {
+		t.Errorf("NATSURL = %q, want %q", cur.NATSURL, tc.wantNATSURL)
 	}
 }
 
-func loadConfigIngestionExtendedCases() []loadConfigIngestionCase {
-	return []loadConfigIngestionCase{
+func loadConfigURLAndErrorCases() []loadConfigURLAndErrorCase {
+	return []loadConfigURLAndErrorCase{
 		{
-			name: "polymorphic mcp_config string",
-			content: `
-channels:
-  default:
-    mode: "threads"
-mcp_config: '{"mcpServers":{"s1":{"serverUrl":"http://s1:1000"}}}'
-`,
-			wantStrings: map[string]string{"Model": DefaultConfigData().Model},
+			name:           "service urls trimming and bot id",
+			content:        "bot_id: \"  aerial-prime  \"\nsynapse_url: \"  http://synapse.internal:4020///  \"\nvanadis_url: \"http://vanadis.internal:4025/  \"\nharo_url: \"  http://haro.internal:4026  \"\ncoven_url: \"http://coven.internal:4027/\"\nnats_url: \"  nats://nats-cluster:4222/  \"\nchannels:\n  default:\n    mode: \"threads\"\n",
+			wantBotID:      "aerial-prime",
+			wantSynapseURL: "http://synapse.internal:4020",
+			wantVanadisURL: "http://vanadis.internal:4025",
+			wantHaroURL:    "http://haro.internal:4026",
+			wantCovenURL:   "http://coven.internal:4027",
+			wantNATSURL:    "nats://nats-cluster:4222",
 		},
 		{
-			name: "polymorphic mcp_config mapping",
-			content: `
-channels:
-  default:
-    mode: "threads"
-mcp_config:
-  mcpServers:
-    s2:
-      serverUrl: "http://s2:2000"
-`,
-			wantStrings: map[string]string{"Model": DefaultConfigData().Model},
-		},
-		{
-			name: "stray turn_queue key ignored",
-			content: `
-model: "gemini-1.5-pro"
-channels:
-  default:
-    mode: "threads"
-turn_queue: coordinator
-`,
-			wantStrings: map[string]string{"Model": "gemini-1.5-pro"},
-		},
-		{
-			name: "service urls trimming and bot id",
-			content: `
-model: "gemini-1.5-pro"
-bot_id: "  aerial-prime  "
-synapse_url: "  http://synapse.internal:4020///  "
-vanadis_url: "http://vanadis.internal:4025/  "
-haro_url: "  http://haro.internal:4026  "
-coven_url: "http://coven.internal:4027/"
-nats_url: "  nats://nats-cluster:4222/  "
-transcripts:
-  stack: " stack-b "
-channels:
-  default:
-    mode: "threads"
-`,
-			wantStrings: map[string]string{
-				"Model":      "gemini-1.5-pro",
-				"BotID":      "aerial-prime",
-				"SynapseURL": "http://synapse.internal:4020",
-				"VanadisURL": "http://vanadis.internal:4025",
-				"HaroURL":    "http://haro.internal:4026",
-				"CovenURL":   "http://coven.internal:4027",
-				"NATSURL":    "nats://nats-cluster:4222",
-			},
-			wantTx: TranscriptsConfig{Stack: "stack-b"},
-		},
-		{
-			name: "nats url env override",
-			content: `
-channels:
-  default:
-    mode: "threads"
-nats_url: "nats://file-nats:4222"
-`,
+			name:        "nats url env override",
+			content:     "channels:\n  default:\n    mode: \"threads\"\nnats_url: \"nats://file-nats:4222\"\n",
 			envMap:      map[string]string{"NATS_URL": "nats://env-nats:4222"},
-			wantStrings: map[string]string{"NATSURL": "nats://env-nats:4222"},
+			wantNATSURL: "nats://env-nats:4222",
 		},
 		{
-			name: "codex engine and codex_bin unmarshaling",
-			content: `
-engine: "codex"
-codex_bin: "/opt/codex/bin/codex"
-channels:
-  default:
-    mode: "threads"
-`,
-			wantStrings: map[string]string{
-				"Engine":   "codex",
-				"CodexBin": "/opt/codex/bin/codex",
-			},
+			name:        "invalid yaml syntax",
+			content:     "model: [invalid {::",
+			wantErr:     true,
+			errContains: "failed to parse",
 		},
 		{
-			name: "transcripts indexer url and batch budget",
-			content: `
-transcripts:
-  stack: "stack-b"
-  indexer_url: "  http://indexer.internal:4060/  "
-  max_batch_bytes: 65536
-channels:
-  default:
-    mode: "threads"
-`,
-			wantTx: TranscriptsConfig{Stack: "stack-b", IndexerURL: "http://indexer.internal:4060", MaxBatchBytes: 65536},
+			name:        "missing channels section",
+			content:     "model: \"gemini-flash\"",
+			wantErr:     true,
+			errContains: "channels.default is required",
 		},
 		{
-			name: "stale transcripts database key is rejected",
-			content: `
-transcripts:
-  database: "postgres://user:pass@shared-db:5432/transcripts"
-  stack: "stack-b"
-channels:
-  default:
-    mode: "threads"
-`,
+			name:        "stale transcripts database key is rejected",
+			content:     "transcripts:\n  database: \"postgres://user:pass@shared-db:5432/transcripts\"\n  stack: \"stack-b\"\nchannels:\n  default:\n    mode: \"threads\"\n",
 			wantErr:     true,
 			errContains: "transcripts: 'database' is deprecated and unsupported",
 		},
@@ -403,6 +339,20 @@ func TestLoadConfig_Ingestion(t *testing.T) {
 	t.Setenv("CONFIG_PATH", "")
 	if _, err := New(); err == nil || !strings.Contains(err.Error(), "no configuration file found in search paths") {
 		t.Fatalf("expected error containing 'no configuration file found in search paths', got: %v", err)
+	}
+}
+
+func TestLoadConfig_ServiceURLsAndErrors(t *testing.T) {
+	origGlobal := activeGlobalConfig.Current()
+	t.Cleanup(func() {
+		activeGlobalConfig.update(origGlobal)
+	})
+
+	tests := loadConfigURLAndErrorCases()
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			assertLoadConfigURLAndErrorCase(t, tc)
+		})
 	}
 }
 
