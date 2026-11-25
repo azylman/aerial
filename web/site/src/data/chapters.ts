@@ -275,12 +275,12 @@ infisical secrets set --env=default \\
         lead:
           'A unified Kubernetes Gateway API implementation and internal DNS rewrite mesh provide zero-configuration service discovery.',
         paragraphs: [
-          'Aerial employs NGINX Gateway Fabric to implement Kubernetes Gateway API HTTPRoute specifications. Two distinct gateway classes isolate traffic: the LAN Gateway (binding ports 80/443 on the local network for console, documentation, and agent views) and the Edge Gateway (exposing port 4021 for secure tunnel webhooks from Discord, GitHub, and external services).',
-          'CoreDNS is configured with internal rewrite rules that map short *.aerial hostnames directly to cluster services (e.g. coven.aerial -> coven.default.svc.cluster.local), eliminating hardcoded IP addresses or external DNS lookups for internal microservice communication.',
+          'Aerial employs NGINX Gateway Fabric to implement Kubernetes Gateway API HTTPRoute specifications. Two distinct gateway classes isolate traffic: the LAN Gateway (binding ports 80/443 on the local network for console, documentation, and agent views) and the Edge Gateway (exposing port 4021 behind a cloudflared tunnel with NetworkPolicy pod isolation for webhooks from Discord, GitHub, and external services).',
+          'CoreDNS is configured with internal rewrite rules that map short *.aerial hostnames directly to cluster services (e.g. coven.aerial -> coven.default.svc.cluster.local and restate.aerial -> restate.restate-green.svc.cluster.local), eliminating hardcoded IP addresses or external DNS lookups for internal microservice communication.',
         ],
         bullets: [
           'LAN Gateway: High-performance local routing for dashboards, REST APIs, and SSE event streams.',
-          'Edge Gateway: Strict webhook receiver gateway with TLS termination and IP filtering.',
+          'Edge Gateway: Internal HTTP webhook listener on port 4021 reached via cloudflared tunnel, isolated by Kubernetes NetworkPolicy.',
           'Internal Mesh: Automatic *.aerial DNS resolution across all pods and agent CLI processes.',
         ],
         codeSnippets: [
@@ -295,8 +295,16 @@ metadata:
 data:
   aerial.override: |
     rewrite stop {
-      name regex (.*)\\.aerial {1}.default.svc.cluster.local
-      answer auto
+        name regex restate\\.aerial\\.?$ restate.restate-green.svc.cluster.local.
+        answer name (.*)\\.restate-green\\.svc\\.cluster\\.local\\.?$ restate.aerial.
+    }
+    rewrite stop {
+        name regex restate-green\\.aerial\\.?$ restate.restate-green.svc.cluster.local.
+        answer name (.*)\\.restate-green\\.svc\\.cluster\\.local\\.?$ restate-green.aerial.
+    }
+    rewrite stop {
+        name regex (.*)\\.aerial\\.?$ {1}.default.svc.cluster.local.
+        answer name (.*)\\.default\\.svc\\.cluster\\.local\\.?$ {1}.aerial.
     }`,
           },
         ],
@@ -661,8 +669,8 @@ description: Run hermetic offsite backups of CloudNativePG and Restate journals 
 ## Verification Procedure
 1. Verify CloudNativePG backup status:
    kubectl cnpg status postgres-19
-2. Trigger on-demand WAL archive sync:
-   kubectl exec -it postgres-19-1 -- barman-cloud-wal-archive /var/lib/postgresql/data`,
+2. Trigger on-demand backup:
+   kubectl cnpg backup postgres-19`,
           },
         ],
       },
@@ -672,11 +680,11 @@ description: Run hermetic offsite backups of CloudNativePG and Restate journals 
         lead:
           'Integrate third-party tools, hardware bridges, and external APIs using Model Context Protocol (MCP) streamable servers.',
         paragraphs: [
-          'Aerial leverages Model Context Protocol (MCP) to provide agents with typed, schema-validated tool interfaces. In addition to core built-in MCP microservices (docket-mcp, discord-mcp, kernel-mcp, infisical-mcp), users can register custom Streamable HTTP and SSE MCP servers in config.yaml under target categories (common, discord, voice, ephemeral).',
+          'Aerial leverages Model Context Protocol (MCP) to provide agents with typed, schema-validated tool interfaces. In addition to core built-in MCP microservices (docket-mcp, discord-mcp, kernel-mcp, infisical-mcp), users can register custom Streamable HTTP MCP servers in config.yaml under target categories (common, discord, voice, ephemeral).',
           'Tools are lazily discovered via standard schema endpoints, enabling agents to call custom home automation endpoints, financial APIs, or hardware monitoring tools without modifying application code.',
         ],
         bullets: [
-          'Streamable HTTP / SSE: High-performance streaming tool invocations over HTTP.',
+          'Streamable HTTP: High-performance tool invocations over HTTP.',
           'Declarative Registration: Add new servers to config.yaml under mcp_servers.common (or target categories).',
           'Automatic Schema Generation: Tool definitions and argument validation schemas generate dynamically.',
         ],
@@ -687,7 +695,7 @@ description: Run hermetic offsite backups of CloudNativePG and Restate journals 
             code: `mcp_servers:
   common:
     home-assistant:
-      serverUrl: http://ha-mcp.aerial:8080/sse
+      serverUrl: http://ha-mcp.aerial:8080/mcp
     custom-iot:
       serverUrl: http://iot-bridge.aerial:4000/mcp`,
           },
