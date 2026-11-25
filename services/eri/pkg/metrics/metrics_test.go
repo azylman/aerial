@@ -169,7 +169,7 @@ func TestSanitizeChannelLabel(t *testing.T) {
 	}{
 		{"", "unknown"},
 		{"   ", "unknown"},
-		{"#the-banana-stand", "the-banana-stand"},
+		{"#general-chat", "general-chat"},
 		{"Lounge", "lounge"},
 		{"#Dev-Chat", "dev-chat"},
 		{"1534436119888793750", "unknown"},

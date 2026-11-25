@@ -478,7 +478,7 @@ func TestGitHubPoller_MultiRepoFanout(t *testing.T) {
 					{
 						ID:        22,
 						RunID:     runIDSidecars,
-						Name:      "Build & Push Images to GHCR (aura-farming)",
+						Name:      "Build & Push Images to GHCR (sidecar-alpha)",
 						Status:    "in_progress",
 						StartedAt: now.Add(-60 * time.Second),
 					},

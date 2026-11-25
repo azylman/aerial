@@ -166,7 +166,7 @@ type extractGuardsCase struct {
 
 func extractGuardsCases() []extractGuardsCase {
 	const bad = `not json at all`
-	const fresh = "Alex keeps the espresso grinder on setting twelve"
+	const fresh = "User keeps the espresso grinder on setting twelve"
 	const factsOnly = `{"facts":[{"fact_text":"` + fresh + `"}]}`
 	const reinforceOnly = `{"facts":[],"reinforced_ids":[1]}`
 	const procOnly = `{"facts":[],"procedural_candidates":[{"trigger":"When the espresso machine shows a descale warning","steps":["Run the descale cycle"]}]}`
@@ -203,9 +203,9 @@ type extractBatchCase struct {
 
 func extractBatchCases() []extractBatchCase {
 	const bad = `not json at all`
-	const seeded = "Alex prefers oat milk in every latte"
-	const fresh = "Alex keeps the espresso grinder on setting twelve"
-	const full = `{"facts":[{"fact_text":"` + fresh + `"},{"action":"DELETE","fact_text":"Alex dropped an old latte habit"},{"fact_text":"short"}],` +
+	const seeded = "User prefers oat milk in every latte"
+	const fresh = "User keeps the espresso grinder on setting twelve"
+	const full = `{"facts":[{"fact_text":"` + fresh + `"},{"action":"DELETE","fact_text":"User dropped an old latte habit"},{"fact_text":"short"}],` +
 		`"reinforced_ids":[1,1,0,99],"procedural_candidates":[{"trigger":"When the espresso machine shows a descale warning","steps":["Run the descale cycle"]}]}`
 	turn := []testTurn{adminTurn("th-apply", 1, "hi", "hello")}
 	return []extractBatchCase{
@@ -229,7 +229,7 @@ func newExtractWorker(t *testing.T, cfg extractWorkerConfig, llmKeys *[]string) 
 	db := newTestDB(t)
 	seedTurns(t, db, cfg.seedTurns...)
 	if cfg.seedFact {
-		seedFacts(t, store.NewSQLStore(db), []string{"Alex prefers oat milk in every latte"}, [][]float32{testEmbeddingAt(0, 1)})
+		seedFacts(t, store.NewSQLStore(db), []string{"User prefers oat milk in every latte"}, [][]float32{testEmbeddingAt(0, 1)})
 	}
 	execSQL(t, db, cfg.sabotage)
 	resp := cmp.Or(cfg.llmResp, `{"facts":[]}`)
@@ -389,7 +389,7 @@ func TestWorkerCallExtractStep(t *testing.T) {
 		{name: "TimeoutOnMultiTurnBatchAsksToHalve", llmErr: context.DeadlineExceeded, turns: 2, want: extractAnswer{TimedOut: true}},
 		{name: "TimeoutOnSingleTurnRetries", llmErr: context.DeadlineExceeded, turns: 1, wantErr: true},
 		{name: "InvalidAnswerIsRejected", resp: "nope", turns: 1, want: extractAnswer{Rejected: "no json object found in raw output"}},
-		{name: "ValidAnswerParses", resp: `{"facts":[{"fact_text":"Alex likes tea"}]}`, turns: 1, want: extractAnswer{Payload: ExtractedFactsPayload{Facts: []ExtractedFactItem{{FactText: "Alex likes tea"}}}}},
+		{name: "ValidAnswerParses", resp: `{"facts":[{"fact_text":"User likes tea"}]}`, turns: 1, want: extractAnswer{Payload: ExtractedFactsPayload{Facts: []ExtractedFactItem{{FactText: "User likes tea"}}}}},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
