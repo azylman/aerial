@@ -2,6 +2,8 @@
 
 A tightly integrated **self-hosted application platform** for your homelab, **autonomous software factory**, and **AI agent** written in Go and running on Kubernetes (`k3s`)—running out-of-the-box on a single node or scaling across multi-node clusters with specialized hardware roles (such as GPU inference, NVMe storage, and touch kiosks).
 
+> **Explore the Documentation & Interactive Showcase**: Visit [**azylman.github.io/aerial**](https://azylman.github.io/aerial/) for the complete 7-chapter architectural handbook, interactive topological showcases, and living operational specifications.
+
 Where standard GitOps homelabs stop at cluster infrastructure, standalone coding orchestrators lack a deployment target, and chat assistants lack durable infrastructure, Aerial unifies all three into a closed loop—so **your agent can build, ship, and operate stateful applications on your homelab autonomously**:
 
 1. **Self-Hosted Application Platform**: Gives your homelab a declarative Kubernetes compute fabric, LAN and edge gateway routing, centralized secret management, durable workflow state machines, persistent event streaming, relational and vector storage, and unified metrics, logs, and distributed tracing.
@@ -20,7 +22,7 @@ Where standard GitOps homelabs stop at cluster infrastructure, standalone coding
 | **Workflows & Event Bus** | **Restate** (RocksDB-backed durable execution for workflow and virtual object state machines) and **NATS JetStream** (durable event streams, webhook fan-out, and work-queue job consumers) |
 | **Secrets Governance** | **Infisical** + **External Secrets Operator** (centralized vault syncing scoped Kubernetes Secrets in-memory with zero plaintext disk persistence) |
 | **Observability** | **VictoriaMetrics** (TSDB) + **`vmalert`** (MAD anomaly and alert rules), **Fluent Bit** + **VictoriaLogs** (LogsQL log analytics, 60-day retention), **VictoriaTraces** (OTLP distributed tracing, 30-day retention), **Grafana**, **Headlamp** (Kubernetes/Flux UI), and **Prometheus Exporters** (**Kubelet / cAdvisor**, **Node Exporter**, **CloudNativePG**) |
-| **Software Factory & GitOps** | **Vikunja** (DAG issue and backlog graph), **GitHub Actions Runner Controller (ARC)** (scale-to-zero in-cluster CI runners), **RoboRev** (automated LLM code review gate), **Ariga Atlas** (declarative SQL schema migrations), and **Flux CD** (webhook-driven push GitOps) |
+| **Software Factory & GitOps** | **Vikunja** (DAG issue and backlog graph), **GitHub Actions CI & Automated Code Review** (`check_run`, `workflow_run`, `pull_request`, and `push` webhooks, with scale-to-zero in-cluster ARC runners and RoboRev), **Ariga Atlas** (declarative SQL schema migrations), and **Flux CD** (webhook-driven push GitOps) |
 | **Agent Core & Memory** | Configurable CLI execution engines (**`agy`**, **Claude Code**, **Codex**, **Muse**), **Hybrid RRF (`pgvector` + FTS) & ACT-R Memory** (semantic fact retrieval, temporal decay, and procedural skill synthesis), **Streamable HTTP MCP Servers**, **`SKILL.md` Workflows** (`agentskills.io`), and **AgentsView** (web transcript and trace inspector) |
 | **Multimodal I/O & Browser Automation** | **Discord Gateway/REST**, **Real-Time Voice** (with optional STT/TTS sidecars), **Twilio PSTN** (inbound/outbound voice calls and SMS), **Kernel Browser** (headful CDP browser control), **1Password CLI** (scoped vault credential retrieval), and **Stripe Link** (`@stripe/link-cli` one-time virtual payment tokens) |
 
@@ -144,11 +146,11 @@ azylman/aerial (Engine Repo)              your-aerial-config (Private Overlay Re
 │ • k3s (1 to N nodes)         │ • vanadis Build API (:4025)  │ • eri (:8080) & eri-restate   │
 │ • lan-gateway & edge-gateway │ • vanadis-restate (:9080)    │ • haro, coven, prospera       │
 │ • restate (RestateCluster)   │ • vanadis-nats bridge (:4027)│ • transcripts (:4030)         │
-│ • nats (NATS JetStream)      │ • docket-mcp & docket-store  │ • coverage-ingest             │
-│ • CloudNativePG Postgres 19  │ • synapse GitOps Fact Router │ • homepage, console, docs     │
-│ • infisical, valkey, coredns │ • github-runner (ARC/RoboRev)│ • agentsview Session HUD      │
-│ • otel-collector (:4317)     │ • flux-system GitOps Engine  │ • headlamp & infisical UIs    │
-│ • bazel-remote cache         │                              │ • Optional GPU / Kiosk Nodes  │
+│ • nats (NATS JetStream)      │ • docket-mcp & docket-store  │ • homepage, console, docs     │
+│ • CloudNativePG Postgres 19  │ • synapse GitOps Fact Router │ • agentsview Session HUD      │
+│ • infisical, valkey, coredns │ • GitHub Actions CI Webhooks │ • headlamp & infisical UIs    │
+│ • otel-collector (:4317)     │ • flux-system GitOps Engine  │ • Optional GPU / Kiosk Nodes  │
+│ • Streamable HTTP MCPs       │ • ARC CI & RoboRev Runners   │                               │
 └──────────────────────────────┴──────────────────────────────┴───────────────────────────────┘
                                                │
                                                ▼
@@ -179,9 +181,9 @@ Where standalone coding agent orchestrators run in local `tmux` sessions without
 
 ```text
 ┌────────────────────┐    ┌────────────────────┐    ┌────────────────────┐    ┌────────────────────┐    ┌────────────────────┐
-│  1. DAG BACKLOG    │    │ 2. PLAN & SCRATCH  │    │ 3. DURABLE BUILD   │    │ 4. CI & ROBOREV    │    │  5. PUSH GITOPS    │
-│  Vikunja + Docket  ├───►│ Ephemeral Clone &  ├───►│  Restate + NATS    ├───►│ Scale-to-Zero ARC  ├───►│  Flux CD Reconcile │
-│  Ready Queue & RRF │    │ Multi-Agent Review │    │ Multi-PR DAG Queue │    │ + LLM Review Gate  │    │  & Live Rollout    │
+│  1. DAG BACKLOG    │    │ 2. PLAN & SCRATCH  │    │ 3. DURABLE BUILD   │    │ 4. CI & REVIEW     │    │  5. PUSH GITOPS    │
+│  Vikunja + Docket  ├───►│ Ephemeral Clone &  ├───►│  Restate + NATS    ├───►│ GitHub Actions CI  ├───►│  Flux CD Reconcile │
+│  Ready Queue & RRF │    │ Multi-Agent Review │    │ Multi-PR DAG Queue │    │ & Code Review Gate │    │  & Live Rollout    │
 └────────────────────┘    └────────────────────┘    └────────────────────┘    └─────────┬──────────┘    └────────────────────┘
                                     ▲                                                   │
                                     └────────── Proactive Self-Healing Wake ────────────┘
@@ -191,8 +193,52 @@ Where standalone coding agent orchestrators run in local `tmux` sessions without
 1. **Dependency-Aware DAG Backlog (`docket-mcp` + Vikunja)**: Features, multi-stage epics, and deferred discoveries are tracked as a directed acyclic graph (DAG) in **Vikunja** backed by PostgreSQL 19 (`pgvector` + full-text hybrid RRF search), exposing an unblocked `ready` queue so the agent never loses context across sessions.
 2. **Ephemeral Scratch Clones & Multi-Agent Review**: Code, schema, and manifest changes are authored in isolated scratch clones (`scripts/aerial-pr.sh init [repo]`), audited by parallel multi-agent review panels, and verified locally (`./scripts/verify.sh --staged`) before submission.
 3. **Durable Multi-PR Build Pipelines (`vanadis` + `vanadis-restate`)**: Multi-PR and cross-repository rollouts (such as shipping an upstream engine feature before enabling downstream config) are enqueued as a single DAG build (`scripts/aerial-build.sh enqueue`). **Restate** durable Virtual Objects (`Build`, `BuildRouter`) and **NATS JetStream** (`aerial.pr.>`) coordinate ordered chunk execution and GitHub auto-merge (`SQUASH`).
-4. **In-Cluster CI & Automated Code Review (`github-runner` + RoboRev)**: Scale-to-zero **GitHub Actions Runner Controller (ARC)** runner sets execute clean-room test/coverage matrices, publish container images to GHCR, and run automated **RoboRev** LLM code reviews on every Pull Request.
-5. **Event-Driven Push GitOps & Self-Healing (`synapse` + Flux CD + `vanadis-restate`)**: Authenticated GitHub push and CI webhooks flow through `edge-gateway` to **`synapse`**, which forwards events to Restate `PRObject` and `RepoObject` on **`vanadis-restate`**. In turn, `vanadis-restate` updates `ConfigMap/aerial-image-tags` in `flux-system`, triggers immediate **Flux CD** Kustomization reconciliation, publishes `aerial.pr.>` facts onto **NATS JetStream** to advance dependent build chunks, and, if CI checks or **RoboRev** fail, wakes `eri-restate` with the failure context to remediate the branch.
+4. **GitHub Actions CI & Automated Code Review**: Pull Requests trigger GitHub Actions CI test/coverage workflows and automated code reviews executed via in-cluster scale-to-zero ARC runners or GitHub-hosted runners. **`synapse`** and **`vanadis-restate`** process GitHub `check_run`, `workflow_run`, `pull_request`, and `push` webhooks from any repository.
+5. **Event-Driven Push GitOps & Self-Healing (`synapse` + Flux CD + `vanadis-restate`)**: Authenticated GitHub push and CI webhooks flow through `edge-gateway` to **`synapse`**, which forwards events to Restate `PRObject` and `RepoObject` on **`vanadis-restate`**. In turn, `vanadis-restate` updates `ConfigMap/aerial-image-tags` in `flux-system`, triggers immediate **Flux CD** Kustomization reconciliation, publishes `aerial.pr.>` facts onto **NATS JetStream** to advance dependent build chunks, and, if CI checks fail or **RoboRev** review checks request changes, wakes `eri-restate` with the failure context and review findings to remediate the branch.
+
+---
+
+## Why Aerial & How It Compares
+
+Modern developer platforms typically fall into one of three silos: infrastructure orchestration without deployment-capable agents, standalone CLI coding loops without a deployment target, or conversational chat agents running as ephemeral background scripts. Aerial bridges these paradigms into a closed loop:
+
+```text
+┌──────────────────────────────┬──────────────────────────────┬──────────────────────────────┐
+│  Homelab & Self-Hosted PaaS  │ Autonomous Software Factory  │     Self-Hosted AI Agent     │
+│   (Cluster Infrastructure)   │   (Spec-to-Production Loop)  │    (Multimodal Glass Box)    │
+└──────────────┬───────────────┴──────────────┬───────────────┴──────────────┬───────────────┘
+               │                              │                              │
+               └──────────────────────► AERIAL ◄─────────────────────────────┘
+                               (Closed-Loop Platform)
+```
+
+| Capability | Homelab & Self-Hosted PaaS<br>*(home-ops, khuedoan/homelab, Coolify, Dokploy)* | Autonomous Software Factories<br>*(Gas Town, Beads, Attractor, OpenHands)* | Self-Hosted AI Agents<br>*(Hermes Agent, OpenClaw)* | **Aerial** |
+| :--- | :--- | :--- | :--- | :--- |
+| **Primary Architecture** | Declarative GitOps, compose manifests, or container app dashboards | CLI/tmux loops, sandboxed environments, or standalone pipeline runners | Dedicated assistant daemon, chat bot, or long-polling desktop service | **Unified Kubernetes (`k3s`) GitOps platform + durable execution runtime + autonomous agent** |
+| **Stateful Orchestration** | Standard Kubernetes controllers or Docker Swarm | In-process execution state, local process trees, or workspace file tracking | Local process runtime, SQLite storage, or filesystem session state | **Restate RocksDB-backed virtual objects + NATS JetStream durable event streaming** |
+| **Delivery & Backlog** | Manual commits or human-driven CI/CD pipelines | Issue graphs (Beads), CLI prompt queues, or pipeline graphs (Attractor) | Conversational reminders, local cron schedules, or chat task lists | **Integrated Vikunja + PostgreSQL 19 (`pgvector` + FTS hybrid RRF) dependency `ready` queue** |
+| **Multi-PR Workflows** | Manual multi-repo PR coordination | Single-repository focus or manual multi-repo sequence coordination | Chat-driven subagent workflows without multi-PR coordination state | **Restate `Build`/`PRObject` state machines coordinating multi-PR DAG builds and auto-squash** |
+| **Deployment & Self-Healing** | GitOps sync alerts (human triages build/deploy breaks) | Development/evaluation sandboxes; no built-in cluster GitOps deployment | Standalone assistant without built-in Kubernetes GitOps delivery | **Push GitOps (Flux CD) + automated reactive wake on CI/review failure for instant branch remediation** |
+| **Glass-Box Observability** | Cluster Grafana/Prometheus (app-level only) | CLI stdout, terminal webviews, or task trace inspectors | Terminal output, chat logs, or developer UI inspectors | **Operator HUD (`console`), transcript timeline (`agentsview`), Restate UI, Grafana, and VictoriaLogs/Traces** |
+| **Memory & Knowledge** | None (infrastructure only) | Repository context, workspace notes, or session history | Vector search, markdown memory files, or dynamic skill synthesis | **ACT-R cognitive memory decay + PostgreSQL 19 hybrid RRF (`pgvector` + FTS) + procedural skill synthesis** |
+| **Multi-Modal Interaction** | Web UI dashboards | CLI terminal or local web sandbox UI | Discord/Telegram chat, with available voice/telephony or browser plugins | **Discord Gateway, real-time voice, PSTN telephony/SMS (`prospera`), and headful browser automation** |
+| **Security & Guardrails** | Standard Linux/RBAC permissions | Container environment isolation, OS-level sandboxes, or workspace boundaries | Direct host tool execution, permission prompts, or container isolation | **Defense-in-depth: `:ro` repository mounts, child-process secret scrubbing, and pre-tool compiled interceptors** |
+
+### 1. Homelab & Self-Hosted PaaS (*home-ops, khuedoan/homelab, Coolify, Dokploy*)
+Traditional homelab platforms provide robust GitOps infrastructure, ingress routing, and container orchestration, but treat applications as static targets deployed by humans. Aerial provides the same declarative foundation—**Two-Repository Flux GitOps**, single-node vanilla `k3s` bootstrap, NGINX Gateway Fabric, CloudNativePG PostgreSQL 19, and full Victoria telemetry—while embedding a durable execution fabric (**Restate + NATS JetStream**) and an autonomous agent that authors, tests, and ships its own software onto the cluster.
+
+### 2. Autonomous Software Factories (*Gas Town, Beads, StrongDM Attractor, OpenHands*)
+Autonomous coding tools excel at local code authoring, interactive debugging, and pipeline execution within development sandboxes. Where standalone orchestrators typically leave the bridge between code completion and live cluster operations to external scripts or human operators, Aerial connects the development loop directly to production:
+- **Persistent Platform Backlog**: An integrated Vikunja DAG issue graph backed by PostgreSQL 19 with hybrid RRF vector and text search, ensuring unblocked `ready` work survives process rotations.
+- **Durable Multi-PR State Machines**: Restate Virtual Objects (`Build`, `BuildRouter`, `PRObject`) coordinating ordered cross-repository migrations with automatic branch dependency tracking and auto-merge.
+- **Closed-Loop CI & GitOps Remediation**: Webhook delivery via `synapse` and `vanadis-restate` triggering push-driven Flux CD deployments, paired with automatic agent wakeups to remediate failing CI checks and RoboRev review findings.
+
+### 3. Self-Hosted AI Agents (*Hermes Agent, OpenClaw*)
+General-purpose self-hosted assistants offer flexible chat interfaces, extensible plugin ecosystems, and local scheduling. Aerial builds on these concepts by unifying the agent runtime with a full Kubernetes homelab platform and software factory:
+- **Glass-Box Web Observability**: Unified web surfaces including live session transcripts and tool traces in `agentsview`, queue and turn metrics in `console`, durable virtual object state in `restate`, and deep log/metric inspection in Grafana and VictoriaLogs.
+- **Cognitive Memory Architecture**: Semantic fact extraction, temporal decay modeled on cognitive ACT-R theory, and procedural skill synthesis via `coven`.
+- **Persistent Multi-Modal Scheduling**: Robust cron, silent heartbeat polling, and external event watches via `haro` wired directly into cluster lifecycle events.
+- **Defense-in-Depth Containment**: Read-only mounts (`:ro`) for core source repositories and secrets, child-process environment sanitization, and Go pre-tool hook interceptors validating tool calls before invocation.
 
 ---
 
