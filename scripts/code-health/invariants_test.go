@@ -3,6 +3,7 @@ package main
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -410,5 +411,186 @@ updates:
 				t.Fatalf("expected %d violations, got %d: %v", tc.expectCount, len(v), v)
 			}
 		})
+	}
+}
+
+func setupParityFiles(t *testing.T, dir, dfContent, mbContent string) {
+	t.Helper()
+	dfDir := filepath.Join(dir, "services", "eri-restate")
+	if err := os.MkdirAll(dfDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dfDir, "Dockerfile"), []byte(dfContent), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "MODULE.bazel"), []byte(mbContent), 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestCheckCommunitySkillsParity_Validation(t *testing.T) {
+	t.Parallel()
+
+	validDockerfile := `ARG ANDROID_SKILLS_REV=rev1
+ARG ANDROID_SKILLS_SHA256=sha1
+ARG CC_SKILLS_GOLANG_REV=rev2
+ARG CC_SKILLS_GOLANG_SHA256=sha2
+ARG BEAUTIFUL_RUST_REV=rev3
+ARG BEAUTIFUL_RUST_SHA256=sha3
+ARG KOTLIN_AGENT_SKILLS_REV=rev4
+ARG KOTLIN_AGENT_SKILLS_SHA256=sha4
+ARG KOTLIN_FOOTGUNS_REV=rev5
+ARG KOTLIN_FOOTGUNS_SHA256=sha5
+
+RUN cp -a wear-compose-m3 wear-widgets jetpack-compose-performance android-intent-security android-permissions-security anr-audit-and-fix testing-setup \
+    golang-code-style golang-concurrency golang-context golang-error-handling golang-modernize golang-performance golang-safety golang-structs-interfaces golang-testing \
+    rust-best-practices rust-port rust-review \
+    kotlin-tooling-agp9-migration kotlin-tooling-kotlin-toolchain \
+    compose-screens-footguns footgun-scan remote-api-footguns state-and-background-footguns
+`
+
+	validModuleBazel := `http_archive(
+    name = "android_skills",
+    sha256 = "sha1",
+    urls = ["https://github.com/android/skills/archive/rev1.tar.gz"],
+    patch_cmds = ["wear-compose-m3 wear-widgets jetpack-compose-performance android-intent-security android-permissions-security anr-audit-and-fix testing-setup"],
+)
+
+http_archive(
+    name = "cc_skills_golang",
+    sha256 = "sha2",
+    urls = ["https://github.com/samber/cc-skills-golang/archive/rev2.tar.gz"],
+    srcs = ["golang-code-style", "golang-concurrency", "golang-context", "golang-error-handling", "golang-modernize", "golang-performance", "golang-safety", "golang-structs-interfaces", "golang-testing"],
+)
+
+http_archive(
+    name = "beautiful_rust",
+    sha256 = "sha3",
+    urls = ["https://github.com/morganlinton/BeautifulRust/archive/rev3.tar.gz"],
+    srcs = ["rust-best-practices", "rust-port", "rust-review"],
+)
+
+http_archive(
+    name = "kotlin_agent_skills",
+    sha256 = "sha4",
+    urls = ["https://github.com/Kotlin/kotlin-agent-skills/archive/rev4.tar.gz"],
+    srcs = ["kotlin-tooling-agp9-migration", "kotlin-tooling-kotlin-toolchain"],
+)
+
+http_archive(
+    name = "kotlin_footguns",
+    sha256 = "sha5",
+    urls = ["https://github.com/maxrave-dev/kotlin-footguns/archive/rev5.tar.gz"],
+    srcs = ["compose-screens-footguns", "footgun-scan", "remote-api-footguns", "state-and-background-footguns"],
+)
+`
+
+	tests := []struct {
+		name        string
+		dockerfile  string
+		moduleBazel string
+		expectCount int
+	}{
+		{
+			name:        "valid_parity",
+			dockerfile:  validDockerfile,
+			moduleBazel: validModuleBazel,
+			expectCount: 0,
+		},
+		{
+			name:        "revision_mismatch",
+			dockerfile:  strings.Replace(validDockerfile, "ARG BEAUTIFUL_RUST_REV=rev3", "ARG BEAUTIFUL_RUST_REV=rev3_drifted", 1),
+			moduleBazel: validModuleBazel,
+			expectCount: 1,
+		},
+		{
+			name:        "sha_mismatch",
+			dockerfile:  strings.Replace(validDockerfile, "ARG CC_SKILLS_GOLANG_SHA256=sha2", "ARG CC_SKILLS_GOLANG_SHA256=sha2_drifted", 1),
+			moduleBazel: validModuleBazel,
+			expectCount: 1,
+		},
+		{
+			name:        "missing_skill_in_dockerfile",
+			dockerfile:  strings.Replace(validDockerfile, "rust-review", "rust-somethingelse", 1),
+			moduleBazel: validModuleBazel,
+			expectCount: 1,
+		},
+		{
+			name:        "missing_skill_in_bazel",
+			dockerfile:  validDockerfile,
+			moduleBazel: strings.Replace(validModuleBazel, "rust-review", "rust-somethingelse", 1),
+			expectCount: 1,
+		},
+		{
+			name:        "missing_arg_rev",
+			dockerfile:  strings.Replace(validDockerfile, "ARG BEAUTIFUL_RUST_REV=rev3", "# omitted", 1),
+			moduleBazel: validModuleBazel,
+			expectCount: 1,
+		},
+		{
+			name:        "missing_arg_sha",
+			dockerfile:  strings.Replace(validDockerfile, "ARG BEAUTIFUL_RUST_SHA256=sha3", "# omitted", 1),
+			moduleBazel: validModuleBazel,
+			expectCount: 1,
+		},
+		{
+			name:        "missing_bazel_repo",
+			dockerfile:  validDockerfile,
+			moduleBazel: strings.Replace(validModuleBazel, `name = "beautiful_rust"`, `name = "other"`, 1),
+			expectCount: 1,
+		},
+		{
+			name:        "missing_bazel_sha",
+			dockerfile:  validDockerfile,
+			moduleBazel: strings.Replace(validModuleBazel, `sha256 = "sha3"`, `# omitted`, 1),
+			expectCount: 1,
+		},
+		{
+			name:        "missing_bazel_url",
+			dockerfile:  validDockerfile,
+			moduleBazel: strings.Replace(validModuleBazel, `urls = ["https://github.com/morganlinton/BeautifulRust/archive/rev3.tar.gz"]`, `# omitted`, 1),
+			expectCount: 1,
+		},
+		{
+			name:        "missing_archive_header",
+			dockerfile:  validDockerfile,
+			moduleBazel: strings.Replace(validModuleBazel, "http_archive(\n    name = \"android_skills\"", "name = \"android_skills\"", 1),
+			expectCount: 1,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			dir := t.TempDir()
+			setupParityFiles(t, dir, tc.dockerfile, tc.moduleBazel)
+
+			violations := checkCommunitySkillsParity(dir)
+			if len(violations) != tc.expectCount {
+				t.Fatalf("expected %d violations, got %d: %v", tc.expectCount, len(violations), violations)
+			}
+		})
+	}
+}
+
+func TestCheckCommunitySkillsParity_MissingFiles(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	violations := checkCommunitySkillsParity(dir)
+	if len(violations) != 0 {
+		t.Fatalf("expected 0 violations for missing files, got %d: %v", len(violations), violations)
+	}
+}
+
+func TestCheckCommunitySkillsParity_ReadErrors(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	dfDir := filepath.Join(dir, "services", "eri-restate", "Dockerfile")
+	if err := os.MkdirAll(dfDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	violations := checkCommunitySkillsParity(dir)
+	if len(violations) != 1 {
+		t.Fatalf("expected 1 violation for directory as file, got %d: %v", len(violations), violations)
 	}
 }
