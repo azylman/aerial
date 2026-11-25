@@ -37,7 +37,7 @@ describe('ArchitectureMap Component', () => {
 
     // Default inspector node
     const inspector = screen.getByTestId('node-inspector');
-    expect(within(inspector).getByText('Eri + Eri-Restate')).toBeTruthy();
+    expect(within(inspector).getByText('Agent Execution Engine')).toBeTruthy();
 
     // Filter by platform pillar
     fireEvent.click(screen.getByTestId('filter-platform'));
@@ -68,12 +68,12 @@ describe('ArchitectureMap Component', () => {
 
     const inspector = screen.getByTestId('node-inspector');
     expect(inspector.textContent).toContain('k3s / NGINX Gateway');
-    expect(inspector.textContent).toContain(':80 / :443');
+    expect(inspector.textContent).toContain('Gateway API (LAN & Edge HTTPRoutes)');
 
     // Select with Enter key
     const nodeVikunja = screen.getByTestId('node-vikunja-docket');
     fireEvent.keyDown(nodeVikunja, { key: 'Enter' });
-    expect(inspector.textContent).toContain('Vikunja + Docket MCP');
+    expect(inspector.textContent).toContain('Vikunja DAG Backlog');
 
     // Select with Space key
     const nodePostgres = screen.getByTestId('node-cnpg-postgres');
@@ -179,7 +179,7 @@ describe('FactoryStepper Component', () => {
     expect(prevBtn.hasAttribute('disabled')).toBe(false);
 
     fireEvent.click(nextBtn);
-    expect(detail.textContent).toContain('Stage 3: Vanadis + Restate + NATS Multi-PR Pipeline');
+    expect(detail.textContent).toContain('Stage 3: Restate + NATS Multi-PR Build Pipeline');
 
     fireEvent.click(nextBtn);
     expect(detail.textContent).toContain('Stage 4: GitHub Actions CI & Automated Code Review');
