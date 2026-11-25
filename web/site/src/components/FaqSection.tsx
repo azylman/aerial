@@ -27,14 +27,14 @@ export const FAQ_ITEMS: readonly FaqItem[] = [
     category: 'Security & GitOps',
     question: 'How does the Two-Repo GitOps model keep personal data and secrets out of the engine repository?',
     answer:
-      'The architecture splits code across an open-source engine repository and a private user configuration repository. The public repository contains only generic services, platform manifests, and domain-agnostic skills. The private repository holds personal personas, private device identifiers, local rules, and custom integrations. Infisical and External Secrets Operator inject sensitive tokens in memory without writing keys to disk.',
+      'The architecture splits code across an open-source engine repository and a private user configuration repository. The public repository contains only generic services, platform manifests, and domain-agnostic skills. The private repository holds personal personas, private device identifiers, local rules, and custom integrations. Infisical holds credentials and External Secrets Operator syncs them into scoped Kubernetes Secrets, keeping keys out of version control.',
   },
   {
     id: 'supported-engines',
     category: 'AI Engines',
     question: 'Which coding CLI engines and LLM providers work with Aerial?',
     answer:
-      'Aerial runs pluggable agent CLI execution engines including Claude Code, Codex CLI, and Gemini CLI. The platform routes model calls to Anthropic, OpenAI, and Google Cloud providers. You can configure preferred models and per-channel reasoning tiers in your user configuration repository. Local ONNX and GGUF inference run speech processing and ambient triage tasks on premises.',
+      'Aerial runs pluggable agent CLI execution engines including Claude Code, Codex CLI, and Google Antigravity. The platform routes model calls to Anthropic, OpenAI, and Google Cloud providers. You can configure preferred models and per-channel reasoning tiers in your user configuration repository. Local ONNX and GGUF inference run speech processing and ambient triage tasks on premises.',
   },
   {
     id: 'self-healing-safety',

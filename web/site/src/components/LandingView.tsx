@@ -23,7 +23,7 @@ export const INTEGRATION_BADGES: readonly IntegrationBadge[] = [
   // AI Engines
   { id: 'claude-code', group: 'AI Engines', label: 'Claude Code' },
   { id: 'codex-cli', group: 'AI Engines', label: 'Codex CLI' },
-  { id: 'gemini-cli', group: 'AI Engines', label: 'Gemini CLI' },
+  { id: 'google-antigravity', group: 'AI Engines', label: 'Google Antigravity' },
   { id: 'local-onnx-speech', group: 'AI Engines', label: 'Local CUDA ONNX Speech' },
 
   // Core Stack

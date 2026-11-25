@@ -135,7 +135,7 @@ export function App() {
     <div className="site-shell" data-testid="site-shell">
       {/* Top Navigation Bar */}
       <header className="site-navbar" role="banner">
-        <div className="navbar-container">
+        <div className={`navbar-container ${route.view === 'docs' ? 'view-docs' : 'view-landing'}`}>
           <a href="#/" className="navbar-brand" aria-label="Aerial Home">
             <span className="brand-badge" aria-hidden="true">
               XVX
@@ -202,7 +202,7 @@ export function App() {
               Handbook
             </a>
 
-            <div className="chapter-jump-container">
+            <div className={`chapter-jump-container ${route.view === 'landing' ? 'landing-hidden' : ''}`}>
               <select
                 className="chapter-select"
                 aria-label="Chapter quick-jump"
