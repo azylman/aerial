@@ -21,7 +21,7 @@ Where standard GitOps homelabs stop at cluster infrastructure, standalone coding
 | **Secrets Governance** | **Infisical** + **External Secrets Operator** (centralized vault syncing scoped Kubernetes Secrets in-memory with zero plaintext disk persistence) |
 | **Observability** | **VictoriaMetrics** (TSDB) + **`vmalert`** (MAD anomaly and alert rules), **Fluent Bit** + **VictoriaLogs** (LogsQL log analytics, 60-day retention), **VictoriaTraces** (OTLP distributed tracing, 30-day retention), **Grafana**, **Headlamp** (Kubernetes/Flux UI), and **Prometheus Exporters** (**Kubelet / cAdvisor**, **Node Exporter**, **CloudNativePG**) |
 | **Software Factory & GitOps** | **Vikunja** (DAG issue and backlog graph), **GitHub Actions Runner Controller (ARC)** (scale-to-zero in-cluster CI runners), **RoboRev** (automated LLM code review gate), **Ariga Atlas** (declarative SQL schema migrations), and **Flux CD** (webhook-driven push GitOps) |
-| **Agent Core & Memory** | Configurable CLI execution engines (**`agy`**, **Claude Code**, **Codex**), **Hybrid RRF (`pgvector` + FTS) & ACT-R Memory** (semantic fact retrieval, temporal decay, and procedural skill synthesis), **Streamable HTTP MCP Servers**, **`SKILL.md` Workflows** (`agentskills.io`), and **AgentsView** (web transcript and trace inspector) |
+| **Agent Core & Memory** | Configurable CLI execution engines (**`agy`**, **Claude Code**, **Codex**, **Muse**), **Hybrid RRF (`pgvector` + FTS) & ACT-R Memory** (semantic fact retrieval, temporal decay, and procedural skill synthesis), **Streamable HTTP MCP Servers**, **`SKILL.md` Workflows** (`agentskills.io`), and **AgentsView** (web transcript and trace inspector) |
 | **Multimodal I/O & Browser Automation** | **Discord Gateway/REST**, **Real-Time Voice** (with optional STT/TTS sidecars), **Twilio PSTN** (inbound/outbound voice calls and SMS), **Kernel Browser** (headful CDP browser control), **1Password CLI** (scoped vault credential retrieval), and **Stripe Link** (`@stripe/link-cli` one-time virtual payment tokens) |
 
 ---
@@ -76,9 +76,9 @@ infisical secrets set --env=default \
 ```
 
 ### Step 4: Authenticate Agent CLI & Verify Rollout
-1. Authenticate your preferred execution engine (for example, `agy` via Google OAuth):
+1. Authenticate your preferred execution engine (for example, `agy` via Google OAuth) in the execution worker pod:
    ```bash
-   kubectl exec -it deployment/eri -c eri -- agy
+   kubectl exec -it $(kubectl get pod -l app.kubernetes.io/name=eri-restate -o name | head -n1) -c eri-restate -- agy
    ```
 2. Verify all pods and Flux Kustomizations are healthy:
    ```bash
@@ -88,7 +88,7 @@ infisical secrets set --env=default \
 
 ### Scaling to Multi-Node Clusters (`aerial-config` Overlays)
 Base manifests in `aerial/k8s/` use portable single-node defaults (single-instance PostgreSQL, no `nodeSelector` constraints, HTTP-only routes). To scale across a multi-node homelab without forking base manifests, layer Flux Kustomization `spec.patches` in `aerial-config/k8s/cluster-overrides.yaml`:
-- **PostgreSQL High Availability**: Patch `Cluster/postgres` to `spec.instances: 2` with node anti-affinity across NVMe storage nodes.
+- **PostgreSQL High Availability**: Patch `Cluster/postgres-19` (fronted by `Service/postgres`) to `spec.instances: 2` with node anti-affinity across NVMe storage nodes.
 - **Hardware & Role Pinning**: Attach `nodeSelector` and taint/toleration rules to schedule GPU inference sidecars on GPU nodes, databases on storage nodes, and display workloads on touch kiosks.
 - **TLS & Custom Domains**: Patch `Gateway/lan-gateway` with Let's Encrypt HTTPS listeners and custom domain `HTTPRoute` rules.
 - **Shared NAS Mounts**: Attach SMB or NFS CSI volumes across worker nodes.
@@ -119,14 +119,17 @@ azylman/aerial (Engine Repo)              your-aerial-config (Private Overlay Re
 │ Voice & Telephony Ingress    │ HTTP REST & Event Webhooks   │ Discord Gateway Funnel        │
 │ • /voice/ask Voice Pipeline  │ • /prompt (Prompt Injection) │ • synapse Gateway WebSocket   │
 │ • Prospera PSTN Agent        │ • /discord/message Outbound  │ • Catch-up Sweeps & JetStream │
-│ • Optional STT/TTS Sidecars  │ • /discord/widget Components │ • POST /discord/ingress       │
-│ • Low-Latency Audio Routing  │ • Edge Gateway Webhooks      │ • Ambient Wake Classification │
+│ • Optional STT/TTS Sidecars  │ • /internal/discord/message  │ • POST /internal/discord/msg  │
+│ • Low-Latency Audio Routing  │ • /internal/discord/interact │ • POST /internal/discord/int  │
+│                              │ • Edge Gateway Webhooks      │ • Ambient Wake Classification │
 └──────────────────────────────┴──────────────────────────────┴───────────────────────────────┘
                                                │
                                                ▼
 ┌─────────────────────────────────────────────────────────────────────────────────────────────┐
-│                                    eri (Execution Core)                                     │
-│  • Configurable Multi-Engine Execution Core: agy, Claude Code, Codex                        │
+│                       eri & eri-restate (Execution Core & Worker)                           │
+│  • eri (:8080): Stateless distroless HTTP ingress front door                                │
+│  • eri-restate (:9080/:4028): Multi-engine worker (agy, Claude Code, Codex, Muse)           │
+│  • Durable Restate sessions (ThreadSession, DispatchSession, TurnRunner, VoiceSession)      │
 │  • Autonomous Subagent Orchestrator & SDD Planning Engine                                   │
 │  • Self-Healing GitOps Worker (Proactive CI/CD & RoboRev Remediation)                       │
 │  • Read-Only Mounts (:ro), Child-Process Secret Scrubbing & Pre-Tool Hook Guardrails        │
@@ -138,12 +141,14 @@ azylman/aerial (Engine Repo)              your-aerial-config (Private Overlay Re
 │               SELF-HOSTED APPLICATION PLATFORM & SOFTWARE FACTORY (k3s)                     │
 ├──────────────────────────────┬──────────────────────────────┬───────────────────────────────┤
 │ Platform Runtime & Primitives│ Autonomous Software Factory  │ Agent Core & Web Surfaces     │
-│ • k3s (1 to N nodes)         │ • vanadis Build API          │ • eri, haro, coven, prospera  │
-│ • lan-gateway & edge-gateway │ • vanadis-restate DAG Worker │ • homepage, console, docs     │
-│ • restate (RestateCluster)   │ • docket-mcp & docket-store  │ • agentsview Session HUD      │
-│ • nats (NATS JetStream)      │ • synapse GitOps Fact Router │ • headlamp & infisical UIs    │
-│ • CloudNativePG Postgres 19  │ • github-runner (ARC/RoboRev)│ • Optional GPU / Kiosk Nodes  │
-│ • infisical, valkey, coredns │ • flux-system GitOps Engine  │   via aerial-config Overlays  │
+│ • k3s (1 to N nodes)         │ • vanadis Build API (:4025)  │ • eri (:8080) & eri-restate   │
+│ • lan-gateway & edge-gateway │ • vanadis-restate (:9080)    │ • haro, coven, prospera       │
+│ • restate (RestateCluster)   │ • vanadis-nats bridge (:4027)│ • transcripts (:4030)         │
+│ • nats (NATS JetStream)      │ • docket-mcp & docket-store  │ • coverage-ingest             │
+│ • CloudNativePG Postgres 19  │ • synapse GitOps Fact Router │ • homepage, console, docs     │
+│ • infisical, valkey, coredns │ • github-runner (ARC/RoboRev)│ • agentsview Session HUD      │
+│ • otel-collector (:4317)     │ • flux-system GitOps Engine  │ • headlamp & infisical UIs    │
+│ • bazel-remote cache         │                              │ • Optional GPU / Kiosk Nodes  │
 └──────────────────────────────┴──────────────────────────────┴───────────────────────────────┘
                                                │
                                                ▼
@@ -162,7 +167,7 @@ azylman/aerial (Engine Repo)              your-aerial-config (Private Overlay Re
 ### Defense-in-Depth Agent Guardrails
 
 - **Read-Only Repository & Credential Mounts (`:ro`)**: Live repositories (`/share/aerial`, `/share/aerial-config`), OAuth credentials, and secret bundles are mounted read-only at the container boundary, forcing all changes through isolated scratch clones (`scripts/aerial-pr.sh init`) and reviewed Pull Requests.
-- **Child-Process Secret Scrubbing**: Database passwords, GitHub PATs, Discord tokens, and API keys are stripped from the child process environment before spawning `agy`, Claude Code, or Codex so the agent acts strictly through typed MCP servers.
+- **Child-Process Secret Scrubbing**: Database passwords, GitHub PATs, Discord tokens, and API keys are stripped from the child process environment before spawning `agy`, Claude Code, Codex, or Muse so the agent acts strictly through typed MCP servers.
 - **Compiled Pre-Tool Hook Interceptors**: Go pre-tool hooks inspect every agent tool call before execution to block read-only or live-SSH mutations, scan staged git diffs for leaked secrets or private IPs, prevent foreground polling loops, and bound filesystem and telemetry queries.
 - **Outbound & Log Secret Redaction**: Outbound Discord messages and log streams pass through exact and derived-encoding (`base64`, URL, hex, JSON-escaped) secret redaction.
 
@@ -187,7 +192,7 @@ Where standalone coding agent orchestrators run in local `tmux` sessions without
 2. **Ephemeral Scratch Clones & Multi-Agent Review**: Code, schema, and manifest changes are authored in isolated scratch clones (`scripts/aerial-pr.sh init [repo]`), audited by parallel multi-agent review panels, and verified locally (`./scripts/verify.sh --staged`) before submission.
 3. **Durable Multi-PR Build Pipelines (`vanadis` + `vanadis-restate`)**: Multi-PR and cross-repository rollouts (such as shipping an upstream engine feature before enabling downstream config) are enqueued as a single DAG build (`scripts/aerial-build.sh enqueue`). **Restate** durable Virtual Objects (`Build`, `BuildRouter`) and **NATS JetStream** (`aerial.pr.>`) coordinate ordered chunk execution and GitHub auto-merge (`SQUASH`).
 4. **In-Cluster CI & Automated Code Review (`github-runner` + RoboRev)**: Scale-to-zero **GitHub Actions Runner Controller (ARC)** runner sets execute clean-room test/coverage matrices, publish container images to GHCR, and run automated **RoboRev** LLM code reviews on every Pull Request.
-5. **Event-Driven Push GitOps & Self-Healing (`synapse` + Flux CD)**: Authenticated GitHub push and CI webhooks flow through `edge-gateway` to **`synapse`**, which updates `ConfigMap/aerial-image-tags` in `flux-system`, triggers immediate **Flux CD** Kustomization reconciliation, and publishes completion facts onto **NATS JetStream** to advance dependent build chunks. If CI checks or **RoboRev** fail, `synapse` automatically wakes the agent with the failure context to remediate the branch.
+5. **Event-Driven Push GitOps & Self-Healing (`synapse` + Flux CD + `vanadis-restate`)**: Authenticated GitHub push and CI webhooks flow through `edge-gateway` to **`synapse`**, which forwards events to Restate `PRObject` and `RepoObject` on **`vanadis-restate`**. In turn, `vanadis-restate` updates `ConfigMap/aerial-image-tags` in `flux-system`, triggers immediate **Flux CD** Kustomization reconciliation, publishes `aerial.pr.>` facts onto **NATS JetStream** to advance dependent build chunks, and wakes `eri-restate` with failure context if CI checks or **RoboRev** fail to remediate the branch.
 
 ---
 
@@ -218,5 +223,5 @@ All user customization lives in your private config repository (start from [**`a
 | **Configure models, channels & persona** | Effort-tiered models, Discord channel wake policies, admin allowlists, and persona rules | [`config.yaml` & `rules/`](https://github.com/azylman/aerial-config-example) |
 | **Add custom workflow skills** | On-demand `SKILL.md` runbooks compatible with the `agentskills.io` standard | [`custom-skills/`](https://github.com/azylman/aerial-config-example/tree/main/custom-skills) |
 | **Connect custom MCP servers** | Registering internal or remote Streamable HTTP MCP tools and secrets | [`mcp_servers` in `config.yaml`](https://github.com/azylman/aerial-config-example/blob/main/config.yaml) |
-| **Intercept or enrich channel turns** | Lifecycle webhooks (`on_wake`, `pre_turn`, `post_turn`) for custom sidecars | [Channel Lifecycle Webhooks](docs/specs/2026-09-22-channel-lifecycle-webhooks.md) |
+| **Intercept or enrich channel turns** | Lifecycle webhooks (`on_wake`, `pre_turn`, `post_turn`) for custom sidecars | [Channel Lifecycle Webhooks](rules/discord/02-channels.md) |
 | **Deploy extra apps or scale nodes** | Adding Kubernetes workloads, HA Postgres, TLS, and GPU/kiosk node pinning | [`k8s/` Overlays](https://github.com/azylman/aerial-config-example/tree/main/k8s) |

@@ -1,7 +1,7 @@
 # PR lifecycle parity goldens
 
 Each JSON file is one PR lifecycle. Two tests read it from separate Go
-modules:
+packages in the root module:
 
 - `services/synapse/internal/router/restate_edge_test.go`
   (`TestRestateOwnedLifecycleEdge`) drives synapse over `synapse` (webhooks,
