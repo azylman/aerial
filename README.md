@@ -115,55 +115,55 @@ azylman/aerial (Engine Repo)              your-aerial-config (Private Overlay Re
 ```
 
 ```text
-┌─────────────────────────────────────────────────────────────────────────────────────────────┐
-│                                  MULTIPLEXED INGRESS LAYER                                  │
-├──────────────────────────────┬──────────────────────────────┬───────────────────────────────┤
-│ Voice & Telephony Ingress    │ HTTP REST & Event Webhooks   │ Discord Gateway Funnel        │
-│ • /voice/ask Voice Pipeline  │ • /prompt (Prompt Injection) │ • synapse Gateway WebSocket   │
-│ • Prospera PSTN Agent        │ • /discord/message Outbound  │ • Catch-up Sweeps & JetStream │
-│ • Optional STT/TTS Sidecars  │ • Edge Gateway Webhooks      │ • POST /internal/discord/     │
-│ • Low-Latency Audio Routing  │                              │   message & interaction       │
-│                              │                              │ • Ambient Wake Classification │
-└──────────────────────────────┴──────────────────────────────┴───────────────────────────────┘
-                                               │
-                                               ▼
-┌─────────────────────────────────────────────────────────────────────────────────────────────┐
-│                       eri & eri-restate (Execution Core & Worker)                           │
-│  • eri (:8080): Stateless distroless HTTP ingress front door                                │
-│  • eri-restate (:9080/:4028): Multi-engine worker (agy, Claude Code, Codex, Muse)           │
-│  • Durable Restate sessions (ThreadSession, DispatchSession, TurnRunner, VoiceSession)      │
-│  • Autonomous Subagent Orchestrator & SDD Planning Engine                                   │
-│  • Self-Healing GitOps Worker (Proactive CI/CD & RoboRev Remediation)                       │
-│  • Read-Only Mounts (:ro), Child-Process Secret Scrubbing & Pre-Tool Hook Guardrails        │
-│  • Two-Tier Ambient Wake Classifier & PostgreSQL 19 Multi-Turn Thread Memory                │
-└─────────────────────────────────────────────────────────────────────────────────────────────┘
-                                               │
-                                               ▼
-┌─────────────────────────────────────────────────────────────────────────────────────────────┐
-│               SELF-HOSTED APPLICATION PLATFORM & SOFTWARE FACTORY (k3s)                     │
-├──────────────────────────────┬──────────────────────────────┬───────────────────────────────┤
-│ Platform Runtime & Primitives│ Autonomous Software Factory  │ Agent Core & Web Surfaces     │
-│ • k3s (1 to N nodes)         │ • vanadis Build API (:4025)  │ • eri (:8080) & eri-restate   │
-│ • lan-gateway & edge-gateway │ • vanadis-restate (:9080)    │ • haro, coven, prospera       │
-│ • restate (RestateCluster)   │ • vanadis-nats bridge (:4027)│ • transcripts (:4030)         │
-│ • nats (NATS JetStream)      │ • docket-mcp & docket-store  │ • homepage, console, docs     │
-│ • CloudNativePG Postgres 19  │ • synapse GitOps Fact Router │ • agentsview Session HUD      │
-│ • infisical, valkey, coredns │ • GitHub Actions CI Webhooks │ • headlamp & infisical UIs    │
-│ • otel-collector (:4317)     │ • flux-system GitOps Engine  │ • Optional GPU / Kiosk Nodes  │
-│ • Streamable HTTP MCPs       │ • ARC CI & RoboRev Runners   │                               │
-└──────────────────────────────┴──────────────────────────────┴───────────────────────────────┘
-                                               │
-                                               ▼
-┌─────────────────────────────────────────────────────────────────────────────────────────────┐
-│                          AUTONOMOUS TOOL RUNTIME (MCP) & TELEMETRY                          │
-├──────────────────────────────┬──────────────────────────────┬───────────────────────────────┤
-│ Haro Scheduler MCP           │ Coven Memory MCP             │ VictoriaMetrics TSDB          │
-│ Kubernetes MCP               │ Infisical Secrets MCP        │ vmalert Anomaly/Alert Rules   │
-│ GitHub Operations MCP        │ Discord REST MCP             │ VictoriaLogs (LogsQL)         │
-│ Kernel Browser MCP           │ VictoriaMetrics MCP          │ VictoriaTraces (OTLP)         │
-│ Prospera Phone Agent         │ Vanadis Build Queue MCP      │ Grafana & Headlamp Dashboards │
-│ Docket Issue Tracker MCP     │ VictoriaLogs/Traces MCP      │ Fluent Bit Log DaemonSet      │
-└──────────────────────────────┴──────────────────────────────┴───────────────────────────────┘
+┌──────────────────────────────────────────────────────────────────────────────────────────────────┐
+│                                    MULTIPLEXED INGRESS LAYER                                     │
+├───────────────────────────────┬─────────────────────────────────┬────────────────────────────────┤
+│ Voice & Telephony Ingress     │ HTTP REST & Event Webhooks      │ Discord Gateway Funnel         │
+│ • /voice/ask Voice Pipeline   │ • /prompt (Prompt Injection)    │ • Discord Gateway WebSocket    │
+│ • Twilio PSTN Voice & SMS     │ • /discord/message Outbound     │ • Catch-up Sweeps & JetStream  │
+│ • Optional STT/TTS Sidecars   │ • Edge Gateway Webhooks         │ • POST /internal/discord/      │
+│ • Low-Latency Audio Routing   │                                 │   message & interaction        │
+│                               │                                 │ • Ambient Wake Classification  │
+└───────────────────────────────┴─────────────────────────────────┴────────────────────────────────┘
+                                                 │
+                                                 ▼
+┌──────────────────────────────────────────────────────────────────────────────────────────────────┐
+│                              AGENT EXECUTION CORE & DURABLE WORKER                               │
+│  • Stateless HTTP Ingress Front Door                                                             │
+│  • Multi-Engine Restate Worker (agy, Claude Code, Codex, Muse)                                   │
+│  • Durable Restate sessions (ThreadSession, DispatchSession, TurnRunner, VoiceSession)           │
+│  • Autonomous Subagent Orchestrator & SDD Planning Engine                                        │
+│  • Self-Healing GitOps Worker (Proactive CI/CD & RoboRev Remediation)                            │
+│  • Read-Only Mounts (:ro), Child-Process Secret Scrubbing & Pre-Tool Hook Guardrails             │
+│  • Two-Tier Ambient Wake Classifier & PostgreSQL 19 Multi-Turn Thread Memory                     │
+└──────────────────────────────────────────────────────────────────────────────────────────────────┘
+                                                 │
+                                                 ▼
+┌──────────────────────────────────────────────────────────────────────────────────────────────────┐
+│                    SELF-HOSTED APPLICATION PLATFORM & SOFTWARE FACTORY (k3s)                     │
+├───────────────────────────────┬─────────────────────────────────┬────────────────────────────────┤
+│ Platform Runtime & Primitives │ Autonomous Software Factory     │ Agent Core & Web Surfaces      │
+│ • k3s (1 to N nodes)          │ • Multi-PR Build Orchestrator   │ • Stateless Ingress & Worker   │
+│ • lan-gateway & edge-gateway  │ • Restate Build State Machines  │ • Scheduler, Memory & Telephony│
+│ • restate (RestateCluster)    │ • JetStream Build Event Bridge  │ • Transcript Search & Indexer  │
+│ • nats (NATS JetStream)       │ • Vikunja DAG Backlog & MCP     │ • homepage, console, docs      │
+│ • CloudNativePG Postgres 19   │ • GitHub & Discord Event Router │ • agentsview Session HUD       │
+│ • infisical, valkey, coredns  │ • GitHub Actions CI Webhooks    │ • headlamp & infisical UIs     │
+│ • OpenTelemetry Collector     │ • flux-system GitOps Engine     │ • Optional GPU / Kiosk Nodes   │
+│ • Streamable HTTP MCPs        │ • ARC CI & RoboRev Runners      │                                │
+└───────────────────────────────┴─────────────────────────────────┴────────────────────────────────┘
+                                                 │
+                                                 ▼
+┌──────────────────────────────────────────────────────────────────────────────────────────────────┐
+│                            AUTONOMOUS TOOL RUNTIME (MCP) & TELEMETRY                             │
+├───────────────────────────────┬─────────────────────────────────┬────────────────────────────────┤
+│ Persistent Scheduler MCP      │ Cognitive Memory MCP            │ VictoriaMetrics TSDB           │
+│ Kubernetes MCP                │ Infisical Secrets MCP           │ vmalert Anomaly/Alert Rules    │
+│ GitHub Operations MCP         │ Discord REST MCP                │ VictoriaLogs (LogsQL)          │
+│ Kernel Browser MCP            │ VictoriaMetrics MCP             │ VictoriaTraces (OTLP)          │
+│ Twilio Telephony MCP          │ Multi-PR Build Queue MCP        │ Grafana & Headlamp Dashboards  │
+│ Vikunja Issue Tracker MCP     │ VictoriaLogs/Traces MCP         │ Fluent Bit Log DaemonSet       │
+└───────────────────────────────┴─────────────────────────────────┴────────────────────────────────┘
 ```
 
 ### Defense-in-Depth Agent Guardrails
@@ -190,11 +190,11 @@ Where standalone coding agent orchestrators run in local `tmux` sessions without
                                                  (on CI or RoboRev failure)
 ```
 
-1. **Dependency-Aware DAG Backlog (`docket-mcp` + Vikunja)**: Features, multi-stage epics, and deferred discoveries are tracked as a directed acyclic graph (DAG) in **Vikunja** backed by PostgreSQL 19 (`pgvector` + full-text hybrid RRF search), exposing an unblocked `ready` queue so the agent never loses context across sessions.
+1. **Dependency-Aware DAG Backlog (Vikunja + Issue Tracker MCP)**: Features, multi-stage epics, and deferred discoveries are tracked as a directed acyclic graph (DAG) in **Vikunja** backed by PostgreSQL 19 (`pgvector` + full-text hybrid RRF search), exposing an unblocked `ready` queue so the agent never loses context across sessions.
 2. **Ephemeral Scratch Clones & Multi-Agent Review**: Code, schema, and manifest changes are authored in isolated scratch clones (`scripts/aerial-pr.sh init [repo]`), audited by parallel multi-agent review panels, and verified locally (`./scripts/verify.sh --staged`) before submission.
-3. **Durable Multi-PR Build Pipelines (`vanadis` + `vanadis-restate`)**: Multi-PR and cross-repository rollouts (such as shipping an upstream engine feature before enabling downstream config) are enqueued as a single DAG build (`scripts/aerial-build.sh enqueue`). **Restate** durable Virtual Objects (`Build`, `BuildRouter`) and **NATS JetStream** (`aerial.pr.>`) coordinate ordered chunk execution and GitHub auto-merge (`SQUASH`).
-4. **GitHub Actions CI & Automated Code Review**: Pull Requests trigger GitHub Actions CI test/coverage workflows and automated code reviews executed via in-cluster scale-to-zero ARC runners or GitHub-hosted runners. **`synapse`** and **`vanadis-restate`** process GitHub `check_run`, `workflow_run`, `pull_request`, and `push` webhooks from any repository.
-5. **Event-Driven Push GitOps & Self-Healing (`synapse` + Flux CD + `vanadis-restate`)**: Authenticated GitHub push and CI webhooks flow through `edge-gateway` to **`synapse`**, which forwards events to Restate `PRObject` and `RepoObject` on **`vanadis-restate`**. In turn, `vanadis-restate` updates `ConfigMap/aerial-image-tags` in `flux-system`, triggers immediate **Flux CD** Kustomization reconciliation, publishes `aerial.pr.>` facts onto **NATS JetStream** to advance dependent build chunks, and, if CI checks fail or **RoboRev** review checks request changes, wakes `eri-restate` with the failure context and review findings to remediate the branch.
+3. **Durable Multi-PR Build Pipelines (Restate + NATS JetStream)**: Multi-PR and cross-repository rollouts (such as shipping an upstream engine feature before enabling downstream config) are enqueued as a single DAG build (`scripts/aerial-build.sh enqueue`). **Restate** durable Virtual Objects (`Build`, `BuildRouter`) and **NATS JetStream** (`aerial.pr.>`) coordinate ordered chunk execution and GitHub auto-merge (`SQUASH`).
+4. **GitHub Actions CI & Automated Code Review**: Pull Requests trigger GitHub Actions CI test/coverage workflows and automated code reviews executed via in-cluster scale-to-zero ARC runners or GitHub-hosted runners. **The webhook router** and **Restate build state machines** process GitHub `check_run`, `workflow_run`, `pull_request`, and `push` webhooks from any repository.
+5. **Event-Driven Push GitOps & Self-Healing (Edge Router + Flux CD + Restate)**: Authenticated GitHub push and CI webhooks flow through `edge-gateway` to **the webhook router**, which forwards events to Restate `PRObject` and `RepoObject` on **Restate build state machines**. In turn, **Restate build state machines** update `ConfigMap/aerial-image-tags` in `flux-system`, trigger immediate **Flux CD** Kustomization reconciliation, publish `aerial.pr.>` facts onto **NATS JetStream** to advance dependent build chunks, and, if CI checks fail or **RoboRev** review checks request changes, wake **the execution worker** with the failure context and review findings to remediate the branch.
 
 ---
 
@@ -221,7 +221,7 @@ Modern developer platforms typically fall into one of three silos: infrastructur
 | **Deployment & Self-Healing** | GitOps sync alerts (human triages build/deploy breaks) | Development/evaluation sandboxes; no built-in cluster GitOps deployment | Standalone assistant without built-in Kubernetes GitOps delivery | **Push GitOps (Flux CD) + automated reactive wake on CI/review failure for instant branch remediation** |
 | **Glass-Box Observability** | Cluster Grafana/Prometheus (app-level only) | CLI stdout, terminal webviews, or task trace inspectors | Terminal output, chat logs, or developer UI inspectors | **Operator HUD (`console`), transcript timeline (`agentsview`), Restate UI, Grafana, and VictoriaLogs/Traces** |
 | **Memory & Knowledge** | None (infrastructure only) | Repository context, workspace notes, or session history | Vector search, markdown memory files, or dynamic skill synthesis | **ACT-R cognitive memory decay + PostgreSQL 19 hybrid RRF (`pgvector` + FTS) + procedural skill synthesis** |
-| **Multi-Modal Interaction** | Web UI dashboards | CLI terminal or local web sandbox UI | Discord/Telegram chat, with available voice/telephony or browser plugins | **Discord Gateway, real-time voice, PSTN telephony/SMS (`prospera`), and headful browser automation** |
+| **Multi-Modal Interaction** | Web UI dashboards | CLI terminal or local web sandbox UI | Discord/Telegram chat, with available voice/telephony or browser plugins | **Discord Gateway, real-time voice, PSTN telephony/SMS, and headful browser automation** |
 | **Security & Guardrails** | Standard Linux/RBAC permissions | Container environment isolation, OS-level sandboxes, or workspace boundaries | Direct host tool execution, permission prompts, or container isolation | **Defense-in-depth: `:ro` repository mounts, child-process secret scrubbing, and pre-tool compiled interceptors** |
 
 ### 1. Homelab & Self-Hosted PaaS (*home-ops, khuedoan/homelab, Coolify, Dokploy*)
@@ -231,13 +231,13 @@ Traditional homelab platforms provide robust GitOps infrastructure, ingress rout
 Autonomous coding tools excel at local code authoring, interactive debugging, and pipeline execution within development sandboxes. Where standalone orchestrators typically leave the bridge between code completion and live cluster operations to external scripts or human operators, Aerial connects the development loop directly to production:
 - **Persistent Platform Backlog**: An integrated Vikunja DAG issue graph backed by PostgreSQL 19 with hybrid RRF vector and text search, ensuring unblocked `ready` work survives process rotations.
 - **Durable Multi-PR State Machines**: Restate Virtual Objects (`Build`, `BuildRouter`, `PRObject`) coordinating ordered cross-repository migrations with automatic branch dependency tracking and auto-merge.
-- **Closed-Loop CI & GitOps Remediation**: Webhook delivery via `synapse` and `vanadis-restate` triggering push-driven Flux CD deployments, paired with automatic agent wakeups to remediate failing CI checks and RoboRev review findings.
+- **Closed-Loop CI & GitOps Remediation**: Webhook delivery triggering push-driven Flux CD deployments, paired with automatic agent wakeups to remediate failing CI checks and RoboRev review findings.
 
 ### 3. Self-Hosted AI Agents (*Hermes Agent, OpenClaw*)
 General-purpose self-hosted assistants offer flexible chat interfaces, extensible plugin ecosystems, and local scheduling. Aerial builds on these concepts by unifying the agent runtime with a full Kubernetes homelab platform and software factory:
 - **Glass-Box Web Observability**: Unified web surfaces including live session transcripts and tool traces in `agentsview`, queue and turn metrics in `console`, durable virtual object state in `restate`, and deep log/metric inspection in Grafana and VictoriaLogs.
-- **Cognitive Memory Architecture**: Semantic fact extraction, temporal decay modeled on cognitive ACT-R theory, and procedural skill synthesis via `coven`.
-- **Persistent Multi-Modal Scheduling**: Robust cron, silent heartbeat polling, and external event watches via `haro` wired directly into cluster lifecycle events.
+- **Cognitive Memory Architecture**: Semantic fact extraction, temporal decay modeled on cognitive ACT-R theory, and procedural skill synthesis.
+- **Persistent Multi-Modal Scheduling**: Robust cron, silent heartbeat polling, and external event watches wired directly into cluster lifecycle events.
 - **Defense-in-Depth Containment**: Read-only mounts (`:ro`) for core source repositories and secrets, child-process environment sanitization, and Go pre-tool hook interceptors validating tool calls before invocation.
 
 ---
@@ -249,12 +249,12 @@ Unlike black-box background daemons where state is hidden inside CLI logs or loc
 | Interface | Route / Service | Purpose |
 | :--- | :--- | :--- |
 | **Root Service Portal (`homepage`)** | `http://<node-ip>/` | Unified landing dashboard with live service health monitors and status widgets |
-| **Operator Console (`console`)** | `http://<node-ip>/console/` | Real-time mission control HUD for active agent turns, Vanadis multi-PR builds, schedules, and memory facts |
+| **Operator Console (`console`)** | `http://<node-ip>/console/` | Real-time mission control HUD for active agent turns, multi-PR DAG builds, schedules, and memory facts |
 | **Session & Trace Inspector (`agentsview`)** | `http://<node-ip>/agentsview/` | Full multi-turn conversation transcripts, subagent execution trees, and tool call timelines |
 | **Living Documentation Portal (`docs`)** | `http://<node-ip>/docs/` | Docsify web portal rendering architectural specifications, Mermaid diagrams, and operational runbooks |
 | **Restate Durable Execution UI (`restate`)** | `http://<node-ip>/restate/` | Built-in Restate admin console for `Build` / `BuildRouter` services, RocksDB virtual object state, and execution journals |
 | **Metrics, Logs & Traces (`grafana`, `victorialogs`, `victoriatraces`)** | `http://<node-ip>/grafana/` & `Service/victoria*` (`/select/vmui/`) | Anonymous-admin Grafana with pre-provisioned system/Postgres/container/token dashboards, plus LogsQL and OTLP trace `vmui` consoles |
-| **DAG Backlog & Issue Board (`docket-store` / Vikunja)** | `Service/docket-store` | Visual Kanban, list, Gantt, and dependency board for browsing and managing the software factory's task graph |
+| **DAG Backlog & Issue Board (Vikunja)** | In-cluster Vikunja Service | Visual Kanban, list, Gantt, and dependency board for browsing and managing the software factory's task graph |
 | **Kubernetes & Flux Explorer (`headlamp`)** | `Service/headlamp` | Read-only Kubernetes dashboard preloaded with `headlamp-plugin-flux` for pods, events, and Flux GitOps rollouts |
 | **Secrets Governance UI (`infisical`)** | `Service/infisical` | Web vault for environment secrets, machine identities, and External Secrets Operator sync status |
 
