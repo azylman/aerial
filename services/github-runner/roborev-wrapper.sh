@@ -17,12 +17,14 @@ if [[ "${1:-}" == "ci" && "${2:-}" == "review" ]]; then
       *) shift ;;
     esac
   done
-  branch="${GITHUB_HEAD_REF:-}" base_sha="" head_sha=""
+  branch="${GITHUB_HEAD_REF:-}" base_ref="${GITHUB_BASE_REF:-}" base_sha="" head_sha=""
   if [[ -n "${GITHUB_EVENT_PATH:-}" && -f "${GITHUB_EVENT_PATH}" ]]; then
     branch="${branch:-$(jq -r '.pull_request.head.ref // empty' "${GITHUB_EVENT_PATH}" 2>/dev/null || true)}"
+    base_ref="${base_ref:-$(jq -r '.pull_request.base.ref // empty' "${GITHUB_EVENT_PATH}" 2>/dev/null || true)}"
     base_sha=$(jq -r '.pull_request.base.sha // .before // empty' "${GITHUB_EVENT_PATH}" 2>/dev/null || true)
     head_sha=$(jq -r '.pull_request.head.sha // .after // empty' "${GITHUB_EVENT_PATH}" 2>/dev/null || true)
   fi
+  [ -n "${base_ref}" ] && r_sha=$(git rev-parse --verify -q "origin/${base_ref}" 2>/dev/null || true) && [ -n "${r_sha}" ] && base_sha="${r_sha}"
   head_sha="${head_sha:-$(git rev-parse HEAD 2>/dev/null || true)}"
   branch="${branch:-$(git rev-parse --abbrev-ref HEAD 2>/dev/null || true)}"
   [ "${branch}" = "HEAD" ] && branch=""
