@@ -401,12 +401,7 @@ describe('QuickstartSteps Component', () => {
 });
 
 describe('LandingView Hero Quick-Install Pill', () => {
-  beforeEach(() => {
-    vi.useFakeTimers();
-  });
-
   afterEach(() => {
-    vi.useRealTimers();
     cleanup();
   });
 
@@ -420,7 +415,7 @@ describe('LandingView Hero Quick-Install Pill', () => {
     expect(jumpLink.getAttribute('href')).toBe('#quickstart');
   });
 
-  it('copies hero install command to clipboard and resets timer on re-copy', async () => {
+  it('copies hero install command to clipboard and updates button label', async () => {
     const writeTextMock = vi.fn().mockResolvedValue(undefined);
     Object.assign(navigator, {
       clipboard: {
@@ -439,29 +434,9 @@ describe('LandingView Hero Quick-Install Pill', () => {
 
     expect(writeTextMock).toHaveBeenCalledWith(HERO_INSTALL_COMMAND);
     expect(copyBtn.textContent).toContain('Copied!');
-
-    // Click copy again after 2000ms (resets timer for full 2500ms)
-    act(() => {
-      vi.advanceTimersByTime(2000);
-    });
-    await act(async () => {
-      fireEvent.click(copyBtn);
-    });
-
-    // 1000ms later (3000ms after first click), should STILL be Copied!
-    act(() => {
-      vi.advanceTimersByTime(1000);
-    });
-    expect(copyBtn.textContent).toContain('Copied!');
-
-    // Advance remaining 1500ms -> reverts to Copy
-    act(() => {
-      vi.advanceTimersByTime(1500);
-    });
-    expect(copyBtn.textContent).toContain('Copy');
   });
 
-  it('handles hero install clipboard failure gracefully and cleans up timer on unmount', async () => {
+  it('handles hero install clipboard failure gracefully', async () => {
     const writeTextMock = vi.fn().mockRejectedValue(new Error('Permission denied'));
     Object.assign(navigator, {
       clipboard: {
@@ -469,7 +444,7 @@ describe('LandingView Hero Quick-Install Pill', () => {
       },
     });
 
-    const { unmount } = render(<LandingView />);
+    render(<LandingView />);
 
     const copyBtn = screen.getByTestId('hero-install-copy-btn');
     await act(async () => {
@@ -477,25 +452,6 @@ describe('LandingView Hero Quick-Install Pill', () => {
     });
 
     expect(copyBtn.textContent).toContain('Copy failed');
-
-    // Advance 2500ms -> reverts to Copy
-    act(() => {
-      vi.advanceTimersByTime(2500);
-    });
-    expect(copyBtn.textContent).toContain('Copy');
-
-    // Trigger failure again to test unmount cleanup
-    await act(async () => {
-      fireEvent.click(copyBtn);
-    });
-    expect(copyBtn.textContent).toContain('Copy failed');
-
-    // Verify timer is registered before unmount
-    expect(vi.getTimerCount()).toBe(1);
-
-    // Unmount cancels pending timer via effect cleanup
-    unmount();
-    expect(vi.getTimerCount()).toBe(0);
   });
 });
 

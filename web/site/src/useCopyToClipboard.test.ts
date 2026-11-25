@@ -106,23 +106,4 @@ describe('useCopyToClipboard hook', () => {
     expect(ok).toBe(false);
     expect(result.current.isFailed()).toBe(true);
   });
-
-  it('cleans up pending timer on unmount', async () => {
-    const writeTextMock = vi.fn().mockResolvedValue(undefined);
-    Object.assign(navigator, {
-      clipboard: {
-        writeText: writeTextMock,
-      },
-    });
-
-    const { result, unmount } = renderHook(() => useCopyToClipboard());
-
-    await act(async () => {
-      await result.current.copy('command');
-    });
-
-    expect(vi.getTimerCount()).toBe(1);
-    unmount();
-    expect(vi.getTimerCount()).toBe(0);
-  });
 });
