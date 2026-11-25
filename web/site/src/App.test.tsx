@@ -18,11 +18,22 @@ describe('parseRouteHash', () => {
   });
 
   it('parses docs hashes correctly', () => {
-    expect(parseRouteHash('#/docs')).toEqual({ view: 'docs', chapterId: 'overview' });
-    expect(parseRouteHash('#/docs/')).toEqual({ view: 'docs', chapterId: 'overview' });
+    expect(parseRouteHash('#/docs')).toEqual({ view: 'docs', chapterId: 'overview', sectionId: undefined });
+    expect(parseRouteHash('#/docs/')).toEqual({ view: 'docs', chapterId: 'overview', sectionId: undefined });
     expect(parseRouteHash('#/docs/software-factory')).toEqual({
       view: 'docs',
       chapterId: 'software-factory',
+      sectionId: undefined,
+    });
+    expect(parseRouteHash('#section-stateless-ingress')).toEqual({
+      view: 'docs',
+      chapterId: 'multimodal-agent',
+      sectionId: 'stateless-ingress',
+    });
+    expect(parseRouteHash('#/docs/multimodal-agent#section-stateless-ingress')).toEqual({
+      view: 'docs',
+      chapterId: 'multimodal-agent',
+      sectionId: 'stateless-ingress',
     });
   });
 });
@@ -216,6 +227,36 @@ describe('App component', () => {
     const select = screen.getByLabelText('Chapter quick-jump');
     fireEvent.change(select, { target: { value: 'application-platform' } });
     expect(window.location.hash).toBe('#/docs/application-platform');
+  });
+
+  it('opens owning chapter and scrolls to section when navigating directly to a section hash', () => {
+    const scrollSpy = vi.fn();
+    const originalScrollIntoView = Element.prototype.scrollIntoView;
+    Element.prototype.scrollIntoView = function (this: Element, ...args: unknown[]) {
+      scrollSpy(this, ...args);
+    };
+
+    try {
+      render(<App />);
+
+      act(() => {
+        window.location.hash = '#section-stateless-ingress';
+        window.dispatchEvent(new HashChangeEvent('hashchange'));
+      });
+
+      expect(screen.getByTestId('handbook-view')).toBeTruthy();
+      expect(screen.getByText('CHAPTER 5')).toBeTruthy();
+      expect(screen.getByRole('heading', { level: 1 }).textContent).toBe('The Multimodal AI Agent');
+      const target = screen.getByTestId('section-stateless-ingress');
+      expect(target).toBeTruthy();
+      expect(scrollSpy).toHaveBeenCalledWith(target, { behavior: 'smooth' });
+    } finally {
+      if (originalScrollIntoView) {
+        Element.prototype.scrollIntoView = originalScrollIntoView;
+      } else {
+        delete (Element.prototype as { scrollIntoView?: unknown }).scrollIntoView;
+      }
+    }
   });
 
   it('toggles theme when clicking the theme button in navbar', () => {
