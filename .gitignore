@@ -34,6 +34,11 @@ PR_DESCRIPTION.md
 /services/console/ui/coverage/
 /services/console/ui/e2e/artifacts/
 
+# React marketing and docs site build output and local toolchain
+/web/site/node_modules/
+/web/site/dist/
+/web/site/coverage/
+
 # Locally built code-health analyzer binary
 /scripts/code-health/code-health
 

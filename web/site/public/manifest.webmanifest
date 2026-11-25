@@ -1,0 +1,10 @@
+{
+  "name": "Aerial",
+  "short_name": "Aerial",
+  "description": "Autonomous AI Personal Assistant",
+  "start_url": "./",
+  "display": "standalone",
+  "background_color": "#181825",
+  "theme_color": "#181825",
+  "icons": []
+}
