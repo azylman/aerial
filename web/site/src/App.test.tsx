@@ -24,6 +24,10 @@ describe('parseRouteHash', () => {
       view: 'docs',
       chapterId: 'software-factory',
     });
+    expect(parseRouteHash('#section-closed-loop-thesis')).toEqual({
+      view: 'docs',
+      chapterId: 'overview',
+    });
   });
 });
 
@@ -216,6 +220,36 @@ describe('App component', () => {
     const select = screen.getByLabelText('Chapter quick-jump');
     fireEvent.change(select, { target: { value: 'application-platform' } });
     expect(window.location.hash).toBe('#/docs/application-platform');
+  });
+
+  it('keeps handbook and chapter displayed when clicking a TOC section link', () => {
+    render(<App />);
+
+    act(() => {
+      window.location.hash = '#/docs/overview';
+      window.dispatchEvent(new HashChangeEvent('hashchange'));
+    });
+
+    expect(screen.getByTestId('handbook-view')).toBeTruthy();
+    expect(screen.getByText('CHAPTER 1')).toBeTruthy();
+
+    const toc = screen.getByRole('navigation', { name: 'Section table of contents' });
+    const tocLink = within(toc).getByText('The Closed-Loop Thesis');
+
+    const targetSection = document.getElementById('section-closed-loop-thesis');
+    expect(targetSection).toBeTruthy();
+    const scrollSpy = vi.fn();
+    if (targetSection) {
+      targetSection.scrollIntoView = scrollSpy;
+    }
+
+    fireEvent.click(tocLink);
+
+    // Handbook and chapter are still shown (did not unmount or redirect to landing)
+    expect(screen.getByTestId('handbook-view')).toBeTruthy();
+    expect(screen.getByText('CHAPTER 1')).toBeTruthy();
+    expect(screen.queryByTestId('landing-view')).toBeNull();
+    expect(scrollSpy).toHaveBeenCalled();
   });
 
   it('toggles theme when clicking the theme button in navbar', () => {

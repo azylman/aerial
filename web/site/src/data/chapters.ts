@@ -391,10 +391,7 @@ data:
             caption: 'docket-mcp ready tool query',
             code: `{
   "tool": "ready",
-  "arguments": {
-    "project_id": 1,
-    "limit": 5
-  }
+  "arguments": {}
 }`,
           },
         ],
@@ -757,14 +754,15 @@ export function filterChapters(
     return chapters;
   }
 
+  const chapterNumMatch = q.match(/^(?:chapter|ch\.?)\s*(\d+)$/i);
+  const targetChapterNumber = chapterNumMatch ? parseInt(chapterNumMatch[1]!, 10) : null;
+
   return chapters
     .map((chapter) => {
       const titleMatch = chapter.title.toLowerCase().includes(q);
       const summaryMatch = chapter.summary.toLowerCase().includes(q);
       const numberMatch =
-        `chapter ${chapter.number}`.includes(q) ||
-        `ch. ${chapter.number}`.includes(q) ||
-        `ch ${chapter.number}`.includes(q);
+        targetChapterNumber !== null && chapter.number === targetChapterNumber;
 
       const matchingSections = chapter.sections.filter((sec) => {
         if (sec.title.toLowerCase().includes(q)) return true;

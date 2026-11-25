@@ -34,6 +34,12 @@ export function parseRouteHash(hash: string): RouteState {
   if (!clean) {
     return { view: 'landing' };
   }
+  if (clean.startsWith('section-')) {
+    return {
+      view: 'docs',
+      chapterId: 'overview',
+    };
+  }
   const parts = clean.split('/').filter(Boolean);
   if (parts[0] === 'docs') {
     const chapterId = parts[1] || 'overview';

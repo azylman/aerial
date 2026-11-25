@@ -14,20 +14,28 @@ describe('filterChapters helper', () => {
     expect(byTitle).toHaveLength(1);
     expect(byTitle[0]!.id).toBe('software-factory');
 
-    const bySummary = filterChapters(HANDBOOK_CHAPTERS, 'closed-loop thesis');
+    const bySummary = filterChapters(HANDBOOK_CHAPTERS, 'and architecture philosophy');
     expect(bySummary).toHaveLength(1);
     expect(bySummary[0]!.id).toBe('overview');
+    expect(bySummary[0]!.sections).toHaveLength(HANDBOOK_CHAPTERS[0]!.sections.length);
   });
 
   it('matches chapter by chapter number formatting', () => {
     const ch1 = filterChapters(HANDBOOK_CHAPTERS, 'chapter 1');
-    expect(ch1.some((c) => c.number === 1)).toBe(true);
+    expect(ch1).toHaveLength(1);
+    expect(ch1[0]!.number).toBe(1);
 
     const ch2 = filterChapters(HANDBOOK_CHAPTERS, 'ch. 2');
-    expect(ch2.some((c) => c.number === 2)).toBe(true);
+    expect(ch2).toHaveLength(1);
+    expect(ch2[0]!.number).toBe(2);
 
     const ch3 = filterChapters(HANDBOOK_CHAPTERS, 'ch 3');
-    expect(ch3.some((c) => c.number === 3)).toBe(true);
+    expect(ch3).toHaveLength(1);
+    expect(ch3[0]!.number).toBe(3);
+
+    // Fragments like 'apt' should not trigger numberMatch across all chapters
+    const aptMatches = filterChapters(HANDBOOK_CHAPTERS, 'apt');
+    expect(aptMatches.length).toBeLessThan(HANDBOOK_CHAPTERS.length);
   });
 
   it('matches section by title, lead, paragraphs, and bullets', () => {
@@ -135,6 +143,7 @@ describe('HandbookView component', () => {
     expect(onSelect).toHaveBeenCalledWith('software-factory');
 
     // Clicking sidebar nav link triggers onSelectChapter
+    onSelect.mockClear();
     const ch4Link = screen.getByTestId('handbook-nav-link-software-factory');
     fireEvent.click(ch4Link);
     expect(onSelect).toHaveBeenCalledWith('software-factory');

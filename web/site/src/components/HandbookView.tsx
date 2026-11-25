@@ -87,6 +87,14 @@ export function HandbookView({ chapterId, onSelectChapter }: HandbookViewProps) 
     setSearchQuery('');
   };
 
+  const handleTocClick = (event: React.MouseEvent<HTMLAnchorElement>, sectionId: string) => {
+    event.preventDefault();
+    const target = document.getElementById(`section-${sectionId}`);
+    if (target) {
+      target.scrollIntoView({ behavior: 'smooth' });
+    }
+  };
+
   const filteredChapters = filterChapters(HANDBOOK_CHAPTERS, searchQuery);
 
   const activeChapterId = chapterId || 'overview';
@@ -181,7 +189,11 @@ export function HandbookView({ chapterId, onSelectChapter }: HandbookViewProps) 
                 <ul className="section-toc-list">
                   {displayChapter.sections.map((sec) => (
                     <li key={sec.id}>
-                      <a href={`#section-${sec.id}`} className="section-toc-link">
+                      <a
+                        href={`#section-${sec.id}`}
+                        className="section-toc-link"
+                        onClick={(e) => handleTocClick(e, sec.id)}
+                      >
                         {sec.title}
                       </a>
                     </li>
