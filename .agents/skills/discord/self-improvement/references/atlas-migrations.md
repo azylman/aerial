@@ -22,5 +22,5 @@ All database schema modifications across `aerial` and `aerial-sidecars` use decl
   ./scripts/verify.sh --staged
   go test -race ./services/eri/pkg/db/...
   ```
-- `./scripts/verify.sh --staged` automatically validates `check_no_imperative_ddl` and verifies migration directory checksums via `atlas migrate validate`.
+- `./scripts/verify.sh --staged` automatically validates `checkNoImperativeDDL` (run through `scripts/code-health`) and verifies migration directory checksums via `atlas migrate validate`.
 - Cluster-wide schema rollout executes automatically via the standalone `db-migrate` Kubernetes `Job` (`k8s/core-services.yaml`) whenever `TAG_AERIAL_MIGRATOR` or `TAG_AERIAL_SIDECAR_MIGRATOR` updates.

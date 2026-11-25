@@ -9,11 +9,21 @@ RUN git clone --depth 1 --branch v0.54.0 https://github.com/bazelbuild/bazel-gaz
     (cd /tmp/gazelle && CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /out/bin/gazelle ./cmd/gazelle) && \
     rm -rf /tmp/gazelle
 
-# --- Superpowers stage ---------------------------------------------------
+# --- Superpowers and community skills stage ------------------------------
 FROM alpine:3.24 AS superpowers
 
 ARG SUPERPOWERS_VERSION=v7.0.1
 ARG SUPERPOWERS_SHA256=2295dd270d929ddbe3f82e43ab5cc6e3dfb4afdbfb56225347394491d34d747d
+ARG ANDROID_SKILLS_REV=7f7b21730a605d112ca9f79b6e40105ce7b670ee
+ARG ANDROID_SKILLS_SHA256=37604cc723c5c5a8e51344047a7312b98f9fea02f5b01b149ce8718f32b638d0
+ARG CC_SKILLS_GOLANG_REV=d68d80aec298e1b74b37c2a472c002b5217248b3
+ARG CC_SKILLS_GOLANG_SHA256=07f2429c459d23f3b724b943e7f4c42e4a8e4a193122d4847a7f77ebfcd1a90f
+ARG BEAUTIFUL_RUST_REV=b9718436d77ee7bcf17cdcb6aa27628feb95d97a
+ARG BEAUTIFUL_RUST_SHA256=45b36f271ec54b39694412017923b528db2a8c5fe5e9b9ce5bd28cbc8b133a7c
+ARG KOTLIN_AGENT_SKILLS_REV=087f5689c1934135ed58718cdf524525e452b7e9
+ARG KOTLIN_AGENT_SKILLS_SHA256=b1703675a525ae8f364ca85f459b44fd027673834839e09239b15c13633042e6
+ARG KOTLIN_FOOTGUNS_REV=2c391bc9c9f873580aa855d7a7b1c3a2ed9e68ae
+ARG KOTLIN_FOOTGUNS_SHA256=693ddb93796ef1af8cba93546a27ad5532341afcb848737f5a04bb5eed6dc895
 
 RUN mkdir -p /tmp/superpowers /opt/skills /opt/superpowers && \
     wget -qO /tmp/superpowers.tar.gz "https://github.com/obra/superpowers/archive/refs/tags/${SUPERPOWERS_VERSION}.tar.gz" && \
@@ -32,7 +42,75 @@ RUN mkdir -p /tmp/superpowers /opt/skills /opt/superpowers && \
         cp -a "/tmp/superpowers/skills/$skill" /opt/skills/; \
     done && \
     rm -rf /tmp/superpowers && \
-    ln -s /opt/skills /opt/superpowers/skills
+    ln -s /opt/skills /opt/superpowers/skills && \
+    mkdir -p /tmp/android-skills && \
+    wget -qO /tmp/android-skills.tar.gz "https://github.com/android/skills/archive/${ANDROID_SKILLS_REV}.tar.gz" && \
+    echo "${ANDROID_SKILLS_SHA256}  /tmp/android-skills.tar.gz" | sha256sum -c - && \
+    tar -xz --strip-components=1 -C /tmp/android-skills -f /tmp/android-skills.tar.gz && \
+    rm -f /tmp/android-skills.tar.gz && \
+    cp -a /tmp/android-skills/wear/wear-compose-m3 /opt/skills/ && \
+    cp -a /tmp/android-skills/wear/wear-widgets /opt/skills/ && \
+    cp -a /tmp/android-skills/jetpack-compose/jetpack-compose-performance /opt/skills/ && \
+    cp -a /tmp/android-skills/security/android-intent-security /opt/skills/ && \
+    cp -a /tmp/android-skills/security/android-permissions-security /opt/skills/ && \
+    cp -a /tmp/android-skills/performance/anr-audit-and-fix /opt/skills/ && \
+    cp -a /tmp/android-skills/testing/testing-setup /opt/skills/ && \
+    rm -rf /tmp/android-skills && \
+    mkdir -p /tmp/golang-skills && \
+    wget -qO /tmp/golang-skills.tar.gz "https://github.com/samber/cc-skills-golang/archive/${CC_SKILLS_GOLANG_REV}.tar.gz" && \
+    echo "${CC_SKILLS_GOLANG_SHA256}  /tmp/golang-skills.tar.gz" | sha256sum -c - && \
+    tar -xz --strip-components=1 -C /tmp/golang-skills -f /tmp/golang-skills.tar.gz && \
+    rm -f /tmp/golang-skills.tar.gz && \
+    for skill in \
+        golang-code-style \
+        golang-concurrency \
+        golang-context \
+        golang-error-handling \
+        golang-modernize \
+        golang-performance \
+        golang-safety \
+        golang-structs-interfaces \
+        golang-testing; do \
+        cp -a "/tmp/golang-skills/skills/$skill" /opt/skills/; \
+        rm -rf "/opt/skills/$skill/evals"; \
+    done && \
+    rm -rf /tmp/golang-skills && \
+    mkdir -p /tmp/rust-skills && \
+    wget -qO /tmp/rust-skills.tar.gz "https://github.com/morganlinton/BeautifulRust/archive/${BEAUTIFUL_RUST_REV}.tar.gz" && \
+    echo "${BEAUTIFUL_RUST_SHA256}  /tmp/rust-skills.tar.gz" | sha256sum -c - && \
+    tar -xz --strip-components=1 -C /tmp/rust-skills -f /tmp/rust-skills.tar.gz && \
+    rm -f /tmp/rust-skills.tar.gz && \
+    for skill in \
+        rust-best-practices \
+        rust-port \
+        rust-review; do \
+        cp -a "/tmp/rust-skills/skills/$skill" /opt/skills/; \
+    done && \
+    rm -rf /tmp/rust-skills && \
+    mkdir -p /tmp/kotlin-agent-skills && \
+    wget -qO /tmp/kotlin-agent-skills.tar.gz "https://github.com/Kotlin/kotlin-agent-skills/archive/${KOTLIN_AGENT_SKILLS_REV}.tar.gz" && \
+    echo "${KOTLIN_AGENT_SKILLS_SHA256}  /tmp/kotlin-agent-skills.tar.gz" | sha256sum -c - && \
+    tar -xz --strip-components=1 -C /tmp/kotlin-agent-skills -f /tmp/kotlin-agent-skills.tar.gz && \
+    rm -f /tmp/kotlin-agent-skills.tar.gz && \
+    for skill in \
+        kotlin-tooling-agp9-migration \
+        kotlin-tooling-kotlin-toolchain; do \
+        cp -a "/tmp/kotlin-agent-skills/skills/$skill" /opt/skills/; \
+    done && \
+    rm -rf /tmp/kotlin-agent-skills && \
+    mkdir -p /tmp/kotlin-footguns && \
+    wget -qO /tmp/kotlin-footguns.tar.gz "https://github.com/maxrave-dev/kotlin-footguns/archive/${KOTLIN_FOOTGUNS_REV}.tar.gz" && \
+    echo "${KOTLIN_FOOTGUNS_SHA256}  /tmp/kotlin-footguns.tar.gz" | sha256sum -c - && \
+    tar -xz --strip-components=1 -C /tmp/kotlin-footguns -f /tmp/kotlin-footguns.tar.gz && \
+    rm -f /tmp/kotlin-footguns.tar.gz && \
+    for skill in \
+        compose-screens-footguns \
+        footgun-scan \
+        remote-api-footguns \
+        state-and-background-footguns; do \
+        cp -a "/tmp/kotlin-footguns/skills/$skill" /opt/skills/; \
+    done && \
+    rm -rf /tmp/kotlin-footguns
 
 # --- Rust toolchain builder stage -----------------------------------------
 FROM ubuntu:24.04 AS rust-builder
