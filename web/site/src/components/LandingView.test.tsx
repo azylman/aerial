@@ -4,8 +4,9 @@ import { ArchitectureMap } from './ArchitectureMap';
 import { ComparisonMatrix } from './ComparisonMatrix';
 import { FactoryStepper } from './FactoryStepper';
 import { GlassBoxShowcase } from './GlassBoxShowcase';
-import { LandingView } from './LandingView';
+import { HERO_INSTALL_COMMAND, LandingView } from './LandingView';
 import { QuickstartSteps } from './QuickstartSteps';
+import { USE_CASE_SCENARIOS, UseCaseGallery } from './UseCaseGallery';
 
 describe('LandingView Component', () => {
   afterEach(() => {
@@ -15,6 +16,8 @@ describe('LandingView Component', () => {
   it('renders landing hero, pillar features, and all showcase sections', () => {
     render(<LandingView />);
 
+    expect(screen.getByTestId('hero-install-pill')).toBeTruthy();
+    expect(within(screen.getByTestId('section-use-cases')).getByTestId('use-case-gallery')).toBeTruthy();
     expect(within(screen.getByTestId('section-architecture')).getByTestId('architecture-map')).toBeTruthy();
     expect(within(screen.getByTestId('section-factory')).getByTestId('factory-stepper')).toBeTruthy();
     expect(within(screen.getByTestId('section-showcase')).getByTestId('glassbox-showcase')).toBeTruthy();
@@ -395,5 +398,202 @@ describe('QuickstartSteps Component', () => {
     // Unmount cancels pending timer via effect cleanup
     unmount();
     expect(vi.getTimerCount()).toBe(0);
+  });
+});
+
+describe('LandingView Hero Quick-Install Pill', () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+    cleanup();
+  });
+
+  it('renders quick-install pill with bootstrap command, copy button, and anchor jump', () => {
+    render(<LandingView />);
+
+    const pill = screen.getByTestId('hero-install-pill');
+    expect(pill).toBeTruthy();
+    expect(pill.textContent).toContain(HERO_INSTALL_COMMAND);
+
+    const jumpLink = screen.getByTestId('hero-install-jump');
+    expect(jumpLink.getAttribute('href')).toBe('#quickstart');
+    expect(jumpLink.textContent).toContain('4-Step Guide ↓');
+  });
+
+  it('copies hero install command to clipboard and resets timer on re-copy', async () => {
+    const writeTextMock = vi.fn().mockResolvedValue(undefined);
+    Object.assign(navigator, {
+      clipboard: {
+        writeText: writeTextMock,
+      },
+    });
+
+    render(<LandingView />);
+
+    const copyBtn = screen.getByTestId('hero-install-copy-btn');
+    expect(copyBtn.textContent).toContain('Copy');
+
+    await act(async () => {
+      fireEvent.click(copyBtn);
+    });
+
+    expect(writeTextMock).toHaveBeenCalledWith(HERO_INSTALL_COMMAND);
+    expect(copyBtn.textContent).toContain('Copied!');
+
+    // Click copy again after 2000ms (resets timer for full 2500ms)
+    act(() => {
+      vi.advanceTimersByTime(2000);
+    });
+    await act(async () => {
+      fireEvent.click(copyBtn);
+    });
+
+    // 1000ms later (3000ms after first click), should STILL be Copied!
+    act(() => {
+      vi.advanceTimersByTime(1000);
+    });
+    expect(copyBtn.textContent).toContain('Copied!');
+
+    // Advance remaining 1500ms -> reverts to Copy
+    act(() => {
+      vi.advanceTimersByTime(1500);
+    });
+    expect(copyBtn.textContent).toContain('Copy');
+  });
+
+  it('handles hero install clipboard failure gracefully and cleans up timer on unmount', async () => {
+    const writeTextMock = vi.fn().mockRejectedValue(new Error('Permission denied'));
+    Object.assign(navigator, {
+      clipboard: {
+        writeText: writeTextMock,
+      },
+    });
+
+    const { unmount } = render(<LandingView />);
+
+    const copyBtn = screen.getByTestId('hero-install-copy-btn');
+    await act(async () => {
+      fireEvent.click(copyBtn);
+    });
+
+    expect(screen.queryByText('Copied!')).toBeNull();
+    expect(copyBtn.textContent).toContain('Copy failed');
+
+    // Advance 2500ms -> reverts to Copy
+    act(() => {
+      vi.advanceTimersByTime(2500);
+    });
+    expect(copyBtn.textContent).toContain('Copy');
+
+    // Trigger failure again to test unmount cleanup
+    await act(async () => {
+      fireEvent.click(copyBtn);
+    });
+    expect(copyBtn.textContent).toContain('Copy failed');
+
+    // Verify timer is registered before unmount
+    expect(vi.getTimerCount()).toBe(1);
+
+    // Unmount cancels pending timer via effect cleanup
+    unmount();
+    expect(vi.getTimerCount()).toBe(0);
+  });
+});
+
+describe('UseCaseGallery Component', () => {
+  afterEach(() => {
+    cleanup();
+  });
+
+  it('renders default scenario and switches tabs across all 4 scenarios', () => {
+    render(<UseCaseGallery />);
+
+    expect(screen.getByTestId('use-case-gallery')).toBeTruthy();
+    expect(screen.getByRole('heading', { name: 'What Aerial Does in Practice' })).toBeTruthy();
+
+    const promptEl = screen.getByTestId('usecase-prompt');
+    const outcomeEl = screen.getByTestId('usecase-outcome');
+
+    // Default scenario: ci-remediation
+    expect(screen.getByTestId('usecase-tab-ci-remediation').classList.contains('active')).toBe(true);
+    expect(promptEl.textContent).toContain('Fix the failing unit tests');
+    expect(outcomeEl.textContent).toContain('Automated code review passes');
+    expect(screen.getByTestId('usecase-step-0').textContent).toContain('Parse compiler failure logs');
+
+    // Switch to multi-pr-migration
+    fireEvent.click(screen.getByTestId('usecase-tab-multi-pr-migration'));
+    expect(screen.getByTestId('usecase-tab-multi-pr-migration').classList.contains('active')).toBe(true);
+    expect(screen.getByTestId('usecase-prompt').textContent).toContain('vector embeddings column');
+    expect(screen.getByTestId('usecase-outcome').textContent).toContain('Multi-repository changes deploy sequentially');
+    expect(screen.getByTestId('usecase-step-1').textContent).toContain('Enqueue multi-stage build workflow');
+
+    // Switch to incident-triage
+    fireEvent.click(screen.getByTestId('usecase-tab-incident-triage'));
+    expect(screen.getByTestId('usecase-tab-incident-triage').classList.contains('active')).toBe(true);
+    expect(screen.getByTestId('usecase-prompt').textContent).toContain('Why did voice interaction latency spike');
+    expect(screen.getByTestId('usecase-outcome').textContent).toContain('Engineers receive root-cause diagnosis');
+    expect(screen.getByTestId('usecase-step-2').textContent).toContain('Publish incident diagnosis');
+
+    // Switch to smart-home-scheduler
+    fireEvent.click(screen.getByTestId('usecase-tab-smart-home-scheduler'));
+    expect(screen.getByTestId('usecase-tab-smart-home-scheduler').classList.contains('active')).toBe(true);
+    expect(screen.getByTestId('usecase-prompt').textContent).toContain('Turn off hallway lights');
+    expect(screen.getByTestId('usecase-outcome').textContent).toContain('Routines survive service restarts');
+    expect(screen.getByTestId('usecase-step-0').textContent).toContain('Schedule durable one-shot timer');
+  });
+});
+
+describe('ASD-STE100 and zero-codename compliance', () => {
+  const FORBIDDEN_CODENAMES =
+    /\b(eri|coven|haro|vanadis|synapse|prospera|senses|pjev|docket-mcp|docket-store)\b/i;
+  const FORBIDDEN_PORTS = /:[0-9]{2,5}\b/;
+
+  it('verifies USE_CASE_SCENARIOS contains zero internal microservice codenames and zero port numbers', () => {
+    for (const scenario of USE_CASE_SCENARIOS) {
+      const allText = [
+        scenario.category,
+        scenario.title,
+        scenario.prompt,
+        scenario.outcome,
+        ...scenario.engineSteps,
+        ...scenario.stackBadges,
+      ].join(' ');
+
+      expect(FORBIDDEN_CODENAMES.test(allText)).toBe(false);
+      expect(FORBIDDEN_PORTS.test(allText)).toBe(false);
+    }
+  });
+
+  it('verifies USE_CASE_SCENARIOS conforms to ASD-STE100 sentence and word count constraints', () => {
+    for (const scenario of USE_CASE_SCENARIOS) {
+      // Descriptive text fields: each sentence <= 25 words
+      const descriptiveFields = [
+        scenario.category,
+        scenario.title,
+        scenario.prompt,
+        scenario.outcome,
+      ];
+      for (const field of descriptiveFields) {
+        const sentences = field
+          .split(/(?<=[.?!])\s+/)
+          .map((s) => s.trim())
+          .filter((s) => s.length > 0);
+
+        for (const sentence of sentences) {
+          const words = sentence.split(/\s+/).filter((w) => w.length > 0);
+          expect(words.length).toBeLessThanOrEqual(25);
+        }
+      }
+
+      // Procedural engine steps: each step <= 20 words
+      expect(scenario.engineSteps.length).toBe(3);
+      for (const step of scenario.engineSteps) {
+        const words = step.split(/\s+/).filter((w) => w.length > 0);
+        expect(words.length).toBeLessThanOrEqual(20);
+      }
+    }
   });
 });
