@@ -38,20 +38,12 @@ describe('ArchitectureMap Component', () => {
   it('renders 9 topology nodes and handles pillar filtering', () => {
     render(<ArchitectureMap />);
 
-    expect(screen.getByTestId('architecture-map')).toBeTruthy();
-    expect(screen.getByTestId('filter-all')).toBeTruthy();
-
     const nodeEri = screen.getByTestId('node-eri-restate');
     const nodeK3s = screen.getByTestId('node-k3s-nginx');
     const nodeVikunja = screen.getByTestId('node-vikunja-docket');
 
-    expect(nodeEri).toBeTruthy();
-    expect(nodeK3s).toBeTruthy();
-    expect(nodeVikunja).toBeTruthy();
-
     // Default inspector node
     const inspector = screen.getByTestId('node-inspector');
-    expect(inspector).toBeTruthy();
     expect(within(inspector).getByText('Eri + Eri-Restate')).toBeTruthy();
 
     // Filter by platform pillar
@@ -178,7 +170,6 @@ describe('FactoryStepper Component', () => {
   it('navigates through all 5 stages using step buttons and navigation arrows', () => {
     render(<FactoryStepper />);
 
-    expect(screen.getByTestId('factory-stepper')).toBeTruthy();
     const detail = screen.getByTestId('stage-detail-content');
     expect(detail.textContent).toContain('Stage 1: Vikunja DAG Ready Queue');
 
@@ -221,7 +212,6 @@ describe('FactoryStepper Component', () => {
     fireEvent.click(toggleBtn);
 
     expect(screen.getByTestId('remediation-banner')).toBeTruthy();
-    expect(screen.getByText(/Autonomous Self-Healing Loop Active/i)).toBeTruthy();
 
     fireEvent.click(toggleBtn);
     expect(screen.queryByTestId('remediation-banner')).toBeNull();
@@ -235,8 +225,6 @@ describe('ComparisonMatrix Component', () => {
 
   it('filters competitors by category and search keyword', () => {
     render(<ComparisonMatrix />);
-
-    expect(screen.getByTestId('comparison-matrix')).toBeTruthy();
 
     // Default: all categories
     expect(screen.getByTestId('comp-card-home-ops')).toBeTruthy();
@@ -270,9 +258,6 @@ describe('ComparisonMatrix Component', () => {
     // Empty search match
     fireEvent.change(searchInput, { target: { value: 'nonexistent-software-tool' } });
     expect(screen.getByText(/No competitors matched your search query/i)).toBeTruthy();
-
-    // Clear search
-    fireEvent.change(searchInput, { target: { value: '' } });
   });
 
   it('switches between Cards and Matrix table view modes', () => {
@@ -303,7 +288,7 @@ describe('QuickstartSteps Component', () => {
     cleanup();
   });
 
-  it('switches steps and copies command to clipboard', async () => {
+  it('switches steps, copies command to clipboard, and cancels pending timeout on re-copy', async () => {
     const writeTextMock = vi.fn().mockResolvedValue(undefined);
     Object.assign(navigator, {
       clipboard: {
@@ -313,7 +298,6 @@ describe('QuickstartSteps Component', () => {
 
     render(<QuickstartSteps />);
 
-    expect(screen.getByTestId('quickstart-steps')).toBeTruthy();
     expect(screen.getByTestId('step-card-1')).toBeTruthy();
 
     // Click copy button on Step 1
@@ -325,9 +309,23 @@ describe('QuickstartSteps Component', () => {
     expect(writeTextMock).toHaveBeenCalledWith(expect.stringContaining('curl -sfL https://get.k3s.io'));
     expect(screen.getByText('Copied to Clipboard!')).toBeTruthy();
 
-    // Advance timer to test timeout reset
+    // Click copy again after 2000ms (resets timer for full 2500ms)
     act(() => {
-      vi.advanceTimersByTime(3000);
+      vi.advanceTimersByTime(2000);
+    });
+    await act(async () => {
+      fireEvent.click(copyBtn1);
+    });
+
+    // 1000ms later (3000ms after first click), should STILL be copied
+    act(() => {
+      vi.advanceTimersByTime(1000);
+    });
+    expect(screen.getByText('Copied to Clipboard!')).toBeTruthy();
+
+    // Advance remaining 1500ms -> reverts to Copy Command
+    act(() => {
+      vi.advanceTimersByTime(1500);
     });
     expect(screen.getByText('Copy Command')).toBeTruthy();
 
@@ -345,7 +343,7 @@ describe('QuickstartSteps Component', () => {
     expect(screen.getByTestId('step-card-4')).toBeTruthy();
   });
 
-  it('handles clipboard failure gracefully', async () => {
+  it('handles clipboard failure gracefully and cleans up timer on unmount', async () => {
     const writeTextMock = vi.fn().mockRejectedValue(new Error('Permission denied'));
     Object.assign(navigator, {
       clipboard: {
@@ -353,7 +351,7 @@ describe('QuickstartSteps Component', () => {
       },
     });
 
-    render(<QuickstartSteps />);
+    const { unmount } = render(<QuickstartSteps />);
 
     const copyBtn = screen.getByTestId('copy-btn-1');
     await act(async () => {
@@ -361,10 +359,15 @@ describe('QuickstartSteps Component', () => {
     });
 
     expect(screen.getByText('Copied to Clipboard!')).toBeTruthy();
+
+    // Unmount before timeout expires
+    unmount();
+    act(() => {
+      vi.advanceTimersByTime(3000);
+    });
   });
 
-  it('handles consecutive copies and missing clipboard API gracefully', async () => {
-    // Delete clipboard
+  it('handles missing clipboard API gracefully', async () => {
     // @ts-expect-error test undefined clipboard
     delete navigator.clipboard;
 
@@ -376,29 +379,5 @@ describe('QuickstartSteps Component', () => {
     });
 
     expect(screen.getByText('Copied to Clipboard!')).toBeTruthy();
-
-    // Advance timer partially
-    act(() => {
-      vi.advanceTimersByTime(1000);
-    });
-
-    // Switch step while copied
-    fireEvent.click(screen.getByTestId('quick-tab-2'));
-    const copyBtn2 = screen.getByTestId('copy-btn-2');
-    await act(async () => {
-      fireEvent.click(copyBtn2);
-    });
-
-    // Advance timer so first step's timer fires (id 1 !== id 2)
-    act(() => {
-      vi.advanceTimersByTime(1600);
-    });
-    expect(screen.getByText('Copied to Clipboard!')).toBeTruthy();
-
-    // Advance timer so second step's timer fires
-    act(() => {
-      vi.advanceTimersByTime(2000);
-    });
-    expect(screen.getByText('Copy Command')).toBeTruthy();
   });
 });

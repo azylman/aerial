@@ -5,9 +5,11 @@ export type PillarFilter = 'all' | 'platform' | 'factory' | 'agent';
 export interface TopologyNode {
   id: string;
   name: string;
+  displayName?: string;
   pillar: 'platform' | 'factory' | 'agent';
   role: string;
   ports: string;
+  displayPorts?: string;
   description: string;
   chapterId: string;
   chapterTitle: string;
@@ -34,13 +36,14 @@ export const TOPOLOGY_NODES: readonly TopologyNode[] = [
     pillar: 'platform',
     role: 'Kubernetes Fabric & Gateway API Ingress',
     ports: ':80 / :443 (LAN & Edge HTTPRoutes)',
+    displayPorts: ':80 / :443 (Gateway API)',
     description:
       'Single-node k3s or multi-node cluster runtime paired with NGINX Gateway Fabric and CoreDNS for LAN apps and external edge webhooks.',
     chapterId: 'application-platform',
     chapterTitle: 'The Self-Hosted Application Platform',
-    x: 40,
+    x: 35,
     y: 50,
-    width: 260,
+    width: 270,
     height: 72,
     icon: '🪐',
   },
@@ -50,13 +53,14 @@ export const TOPOLOGY_NODES: readonly TopologyNode[] = [
     pillar: 'platform',
     role: 'Relational State, Embeddings & Hybrid RRF',
     ports: ':5432 (Postgres) / :9187 (Metrics)',
+    displayPorts: ':5432 (SQL) / :9187 (Metrics)',
     description:
       'CloudNativePG high-availability PostgreSQL 19 cluster with pgvector extension powering session memory, Vikunja task graphs, and hybrid text/vector search.',
     chapterId: 'application-platform',
     chapterTitle: 'The Self-Hosted Application Platform',
-    x: 40,
+    x: 35,
     y: 160,
-    width: 260,
+    width: 270,
     height: 72,
     icon: '🗄️',
   },
@@ -66,13 +70,14 @@ export const TOPOLOGY_NODES: readonly TopologyNode[] = [
     pillar: 'platform',
     role: 'Durable Workflows & Event Streaming',
     ports: ':8080 (Ingress) / :9080 (SDK) / :4222 (NATS)',
+    displayPorts: ':8080 / :9080 / :4222',
     description:
       'RocksDB-backed durable virtual objects (Restate) paired with NATS JetStream pubsub streams for resilient event propagation and distributed transactions.',
     chapterId: 'application-platform',
     chapterTitle: 'The Self-Hosted Application Platform',
-    x: 40,
+    x: 35,
     y: 270,
-    width: 260,
+    width: 270,
     height: 72,
     icon: '⚡',
   },
@@ -82,13 +87,14 @@ export const TOPOLOGY_NODES: readonly TopologyNode[] = [
     pillar: 'platform',
     role: 'Unified Metrics, Logs & OTLP Tracing',
     ports: ':8428 (TSDB) / :9428 (Logs) / :10428 (Traces)',
+    displayPorts: ':8428 / :9428 / :10428',
     description:
       'Comprehensive observability stack with 60-day LogsQL container retention, 30-day OTLP distributed tracing, and automated vmalert anomaly rules.',
     chapterId: 'application-platform',
     chapterTitle: 'The Self-Hosted Application Platform',
-    x: 40,
+    x: 35,
     y: 380,
-    width: 260,
+    width: 270,
     height: 72,
     icon: '📊',
   },
@@ -98,13 +104,14 @@ export const TOPOLOGY_NODES: readonly TopologyNode[] = [
     pillar: 'factory',
     role: 'DAG Backlog Graph & Ready Queue',
     ports: ':3456 (API) / :8080 (docket-mcp)',
+    displayPorts: ':3456 (API) / :8080 (MCP)',
     description:
       'Dependency-aware issue tracking with PostgreSQL 19 hybrid RRF search, exposing an unblocked ready queue for autonomous task dispatch.',
     chapterId: 'software-factory',
     chapterTitle: 'The Autonomous Software Factory',
-    x: 350,
+    x: 345,
     y: 80,
-    width: 260,
+    width: 270,
     height: 72,
     icon: '📋',
   },
@@ -114,13 +121,14 @@ export const TOPOLOGY_NODES: readonly TopologyNode[] = [
     pillar: 'factory',
     role: 'Multi-PR Build DAG Orchestration',
     ports: ':4025 (Build API) / :9080 (Restate) / :4027 (Bridge)',
+    displayPorts: ':4025 (API) / :9080 (Restate)',
     description:
       'Coordinates multi-chunk, cross-repo pull request workflows via Restate Build and BuildRouter virtual objects with automated squash merges.',
     chapterId: 'software-factory',
     chapterTitle: 'The Autonomous Software Factory',
-    x: 350,
+    x: 345,
     y: 200,
-    width: 260,
+    width: 270,
     height: 72,
     icon: '🏗️',
   },
@@ -130,13 +138,14 @@ export const TOPOLOGY_NODES: readonly TopologyNode[] = [
     pillar: 'factory',
     role: 'GitOps Fact Router & Push CD',
     ports: ':4020 (Synapse) / :9090 (Flux Webhook)',
+    displayPorts: ':4020 (Synapse) / Flux CD',
     description:
       'Processes GitHub push/PR webhooks, updates image tags in flux-system, triggers instant GitOps reconciliation, and dispatches CI remediation wakes.',
     chapterId: 'software-factory',
     chapterTitle: 'The Autonomous Software Factory',
-    x: 350,
+    x: 345,
     y: 320,
-    width: 260,
+    width: 270,
     height: 72,
     icon: '🔄',
   },
@@ -146,29 +155,32 @@ export const TOPOLOGY_NODES: readonly TopologyNode[] = [
     pillar: 'agent',
     role: 'Stateless Ingress & Multi-Engine Worker',
     ports: ':8080 (Front Door) / :9080 (Worker) / :4028 (Proxy)',
+    displayPorts: ':8080 (HTTP) / :9080 (SDK)',
     description:
       'Distroless HTTP ingress front door paired with durable worker orchestrating agy, Claude Code, Codex, and Muse with read-only security guardrails.',
     chapterId: 'multimodal-agent',
     chapterTitle: 'The Multimodal AI Agent',
-    x: 660,
+    x: 655,
     y: 130,
-    width: 260,
+    width: 270,
     height: 72,
     icon: '🛰️',
   },
   {
     id: 'coven-haro',
     name: 'Coven ACT-R Memory & Haro Scheduler',
+    displayName: 'Coven & Haro Scheduler',
     pillar: 'agent',
     role: 'Cognitive Memory & Persistent Timers',
     ports: ':4008 (Coven) / :4005 (Haro Scheduler)',
+    displayPorts: ':4008 (Coven) / :4005 (Haro)',
     description:
       'ACT-R cognitive memory decay with procedural skill synthesis alongside durable cron, heartbeat, and external event-watch scheduling.',
     chapterId: 'multimodal-agent',
     chapterTitle: 'The Multimodal AI Agent',
-    x: 660,
+    x: 655,
     y: 270,
-    width: 260,
+    width: 270,
     height: 72,
     icon: '🧠',
   },
@@ -181,7 +193,7 @@ export const TOPOLOGY_EDGES: readonly TopologyEdge[] = [
     to: 'eri-restate',
     label: 'HTTP Ingress & Webhooks',
     pillar: 'agent',
-    path: 'M 300 86 C 480 86, 520 146, 660 146',
+    path: 'M 305 86 C 480 86, 520 146, 655 146',
   },
   {
     id: 'edge-eri-postgres',
@@ -189,7 +201,7 @@ export const TOPOLOGY_EDGES: readonly TopologyEdge[] = [
     to: 'cnpg-postgres',
     label: 'Session State & Vectors',
     pillar: 'platform',
-    path: 'M 660 166 C 500 166, 480 196, 300 196',
+    path: 'M 655 166 C 500 166, 480 196, 305 196',
   },
   {
     id: 'edge-eri-restate',
@@ -197,7 +209,7 @@ export const TOPOLOGY_EDGES: readonly TopologyEdge[] = [
     to: 'restate-nats',
     label: 'Durable Sessions',
     pillar: 'platform',
-    path: 'M 660 186 C 500 186, 480 290, 300 290',
+    path: 'M 655 186 C 500 186, 480 290, 305 290',
   },
   {
     id: 'edge-eri-coven',
@@ -229,7 +241,7 @@ export const TOPOLOGY_EDGES: readonly TopologyEdge[] = [
     to: 'eri-restate',
     label: 'CI Self-Healing Remediation',
     pillar: 'factory',
-    path: 'M 610 340 C 720 340, 720 250, 720 202',
+    path: 'M 615 340 C 720 340, 720 250, 720 202',
   },
   {
     id: 'edge-platform-telemetry',
@@ -328,7 +340,7 @@ export function ArchitectureMap() {
         <svg
           viewBox="0 0 960 500"
           className="arch-svg"
-          role="img"
+          role="group"
           aria-label="Aerial 3-Pillar Architecture Topology Map"
         >
           <defs>
@@ -416,13 +428,13 @@ export function ArchitectureMap() {
                     {node.icon}
                   </text>
                   <text x="44" y="27" className="node-title">
-                    {node.name}
+                    {node.displayName || node.name}
                   </text>
                   <text x="44" y="47" className="node-role">
                     {node.role}
                   </text>
                   <text x="44" y="62" className="node-ports">
-                    {node.ports}
+                    {node.displayPorts || node.ports}
                   </text>
                 </g>
               );

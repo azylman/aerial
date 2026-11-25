@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 
 export interface QuickstepItem {
   id: number;
@@ -28,9 +28,10 @@ export const QUICKSTART_STEPS: readonly QuickstepItem[] = [
     title: 'Fork Config & Bootstrap via Flux CD',
     badge: 'Two-Repo GitOps',
     summary:
-      'Fork azylman/aerial-config-example to create your private config repo, then bootstrap Flux CD to track your fork.',
+      'Fork azylman/aerial-config-example to create your private config repo, customize config.yaml with your Discord administrator ID (admin_users) and persona rules, then bootstrap Flux CD.',
     command: `export GITHUB_PAT="your-github-pat"\n\ncurl -s https://fluxcd.io/install.sh | sudo bash\nGITHUB_TOKEN="$GITHUB_PAT" flux bootstrap github \\\n  --owner=your-username \\\n  --repository=my-aerial-config \\\n  --branch=main \\\n  --path=k8s \\\n  --personal`,
     notes: [
+      'Customize config.yaml with your Discord administrator ID (admin_users) and persona rules before bootstrap',
       'Zero plaintext token stored on disk; GITHUB_PAT passed in-memory during bootstrap',
       'Flux immediately reconciles base operators, databases, and platform services',
     ],
@@ -64,6 +65,15 @@ export const QUICKSTART_STEPS: readonly QuickstepItem[] = [
 export function QuickstartSteps() {
   const [copiedId, setCopiedId] = useState<number | null>(null);
   const [activeStepTab, setActiveStepTab] = useState<number>(1);
+  const timeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  useEffect(() => {
+    return () => {
+      if (timeoutRef.current) {
+        clearTimeout(timeoutRef.current);
+      }
+    };
+  }, []);
 
   const handleCopy = async (id: number, text: string) => {
     try {
@@ -71,9 +81,13 @@ export function QuickstartSteps() {
     } catch {
       // Fallback in environments without clipboard permissions
     }
+    if (timeoutRef.current) {
+      clearTimeout(timeoutRef.current);
+    }
     setCopiedId(id);
-    setTimeout(() => {
-      setCopiedId((current) => (current === id ? null : current));
+    timeoutRef.current = setTimeout(() => {
+      setCopiedId(null);
+      timeoutRef.current = null;
     }, 2500);
   };
 
