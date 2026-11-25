@@ -55,7 +55,7 @@ a:hover {
   position: sticky;
   top: 0;
   z-index: 100;
-  background-color: rgba(var(--ae-canvas-rgb), 0.88);
+  background-color: rgb(var(--ae-canvas-rgb) / 0.88);
   backdrop-filter: blur(12px);
   -webkit-backdrop-filter: blur(12px);
   border-bottom: 1px solid var(--ae-border);
@@ -561,21 +561,21 @@ a:hover {
 }
 
 .badge-accent {
-  background-color: rgba(var(--ae-accent-rgb), 0.15);
+  background-color: rgb(var(--ae-accent-rgb) / 0.15);
   color: var(--ae-accent);
-  border: 1px solid rgba(var(--ae-accent-rgb), 0.3);
+  border: 1px solid rgb(var(--ae-accent-rgb) / 0.3);
 }
 
 .badge-success {
-  background-color: rgba(var(--ae-ok-rgb), 0.15);
+  background-color: rgb(var(--ae-ok-rgb) / 0.15);
   color: var(--ae-ok);
-  border: 1px solid rgba(var(--ae-ok-rgb), 0.3);
+  border: 1px solid rgb(var(--ae-ok-rgb) / 0.3);
 }
 
 .badge-warn {
-  background-color: rgba(var(--ae-warn-rgb), 0.15);
+  background-color: rgb(var(--ae-warn-rgb) / 0.15);
   color: var(--ae-warn);
-  border: 1px solid rgba(var(--ae-warn-rgb), 0.3);
+  border: 1px solid rgb(var(--ae-warn-rgb) / 0.3);
 }
 
 .val-ok {
@@ -642,7 +642,7 @@ a:hover {
 }
 
 .pillar-col-bg {
-  fill: rgba(var(--ae-canvas-rgb), 0.6);
+  fill: rgb(var(--ae-canvas-rgb) / 0.6);
   stroke: var(--ae-border);
   stroke-width: 1;
 }
@@ -678,7 +678,7 @@ a:hover {
   stroke: var(--ae-accent);
   stroke-width: 2.5;
   fill: var(--ae-surface);
-  filter: drop-shadow(0 0 10px rgba(var(--ae-accent-rgb), 0.3));
+  filter: drop-shadow(0 0 10px rgb(var(--ae-accent-rgb) / 0.3));
 }
 
 .node-group.dimmed {
@@ -761,21 +761,21 @@ a:hover {
 }
 
 .pillar-tag-platform {
-  background: rgba(var(--ae-info-rgb), 0.15);
+  background: rgb(var(--ae-info-rgb) / 0.15);
   color: var(--ae-info);
-  border: 1px solid rgba(var(--ae-info-rgb), 0.3);
+  border: 1px solid rgb(var(--ae-info-rgb) / 0.3);
 }
 
 .pillar-tag-factory {
-  background: rgba(var(--ae-accent-rgb), 0.15);
+  background: rgb(var(--ae-accent-rgb) / 0.15);
   color: var(--ae-accent);
-  border: 1px solid rgba(var(--ae-accent-rgb), 0.3);
+  border: 1px solid rgb(var(--ae-accent-rgb) / 0.3);
 }
 
 .pillar-tag-agent {
-  background: rgba(var(--ae-ok-rgb), 0.15);
+  background: rgb(var(--ae-ok-rgb) / 0.15);
   color: var(--ae-ok);
-  border: 1px solid rgba(var(--ae-ok-rgb), 0.3);
+  border: 1px solid rgb(var(--ae-ok-rgb) / 0.3);
 }
 
 .inspector-ports {
@@ -1094,13 +1094,13 @@ a:hover {
 }
 
 .chunk-done {
-  background-color: rgba(var(--ae-ok-rgb), 0.15);
+  background-color: rgb(var(--ae-ok-rgb) / 0.15);
   color: var(--ae-ok);
-  border-color: rgba(var(--ae-ok-rgb), 0.3);
+  border-color: rgb(var(--ae-ok-rgb) / 0.3);
 }
 
 .chunk-active {
-  background-color: rgba(var(--ae-accent-rgb), 0.2);
+  background-color: rgb(var(--ae-accent-rgb) / 0.2);
   color: var(--ae-accent);
   border-color: var(--ae-accent);
   font-weight: 700;
@@ -1526,12 +1526,12 @@ a:hover {
 
 .active-remediation {
   border-color: var(--ae-accent) !important;
-  background-color: rgba(var(--ae-accent-rgb), 0.15) !important;
+  background-color: rgb(var(--ae-accent-rgb) / 0.15) !important;
   color: var(--ae-accent) !important;
 }
 
 .remediation-banner {
-  background: linear-gradient(135deg, rgba(var(--ae-accent-rgb), 0.1), rgba(var(--ae-info-rgb), 0.1));
+  background: linear-gradient(135deg, rgb(var(--ae-accent-rgb) / 0.1), rgb(var(--ae-info-rgb) / 0.1));
   border: 1px solid var(--ae-accent);
   border-radius: 0.75rem;
   padding: 1.25rem 1.5rem;
@@ -1578,31 +1578,31 @@ a:hover {
 }
 
 .pill-fail {
-  background: rgba(var(--ae-danger-rgb), 0.15);
+  background: rgb(var(--ae-danger-rgb) / 0.15);
   color: var(--ae-danger);
   border-color: var(--ae-danger);
 }
 
 .pill-wake {
-  background: rgba(var(--ae-info-rgb), 0.15);
+  background: rgb(var(--ae-info-rgb) / 0.15);
   color: var(--ae-info);
   border-color: var(--ae-info);
 }
 
 .pill-scratch {
-  background: rgba(var(--ae-warn-rgb), 0.15);
+  background: rgb(var(--ae-warn-rgb) / 0.15);
   color: var(--ae-warn);
   border-color: var(--ae-warn);
 }
 
 .pill-retry {
-  background: rgba(var(--ae-accent-rgb), 0.15);
+  background: rgb(var(--ae-accent-rgb) / 0.15);
   color: var(--ae-accent);
   border-color: var(--ae-accent);
 }
 
 .pill-success {
-  background: rgba(var(--ae-ok-rgb), 0.15);
+  background: rgb(var(--ae-ok-rgb) / 0.15);
   color: var(--ae-ok);
   border-color: var(--ae-ok);
 }
@@ -1905,21 +1905,21 @@ a:hover {
 }
 
 .tag-homelab {
-  background: rgba(var(--ae-info-rgb), 0.15);
+  background: rgb(var(--ae-info-rgb) / 0.15);
   color: var(--ae-info);
-  border: 1px solid rgba(var(--ae-info-rgb), 0.3);
+  border: 1px solid rgb(var(--ae-info-rgb) / 0.3);
 }
 
 .tag-factory {
-  background: rgba(var(--ae-accent-rgb), 0.15);
+  background: rgb(var(--ae-accent-rgb) / 0.15);
   color: var(--ae-accent);
-  border: 1px solid rgba(var(--ae-accent-rgb), 0.3);
+  border: 1px solid rgb(var(--ae-accent-rgb) / 0.3);
 }
 
 .tag-agent {
-  background: rgba(var(--ae-ok-rgb), 0.15);
+  background: rgb(var(--ae-ok-rgb) / 0.15);
   color: var(--ae-ok);
-  border: 1px solid rgba(var(--ae-ok-rgb), 0.3);
+  border: 1px solid rgb(var(--ae-ok-rgb) / 0.3);
 }
 
 .comp-name {
@@ -1966,8 +1966,8 @@ a:hover {
 }
 
 .aerial-advantage-box {
-  background: rgba(var(--ae-accent-rgb), 0.08);
-  border: 1px solid rgba(var(--ae-accent-rgb), 0.25);
+  background: rgb(var(--ae-accent-rgb) / 0.08);
+  border: 1px solid rgb(var(--ae-accent-rgb) / 0.25);
   border-radius: 0.5rem;
   padding: 1rem;
   margin-top: auto;
@@ -2037,7 +2037,7 @@ a:hover {
 }
 
 .highlight-aerial {
-  background-color: rgba(var(--ae-accent-rgb), 0.08);
+  background-color: rgb(var(--ae-accent-rgb) / 0.08);
   color: var(--ae-accent);
   font-weight: 600;
 }
@@ -2178,7 +2178,7 @@ a:hover {
   display: flex;
   justify-content: space-between;
   padding: 0.4rem 0.85rem;
-  background-color: rgba(var(--ae-surface-elevated-rgb), 0.5);
+  background-color: rgb(var(--ae-surface-elevated-rgb) / 0.5);
   border-bottom: 1px solid var(--ae-border);
   font-family: 'JetBrains Mono', monospace;
   font-size: 0.75rem;
@@ -2221,7 +2221,7 @@ a:hover {
 }
 
 .scaling-callout {
-  background: rgba(var(--ae-info-rgb), 0.1);
+  background: rgb(var(--ae-info-rgb) / 0.1);
   border: 1px solid var(--ae-info);
   border-radius: 0.75rem;
   padding: 1.25rem 1.5rem;
@@ -2242,7 +2242,7 @@ a:hover {
 .bottom-cta-banner {
   margin-top: 5rem;
   padding: 3.5rem 2rem;
-  background: linear-gradient(135deg, rgba(var(--ae-accent-rgb), 0.15), rgba(var(--ae-info-rgb), 0.15));
+  background: linear-gradient(135deg, rgb(var(--ae-accent-rgb) / 0.15), rgb(var(--ae-info-rgb) / 0.15));
   border: 1px solid var(--ae-accent);
   border-radius: 1rem;
   text-align: center;
