@@ -270,10 +270,10 @@ func TestSQLStore_InsertFact(t *testing.T) {
 		{name: "EmptyFactText", factText: "   ", emb: angleEmbedding(0), wantErr: true},
 		{name: "InvalidEmbeddingDim", factText: "valid", emb: make([]float32, 10), wantErr: true},
 		{name: "InsertError", factText: "valid fact", emb: angleEmbedding(0), sabotage: sabotageInsertFact, wantErr: true},
-		{name: "config.DefaultStackTrimmed", factText: "  Alex drinks matcha  ", emb: angleEmbedding(0), wantText: "Alex drinks matcha", wantAgent: "aerial"},
-		{name: "StoreStack", stack: "agent-beta", factText: "Alex owns a kayak", emb: angleEmbedding(30), wantText: "Alex owns a kayak", wantAgent: "agent-beta"},
-		{name: "ExplicitSourceAgent", stack: "agent-beta", factText: "Alex likes sushi", emb: angleEmbedding(60), sourceAgent: []string{"  agent-x  "}, wantText: "Alex likes sushi", wantAgent: "agent-x"},
-		{name: "BlankSourceAgentFallsBack", factText: "Alex likes tea", emb: angleEmbedding(60), sourceAgent: []string{"  "}, wantText: "Alex likes tea", wantAgent: "aerial"},
+		{name: "config.DefaultStackTrimmed", factText: "  User drinks matcha  ", emb: angleEmbedding(0), wantText: "User drinks matcha", wantAgent: "aerial"},
+		{name: "StoreStack", stack: "agent-beta", factText: "User owns a kayak", emb: angleEmbedding(30), wantText: "User owns a kayak", wantAgent: "agent-beta"},
+		{name: "ExplicitSourceAgent", stack: "agent-beta", factText: "User likes sushi", emb: angleEmbedding(60), sourceAgent: []string{"  agent-x  "}, wantText: "User likes sushi", wantAgent: "agent-x"},
+		{name: "BlankSourceAgentFallsBack", factText: "User likes tea", emb: angleEmbedding(60), sourceAgent: []string{"  "}, wantText: "User likes tea", wantAgent: "aerial"},
 	}
 
 	for _, tc := range tests {
@@ -320,11 +320,11 @@ func TestSQLStore_UpdateFact(t *testing.T) {
 		wantCount int
 	}{
 		{name: "NilDBError", nilDB: true, factText: "valid", emb: testEmbeddingAt(5, 1), wantErr: true},
-		{name: "EmptyFactText", factText: " ", emb: testEmbeddingAt(5, 1), wantErr: true, wantText: "Alex drinks coffee", wantCount: 1},
-		{name: "InvalidEmbeddingDim", factText: "valid", emb: make([]float32, 10), wantErr: true, wantText: "Alex drinks coffee", wantCount: 1},
-		{name: "ExecError", factText: "Alex drinks matcha", emb: testEmbeddingAt(5, 1), sabotage: sabotageUpdateFact, wantErr: true, wantText: "Alex drinks coffee", wantCount: 1},
-		{name: "NotFound", id: sqlstoreMissingFactID, factText: "Alex drinks matcha", emb: testEmbeddingAt(5, 1), wantIs: ErrFactNotFound, wantText: "Alex drinks coffee", wantCount: 1},
-		{name: "SuccessRewritesAndReinforces", factText: "  Alex drinks matcha ", emb: testEmbeddingAt(5, 1), wantText: "Alex drinks matcha", wantCount: 2},
+		{name: "EmptyFactText", factText: " ", emb: testEmbeddingAt(5, 1), wantErr: true, wantText: "User drinks coffee", wantCount: 1},
+		{name: "InvalidEmbeddingDim", factText: "valid", emb: make([]float32, 10), wantErr: true, wantText: "User drinks coffee", wantCount: 1},
+		{name: "ExecError", factText: "User drinks matcha", emb: testEmbeddingAt(5, 1), sabotage: sabotageUpdateFact, wantErr: true, wantText: "User drinks coffee", wantCount: 1},
+		{name: "NotFound", id: sqlstoreMissingFactID, factText: "User drinks matcha", emb: testEmbeddingAt(5, 1), wantIs: ErrFactNotFound, wantText: "User drinks coffee", wantCount: 1},
+		{name: "SuccessRewritesAndReinforces", factText: "  User drinks matcha ", emb: testEmbeddingAt(5, 1), wantText: "User drinks matcha", wantCount: 2},
 	}
 
 	for _, tc := range tests {
@@ -336,7 +336,7 @@ func TestSQLStore_UpdateFact(t *testing.T) {
 				return
 			}
 			store := newTestStore(t)
-			seeded, err := store.InsertFact(ctx, "Alex drinks coffee", testEmbeddingAt(0, 1))
+			seeded, err := store.InsertFact(ctx, "User drinks coffee", testEmbeddingAt(0, 1))
 			if err != nil {
 				t.Fatalf("seed: %v", err)
 			}
@@ -390,7 +390,7 @@ func TestSQLStore_ReinforceFact(t *testing.T) {
 				return
 			}
 			store := newTestStore(t)
-			seeded := seedSQLStoreFacts(t, store, sqlstoreFact{text: "Alex drinks coffee", ageDays: 400})[0]
+			seeded := seedSQLStoreFacts(t, store, sqlstoreFact{text: "User drinks coffee", ageDays: 400})[0]
 			execSQL(t, store.DB(), tc.sabotage)
 			id := tc.id
 			if id == 0 {
@@ -435,7 +435,7 @@ func TestSQLStore_DeleteFact(t *testing.T) {
 				return
 			}
 			store := newTestStore(t)
-			seeded := seedSQLStoreFacts(t, store, sqlstoreFact{text: "Alex drinks coffee"})[0]
+			seeded := seedSQLStoreFacts(t, store, sqlstoreFact{text: "User drinks coffee"})[0]
 			execSQL(t, store.DB(), tc.sabotage)
 			id := tc.id
 			if id == 0 {
@@ -455,8 +455,8 @@ func TestSQLStore_DeleteFact(t *testing.T) {
 
 // sqlstoreDupFacts sit at 25.84° (cos = 0.9 to 0°) and 60° (cos = 0.5).
 var sqlstoreDupFacts = []sqlstoreFact{
-	{text: "Alex drinks matcha daily", deg: 25.84, count: 3},
-	{text: "Alex owns a kayak", deg: 60},
+	{text: "User drinks matcha daily", deg: 25.84, count: 3},
+	{text: "User owns a kayak", deg: 60},
 }
 
 func TestSQLStore_FindDuplicateFact(t *testing.T) {
@@ -477,10 +477,10 @@ func TestSQLStore_FindDuplicateFact(t *testing.T) {
 		{name: "ShortEmbeddingReturnsNil", facts: sqlstoreDupFacts, emb: make([]float32, 10)},
 		{name: "EmptyTableReturnsNil", emb: angleEmbedding(0), minSim: 0.1},
 		{name: "QueryError", facts: sqlstoreDupFacts, emb: angleEmbedding(0), sabotage: sabotageFacts, wantErr: true},
-		{name: "NearestAboveMin", facts: sqlstoreDupFacts, emb: angleEmbedding(0), minSim: 0.85, wantText: "Alex drinks matcha daily", wantCount: 3, wantSim: 0.9},
-		{name: "DefaultMinSimIs085", facts: sqlstoreDupFacts, emb: angleEmbedding(0), wantText: "Alex drinks matcha daily", wantCount: 3, wantSim: 0.9},
+		{name: "NearestAboveMin", facts: sqlstoreDupFacts, emb: angleEmbedding(0), minSim: 0.85, wantText: "User drinks matcha daily", wantCount: 3, wantSim: 0.9},
+		{name: "DefaultMinSimIs085", facts: sqlstoreDupFacts, emb: angleEmbedding(0), wantText: "User drinks matcha daily", wantCount: 3, wantSim: 0.9},
 		{name: "NearestBelowMinReportsSim", facts: sqlstoreDupFacts, emb: angleEmbedding(0), minSim: 0.95, wantSim: 0.9},
-		{name: "OtherNeighbour", facts: sqlstoreDupFacts, emb: angleEmbedding(60), minSim: 0.99, wantText: "Alex owns a kayak", wantCount: 1, wantSim: 1},
+		{name: "OtherNeighbour", facts: sqlstoreDupFacts, emb: angleEmbedding(60), minSim: 0.99, wantText: "User owns a kayak", wantCount: 1, wantSim: 1},
 	}
 
 	for _, tc := range tests {
@@ -516,11 +516,11 @@ func TestSQLStore_FindDuplicateFact(t *testing.T) {
 //	sails kayak (vr4 + tr2, count 1, 14 d):   0.9465726*1.1039721*0.7845840  = 0.819882
 //	tea (vector-only, vr5 at 90°, count 1):   0.6461538*1.1039721            = 0.713336
 var sqlstoreRankingFacts = []sqlstoreFact{
-	{text: "Alex drinks matcha", deg: 0},
-	{text: "Alex owns a kayak and a spare kayak", deg: 10},
-	{text: "Alex likes sushi", deg: 20, count: 10},
-	{text: "Alex sails a kayak", deg: 30, ageDays: 14},
-	{text: "Alex brews tea", deg: 90},
+	{text: "User drinks matcha", deg: 0},
+	{text: "User owns a kayak and a spare kayak", deg: 10},
+	{text: "User likes sushi", deg: 20, count: 10},
+	{text: "User sails a kayak", deg: 30, ageDays: 14},
+	{text: "User brews tea", deg: 90},
 }
 
 func TestSQLStore_SearchCandidateFacts(t *testing.T) {
@@ -542,23 +542,23 @@ func TestSQLStore_SearchCandidateFacts(t *testing.T) {
 		{name: "EmptyQueryReturnsNil", facts: sqlstoreRankingFacts, emb: angleEmbedding(0), query: "   "},
 		{name: "QueryError", facts: sqlstoreRankingFacts, emb: angleEmbedding(0), query: "kayak", sabotage: sabotageFactSearch, wantErr: true},
 		{name: "HybridRankingWithBoostAndDecayDefaults", facts: sqlstoreRankingFacts, emb: angleEmbedding(0), query: "kayak", limit: -1, minScore: -1, want: []sqlstoreScored{
-			{"Alex owns a kayak and a spare kayak", 1.073614},
-			{"Alex likes sushi", 0.906456},
-			{"Alex sails a kayak", 0.819882},
-			{"Alex drinks matcha", 0.760112},
-			{"Alex brews tea", 0.713336},
+			{"User owns a kayak and a spare kayak", 1.073614},
+			{"User likes sushi", 0.906456},
+			{"User sails a kayak", 0.819882},
+			{"User drinks matcha", 0.760112},
+			{"User brews tea", 0.713336},
 		}},
 		{name: "MinScoreCutoff", facts: sqlstoreRankingFacts, emb: angleEmbedding(0), query: "kayak", minScore: 0.75, want: []sqlstoreScored{
-			{"Alex owns a kayak and a spare kayak", 1.073614},
-			{"Alex likes sushi", 0.906456},
-			{"Alex sails a kayak", 0.819882},
-			{"Alex drinks matcha", 0.760112},
+			{"User owns a kayak and a spare kayak", 1.073614},
+			{"User likes sushi", 0.906456},
+			{"User sails a kayak", 0.819882},
+			{"User drinks matcha", 0.760112},
 		}},
 		// limit 2: vector hits {matcha, double kayak}, text hits {double kayak,
 		// sails kayak}; sails kayak is text-only: 60*0.3/62*1.1039721*0.784584 = 0.251465.
 		{name: "CandidateLimitTruncates", facts: sqlstoreRankingFacts, emb: angleEmbedding(0), query: "kayak", limit: 2, want: []sqlstoreScored{
-			{"Alex owns a kayak and a spare kayak", 1.073614},
-			{"Alex drinks matcha", 0.760112},
+			{"User owns a kayak and a spare kayak", 1.073614},
+			{"User drinks matcha", 0.760112},
 		}},
 	}
 
@@ -588,7 +588,7 @@ func TestSQLStore_SearchCandidateFacts(t *testing.T) {
 var sqlstorePageFacts = []sqlstoreFact{
 	{text: "Linux kernel 100%", count: 3},
 	{text: "linux_user prefers vim", count: 3, ageDays: 1},
-	{text: "Alex runs Linux"},
+	{text: "User runs Linux"},
 	{text: "Cooking pasta"},
 	{text: "linuxXuser"},
 	{text: "progress 100x"},
@@ -610,12 +610,12 @@ func TestSQLStore_GetFactsPaginated(t *testing.T) {
 		{name: "NilDBError", nilDB: true, wantErr: true},
 		{name: "CountQueryError", filter: FactsFilter{Limit: 10}, sabotage: sabotageFacts, wantErr: true},
 		{name: "SelectQueryError", filter: FactsFilter{Limit: 5}, sabotage: sqlstoreSabotagePaginateSelect, wantErr: true},
-		{name: "AllOrdered", wantTotal: 6, wantTexts: []string{"Linux kernel 100%", "linux_user prefers vim", "progress 100x", "linuxXuser", "Cooking pasta", "Alex runs Linux"}},
+		{name: "AllOrdered", wantTotal: 6, wantTexts: []string{"Linux kernel 100%", "linux_user prefers vim", "progress 100x", "linuxXuser", "Cooking pasta", "User runs Linux"}},
 		{name: "CaseInsensitiveFilterNegativeOffset", filter: FactsFilter{Query: " LINUX ", Limit: 2, Offset: -1}, wantTotal: 4, wantLimit: 2, wantTexts: []string{"Linux kernel 100%", "linux_user prefers vim"}},
 		{name: "UnderscoreEscaped", filter: FactsFilter{Query: "linux_user"}, wantTotal: 1, wantTexts: []string{"linux_user prefers vim"}},
 		{name: "PercentEscaped", filter: FactsFilter{Query: "100%"}, wantTotal: 1, wantTexts: []string{"Linux kernel 100%"}},
 		{name: "LimitOffset", filter: FactsFilter{Limit: 2, Offset: 2}, wantTotal: 6, wantLimit: 2, wantOffset: 2, wantTexts: []string{"progress 100x", "linuxXuser"}},
-		{name: "OffsetOnly", filter: FactsFilter{Offset: 4}, wantTotal: 6, wantOffset: 4, wantTexts: []string{"Cooking pasta", "Alex runs Linux"}},
+		{name: "OffsetOnly", filter: FactsFilter{Offset: 4}, wantTotal: 6, wantOffset: 4, wantTexts: []string{"Cooking pasta", "User runs Linux"}},
 		{name: "NoMatchesEmptySlice", filter: FactsFilter{Query: "kayak"}, wantTexts: []string{}},
 	}
 

@@ -13,7 +13,7 @@ const NOW = Date.parse('2026-11-08T12:00:00Z');
 
 // Importance order: 12, 7, 9, 30, 4.
 const FACTS: readonly FactItem[] = [
-  fact(4, 'Avoids cumin in recipes', 1),
+  fact(4, 'Prefers mechanical keyboards', 1),
   fact(9, 'Prefers oat milk in lattes', 3, '2026-11-08T09:00:00Z'),
   fact(12, 'Builds ship through Vanadis', 5, '2026-11-08T11:59:30Z'),
   fact(30, 'Oat milk is the default', 1),
@@ -112,7 +112,7 @@ describe('MemoryView filters', () => {
         <MemoryView />
       </>,
     );
-    fireEvent.change(search(), { target: { value: 'cumin' } });
+    fireEvent.change(search(), { target: { value: 'keyboards' } });
     expect(nodes()).toEqual(['NODE #4']);
     if (how === 'button') {
       fireEvent.click(screen.getByRole('button', { name: 'Clear search' }));
