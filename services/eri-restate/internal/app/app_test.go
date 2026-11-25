@@ -119,7 +119,7 @@ func TestEriRestateDefinitions(t *testing.T) {
 		want  map[string]map[string]string
 	}{
 		{name: "aerial", agent: "aerial", want: want("")},
-		{name: "miorine", agent: "miorine", want: want("-miorine")},
+		{name: "agent-alpha", agent: "agent-alpha", want: want("-agent-alpha")},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {

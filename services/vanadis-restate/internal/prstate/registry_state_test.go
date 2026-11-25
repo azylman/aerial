@@ -875,12 +875,12 @@ func TestPRState_Untracked(t *testing.T) {
 		{name: "pre-guard deploying residue stays untracked", st: untrackedResidue(), want: true},
 		{name: "registered pr is tracked", st: with(func(s *PRState) { s.Registered = true })},
 		{name: "opened head is tracked", st: with(func(s *PRState) { s.HeadSHA = "h1" })},
-		{name: "shadow-built opened pr without register is tracked", st: with(func(s *PRState) { s.HeadSHA, s.Agent = "h2304", "miorine" })},
+		{name: "shadow-built opened pr without register is tracked", st: with(func(s *PRState) { s.HeadSHA, s.Agent = "h2304", "agent-alpha" })},
 		{name: "merge sha is tracked", st: with(func(s *PRState) { s.MergeSHA = "m1" })},
 		{name: "target thread is tracked", st: with(func(s *PRState) { s.TargetID = "100000000000000001" })},
 		{name: "opened with body bot metadata is tracked", st: with(func(s *PRState) {
-			applyEventRow(s, PREvent{Repo: s.Repo, PRNumber: s.PRNumber, HeadSHA: "h1", Agent: "suletta"})
-			s.ClaimOwner("suletta")
+			applyEventRow(s, PREvent{Repo: s.Repo, PRNumber: s.PRNumber, HeadSHA: "h1", Agent: "agent-beta"})
+			s.ClaimOwner("agent-beta")
 		})},
 		{name: "merged terminal is tracked", st: with(func(s *PRState) { s.Terminal = TerminalMerged })},
 		{name: "closed terminal is tracked", st: with(func(s *PRState) { s.Terminal = TerminalClosed })},
@@ -934,20 +934,20 @@ func TestPRState_ApplySelfRegistration(t *testing.T) {
 			wantState: PRState{Branch: "dependabot/x", HeadSHA: "h1", TargetID: "100000000000000009", Title: "T"},
 		},
 		{
-			name: "insert seeds the lowercased body owner", head: "h1", target: "100000000000000002", title: "T", agent: " Miorine ", want: true,
-			wantState: PRState{HeadSHA: "h1", TargetID: "100000000000000002", Title: "T", Agent: "miorine"},
+			name: "insert seeds the lowercased body owner", head: "h1", target: "100000000000000002", title: "T", agent: " Agent-Alpha ", want: true,
+			wantState: PRState{HeadSHA: "h1", TargetID: "100000000000000002", Title: "T", Agent: "agent-alpha"},
 		},
 		{
-			name: "insert claims over a hinted owner", stored: PRState{Agent: "aerial"}, target: "100000000000000002", agent: "miorine", want: true,
-			wantState: PRState{TargetID: "100000000000000002", Agent: "miorine"},
+			name: "insert claims over a hinted owner", stored: PRState{Agent: "aerial"}, target: "100000000000000002", agent: "agent-alpha", want: true,
+			wantState: PRState{TargetID: "100000000000000002", Agent: "agent-alpha"},
 		},
 		{
-			name: "insert after register only fills an empty owner", stored: PRState{Registered: true, Agent: "aerial"}, target: "100000000000000002", agent: "miorine", want: true,
+			name: "insert after register only fills an empty owner", stored: PRState{Registered: true, Agent: "aerial"}, target: "100000000000000002", agent: "agent-alpha", want: true,
 			wantState: PRState{Registered: true, TargetID: "100000000000000002", Agent: "aerial"},
 		},
 		{
 			name: "stored target wins and keeps the owner", stored: PRState{Branch: "feat", HeadSHA: "h1", TargetID: "100000000000000001", Title: "Old", Agent: "aerial"},
-			branch: "feat", head: "h2", target: "100000000000000009", title: "New", agent: "miorine",
+			branch: "feat", head: "h2", target: "100000000000000009", title: "New", agent: "agent-alpha",
 			wantState: PRState{Branch: "feat", HeadSHA: "h1", TargetID: "100000000000000001", Title: "Old", Agent: "aerial"},
 		},
 		{

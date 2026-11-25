@@ -19,7 +19,7 @@ func TestHasAerialPRMetadata(t *testing.T) {
 	}{
 		{name: "no trailer", body: "plain body"},
 		{name: "bot id trailer", body: "x <!-- aerial-pr: {\"bot_id\":\"aerial\"} -->", want: true},
-		{name: "agent trailer", body: "<!-- aerial-pr: {\"agent\":\"miorine\"} -->", want: true},
+		{name: "agent trailer", body: "<!-- aerial-pr: {\"agent\":\"agent-alpha\"} -->", want: true},
 		{name: "snowflake target trailer", body: "<!-- aerial-pr: {\"target_id\":\"discord-123456789012345678\"} -->", want: true},
 		{name: "headless target trailer", body: "<!-- aerial-pr: {\"target_id\":\"pool:dispatch-abc\"} -->", want: true},
 		{name: "invalid target only", body: "<!-- aerial-pr: {\"target_id\":\"general\"} -->"},

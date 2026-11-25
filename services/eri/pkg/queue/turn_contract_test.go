@@ -23,8 +23,8 @@ func TestTurnRunnerServiceName(t *testing.T) {
 		{"empty", "", "TurnRunner"},
 		{"aerial", "aerial", "TurnRunner"},
 		{"mixed case with spaces", "  AERIAL ", "TurnRunner"},
-		{"miorine", "miorine", "TurnRunner-miorine"},
-		{"suletta", "Suletta", "TurnRunner-suletta"},
+		{"agent-alpha", "agent-alpha", "TurnRunner-agent-alpha"},
+		{"agent-beta", "Agent-Beta", "TurnRunner-agent-beta"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {

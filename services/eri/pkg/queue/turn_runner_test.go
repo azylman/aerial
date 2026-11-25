@@ -506,9 +506,9 @@ var turnRunnerBurstCases = []turnRunnerBurstCase{
 		wantCalls:   []string{"started", "prep", `fail m1,m2 queue: unknown prep decision "maybe"`},
 	},
 	{
-		name: "OnTurnDoneTargetsAgentCoordinator", agent: "miorine", started: StartedTurn{},
+		name: "OnTurnDoneTargetsAgentCoordinator", agent: "agent-alpha", started: StartedTurn{},
 		wantOutcome: OutcomeEmpty,
-		wantCmds:    []string{"run record-started", doneSend("ThreadSession-miorine", "thread-1", OutcomeEmpty, 0)},
+		wantCmds:    []string{"run record-started", doneSend("ThreadSession-agent-alpha", "thread-1", OutcomeEmpty, 0)},
 		wantCalls:   []string{"started"},
 	},
 }
@@ -582,9 +582,9 @@ func TestTurnRunnerRunDispatch(t *testing.T) {
 			wantCalls:   []string{"started", "prep", "attempt ord=1 run=1", "fail d1 integrity violation"},
 		},
 		{
-			name: "AgentScopedCoordinator", agent: "suletta", started: StartedTurn{},
+			name: "AgentScopedCoordinator", agent: "agent-beta", started: StartedTurn{},
 			wantOutcome: OutcomeEmpty,
-			wantCmds:    []string{"run record-started", doneSend("DispatchSession-suletta", "session-1", OutcomeEmpty, 0)},
+			wantCmds:    []string{"run record-started", doneSend("DispatchSession-agent-beta", "session-1", OutcomeEmpty, 0)},
 			wantCalls:   []string{"started"},
 		},
 	}
@@ -611,7 +611,7 @@ func TestReflectTurnRunner(t *testing.T) {
 		wantName string
 	}{
 		{name: "PrimaryAgent", agent: "", wantName: "TurnRunner"},
-		{name: "SiblingAgent", agent: "miorine", wantName: "TurnRunner-miorine"},
+		{name: "SiblingAgent", agent: "agent-alpha", wantName: "TurnRunner-agent-alpha"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
