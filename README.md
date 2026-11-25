@@ -119,9 +119,9 @@ azylman/aerial (Engine Repo)              your-aerial-config (Private Overlay Re
 │ Voice & Telephony Ingress    │ HTTP REST & Event Webhooks   │ Discord Gateway Funnel        │
 │ • /voice/ask Voice Pipeline  │ • /prompt (Prompt Injection) │ • synapse Gateway WebSocket   │
 │ • Prospera PSTN Agent        │ • /discord/message Outbound  │ • Catch-up Sweeps & JetStream │
-│ • Optional STT/TTS Sidecars  │ • /internal/discord/message  │ • POST /internal/discord/msg  │
-│ • Low-Latency Audio Routing  │ • /internal/discord/interact │ • POST /internal/discord/int  │
-│                              │ • Edge Gateway Webhooks      │ • Ambient Wake Classification │
+│ • Optional STT/TTS Sidecars  │ • Edge Gateway Webhooks      │ • POST /internal/discord/     │
+│ • Low-Latency Audio Routing  │                              │   message & interaction       │
+│                              │                              │ • Ambient Wake Classification │
 └──────────────────────────────┴──────────────────────────────┴───────────────────────────────┘
                                                │
                                                ▼
@@ -192,7 +192,7 @@ Where standalone coding agent orchestrators run in local `tmux` sessions without
 2. **Ephemeral Scratch Clones & Multi-Agent Review**: Code, schema, and manifest changes are authored in isolated scratch clones (`scripts/aerial-pr.sh init [repo]`), audited by parallel multi-agent review panels, and verified locally (`./scripts/verify.sh --staged`) before submission.
 3. **Durable Multi-PR Build Pipelines (`vanadis` + `vanadis-restate`)**: Multi-PR and cross-repository rollouts (such as shipping an upstream engine feature before enabling downstream config) are enqueued as a single DAG build (`scripts/aerial-build.sh enqueue`). **Restate** durable Virtual Objects (`Build`, `BuildRouter`) and **NATS JetStream** (`aerial.pr.>`) coordinate ordered chunk execution and GitHub auto-merge (`SQUASH`).
 4. **In-Cluster CI & Automated Code Review (`github-runner` + RoboRev)**: Scale-to-zero **GitHub Actions Runner Controller (ARC)** runner sets execute clean-room test/coverage matrices, publish container images to GHCR, and run automated **RoboRev** LLM code reviews on every Pull Request.
-5. **Event-Driven Push GitOps & Self-Healing (`synapse` + Flux CD + `vanadis-restate`)**: Authenticated GitHub push and CI webhooks flow through `edge-gateway` to **`synapse`**, which forwards events to Restate `PRObject` and `RepoObject` on **`vanadis-restate`**. In turn, `vanadis-restate` updates `ConfigMap/aerial-image-tags` in `flux-system`, triggers immediate **Flux CD** Kustomization reconciliation, publishes `aerial.pr.>` facts onto **NATS JetStream** to advance dependent build chunks, and wakes `eri-restate` with failure context if CI checks or **RoboRev** fail to remediate the branch.
+5. **Event-Driven Push GitOps & Self-Healing (`synapse` + Flux CD + `vanadis-restate`)**: Authenticated GitHub push and CI webhooks flow through `edge-gateway` to **`synapse`**, which forwards events to Restate `PRObject` and `RepoObject` on **`vanadis-restate`**. In turn, `vanadis-restate` updates `ConfigMap/aerial-image-tags` in `flux-system`, triggers immediate **Flux CD** Kustomization reconciliation, publishes `aerial.pr.>` facts onto **NATS JetStream** to advance dependent build chunks, and, if CI checks or **RoboRev** fail, wakes `eri-restate` with the failure context to remediate the branch.
 
 ---
 

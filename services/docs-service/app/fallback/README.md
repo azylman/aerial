@@ -110,18 +110,25 @@ Kubelet Container Metrics"]
 
     %% Core interactions
     Eri --> EriRestate
+    Eri --> Haro
+    Eri --> Pjev
+    Eri --> Senses
     EriRestate --> Restate
     EriRestate --> Postgres
+    EriRestate --> Haro
+    EriRestate --> Vanadis
     Haro --> Postgres
     Haro --> Restate
     Coven --> Postgres
     Coven --> Restate
+    Coven --> Senses
     Vanadis --> Postgres
     Vanadis --> Nats
     VanadisNats --> Restate
     VanadisRestate --> Restate
     VanadisRestate --> Nats
     Transcripts --> Postgres
+    Transcripts --> Senses
     Synapse --> Nats
 
     %% GitOps & Persistence
