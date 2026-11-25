@@ -81,7 +81,7 @@ bazel test //services/... //pkg/...`,
         bullets: [
           'Task DAG Queue: Work is structured in Vikunja task graphs and queued through docket-mcp based on dependency readiness.',
           'Multi-Chunk Builds: Features spanning upstream engine and downstream user configuration are enqueued as cohesive multi-chunk Vanadis plans.',
-          'Multi-Agent Review: Tiered review panels (the Girl Gang) inspect plans and diffs across architecture, security, and edge-case angles.',
+          'Multi-Agent Review: Tiered multi-agent review panels inspect plans and diffs across architecture, security, and edge-case angles.',
           'Autonomous Remediation: Green CI checks merge automatically, while test failures immediately wake targeted remediation agents with exact failure logs.',
         ],
         callout: {
@@ -210,11 +210,11 @@ GITHUB_TOKEN="$GITHUB_PAT" flux bootstrap github \\
           'Aerial utilizes Infisical and External Secrets Operator for centralized secret management, preventing plaintext secrets from ever touching Git repositories.',
         paragraphs: [
           'All application credentials, Discord bot tokens, and API keys are stored in an in-cluster Infisical instance. External Secrets Operator (ESO) watches Infisical and creates scoped Kubernetes Secrets consumed by microservices.',
-          'Bootstrapping Infisical involves creating a Machine Identity, granting it read access to the aerial project (default project slug aerial-8-jn8, configurable via INFISICAL_PROJECT_SLUG), and saving its credentials as a Kubernetes Secret. External Secrets Operator automatically generates database, Infisical, VictoriaMetrics, NATS, and GitHub webhook credentials and syncs them into Infisical via PushSecret.',
+          'Bootstrapping Infisical involves creating a Machine Identity, granting it read access to the aerial project (default project slug aerial, configurable via INFISICAL_PROJECT_SLUG), and saving its credentials as a Kubernetes Secret. External Secrets Operator automatically generates database, Infisical, VictoriaMetrics, NATS, and GitHub webhook credentials and syncs them into Infisical via PushSecret.',
         ],
         bullets: [
           'Universal Auth: Kubernetes workloads authenticate to Infisical via Machine Identity tokens.',
-          'Project Slug: Defaults to aerial-8-jn8, overridden via INFISICAL_PROJECT_SLUG in aerial-config/k8s/cluster-overrides.yaml.',
+          'Project Slug: Defaults to aerial, overridden via INFISICAL_PROJECT_SLUG in aerial-config/k8s/cluster-overrides.yaml.',
           'Automated Generation: Database passwords, internal webhook secrets, and NATS credentials generate automatically.',
           'Scoped Distribution: Each microservice receives only the environment variables it requires.',
         ],
@@ -234,7 +234,7 @@ export INFISICAL_TOKEN="$(infisical bootstrap \\
 kubectl create secret generic infisical-universal-auth \\
   --from-literal=INFISICAL_TOKEN="$INFISICAL_TOKEN"
 
-# 3. Populate Discord Bot Token and GitHub PAT in project aerial-8-jn8 (default environment)
+# 3. Populate Discord Bot Token and GitHub PAT in project aerial (default environment)
 infisical secrets set --env=default \\
   DISCORD_BOT_TOKEN="your-discord-token" \\
   GITHUB_PAT="$GITHUB_PAT"`,
@@ -431,19 +431,19 @@ data:
           'Engineering tasks are classified into distinct tiers with rigorous multi-agent plan and diff reviews for non-trivial modifications.',
         paragraphs: [
           'Aerial prevents reckless code modifications by enforcing a strict tiering rubric: Tier 0 (trivial configuration and documentation tweaks ≤ 5 LOC), Tier 1 (targeted single-package bugfixes and features), Tier 2 (cross-package refactors), and Tier 3 (architectural changes and schema migrations).',
-          'Tier 1 and above require review by the Girl Gang—a panel of specialized subagents evaluating the plan and diff from distinct angles: Architecture & Contracts, Security & Invariants, Test Coverage & Edge Cases, and Operational Simplicity.',
+          'Tier 1 and above require review by a multi-agent review panel—specialized subagents evaluating the plan and diff from distinct angles: Architecture & Contracts, Security & Invariants, Test Coverage & Edge Cases, and Operational Simplicity.',
         ],
         bullets: [
           'Tier 0: Direct execution with verify.sh validation (single PR).',
-          'Tier 1: Girl Gang plan review + verification before commit.',
+          'Tier 1: Multi-agent plan review + verification before commit.',
           'Tier 2-3: Formal multi-agent review panel + multi-chunk Vanadis build.',
           'Dynamic Scope Re-Tiering: If unexpected complexity is uncovered during execution, the task is immediately promoted to a higher tier.',
         ],
         callout: {
           type: 'important',
-          title: 'The Girl Gang Moniker',
+          title: 'Adversarial Multi-Agent Review Panel',
           text:
-            'The subagent review panel is formally designated as the Girl Gang (or the gang), providing independent, adversarial review passes before code is merged.',
+            'The subagent review panel provides independent, adversarial review passes across architecture, security, and testing before code is merged.',
         },
       },
       {

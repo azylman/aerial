@@ -234,7 +234,7 @@ export function GlassBoxShowcase() {
                     { step: 1, name: 'User Directive Received', type: 'event', duration: '12ms' },
                     { step: 2, name: 'Tool: docket_ready', type: 'tool', duration: '18ms' },
                     { step: 3, name: 'Tool: aerial_pr_init', type: 'tool', duration: '210ms' },
-                    { step: 4, name: 'Subagent: Girl Gang Review', type: 'subagent', duration: '1,420ms' },
+                    { step: 4, name: 'Subagent: Multi-Agent Review', type: 'subagent', duration: '1,420ms' },
                     { step: 5, name: 'Tool: verify_and_submit', type: 'tool', duration: '450ms' },
                   ].map((s, idx) => (
                     <button
@@ -287,7 +287,7 @@ export function GlassBoxShowcase() {
                   )}
                   {activeStepIndex === 3 && (
                     <div className="step-body">
-                      <h4>Subagent: Girl Gang Multi-Agent Review</h4>
+                      <h4>Subagent: Multi-Agent Review Panel</h4>
                       <p>Dispatched parallel subagents to audit architecture contracts, test isolation, and security guardrails.</p>
                       <pre>
                         <code>{`{\n  "panel": ["architecture", "security", "testing"],\n  "verdict": "APPROVED",\n  "findings": []\n}`}</code>

@@ -646,7 +646,7 @@ type unpinnedFactStore struct {
 
 func TestWithFactWriteTx(t *testing.T) {
 	t.Parallel()
-	const factText = "Alex keeps the espresso grinder on setting twelve"
+	const factText = "User keeps the espresso grinder on setting twelve"
 	testErr := errors.New("write failed")
 
 	tests := []struct {
@@ -723,7 +723,7 @@ func TestWithFactWriteTx(t *testing.T) {
 // unrelated inserts proceed independently.
 func TestReconcileCandidateFact_ConcurrentWrites(t *testing.T) {
 	t.Parallel()
-	const seededText = "Alex prefers single-origin espresso in the morning"
+	const seededText = "User prefers single-origin espresso in the morning"
 
 	tests := []struct {
 		name          string
@@ -751,7 +751,7 @@ func TestReconcileCandidateFact_ConcurrentWrites(t *testing.T) {
 			for i := range tc.workers {
 				idx, text := 0, seededText
 				if tc.distinct {
-					idx, text = i, fmt.Sprintf("Alex owns household appliance number %d", i)
+					idx, text = i, fmt.Sprintf("User owns household appliance number %d", i)
 				}
 				client := &MockOllamaClient{embedding: testEmbeddingAt(idx, 1)}
 				item := ExtractedFactItem{Action: actionAdd, FactText: text}
@@ -808,8 +808,8 @@ func (v vanishingStore) DeleteFact(ctx context.Context, id int64) error {
 func TestWriteCandidateReconcile_TargetVanished(t *testing.T) {
 	t.Parallel()
 	const (
-		seededText = "Alex prefers oat milk in every latte"
-		candText   = "Alex prefers whole milk in cappuccinos"
+		seededText = "User prefers oat milk in every latte"
+		candText   = "User prefers whole milk in cappuccinos"
 	)
 
 	tests := []struct {

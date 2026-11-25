@@ -72,7 +72,7 @@ Inventory agents read code, not live state. Before reporting that a build is stu
 Lead with what can come out safely (delete, compaction, duplication, with LOC each). Then list only the calls the user has to make (whole services, features, legacy paths, VRAM-holding models). Then blind spots, bugs found along the way, and any side effects the inventory caused. Record the user's answers in `inventory/DECISIONS.md`. It overrides every inventory file, and every chunk reads it first.
 
 ## 4. Turn it into staged builds
-**REQUIRED SUB-SKILL:** Load `self-improvement` and its `references/vanadis-build-authoring.md`. Sweeps are Tier 3: Girl Gang plan review, then human approval before enqueue. Split builds where risk changes:
+**REQUIRED SUB-SKILL:** Load `self-improvement` and its `references/vanadis-build-authoring.md`. Sweeps are Tier 3: multi-agent plan review, then human approval before enqueue. Split builds where risk changes:
 1. **Feature cutovers and removals the user approved** (e.g. switching on a dark replacement, then deleting the legacy path). Own build, with live soak gates that write evidence files. Each destructive chunk re-proves the previous gate before deleting anything.
 2. **Dead code purge**, parallel chunks per service group and repo, plus a live verify chunk per deploy group. Close coverage blind spots here so the next sweep has data, and drop any dead schema tables/columns via declarative `schema.sql` + Atlas migrations (`scripts/atlas-diff.sh`).
 3. **Shared helpers**: new `pkg/` packages first, then one adoption chunk per module in parallel, then cross-repo adoption.

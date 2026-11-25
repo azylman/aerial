@@ -31,7 +31,7 @@ const QueueKpis = memo(function QueueKpis() {
   );
 });
 
-/** The ACTIVE TASKS cockpit (#tasks-view). */
+/** The ACTIVE TASKS dashboard (#tasks-view). */
 export default function TasksView() {
   return (
     <>

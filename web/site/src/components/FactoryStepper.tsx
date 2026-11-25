@@ -41,7 +41,7 @@ export const FACTORY_STAGES: readonly FactoryStage[] = [
   {
     id: 2,
     title: 'Ephemeral Scratch & Multi-Agent Review',
-    subtitle: 'Isolated worktrees & Girl Gang audits',
+    subtitle: 'Isolated worktrees & multi-agent audits',
     icon: '🧪',
     component: 'scripts/aerial-pr.sh init + Subagent Review Panel',
     inputs: [
@@ -51,7 +51,7 @@ export const FACTORY_STAGES: readonly FactoryStage[] = [
     actions: [
       'Clones isolated ephemeral worktree in /data/scratch/',
       'Authors code, tests, and declarative schema.sql migrations',
-      'Dispatches parallel Girl Gang review panel (architecture, security, test coverage)',
+      'Dispatches parallel multi-agent review panel (architecture, security, test coverage)',
       'Runs local hermetic verification (./scripts/verify.sh --staged)',
     ],
     outputs: [

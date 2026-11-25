@@ -22,7 +22,7 @@ const fact = (id: number, text: string, count: number, last?: string): FactItem 
 
 // Importance order: 12 (5x), 7 (3x, newer), 9 (3x, older), 30 (1x, higher id), 4 (0 -> 1x).
 const FACTS: readonly FactItem[] = [
-  fact(4, 'Avoids cumin in recipes', 0),
+  fact(4, 'Prefers mechanical keyboards', 0),
   fact(9, 'Prefers oat milk in lattes', 3, '2026-11-01T00:00:00Z'),
   fact(12, 'Builds ship through Vanadis', 5, '2026-11-02T00:00:00Z'),
   fact(30, 'Oat milk is the default', 1),
@@ -51,7 +51,7 @@ describe('filterFacts', () => {
     { name: 'text query across categories', category: 'ALL', query: 'oat milk', want: [9, 30] },
     { name: 'text query within a pill', category: 'BASE', query: 'oat milk', want: [30] },
     { name: 'id query', category: 'ALL', query: '12', want: [12] },
-    { name: 'no match', category: 'REINFORCED', query: 'cumin', want: [] },
+    { name: 'no match', category: 'REINFORCED', query: 'keyboards', want: [] },
   ])('$name', ({ category, query, want }) => {
     expect(filterFacts(INDEX, category, query).map((f) => f.fact.id)).toEqual(want);
   });

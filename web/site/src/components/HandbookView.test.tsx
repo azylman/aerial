@@ -73,7 +73,7 @@ describe('filterChapters helper', () => {
 
   it('matches section by callout title and text', () => {
     // Callout title
-    const byCalloutTitle = filterChapters(HANDBOOK_CHAPTERS, 'The Girl Gang Moniker');
+    const byCalloutTitle = filterChapters(HANDBOOK_CHAPTERS, 'Adversarial Multi-Agent Review Panel');
     expect(byCalloutTitle.length).toBeGreaterThan(0);
     expect(byCalloutTitle[0]!.id).toBe('software-factory');
 

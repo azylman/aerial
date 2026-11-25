@@ -331,7 +331,7 @@ spec:
             key: INFISICAL_TOKEN
             name: infisical-universal-auth
       secretsScope:
-        projectSlug: ${INFISICAL_PROJECT_SLUG:=aerial-8-jn8}
+        projectSlug: ${INFISICAL_PROJECT_SLUG:=aerial}
         environmentSlug: default
         secretsPath: /
         recursive: false
