@@ -2,11 +2,25 @@ import { ArchitectureMap } from './ArchitectureMap';
 import { GlassBoxShowcase } from './GlassBoxShowcase';
 import { FactoryStepper } from './FactoryStepper';
 import { ComparisonMatrix } from './ComparisonMatrix';
-import { QuickstartSteps } from './QuickstartSteps';
+import { QUICKSTART_STEPS, QuickstartSteps } from './QuickstartSteps';
+import { UseCaseGallery, USE_CASE_SCENARIOS } from './UseCaseGallery';
+import { useCopyToClipboard } from '../useCopyToClipboard';
 
-export { ArchitectureMap, GlassBoxShowcase, FactoryStepper, ComparisonMatrix, QuickstartSteps };
+export {
+  ArchitectureMap,
+  GlassBoxShowcase,
+  FactoryStepper,
+  ComparisonMatrix,
+  QuickstartSteps,
+  UseCaseGallery,
+  USE_CASE_SCENARIOS,
+};
+
+export const HERO_INSTALL_COMMAND = QUICKSTART_STEPS[0]!.command;
 
 export function LandingView() {
+  const { copy, isCopied, isFailed } = useCopyToClipboard();
+
   return (
     <section className="landing-view" data-testid="landing-view">
       {/* Hero Section */}
@@ -21,6 +35,31 @@ export function LandingView() {
           A closed-loop, self-hosted platform pairing continuous software delivery with multimodal intelligence.
           From Discord and voice interactions to multi-PR DAG builds, automated GitHub review loops, and push GitOps.
         </p>
+
+        {/* Quick-Install Terminal Pill */}
+        <div className="hero-install-pill" data-testid="hero-install-pill">
+          <span className="install-pill-badge">Step 1</span>
+          <span className="install-pill-prompt" aria-hidden="true">
+            $
+          </span>
+          <code className="install-pill-code">{HERO_INSTALL_COMMAND}</code>
+          <div className="install-pill-actions">
+            <button
+              type="button"
+              className={`install-copy-btn ${isCopied() ? 'copied' : ''} ${isFailed() ? 'failed' : ''}`}
+              onClick={() => copy(HERO_INSTALL_COMMAND)}
+              aria-label="Copy bootstrap command"
+              data-testid="hero-install-copy-btn"
+            >
+              <span aria-hidden="true">{isCopied() ? '✓' : isFailed() ? '⚠️' : '📋'}</span>
+              <span>{isCopied() ? 'Copied!' : isFailed() ? 'Copy failed' : 'Copy'}</span>
+            </button>
+            <a href="#quickstart" className="install-guide-link" data-testid="hero-install-jump">
+              4-Step Guide ↓
+            </a>
+          </div>
+        </div>
+
         <div className="hero-actions">
           <a href="#/docs/overview" className="btn-primary" data-testid="hero-cta-handbook">
             Read the Handbook
@@ -81,6 +120,11 @@ export function LandingView() {
           </p>
         </div>
       </div>
+
+      {/* Interactive Use-Case Gallery */}
+      <section className="landing-section" id="use-cases" data-testid="section-use-cases">
+        <UseCaseGallery />
+      </section>
 
       {/* Interactive Architecture Map */}
       <section className="landing-section" id="architecture" data-testid="section-architecture">

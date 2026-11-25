@@ -4,8 +4,9 @@ import { ArchitectureMap } from './ArchitectureMap';
 import { ComparisonMatrix } from './ComparisonMatrix';
 import { FactoryStepper } from './FactoryStepper';
 import { GlassBoxShowcase } from './GlassBoxShowcase';
-import { LandingView } from './LandingView';
+import { HERO_INSTALL_COMMAND, LandingView } from './LandingView';
 import { QuickstartSteps } from './QuickstartSteps';
+import { UseCaseGallery } from './UseCaseGallery';
 
 describe('LandingView Component', () => {
   afterEach(() => {
@@ -15,6 +16,7 @@ describe('LandingView Component', () => {
   it('renders landing hero, pillar features, and all showcase sections', () => {
     render(<LandingView />);
 
+    expect(within(screen.getByTestId('section-use-cases')).getByTestId('use-case-gallery')).toBeTruthy();
     expect(within(screen.getByTestId('section-architecture')).getByTestId('architecture-map')).toBeTruthy();
     expect(within(screen.getByTestId('section-factory')).getByTestId('factory-stepper')).toBeTruthy();
     expect(within(screen.getByTestId('section-showcase')).getByTestId('glassbox-showcase')).toBeTruthy();
@@ -395,5 +397,100 @@ describe('QuickstartSteps Component', () => {
     // Unmount cancels pending timer via effect cleanup
     unmount();
     expect(vi.getTimerCount()).toBe(0);
+  });
+});
+
+describe('LandingView Hero Quick-Install Pill', () => {
+  afterEach(() => {
+    cleanup();
+  });
+
+  it('renders quick-install pill with bootstrap command, copy button, and anchor jump', () => {
+    render(<LandingView />);
+
+    const pill = screen.getByTestId('hero-install-pill');
+    expect(pill.textContent).toContain(HERO_INSTALL_COMMAND);
+
+    const jumpLink = screen.getByTestId('hero-install-jump');
+    expect(jumpLink.getAttribute('href')).toBe('#quickstart');
+  });
+
+  it('copies hero install command to clipboard and updates button label', async () => {
+    const writeTextMock = vi.fn().mockResolvedValue(undefined);
+    Object.assign(navigator, {
+      clipboard: {
+        writeText: writeTextMock,
+      },
+    });
+
+    render(<LandingView />);
+
+    const copyBtn = screen.getByTestId('hero-install-copy-btn');
+    expect(copyBtn.textContent).toContain('Copy');
+
+    await act(async () => {
+      fireEvent.click(copyBtn);
+    });
+
+    expect(writeTextMock).toHaveBeenCalledWith(HERO_INSTALL_COMMAND);
+    expect(copyBtn.textContent).toContain('Copied!');
+  });
+
+  it('handles hero install clipboard failure gracefully', async () => {
+    const writeTextMock = vi.fn().mockRejectedValue(new Error('Permission denied'));
+    Object.assign(navigator, {
+      clipboard: {
+        writeText: writeTextMock,
+      },
+    });
+
+    render(<LandingView />);
+
+    const copyBtn = screen.getByTestId('hero-install-copy-btn');
+    await act(async () => {
+      fireEvent.click(copyBtn);
+    });
+
+    expect(copyBtn.textContent).toContain('Copy failed');
+  });
+});
+
+describe('UseCaseGallery Component', () => {
+  afterEach(() => {
+    cleanup();
+  });
+
+  it('renders default scenario and switches tabs across all 4 scenarios', () => {
+    render(<UseCaseGallery />);
+
+    const promptEl = screen.getByTestId('usecase-prompt');
+    const outcomeEl = screen.getByTestId('usecase-outcome');
+
+    // Default scenario: ci-remediation
+    expect(screen.getByTestId('usecase-tab-ci-remediation').classList.contains('active')).toBe(true);
+    expect(promptEl.textContent).toContain('Fix the failing unit tests');
+    expect(outcomeEl.textContent).toContain('Automated code review passes');
+    expect(screen.getByTestId('usecase-step-0').textContent).toContain('Parse compiler failure logs');
+
+    // Switch to multi-pr-migration
+    fireEvent.click(screen.getByTestId('usecase-tab-multi-pr-migration'));
+    expect(screen.getByTestId('usecase-tab-multi-pr-migration').classList.contains('active')).toBe(true);
+    expect(screen.getByTestId('usecase-prompt').textContent).toContain('vector embeddings column');
+    expect(screen.getByTestId('usecase-outcome').textContent).toContain('Multi-repository changes deploy sequentially');
+    expect(screen.getByTestId('usecase-step-1').textContent).toContain('Enqueue multi-stage build workflow');
+
+    // Switch to incident-triage
+    fireEvent.click(screen.getByTestId('usecase-tab-incident-triage'));
+    expect(screen.getByTestId('usecase-tab-incident-triage').classList.contains('active')).toBe(true);
+    expect(screen.getByTestId('usecase-prompt').textContent).toContain('Why did voice interaction latency spike');
+    expect(screen.getByTestId('usecase-outcome').textContent).toContain('Engineers receive root-cause diagnosis');
+    expect(screen.getByTestId('usecase-step-2').textContent).toContain('Publish incident diagnosis');
+
+    // Switch to smart-home-scheduler
+    fireEvent.click(screen.getByTestId('usecase-tab-smart-home-scheduler'));
+    expect(screen.getByTestId('usecase-tab-smart-home-scheduler').classList.contains('active')).toBe(true);
+    expect(screen.getByTestId('usecase-prompt').textContent).toContain('Turn off hallway lights');
+    expect(screen.getByTestId('usecase-outcome').textContent).toContain('Routines survive service restarts');
+    expect(screen.getByTestId('usecase-step-0').textContent).toContain('Schedule durable one-shot timer');
   });
 });
