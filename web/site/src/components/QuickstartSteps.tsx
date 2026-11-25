@@ -1,4 +1,5 @@
-import { useEffect, useRef, useState } from 'react';
+import { useState } from 'react';
+import { useCopyToClipboard } from '../useCopyToClipboard';
 
 export interface QuickstepItem {
   id: number;
@@ -63,44 +64,8 @@ export const QUICKSTART_STEPS: readonly QuickstepItem[] = [
 ];
 
 export function QuickstartSteps() {
-  const [copiedId, setCopiedId] = useState<number | null>(null);
-  const [copyFailedId, setCopyFailedId] = useState<number | null>(null);
   const [activeStepTab, setActiveStepTab] = useState<number>(1);
-  const timeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-
-  useEffect(() => {
-    return () => {
-      if (timeoutRef.current) {
-        clearTimeout(timeoutRef.current);
-      }
-    };
-  }, []);
-
-  const handleCopy = async (id: number, text: string) => {
-    if (timeoutRef.current) {
-      clearTimeout(timeoutRef.current);
-      timeoutRef.current = null;
-    }
-    try {
-      if (!navigator.clipboard?.writeText) {
-        throw new Error('Clipboard API not available');
-      }
-      await navigator.clipboard.writeText(text);
-      setCopyFailedId(null);
-      setCopiedId(id);
-      timeoutRef.current = setTimeout(() => {
-        setCopiedId(null);
-        timeoutRef.current = null;
-      }, 2500);
-    } catch {
-      setCopiedId(null);
-      setCopyFailedId(id);
-      timeoutRef.current = setTimeout(() => {
-        setCopyFailedId(null);
-        timeoutRef.current = null;
-      }, 2500);
-    }
-  };
+  const { copy, isCopied, isFailed } = useCopyToClipboard<number>();
 
   return (
     <div className="quickstart-container" data-testid="quickstart-steps">
@@ -133,8 +98,8 @@ export function QuickstartSteps() {
       {/* Terminal Steps Stream */}
       <div className="terminal-steps-list">
         {QUICKSTART_STEPS.filter((s) => s.id === activeStepTab).map((step) => {
-          const isCopied = copiedId === step.id;
-          const isFailed = copyFailedId === step.id;
+          const isCopiedStep = isCopied(step.id);
+          const isFailedStep = isFailed(step.id);
 
           return (
             <div key={step.id} className="terminal-step-card" data-testid={`step-card-${step.id}`}>
@@ -147,16 +112,16 @@ export function QuickstartSteps() {
 
                 <button
                   type="button"
-                  className={`copy-code-btn ${isCopied ? 'copied' : ''} ${isFailed ? 'failed' : ''}`}
-                  onClick={() => handleCopy(step.id, step.command)}
+                  className={`copy-code-btn ${isCopiedStep ? 'copied' : ''} ${isFailedStep ? 'failed' : ''}`}
+                  onClick={() => copy(step.command, step.id)}
                   aria-label={`Copy command for Step ${step.id}`}
                   data-testid={`copy-btn-${step.id}`}
                 >
-                  <span aria-hidden="true">{isCopied ? '✓' : isFailed ? '⚠️' : '📋'}</span>
+                  <span aria-hidden="true">{isCopiedStep ? '✓' : isFailedStep ? '⚠️' : '📋'}</span>
                   <span>
-                    {isCopied
+                    {isCopiedStep
                       ? 'Copied to Clipboard!'
-                      : isFailed
+                      : isFailedStep
                         ? 'Copy failed, select manually'
                         : 'Copy Command'}
                   </span>

@@ -279,6 +279,19 @@ a:hover {
   border-color: var(--ae-accent);
 }
 
+.install-pill-badge {
+  font-size: 0.6875rem;
+  font-family: 'JetBrains Mono', monospace;
+  font-weight: 700;
+  text-transform: uppercase;
+  background-color: var(--ae-surface-elevated);
+  border: 1px solid var(--ae-border);
+  color: var(--ae-accent);
+  padding: 0.15rem 0.45rem;
+  border-radius: 9999px;
+  white-space: nowrap;
+}
+
 .install-pill-prompt {
   color: var(--ae-accent);
   font-family: 'JetBrains Mono', monospace;

@@ -1,10 +1,10 @@
-import { useEffect, useRef, useState } from 'react';
 import { ArchitectureMap } from './ArchitectureMap';
 import { GlassBoxShowcase } from './GlassBoxShowcase';
 import { FactoryStepper } from './FactoryStepper';
 import { ComparisonMatrix } from './ComparisonMatrix';
-import { QuickstartSteps } from './QuickstartSteps';
+import { QUICKSTART_STEPS, QuickstartSteps } from './QuickstartSteps';
 import { UseCaseGallery, USE_CASE_SCENARIOS } from './UseCaseGallery';
+import { useCopyToClipboard } from '../useCopyToClipboard';
 
 export {
   ArchitectureMap,
@@ -16,47 +16,10 @@ export {
   USE_CASE_SCENARIOS,
 };
 
-export const HERO_INSTALL_COMMAND =
-  'curl -sfL https://get.k3s.io | sh -s - --disable traefik && flux bootstrap github --path=k8s';
+export const HERO_INSTALL_COMMAND = QUICKSTART_STEPS[0]!.command;
 
 export function LandingView() {
-  const [copied, setCopied] = useState<boolean>(false);
-  const [copyFailed, setCopyFailed] = useState<boolean>(false);
-  const timeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-
-  useEffect(() => {
-    return () => {
-      if (timeoutRef.current) {
-        clearTimeout(timeoutRef.current);
-      }
-    };
-  }, []);
-
-  const handleCopyInstall = async () => {
-    if (timeoutRef.current) {
-      clearTimeout(timeoutRef.current);
-      timeoutRef.current = null;
-    }
-    try {
-      if (!navigator.clipboard?.writeText) {
-        throw new Error('Clipboard API not available');
-      }
-      await navigator.clipboard.writeText(HERO_INSTALL_COMMAND);
-      setCopyFailed(false);
-      setCopied(true);
-      timeoutRef.current = setTimeout(() => {
-        setCopied(false);
-        timeoutRef.current = null;
-      }, 2500);
-    } catch {
-      setCopied(false);
-      setCopyFailed(true);
-      timeoutRef.current = setTimeout(() => {
-        setCopyFailed(false);
-        timeoutRef.current = null;
-      }, 2500);
-    }
-  };
+  const { copy, isCopied, isFailed } = useCopyToClipboard();
 
   return (
     <section className="landing-view" data-testid="landing-view">
@@ -75,6 +38,7 @@ export function LandingView() {
 
         {/* Quick-Install Terminal Pill */}
         <div className="hero-install-pill" data-testid="hero-install-pill">
+          <span className="install-pill-badge">Step 1</span>
           <span className="install-pill-prompt" aria-hidden="true">
             $
           </span>
@@ -82,13 +46,13 @@ export function LandingView() {
           <div className="install-pill-actions">
             <button
               type="button"
-              className={`install-copy-btn ${copied ? 'copied' : ''} ${copyFailed ? 'failed' : ''}`}
-              onClick={handleCopyInstall}
+              className={`install-copy-btn ${isCopied() ? 'copied' : ''} ${isFailed() ? 'failed' : ''}`}
+              onClick={() => copy(HERO_INSTALL_COMMAND)}
               aria-label="Copy bootstrap command"
               data-testid="hero-install-copy-btn"
             >
-              <span aria-hidden="true">{copied ? '✓' : copyFailed ? '⚠️' : '📋'}</span>
-              <span>{copied ? 'Copied!' : copyFailed ? 'Copy failed' : 'Copy'}</span>
+              <span aria-hidden="true">{isCopied() ? '✓' : isFailed() ? '⚠️' : '📋'}</span>
+              <span>{isCopied() ? 'Copied!' : isFailed() ? 'Copy failed' : 'Copy'}</span>
             </button>
             <a href="#quickstart" className="install-guide-link" data-testid="hero-install-jump">
               4-Step Guide ↓
