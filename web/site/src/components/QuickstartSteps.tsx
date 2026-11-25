@@ -77,7 +77,7 @@ export function QuickstartSteps() {
 
   const handleCopy = async (id: number, text: string) => {
     try {
-      await navigator.clipboard?.writeText(text);
+      await navigator.clipboard.writeText(text);
     } catch {
       // Fallback in environments without clipboard permissions
     }

@@ -2270,8 +2270,4 @@ a:hover {
   .agentsview-layout {
     grid-template-columns: 1fr;
   }
-
-  .matrix-row {
-    grid-template-columns: 120px 1fr;
-  }
 }

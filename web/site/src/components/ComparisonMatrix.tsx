@@ -185,6 +185,22 @@ export function ComparisonMatrix() {
     });
   }, [selectedCategory, searchQuery]);
 
+  const filteredDimensions = useMemo(() => {
+    const q = searchQuery.toLowerCase().trim();
+    if (!q) return DIMENSIONS;
+    return DIMENSIONS.filter((dim) => {
+      return (
+        dim.dimension.toLowerCase().includes(q) ||
+        dim.homelab.toLowerCase().includes(q) ||
+        dim.factory.toLowerCase().includes(q) ||
+        dim.agent.toLowerCase().includes(q) ||
+        dim.aerial.toLowerCase().includes(q)
+      );
+    });
+  }, [searchQuery]);
+
+  const matrixGridCols = selectedCategory === 'all' ? '180px 1fr 1fr 1fr 1.3fr' : '200px 1fr 1.3fr';
+
   return (
     <div className="comparison-container" data-testid="comparison-matrix">
       <div className="comparison-header">
@@ -315,25 +331,45 @@ export function ComparisonMatrix() {
       ) : (
         <div className="matrix-table-wrapper" data-testid="comparison-table">
           <div className="matrix-grid">
-            <div className="matrix-row matrix-header-row">
+            <div className="matrix-row matrix-header-row" style={{ gridTemplateColumns: matrixGridCols }}>
               <div className="matrix-cell cell-dimension">Capability Dimension</div>
-              <div className="matrix-cell cell-competitor">Homelab & PaaS</div>
-              <div className="matrix-cell cell-competitor">Software Factories</div>
-              <div className="matrix-cell cell-competitor">AI Agents</div>
+              {(selectedCategory === 'all' || selectedCategory === 'homelab') && (
+                <div className="matrix-cell cell-competitor">Homelab & PaaS</div>
+              )}
+              {(selectedCategory === 'all' || selectedCategory === 'factory') && (
+                <div className="matrix-cell cell-competitor">Software Factories</div>
+              )}
+              {(selectedCategory === 'all' || selectedCategory === 'agent') && (
+                <div className="matrix-cell cell-competitor">AI Agents</div>
+              )}
               <div className="matrix-cell cell-aerial">AERIAL (Closed-Loop)</div>
             </div>
 
-            {DIMENSIONS.map((dim, idx) => (
-              <div key={idx} className="matrix-row" data-testid={`matrix-row-${idx}`}>
+            {filteredDimensions.map((dim, idx) => (
+              <div
+                key={idx}
+                className="matrix-row"
+                style={{ gridTemplateColumns: matrixGridCols }}
+                data-testid={`matrix-row-${idx}`}
+              >
                 <div className="matrix-cell cell-dimension">
                   <strong>{dim.dimension}</strong>
                 </div>
-                <div className="matrix-cell cell-competitor">{dim.homelab}</div>
-                <div className="matrix-cell cell-competitor">{dim.factory}</div>
-                <div className="matrix-cell cell-competitor">{dim.agent}</div>
+                {(selectedCategory === 'all' || selectedCategory === 'homelab') && (
+                  <div className="matrix-cell cell-competitor">{dim.homelab}</div>
+                )}
+                {(selectedCategory === 'all' || selectedCategory === 'factory') && (
+                  <div className="matrix-cell cell-competitor">{dim.factory}</div>
+                )}
+                {(selectedCategory === 'all' || selectedCategory === 'agent') && (
+                  <div className="matrix-cell cell-competitor">{dim.agent}</div>
+                )}
                 <div className="matrix-cell cell-aerial highlight-aerial">{dim.aerial}</div>
               </div>
             ))}
+            {filteredDimensions.length === 0 && (
+              <div className="empty-results-message">No comparison dimensions matched your search query.</div>
+            )}
           </div>
         </div>
       )}

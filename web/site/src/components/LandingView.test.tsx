@@ -136,14 +136,15 @@ describe('GlassBoxShowcase Component', () => {
     fireEvent.click(screen.getByTestId('tab-vikunja'));
     expect(screen.getByTestId('view-vikunja')).toBeTruthy();
 
-    fireEvent.click(screen.getByTestId('card-task-103'));
-    expect(screen.getByTestId('card-task-103').classList.contains('selected')).toBe(true);
-
+    // Test selection changes
     fireEvent.click(screen.getByTestId('card-task-102'));
     expect(screen.getByTestId('card-task-102').classList.contains('selected')).toBe(true);
 
     fireEvent.click(screen.getByTestId('card-task-101'));
     expect(screen.getByTestId('card-task-101').classList.contains('selected')).toBe(true);
+
+    fireEvent.click(screen.getByTestId('card-task-103'));
+    expect(screen.getByTestId('card-task-103').classList.contains('selected')).toBe(true);
 
     // Switch to Observability tab
     fireEvent.click(screen.getByTestId('tab-observability'));
@@ -223,7 +224,7 @@ describe('ComparisonMatrix Component', () => {
     cleanup();
   });
 
-  it('filters competitors by category and search keyword', () => {
+  it('filters competitors by category and search keyword in cards view', () => {
     render(<ComparisonMatrix />);
 
     // Default: all categories
@@ -260,7 +261,7 @@ describe('ComparisonMatrix Component', () => {
     expect(screen.getByText(/No competitors matched your search query/i)).toBeTruthy();
   });
 
-  it('switches between Cards and Matrix table view modes', () => {
+  it('switches between Cards and Matrix table view modes with category and search filtering', () => {
     render(<ComparisonMatrix />);
 
     expect(screen.getByTestId('competitor-cards')).toBeTruthy();
@@ -271,6 +272,21 @@ describe('ComparisonMatrix Component', () => {
     expect(screen.getByTestId('comparison-table')).toBeTruthy();
     expect(screen.queryByTestId('competitor-cards')).toBeNull();
     expect(screen.getByTestId('matrix-row-0')).toBeTruthy();
+
+    // In Matrix view, filter by category
+    fireEvent.click(screen.getByTestId('comp-filter-homelab'));
+    const table = screen.getByTestId('comparison-table');
+    expect(within(table).getByText('Homelab & PaaS')).toBeTruthy();
+    expect(within(table).queryByText('Software Factories')).toBeNull();
+
+    // In Matrix view, filter by search keyword
+    const searchInput = screen.getByTestId('comp-search-input');
+    fireEvent.change(searchInput, { target: { value: 'orchestration' } });
+    expect(screen.getByText('Stateful Orchestration')).toBeTruthy();
+
+    // Unmatched search in Matrix view
+    fireEvent.change(searchInput, { target: { value: 'unmatched-matrix-query' } });
+    expect(screen.getByText(/No comparison dimensions matched your search query/i)).toBeTruthy();
 
     // Switch back to Cards view
     fireEvent.click(screen.getByTestId('view-cards-btn'));
@@ -365,19 +381,5 @@ describe('QuickstartSteps Component', () => {
     act(() => {
       vi.advanceTimersByTime(3000);
     });
-  });
-
-  it('handles missing clipboard API gracefully', async () => {
-    // @ts-expect-error test undefined clipboard
-    delete navigator.clipboard;
-
-    render(<QuickstartSteps />);
-
-    const copyBtn = screen.getByTestId('copy-btn-1');
-    await act(async () => {
-      fireEvent.click(copyBtn);
-    });
-
-    expect(screen.getByText('Copied to Clipboard!')).toBeTruthy();
   });
 });

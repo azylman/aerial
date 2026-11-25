@@ -31,7 +31,7 @@ export const SHOWCASE_TABS: readonly ShowcaseTabInfo[] = [
   {
     id: 'restate',
     title: 'Restate Durable Execution',
-    badge: 'Admin UI :9080',
+    badge: 'Admin UI :9070',
     icon: '⚡',
     route: 'http://<node-ip>/restate/',
     description: 'RocksDB virtual object state machines, invocation replay logs, and durable workflow journals.',
