@@ -8,7 +8,7 @@ description: >-
 
 This skill defines operational procedures and guidelines for querying Aerial's persistent transcript index. Aerial automatically syncs and indexes historical transcripts and tool execution steps into PostgreSQL with hybrid semantic vector embeddings and full-text search (BM25 / tsvector).
 
-The index is **shared across every bot (stack)** and every engine (agy and Claude Code). Each bot only writes its own sessions, but **searches, `get`, and `stats` cover every bot's sessions by default**. Pass `--stack <name>` to narrow results to one bot.
+The index is **shared across every bot (stack)** and every engine (agy, claude, codex, and muse). Each bot only writes its own sessions, but **searches, `get`, and `stats` cover every bot's sessions by default**. Pass `--stack <name>` to narrow results to one bot.
 
 ---
 
@@ -44,7 +44,7 @@ transcript-search stats [options]
 - `-s, --session <id>`: Restrict search results to a specific session / conversation ID.
 - `-n, --limit <int>`: Maximum number of records to return (default: `10`).
 - `--json`: Output structured JSON for piping into `jq`.
-- `--url <url>`: Override the Aerial eri daemon HTTP endpoint (default: `http://localhost:8080` or `$ERI_URL`).
+- `--url <url>`: Override the transcript index endpoint (checks `$TRANSCRIPTS_URL` first, then `$ERI_URL`, defaulting to `http://localhost:8080`).
 
 ### Get Subcommand Flags (Step-Window Zoom)
 - `-s, --session <id>`: Session / conversation ID to inspect (required).
@@ -52,7 +52,7 @@ transcript-search stats [options]
 - `-C, --context <int>`: Number of surrounding context steps before and after the target step (default: `2`, range: 0–20).
 - `--json`: Output raw JSON containing `{session_id, step, context, steps: [...]}`.
 - `--stack <name>`: Only return steps from that stack (default: any stack; the same session ID can exist on more than one stack).
-- `--url <url>`: Override the Aerial eri daemon HTTP endpoint (default: `http://localhost:8080` or `$ERI_URL`).
+- `--url <url>`: Override the transcript index endpoint (checks `$TRANSCRIPTS_URL` first, then `$ERI_URL`, defaulting to `http://localhost:8080`).
 
 ### Stats Subcommand
 Prints total indexed sessions and steps plus a per-stack breakdown. `--stack <name>` limits the counts to one stack; `--json` emits `{total_sessions, total_steps, stacks: [{stack, sessions, steps}], status}`.

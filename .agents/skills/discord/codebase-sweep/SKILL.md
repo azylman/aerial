@@ -30,15 +30,15 @@ Hard rules for inventory agents:
 - **Static analysis across all stack languages**:
   - **Go**: `deadcode` per module, with and without `-test` (reachable only from tests shows up without it), and `golangci-lint --enable-only unused`.
   - **TypeScript / UI**: `knip --production` with prod-only entry points (default knip configs list test files as entries, which hides test-only exports).
-  - **Rust (`services/senses`) & Python**: `cargo clippy --all-targets -- -W dead_code -W unused` for Rust crates, and unused symbol/script checks for Python tooling.
+  - **Rust (`senses` in `aerial-sidecars`) & Python**: `cargo clippy --all-targets -- -W dead_code -W unused` for Rust crates, and unused symbol/script checks for Python tooling.
   - **Schema, K8s & Observability**: Cross-check `services/eri/pkg/db/schema.sql` tables and columns against single-service ownership in Go/Rust/Python code, check `k8s/*.yaml` across `aerial` and `aerial-config` for orphaned manifests/ConfigMaps/service keys, and check Grafana dashboards/vmalert rules for metrics no service emits.
 - **Know the blind spots and list them in the inventory:**
-  - Binaries built with `-cover` but no `-coverpkg` only instrument their own module. Code from another module running inside them shows as 0%.
-  - Shared library modules (`pkg/`) usually have no rows at all. Use static evidence across every consuming module in every repo.
+  - Binaries built with `-cover` but no `-coverpkg` only instrument their own module. In `aerial`'s single root `go.mod`, Bazel instruments `pkg/` packages via `--instrumentation_filter`, but multi-module or non-Bazel repos still show code from another module as 0%.
+  - Shared library modules (`pkg/`) in multi-module or non-Bazel repos usually have no rows at all; use static evidence across every consuming module in every repo.
   - Binaries that never flush coverage (CLIs, hooks) have no data.
   - RTA-based `deadcode` treats every exported method of a type that reaches reflection (fmt, json, templates) as live. Run `deadcode -whylive` on prod-0% exported methods to find the ones reachable only through reflection.
   - Deadcode-gate anchors (`_ = x.Method`, `var _ = []any{...}`, `keepLive(...)`) deliberately hide dead code from CI. Remove them temporarily, re-run, then restore.
-  - `services/coverage-ingest` auto-prunes retired services via `PruneServices`, except `eri-restate` which is hardcoded in the SQL keep-filter—check manually for stale `eri-restate` or unpruned service rows.
+  - `services/coverage-ingest` auto-prunes retired services via `PruneServices`—check manually for unpruned service rows.
 - **False-positive checklist** before calling anything dead: Restate `Reflect` registers all exported methods of a service struct, MCP tool registration, HTTP route tables, `go:embed`, `init()`, build tags, interfaces satisfied implicitly, generated code, and callers in other repos (k8s args, scripts, config keys).
 
 Classify each item as:
@@ -63,7 +63,7 @@ Item line: `- [class] path: Symbol (~N LOC, +M test LOC) — evidence: prod 0% s
   - A near-function matcher: token-level difflib ratio ≥0.80 for funcs of 8+ lines in different directories or repos.
 - Targeted greps for the usual suspects: Restate ingress clients, agent-name and service-name helpers, DB open helpers, k8s auth middleware, GitHub/Discord/MCP clients, coverage flush, retry and backoff.
 - **Record drift.** Copies that already behave differently (substring vs exact match, different fallbacks or timeouts) are bugs. The plan must pick one behavior and say why.
-- Note module boundaries (`internal/` can't cross modules; sharing needs a `pkg/` package and possibly a replace directive), and the per-stack rule: share code via packages, never via cross-service SQL.
+- Note module boundaries (`internal/` can't cross modules; sharing needs a `pkg/` package and possibly a replace directive), Bazel single-module instrumentation (`aerial`'s root `go.mod` vs multi-module sidecars needing static cross-repo checks), and the per-stack rule: share code via packages, never via cross-service SQL.
 
 ### 2d. Verify the inventory's claims about system state
 Inventory agents read code, not live state. Before reporting that a build is stuck, a feature flag was never enabled, or a replacement path superseded a legacy one, verify live state directly: call `get_build` for Vanadis build status, check `git log -n` for what actually merged, and inspect the live `/share/aerial-config` mount or Kubernetes manifests to confirm which path is active in production. Never schedule a legacy path for deletion until you verify its replacement is both deployed and enabled in live config.

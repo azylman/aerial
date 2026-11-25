@@ -318,7 +318,7 @@ func BuildServiceName(agent string) string {
     if norm == "" || norm == "aerial" {
         return "Build"
     }
-    return "Build" + strings.Title(norm) // e.g. BuildSuletta, BuildMiorine
+    return "Build" + strings.ToUpper(norm[:1]) + norm[1:] // e.g. BuildSuletta, BuildMiorine
 }
 ```
 

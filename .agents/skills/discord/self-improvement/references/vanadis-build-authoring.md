@@ -62,7 +62,7 @@ Whenever a change requires **≥ 2 PRs**—whether across multiple repositories 
       "title": "Dark Launch New Workflow Service",
       "effort": "medium",
       "depends_on": [],
-      "target_files": ["services/vanadis/pkg/workflow/service.go", "services/vanadis/pkg/workflow/service_test.go"],
+      "target_files": ["services/vanadis/internal/workflow/service.go", "services/vanadis/internal/workflow/service_test.go"],
       "target_symbols": ["WorkflowService", "TestWorkflowService_Execution"],
       "instructions": "Implement additive workflow service side-by-side with existing path without switching entrypoints. Verify via hermetic tests."
     },
@@ -95,7 +95,7 @@ Whenever a change requires **≥ 2 PRs**—whether across multiple repositories 
       "title": "Cut Over Entrypoint and Purge",
       "effort": "medium",
       "depends_on": ["chunk-3-pre-cutover-readiness-gate"],
-      "target_files": ["services/vanadis/pkg/api/handlers.go", "services/synapse/conflicts.go"],
+      "target_files": ["services/vanadis/internal/api/handlers.go", "services/synapse/conflicts.go"],
       "target_symbols": ["CreateBuildHandler", "PurgeLegacyHandler"],
       "instructions": "Switch live entrypoint to the verified workflow and purge legacy code. Maintain in-flight control-plane continuity fallback."
     },
