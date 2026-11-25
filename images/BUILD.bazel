@@ -304,6 +304,17 @@ pkg_tar(
     strip_prefix = "/.agents",
 )
 
+pkg_tar(
+    name = "eri_restate_community_skills_layer",
+    deps = [
+        "@android_skills//:skills_tar",
+        "@beautiful_rust//:skills_tar",
+        "@cc_skills_golang//:skills_tar",
+        "@kotlin_agent_skills//:skills_tar",
+        "@kotlin_footguns//:skills_tar",
+    ],
+)
+
 aerial_go_image(
     name = "eri-restate",
     base = "@eri_restate_base",
@@ -318,6 +329,7 @@ aerial_go_image(
         ":eri_restate_scripts_layer",
         ":eri_restate_rules_layer",
         ":eri_restate_agents_layer",
+        ":eri_restate_community_skills_layer",
     ],
     user = "0:0",
     workdir = "/app",
@@ -454,6 +466,7 @@ go_test(
         ":covdata_bin",
         ":cover_sample_cover_bin",
         ":coverage_ingest_tools_layer",
+        ":eri_restate_community_skills_layer",
         ":eri_restate_scripts_layer",
         ":github_runner_bins_layer",
         ":github_runner_configs_layer",

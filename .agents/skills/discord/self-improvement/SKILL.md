@@ -8,10 +8,10 @@ description: Tiered engineering workflow (Tiers 0-3), Girl Gang multi-agent revi
 Universal coding, testing, scratch workspace (`scripts/aerial-pr.sh init/submit`), and repository topology invariants are always loaded via `rules/discord/04-engineering.md` and `rules/discord/06-architecture.md`. This skill defines the **Tiered Review & Orchestration Workflow**, **Scope Escalation Gates**, and **CI / RoboRev Remediation Playbook**.
 
 ## Specialized Reference Runbooks (Load Only When Needed)
-- **Language-Specific Engineering Standards (Load When Touching Code)**:
-  - **Go (`.go`, `go.mod`, Bazel `go_test`, `pgtest`, Restate SDK)**: Read [`../go-engineering/SKILL.md`](../go-engineering/SKILL.md).
-  - **Rust (`.rs`, `Cargo.toml`, Tokio/Axum, ONNX `ort`, FFI/CUDA)**: Read [`../rust-engineering/SKILL.md`](../rust-engineering/SKILL.md).
-  - **Kotlin, Android & Wear OS (`.kt`, `.kts`, Jetpack Compose, Wear Compose M3, Tiles/Glance, NFC HCE, Keystore)**: Read [`../kotlin-wear-android/SKILL.md`](../kotlin-wear-android/SKILL.md).
+- **Language & Platform Engineering Skills (Load When Touching Code)**:
+  - **Go (`.go`, `go.mod`, Bazel `go_test`, `pgtest`, Restate SDK)**: Read [`references/go-invariants.md`](references/go-invariants.md) plus community Go skills (`golang-code-style`, `golang-safety`, `golang-concurrency`, `golang-context`, `golang-error-handling`, `golang-testing`, `golang-modernize`, `golang-performance`, `golang-structs-interfaces`).
+  - **Rust (`.rs`, `Cargo.toml`, Tokio/Axum, ONNX `ort`, FFI/CUDA)**: Read community Rust skills (`rust-best-practices`, `rust-review`, `rust-port`).
+  - **Kotlin, Android & Wear OS (`.kt`, `.kts`, Jetpack Compose, Wear Compose M3, Glance Wear widgets, Android security)**: Read community Android/Kotlin skills (`wear-compose-m3`, `wear-widgets`, `jetpack-compose-performance`, `android-intent-security`, `android-permissions-security`, `anr-audit-and-fix`, `testing-setup`, `state-and-background-footguns`, `compose-screens-footguns`, `remote-api-footguns`, `footgun-scan`, `kotlin-tooling-kotlin-toolchain`, `kotlin-tooling-agp9-migration`).
 - **Vanadis Build Plans (`scripts/aerial-build.sh enqueue`)**: Read [`references/vanadis-build-authoring.md`](references/vanadis-build-authoring.md) before authoring a single-chunk or multi-chunk build JSON.
 - **Declarative Database Schema Migrations (`schema.sql` / Ariga Atlas)**: Read [`references/atlas-migrations.md`](references/atlas-migrations.md) whenever modifying database schemas.
 - **Restate Services, Virtual Objects & Durable Workflows (`github.com/restatedev/sdk-go`)**: Read [`references/restate-workflows.md`](references/restate-workflows.md) whenever designing, authoring, or modifying Restate services, Virtual Objects, or workflows.

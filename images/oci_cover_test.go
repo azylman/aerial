@@ -59,6 +59,22 @@ func TestTarLayers(t *testing.T) {
 			},
 		},
 		{
+			name:       "eri restate community skills layer packages upstream skills",
+			tarRelPath: "images/eri_restate_community_skills_layer.tar",
+			requiredEntries: []string{
+				"opt/skills/wear-compose-m3/SKILL.md",
+				"opt/skills/wear-widgets/SKILL.md",
+				"opt/skills/wear-widgets/references/remote-compose-layouts.md",
+				"opt/skills/jetpack-compose-performance/SKILL.md",
+				"opt/skills/golang-safety/SKILL.md",
+				"opt/skills/golang-concurrency/references/channels-and-select.md",
+				"opt/skills/rust-best-practices/SKILL.md",
+				"opt/skills/rust-best-practices/references/effective-rust.md",
+				"opt/skills/state-and-background-footguns/SKILL.md",
+				"opt/skills/kotlin-tooling-kotlin-toolchain/SKILL.md",
+			},
+		},
+		{
 			name:       "github runner bins layer",
 			tarRelPath: "images/github_runner_bins_layer.tar",
 			requiredEntries: []string{
