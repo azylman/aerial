@@ -1,0 +1,51 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+    <title>Aerial // Autonomous AI Personal Assistant</title>
+    <meta name="description" content="Autonomous AI personal assistant inspired by XVX-016 Gundam Aerial. Closed-loop, self-hosted software factory and personal intelligence.">
+    <meta name="theme-color" content="#181825">
+    <meta name="color-scheme" content="dark light">
+    <meta name="apple-mobile-web-app-capable" content="yes">
+    <meta name="apple-mobile-web-app-title" content="Aerial">
+    <link rel="manifest" href="./manifest.webmanifest">
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600;700&family=Plus+Jakarta+Sans:wght@400;500;600;700&display=swap" media="print" onload="this.media='all'">
+    <style>:root { color-scheme: dark; background: #181825; } :root[data-theme="light"] { color-scheme: light; background: #f8fafc; }</style>
+    <script>
+        (function () {
+            var theme = null;
+            try {
+                var m = /(?:^|;\s*)theme=(dark|light)(?=;|\s|$)/.exec(document.cookie);
+                if (m) theme = m[1];
+            } catch (_) {}
+            if (!theme) {
+                try {
+                    var keys = ['aerial-site-theme', 'aerial-theme'];
+                    for (var i = 0; i < keys.length && !theme; i++) {
+                        var s = localStorage.getItem(keys[i]);
+                        if (s === 'dark' || s === 'light') theme = s;
+                    }
+                } catch (_) {}
+            }
+            if (!theme) {
+                try {
+                    if (window.matchMedia && !window.matchMedia('(prefers-color-scheme: dark)').matches) theme = 'light';
+                } catch (_) {}
+            }
+            if (theme === 'light') {
+                document.documentElement.dataset.theme = 'light';
+                document.documentElement.style.colorScheme = 'light';
+                var meta = document.querySelector('meta[name="theme-color"]');
+                if (meta) meta.content = '#f8fafc';
+            }
+        })();
+    </script>
+</head>
+<body>
+    <div id="root"></div>
+    <script type="module" src="./src/main.tsx"></script>
+</body>
+</html>

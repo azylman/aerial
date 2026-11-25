@@ -35,6 +35,24 @@ updates:
         patterns:
           - "*"
 
+  - package-ecosystem: "npm"
+    directory: "/web/site"
+    schedule:
+      interval: "weekly"
+      day: "saturday"
+      time: "06:00"
+      timezone: "America/Los_Angeles"
+    versioning-strategy: increase
+    groups:
+      site-npm:
+        applies-to: version-updates
+        patterns:
+          - "*"
+      site-npm-security:
+        applies-to: security-updates
+        patterns:
+          - "*"
+
   - package-ecosystem: "gomod"
     directory: "/"
     schedule:
