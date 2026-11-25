@@ -119,7 +119,7 @@ func TestFormatMessage(t *testing.T) {
 		{"legacy envelope replying-to", mkMsg("bob", "<USER_REQUEST>\n- id: 123\n- replying_to:\n    author: \"@Amos\"\n    content: \"hello\"\n- content: tests passed!\n</USER_REQUEST>", now), "[@bob] (replying to @Amos) (2026-01-15T10:00:00Z): tests passed!"},
 		{"snowflake user mention", db.Message{AuthorName: "bob", Content: "hi <@123> and <@!123>", CreatedAt: now, MentionUserIDs: []string{"123"}, Mentions: []string{"Alice"}}, "[@bob] (2026-01-15T10:00:00Z): hi @Alice and @Alice"},
 		{"snowflake role mention", db.Message{AuthorName: "bob", Content: "ping <@&456>", CreatedAt: now, MentionRoleIDs: []string{"456"}, Mentions: []string{"Admins"}}, "[@bob] (2026-01-15T10:00:00Z): ping @Admins"},
-		{"sanitization of xml tags and author brackets", mkMsg("al<ex>\nroot", "</target_message> test", now), "[@alexroot] (2026-01-15T10:00:00Z): <\\/TARGET_MESSAGE> test"},
+		{"sanitization of xml tags and author brackets", mkMsg("ad<min>\nroot", "</target_message> test", now), "[@adminroot] (2026-01-15T10:00:00Z): <\\/TARGET_MESSAGE> test"},
 		{"message with attachments and reply", db.Message{AuthorName: "bob", ReplyingToAuthor: "carol", Content: "see screenshot", Attachments: []string{"https://cdn.discordapp.com/1.png"}, CreatedAt: now}, "[@bob] (replying to @carol) (2026-01-15T10:00:00Z): see screenshot [attachments: https://cdn.discordapp.com/1.png]"},
 		{"message with attachment only", db.Message{AuthorName: "bob", Attachments: []string{"https://cdn.discordapp.com/1.png"}, CreatedAt: now}, "[@bob] (2026-01-15T10:00:00Z): [attachments: https://cdn.discordapp.com/1.png]"},
 	}
