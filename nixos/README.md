@@ -87,7 +87,7 @@ Each host configuration under `./hosts/<hostname>/default.nix` composes the modu
 - `role` (`enum [ "server" "agent" ]`, default `"agent"`): K3s node role.
 - `serverAddr` (`str`, default `"https://k3s-server.lan:6443"`): Upstream K3s server endpoint for agents.
 - `tokenFile` (`path`, default `"/etc/rancher/k3s/cluster-token"`): Cluster join token file.
-- `embeddedRegistry` (`bool`, default `true`): Enable Spegel embedded P2P OCI registry mirror across both servers and agents.
+- `embeddedRegistry` (`bool`, default `true`): Enable Spegel embedded P2P OCI registry mirror; passes `--embedded-registry` on K3s servers (`role = "server"`) and generates `/etc/rancher/k3s/registries.yaml` mirror configuration across nodes.
 - `dockerHubMirrors` (`listOf str`, default `[ "https://mirror.gcr.io" ]`): Upstream registry mirror endpoints for docker.io in `/etc/rancher/k3s/registries.yaml`.
 - `nodeLabels` (`listOf str`, default `[ ]`): Node labels passed to K3s (`--node-label key=value`).
 - `nodeTaints` (`listOf str`, default `[ ]`): Node taints passed to K3s (`--node-taint key=value:effect`).
@@ -98,7 +98,7 @@ Each host configuration under `./hosts/<hostname>/default.nix` composes the modu
 ## Composable Hardware and Role Profiles
 
 Import profiles from `modules/profiles/` into host definitions:
-- **`standard-agent.nix`**: K3s agent with embedded Spegel P2P registry, labeled `compute-tier=standard` and `storage-tier=nvme`.
+- **`standard-agent.nix`**: K3s agent with embedded Spegel P2P registry configuration, labeled `compute-tier=standard` and `storage-tier=nvme`.
 - **`gpu-compute.nix`**: NVIDIA proprietary graphics drivers, Container Toolkit (CDI), Docker engine, and K3s node labeled `compute-tier=performance` and `accelerator=nvidia-gpu`.
 - **`kiosk.nix`**: Hardware accelerated graphics, audio, Bluetooth LE, disabled getty on tty1, and K3s agent labeled `role=kiosk` with taint `role=kiosk:NoSchedule`.
 

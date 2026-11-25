@@ -16,7 +16,7 @@ flowchart TB
         WebBrowser(["Web Browser / Client"])
         Synapse["synapse (:4020)
 • Discord Gateway WebSocket & JetStream Ingress
-• GitHub, Flux & Infisical Webhooks"]
+• GitHub & Flux Event Forwarder"]
         LanGW["lan-gateway (:80 / :443)
 NGINX Gateway Fabric"]
         EdgeGW["edge-gateway (:4021)
@@ -25,16 +25,23 @@ External Webhook Ingress"]
 
     subgraph CoreAI ["🧠 Core Execution & AI Services"]
         Eri["eri (:8080)
-• Antigravity Agent Runtime & Memory
+• Distroless HTTP Ingress Front Door
 • Voice & Prompt Execution Pipeline"]
-        Haro["haro (:4005)
+        EriRestate["eri-restate (:9080 / :4028)
+• Multi-Engine Execution Worker (agy, claude, codex, muse)
+• Restate Sessions & TurnRunner"]
+        Haro["haro (:4005 / :9080)
 Persistent Scheduler & Event Watches"]
-        Coven["coven (:4008)
+        Coven["coven (:4008 / :9080)
 Semantic Fact Extraction & Memory Decay"]
         Vanadis["vanadis (:4025)
 Multi-Chunk Build Queue Orchestrator"]
+        VanadisNats["vanadis-nats (:4027)
+JetStream-to-Restate Consumer Bridge"]
         VanadisRestate["vanadis-restate (:9080 / :4026)
-Restate Build Workflow Worker"]
+Restate Build & PR Workflow Worker"]
+        Transcripts["transcripts (:4030)
+Session Summaries & Step Logs"]
         Pjev["pjev (:8000)
 System-1 Ambient Triage (/v1/systemone)"]
         Senses["senses (:8880 / :10300)
@@ -44,8 +51,7 @@ STT, TTS, Embeddings & Wyoming"]
     subgraph Persistence ["💾 Persistence & GitOps"]
         Postgres[("postgres (:5432 / :9187)
 • CloudNativePG PostgreSQL 19 + pgvector
-• CAS Task Queues & PR Registry
-• Vector RAG & State Persistence")]
+• Relational, Vector & Memory Persistence")]
         Nats["nats (:4222 / :8222)
 NATS 2 JetStream Broker"]
         Restate["restate (:8080 / :9070)
@@ -57,9 +63,9 @@ Mounts /share/aerial:ro & /share/aerial-config:ro"]
     end
 
     subgraph WebServices ["📊 Web & Documentation Microservices"]
-        Homepage["homepage (:8080)
+        Homepage["homepage (:3001)
 Service Discovery HUD"]
-        Console["console (:8080)
+        Console["console (:8084)
 Live Cluster Status HUD"]
         Docs["docs (:80)
 Docsify + Mermaid Engine"]
@@ -68,6 +74,8 @@ Transcript Visualizer"]
     end
 
     subgraph Observability ["📈 Full-Stack Observability"]
+        OtelCollector["otel-collector (:4317)
+OpenTelemetry Ingestion Collector"]
         Victoria["victoriametrics (:8428)
 Single-Node Prometheus TSDB"]
         VMAlert["vmalert (:8880)
@@ -88,7 +96,8 @@ Kubelet Container Metrics"]
 
     %% Ingress flow
     DiscordUser -->|Gateway WebSocket| Synapse
-    Synapse -->|POST /discord/ingress\nPOST /discord/interaction| Eri
+    Synapse -->|POST /internal/discord/message\nPOST /internal/discord/interaction| Eri
+    Synapse -->|Restate PRObject / RepoObject| Restate
     WebBrowser --> LanGW
     WebBrowser --> EdgeGW
     LanGW --> Homepage
@@ -100,19 +109,27 @@ Kubelet Container Metrics"]
     LanGW --> VTraces
 
     %% Core interactions
+    Eri --> EriRestate
     Eri --> Haro
-    Eri --> Coven
-    Eri --> Vanadis
     Eri --> Pjev
     Eri --> Senses
-    Eri --> Postgres
+    EriRestate --> Restate
+    EriRestate --> Postgres
+    EriRestate --> Haro
+    EriRestate --> Vanadis
     Haro --> Postgres
+    Haro --> Restate
     Coven --> Postgres
+    Coven --> Restate
+    Coven --> Senses
     Vanadis --> Postgres
     Vanadis --> Nats
+    VanadisNats --> Restate
     VanadisRestate --> Restate
+    VanadisRestate --> Nats
+    Transcripts --> Postgres
+    Transcripts --> Senses
     Synapse --> Nats
-    Synapse --> Postgres
 
     %% GitOps & Persistence
     Flux --> GitSync
@@ -126,7 +143,8 @@ Kubelet Container Metrics"]
     VMAlert --> Victoria
     Grafana -->|PromQL| Victoria
     FluentBit -->|Ships Logs| VLogs
-    LanGW -->|OTLP Spans| VTraces
+    LanGW -->|OTLP Spans| OtelCollector
+    OtelCollector -->|OTLP Spans| VTraces
     Grafana -->|LogsQL| VLogs
     Grafana -->|Traces| VTraces
 ```
@@ -151,8 +169,8 @@ aerial-config/
 ├── homepage/                 # Service discovery cards & bookmarks
 ├── k8s/                      # User-defined Kubernetes manifests & Kustomizations
 ├── services/                 # Dedicated service configuration files & dashboards
-│   ├── services/{synapse,haro,coven,vanadis}/
-│   └── services/grafana/dashboards/
+│   ├── {synapse,haro,coven,vanadis}/
+│   └── grafana/dashboards/
 └── docs/                     # Living Docsify documentation portal
     ├── README.md             # Docs homepage
     ├── _sidebar.md           # Sidebar navigation
@@ -169,4 +187,4 @@ aerial-config/
 - **Zero-Build Hot Reloading**: Any commit or sync to `aerial-config` is immediately live in your browser.
 - **Mermaid.js Engine**: Sequence diagrams, flowcharts, and architecture maps rendered in real time.
 - **Offline / Local First**: 100% vendored assets with zero external CDN dependencies.
-- **Standard Docsify Theme**: Uses the upstream Docsify dark theme.
+- **Dual-Theme Palette**: Shared Catppuccin Mocha dark / Polar Slate & Cobalt light styling via `aerial-tokens.css` and `aerial-theme.js`.
