@@ -1100,7 +1100,7 @@ func TestUnifiedProcessPool_DirtyEvictionAndReconciliation_Suite(t *testing.T) {
 		{name: "InflightPreservedDuringMarkDirty", initialKey: "thread-inflight", markDirty: true, setInflight: true, expectEvicted: false, expectClosed: false, expectSpawns: 1},
 		{name: "EvictedDaemonCloseErrorLogged", initialKey: "thread-evict-err", markDirty: true, killErr: errors.New("simulated eviction kill error"), expectEvicted: true, expectClosed: true, expectSpawns: 1},
 		{name: "RewarmingFailureLogged", initialKey: "kiosk", markDirty: true, prewarmed: []string{"kiosk"}, spawnerErrOn: 2, expectEvicted: true, expectRewarmed: false, expectClosed: true, expectSpawns: 2},
-		{name: "ReconcilesNewlyAddedPrewarmedTargets", initialKey: "kiosk", markDirty: true, prewarmed: []string{"kiosk"}, updatePre: []string{"touch-kiosk-kitchen"}, expectEvicted: true, expectClosed: true, expectSpawns: 2},
+		{name: "ReconcilesNewlyAddedPrewarmedTargets", initialKey: "kiosk", markDirty: true, prewarmed: []string{"kiosk"}, updatePre: []string{"touch-kiosk-2"}, expectEvicted: true, expectClosed: true, expectSpawns: 2},
 		{name: "ClosedPoolMarkDirtyReturnsEarly", closeBeforeMarkDirty: true},
 	}
 
@@ -1302,7 +1302,7 @@ func TestUnifiedProcessPool_PrewarmedTargets_DynamicUpdate(t *testing.T) {
 		{name: "NilPool_ReturnsNil", nilPool: true, update: []string{"test"}},
 		{name: "InitialAndDefensiveCopy", initial: []string{"a", "b"}, mutateFirst: true, expectedSlice: []string{"a", "b"}},
 		{name: "UpdateFiltersWhitespaceAndEmpty", update: []string{"  target1  ", "", "   ", "target2"}, expectedSlice: []string{"target1", "target2"}},
-		{name: "UpdateDeduplicatesTargets", update: []string{"kiosk", "kiosk", "touch-kiosk-kitchen", "  kiosk  "}, expectedSlice: []string{"kiosk", "touch-kiosk-kitchen"}},
+		{name: "UpdateDeduplicatesTargets", update: []string{"kiosk", "kiosk", "touch-kiosk-2", "  kiosk  "}, expectedSlice: []string{"kiosk", "touch-kiosk-2"}},
 	}
 
 	for _, tc := range tests {
