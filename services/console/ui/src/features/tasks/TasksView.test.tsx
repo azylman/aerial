@@ -175,7 +175,7 @@ describe('TasksView', () => {
   it.each([
     { name: 'idle', tasks: [], want: ['0 / 4 WORKERS', 'REAL-TIME DISPATCH', '0 TURNS'], wantCards: 0 },
     { name: 'busy', tasks: TASKS, want: ['3 / 4 WORKERS', '3 PROCESSING TURNS', '2 TURNS'], wantCards: 5 },
-  ])('$name cockpit', ({ tasks, want, wantCards }) => {
+  ])('$name dashboard', ({ tasks, want, wantCards }) => {
     const { container } = render(<TasksView />);
     seed(tasks);
     for (const text of want) expect(screen.getByText(text)).toBeTruthy();

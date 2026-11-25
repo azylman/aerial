@@ -63,7 +63,7 @@ export function LandingView() {
             <h2 className="feature-title">Autonomous Software Factory</h2>
           </div>
           <p className="feature-desc">
-            Vikunja DAG backlog, tiered multi-agent review panel (the girl gang), Vanadis multi-PR DAG builds,
+            Vikunja DAG backlog, tiered multi-agent review panel, Vanadis multi-PR DAG builds,
             scale-to-zero in-cluster ARC runners, and proactive CI failure remediation wakes.
           </p>
         </div>

@@ -42,7 +42,7 @@ export const QUICKSTART_STEPS: readonly QuickstepItem[] = [
     badge: 'Zero-Plaintext Vault',
     summary:
       'Initialize Infisical machine identity, store the auth token in Kubernetes, and set your Discord and GitHub tokens.',
-    command: `# 1. Bootstrap Infisical and store the returned Machine Identity Token Auth token\nexport INFISICAL_TOKEN="$(infisical bootstrap \\\n  --domain http://<node-ip> \\\n  --email admin@example.com \\\n  --password 'your-admin-password' \\\n  --organization aerial \\\n  | jq -r '.identity.credentials.token')"\n\nkubectl create secret generic infisical-universal-auth \\\n  --from-literal=INFISICAL_TOKEN="$INFISICAL_TOKEN"\n\n# 2. Populate external application secrets in Infisical (project slug aerial-8-jn8, default environment)\ninfisical secrets set --env=default \\\n  DISCORD_BOT_TOKEN="your-discord-bot-token" \\\n  GITHUB_PAT="$GITHUB_PAT"`,
+    command: `# 1. Bootstrap Infisical and store the returned Machine Identity Token Auth token\nexport INFISICAL_TOKEN="$(infisical bootstrap \\\n  --domain http://<node-ip> \\\n  --email admin@example.com \\\n  --password 'your-admin-password' \\\n  --organization aerial \\\n  | jq -r '.identity.credentials.token')"\n\nkubectl create secret generic infisical-universal-auth \\\n  --from-literal=INFISICAL_TOKEN="$INFISICAL_TOKEN"\n\n# 2. Populate external application secrets in Infisical (project slug aerial, default environment)\ninfisical secrets set --env=default \\\n  DISCORD_BOT_TOKEN="your-discord-bot-token" \\\n  GITHUB_PAT="$GITHUB_PAT"`,
     notes: [
       'External Secrets Operator auto-generates PostgreSQL, NATS, and webhook secrets',
       'Secrets sync in-memory into scoped Kubernetes Secrets with zero disk leakage',

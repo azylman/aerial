@@ -28,14 +28,19 @@ if [[ "${1:-}" == "ci" && "${2:-}" == "review" ]]; then
   head_sha="${head_sha:-$(git rev-parse HEAD 2>/dev/null || true)}"
   branch="${branch:-$(git rev-parse --abbrev-ref HEAD 2>/dev/null || true)}"
   [ "${branch}" = "HEAD" ] && branch=""
-  [ -z "${ref}" ] && [ -n "${base_sha}" ] && [ -n "${head_sha}" ] && ref="$(git merge-base "${base_sha}" "${head_sha}" 2>/dev/null || echo "${base_sha}")..${head_sha}"
+  [ -n "${branch}" ] && [ -n "${head_sha}" ] && git update-ref "refs/heads/${branch}" "${head_sha}" 2>/dev/null || true
   ROBOREV_SYNC_BRANCH="${branch:-__none__}" run_real daemon start >/dev/null 2>&1 || true
   if [ -s "/root/.roborev/postgres-password" ]; then
     for _ in $(seq 1 10); do ROBOREV_SYNC_BRANCH="${branch:-__none__}" run_real sync now >/dev/null 2>&1 && break || sleep 1; done
   fi
   args=(review --wait)
   (git show origin/main:.roborev.toml 2>/dev/null || cat .roborev.toml 2>/dev/null || true) | grep -qE 'review_types[[:space:]]*=[[:space:]]*\[[[:space:]]*"default"[[:space:]]*\]' && args+=(--panel none)
-  [ -n "${ref}" ] && args+=("${ref}")
+  if [ -z "${ref}" ] && [ -n "${branch}" ] && [ -n "${base_sha}" ]; then
+    args+=(--branch="${branch}" --base="${base_sha}")
+  else
+    [ -z "${ref}" ] && [ -n "${base_sha}" ] && [ -n "${head_sha}" ] && ref="$(git merge-base "${base_sha}" "${head_sha}" 2>/dev/null || echo "${base_sha}")..${head_sha}"
+    [ -n "${ref}" ] && args+=("${ref}")
+  fi
   [ -n "${min_sev}" ] && args+=(--min-severity "${min_sev}")
   raw=$(mktemp) body=$(mktemp)
   trap 'rm -f "${raw}" "${body}"' EXIT
