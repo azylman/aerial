@@ -1,6 +1,6 @@
 import { act, cleanup, fireEvent, render, screen, within } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { App, parseRouteHash, useAerialTheme } from './App';
+import { App, LANDING_SECTIONS, parseRouteHash, useAerialTheme } from './App';
 import {
   applyTheme,
   readStoredTheme,
@@ -15,6 +15,15 @@ describe('parseRouteHash', () => {
     expect(parseRouteHash('#')).toEqual({ view: 'landing' });
     expect(parseRouteHash('#/')).toEqual({ view: 'landing' });
     expect(parseRouteHash('#/unknown-route')).toEqual({ view: 'landing' });
+  });
+
+  it('parses landing section hashes correctly', () => {
+    expect(parseRouteHash('#use-cases')).toEqual({ view: 'landing', sectionId: 'use-cases' });
+    expect(parseRouteHash('#/use-cases')).toEqual({ view: 'landing', sectionId: 'use-cases' });
+    expect(parseRouteHash('#architecture')).toEqual({ view: 'landing', sectionId: 'architecture' });
+    expect(parseRouteHash('#comparison')).toEqual({ view: 'landing', sectionId: 'comparison' });
+    expect(parseRouteHash('#quickstart')).toEqual({ view: 'landing', sectionId: 'quickstart' });
+    expect(parseRouteHash('#faq')).toEqual({ view: 'landing', sectionId: 'faq' });
   });
 
   it('parses docs hashes correctly', () => {
@@ -250,6 +259,72 @@ describe('App component', () => {
       const target = screen.getByTestId('section-stateless-ingress');
       expect(target).toBeTruthy();
       expect(scrollSpy).toHaveBeenCalledWith(target, { behavior: 'smooth' });
+    } finally {
+      if (originalScrollIntoView) {
+        Element.prototype.scrollIntoView = originalScrollIntoView;
+      } else {
+        delete (Element.prototype as { scrollIntoView?: unknown }).scrollIntoView;
+      }
+    }
+  });
+
+  it('smooth scrolls to landing sections when clicking navbar section links', () => {
+    const scrollSpy = vi.fn();
+    const originalScrollIntoView = Element.prototype.scrollIntoView;
+    Element.prototype.scrollIntoView = function (this: Element, ...args: unknown[]) {
+      scrollSpy(this, ...args);
+    };
+
+    try {
+      render(<App />);
+
+      const nav = screen.getByRole('navigation', { name: 'Main Navigation' });
+
+      // Check all 6 section links exist in navbar
+      const useCasesLink = within(nav).getByTestId('nav-link-use-cases');
+      expect(useCasesLink.getAttribute('href')).toBe('#use-cases');
+      expect(useCasesLink.textContent).toBe('Use Cases');
+
+      const archLink = within(nav).getByTestId('nav-link-architecture');
+      expect(archLink.getAttribute('href')).toBe('#architecture');
+      expect(archLink.textContent).toBe('Architecture');
+
+      const factoryLink = within(nav).getByTestId('nav-link-factory');
+      expect(factoryLink.getAttribute('href')).toBe('#software-factory');
+      expect(factoryLink.textContent).toBe('Pipeline');
+
+      const compLink = within(nav).getByTestId('nav-link-comparison');
+      expect(compLink.getAttribute('href')).toBe('#comparison');
+      expect(compLink.textContent).toBe('Comparison');
+
+      const quickLink = within(nav).getByTestId('nav-link-quickstart');
+      expect(quickLink.getAttribute('href')).toBe('#quickstart');
+      expect(quickLink.textContent).toBe('Quickstart');
+
+      const faqLink = within(nav).getByTestId('nav-link-faq');
+      expect(faqLink.getAttribute('href')).toBe('#faq');
+      expect(faqLink.textContent).toBe('FAQ');
+
+      // Navigate to #use-cases
+      act(() => {
+        window.location.hash = '#use-cases';
+        window.dispatchEvent(new HashChangeEvent('hashchange'));
+      });
+
+      const sectionUseCases = screen.getByTestId('section-use-cases');
+      expect(sectionUseCases).toBeTruthy();
+      expect(scrollSpy).toHaveBeenCalledWith(sectionUseCases, { behavior: 'smooth' });
+
+      // Navigate to #faq
+      scrollSpy.mockClear();
+      act(() => {
+        window.location.hash = '#faq';
+        window.dispatchEvent(new HashChangeEvent('hashchange'));
+      });
+
+      const sectionFaq = screen.getByTestId('section-faq');
+      expect(sectionFaq).toBeTruthy();
+      expect(scrollSpy).toHaveBeenCalledWith(sectionFaq, { behavior: 'smooth' });
     } finally {
       if (originalScrollIntoView) {
         Element.prototype.scrollIntoView = originalScrollIntoView;

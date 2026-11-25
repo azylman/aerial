@@ -23,6 +23,18 @@ export interface ChapterInfo {
 
 export const CHAPTERS: readonly ChapterInfo[] = HANDBOOK_CHAPTERS;
 
+export const LANDING_SECTIONS = [
+  'use-cases',
+  'architecture',
+  'software-factory',
+  'observability',
+  'comparison',
+  'quickstart',
+  'faq',
+] as const;
+
+export type LandingSectionId = (typeof LANDING_SECTIONS)[number];
+
 /**
  * Parses location hash into RouteState.
  * Supports:
@@ -34,6 +46,10 @@ export function parseRouteHash(hash: string): RouteState {
   const clean = hash.replace(/^#\/?/, '').trim();
   if (!clean) {
     return { view: 'landing' };
+  }
+
+  if ((LANDING_SECTIONS as readonly string[]).includes(clean)) {
+    return { view: 'landing', sectionId: clean };
   }
 
   // Handle section anchor links (e.g. #section-<id>)
@@ -98,7 +114,9 @@ export function App() {
 
   useEffect(() => {
     if (route.sectionId) {
-      const target = document.getElementById(`section-${route.sectionId}`);
+      const target =
+        document.getElementById(route.sectionId) ||
+        document.getElementById(`section-${route.sectionId}`);
       if (target) {
         if (typeof target.scrollIntoView === 'function') {
           target.scrollIntoView({ behavior: 'smooth' });
@@ -129,10 +147,52 @@ export function App() {
           <nav className="navbar-nav" aria-label="Main Navigation">
             <a
               href="#/"
-              className={`nav-tab ${route.view === 'landing' ? 'active' : ''}`}
-              aria-current={route.view === 'landing' ? 'page' : undefined}
+              className={`nav-tab ${route.view === 'landing' && !route.sectionId ? 'active' : ''}`}
+              aria-current={route.view === 'landing' && !route.sectionId ? 'page' : undefined}
             >
               Overview
+            </a>
+            <a
+              href="#use-cases"
+              className={`nav-tab nav-section-link ${route.view === 'landing' && route.sectionId === 'use-cases' ? 'active' : ''}`}
+              data-testid="nav-link-use-cases"
+            >
+              Use Cases
+            </a>
+            <a
+              href="#architecture"
+              className={`nav-tab nav-section-link ${route.view === 'landing' && route.sectionId === 'architecture' ? 'active' : ''}`}
+              data-testid="nav-link-architecture"
+            >
+              Architecture
+            </a>
+            <a
+              href="#software-factory"
+              className={`nav-tab nav-section-link ${route.view === 'landing' && route.sectionId === 'software-factory' ? 'active' : ''}`}
+              data-testid="nav-link-factory"
+            >
+              Pipeline
+            </a>
+            <a
+              href="#comparison"
+              className={`nav-tab nav-section-link ${route.view === 'landing' && route.sectionId === 'comparison' ? 'active' : ''}`}
+              data-testid="nav-link-comparison"
+            >
+              Comparison
+            </a>
+            <a
+              href="#quickstart"
+              className={`nav-tab nav-section-link ${route.view === 'landing' && route.sectionId === 'quickstart' ? 'active' : ''}`}
+              data-testid="nav-link-quickstart"
+            >
+              Quickstart
+            </a>
+            <a
+              href="#faq"
+              className={`nav-tab nav-section-link ${route.view === 'landing' && route.sectionId === 'faq' ? 'active' : ''}`}
+              data-testid="nav-link-faq"
+            >
+              FAQ
             </a>
             <a
               href={`#/docs/${currentChapter.id}`}

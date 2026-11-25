@@ -4,7 +4,13 @@ import { ArchitectureMap } from './ArchitectureMap';
 import { ComparisonMatrix } from './ComparisonMatrix';
 import { FactoryStepper } from './FactoryStepper';
 import { GlassBoxShowcase } from './GlassBoxShowcase';
-import { HERO_INSTALL_COMMAND, LandingView } from './LandingView';
+import {
+  FAQ_ITEMS,
+  FaqSection,
+  HERO_INSTALL_COMMAND,
+  INTEGRATION_BADGES,
+  LandingView,
+} from './LandingView';
 import { QuickstartSteps } from './QuickstartSteps';
 import { UseCaseGallery } from './UseCaseGallery';
 
@@ -22,6 +28,7 @@ describe('LandingView Component', () => {
     expect(within(screen.getByTestId('section-showcase')).getByTestId('glassbox-showcase')).toBeTruthy();
     expect(within(screen.getByTestId('section-comparison')).getByTestId('comparison-matrix')).toBeTruthy();
     expect(within(screen.getByTestId('section-quickstart')).getByTestId('quickstart-steps')).toBeTruthy();
+    expect(within(screen.getByTestId('section-faq')).getByTestId('faq-section')).toBeTruthy();
   });
 });
 
@@ -492,5 +499,135 @@ describe('UseCaseGallery Component', () => {
     expect(screen.getByTestId('usecase-prompt').textContent).toContain('Turn off hallway lights');
     expect(screen.getByTestId('usecase-outcome').textContent).toContain('Routines survive service restarts');
     expect(screen.getByTestId('usecase-step-0').textContent).toContain('Schedule durable one-shot timer');
+  });
+});
+
+describe('LandingView Integration Strip', () => {
+  afterEach(() => {
+    cleanup();
+  });
+
+  it('renders integration badge strip with 12 badges across Surfaces, AI Engines, and Core Stack', () => {
+    render(<LandingView />);
+
+    const strip = screen.getByTestId('integration-strip');
+    expect(strip).toBeTruthy();
+    expect(strip.textContent).toContain('Supported Surfaces, Engines & Integrations');
+
+    expect(INTEGRATION_BADGES).toHaveLength(12);
+
+    for (const badge of INTEGRATION_BADGES) {
+      const badgeEl = screen.getByTestId(`integration-badge-${badge.id}`);
+      expect(badgeEl).toBeTruthy();
+      expect(badgeEl.textContent).toContain(badge.group);
+      expect(badgeEl.textContent).toContain(badge.label);
+    }
+  });
+});
+
+describe('FaqSection Component', () => {
+  afterEach(() => {
+    cleanup();
+  });
+
+  it('renders header, 5 FAQ items, and handles accordion toggle state across all items', () => {
+    render(<FaqSection />);
+
+    const section = screen.getByTestId('faq-section');
+    expect(section).toBeTruthy();
+    expect(within(section).getByText('Technical FAQ')).toBeTruthy();
+    expect(within(section).getByText('Frequently Asked Questions')).toBeTruthy();
+
+    expect(FAQ_ITEMS).toHaveLength(5);
+
+    // First item is expanded by default
+    const firstBtn = screen.getByTestId(`faq-btn-${FAQ_ITEMS[0]!.id}`);
+    expect(firstBtn.getAttribute('aria-expanded')).toBe('true');
+    expect(screen.getByTestId(`faq-answer-${FAQ_ITEMS[0]!.id}`)).toBeTruthy();
+    expect(screen.getByTestId(`faq-answer-${FAQ_ITEMS[0]!.id}`).textContent).toContain(FAQ_ITEMS[0]!.answer);
+
+    // Clicking first item collapses it
+    fireEvent.click(firstBtn);
+    expect(firstBtn.getAttribute('aria-expanded')).toBe('false');
+    expect(screen.queryByTestId(`faq-answer-${FAQ_ITEMS[0]!.id}`)).toBeNull();
+
+    // Re-expanding first item
+    fireEvent.click(firstBtn);
+    expect(firstBtn.getAttribute('aria-expanded')).toBe('true');
+    expect(screen.getByTestId(`faq-answer-${FAQ_ITEMS[0]!.id}`)).toBeTruthy();
+
+    // Clicking through remaining items: each expands when clicked
+    for (let i = 1; i < FAQ_ITEMS.length; i++) {
+      const item = FAQ_ITEMS[i]!;
+      const btn = screen.getByTestId(`faq-btn-${item.id}`);
+      expect(btn.getAttribute('aria-expanded')).toBe('false');
+      expect(screen.queryByTestId(`faq-answer-${item.id}`)).toBeNull();
+
+      fireEvent.click(btn);
+      expect(btn.getAttribute('aria-expanded')).toBe('true');
+      const answerPanel = screen.getByTestId(`faq-answer-${item.id}`);
+      expect(answerPanel).toBeTruthy();
+      expect(answerPanel.textContent).toContain(item.answer);
+    }
+  });
+});
+
+describe('ASD-STE100 and zero-codename compliance', () => {
+  const CODENAME_REGEX = /\b(eri|coven|haro|vanadis|synapse|prospera|senses|pjev|docket-mcp|docket-store)\b/i;
+  const PORT_REGEX = /:[0-9]{2,5}\b/;
+
+  it('verifies FAQ_ITEMS contain zero internal codenames and zero port numbers', () => {
+    for (const item of FAQ_ITEMS) {
+      expect(item.question).not.toMatch(CODENAME_REGEX);
+      expect(item.question).not.toMatch(PORT_REGEX);
+      expect(item.answer).not.toMatch(CODENAME_REGEX);
+      expect(item.answer).not.toMatch(PORT_REGEX);
+      expect(item.category).not.toMatch(CODENAME_REGEX);
+      expect(item.category).not.toMatch(PORT_REGEX);
+    }
+  });
+
+  it('verifies FAQ_ITEMS conform to ASD-STE100 sentence length (<= 25 words per sentence)', () => {
+    for (const item of FAQ_ITEMS) {
+      // Split answer into sentences
+      const sentences = item.answer
+        .split(/(?<=[.!?])\s+/)
+        .map((s) => s.trim())
+        .filter((s) => s.length > 0);
+
+      expect(sentences.length).toBeLessThanOrEqual(6);
+
+      for (const sentence of sentences) {
+        const words = sentence
+          .replace(/[.,/#!$%^&*;:{}=\-_`~()?"']/g, ' ')
+          .trim()
+          .split(/\s+/)
+          .filter(Boolean);
+        expect(
+          words.length,
+          `Sentence in FAQ item "${item.id}" exceeds 25 words: "${sentence}" (${words.length} words)`
+        ).toBeLessThanOrEqual(25);
+      }
+
+      // Check question word count
+      const qWords = item.question
+        .replace(/[.,/#!$%^&*;:{}=\-_`~()?"']/g, ' ')
+        .trim()
+        .split(/\s+/)
+        .filter(Boolean);
+      expect(
+        qWords.length,
+        `Question "${item.question}" exceeds 25 words (${qWords.length} words)`
+      ).toBeLessThanOrEqual(25);
+    }
+  });
+
+  it('verifies INTEGRATION_BADGES contain zero internal codenames and zero port numbers', () => {
+    for (const badge of INTEGRATION_BADGES) {
+      expect(badge.label).not.toMatch(CODENAME_REGEX);
+      expect(badge.label).not.toMatch(PORT_REGEX);
+      expect(badge.group).not.toMatch(CODENAME_REGEX);
+      expect(badge.group).not.toMatch(PORT_REGEX);
+    }
   });
 });
