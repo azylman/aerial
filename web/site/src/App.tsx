@@ -2,7 +2,7 @@ import { type ChangeEvent, useEffect, useState } from 'react';
 import { useAerialTheme } from './theme';
 import { LandingView } from './components/LandingView';
 import { HandbookView } from './components/HandbookView';
-import { HANDBOOK_CHAPTERS } from './data/chapters';
+import { HANDBOOK_CHAPTERS, findChapterForSection } from './data/chapters';
 
 export { useAerialTheme };
 
@@ -11,6 +11,7 @@ export type RouteView = 'landing' | 'docs';
 export interface RouteState {
   view: RouteView;
   chapterId?: string;
+  sectionId?: string;
 }
 
 export interface ChapterInfo {
@@ -34,18 +35,38 @@ export function parseRouteHash(hash: string): RouteState {
   if (!clean) {
     return { view: 'landing' };
   }
+
+  // Handle section anchor links (e.g. #section-<id>)
   if (clean.startsWith('section-')) {
-    return {
-      view: 'docs',
-      chapterId: 'overview',
-    };
-  }
-  const parts = clean.split('/').filter(Boolean);
-  if (parts[0] === 'docs') {
-    const chapterId = parts[1] || 'overview';
+    const sectionId = clean.replace(/^section-/, '');
+    const chapterId = findChapterForSection(sectionId) || 'overview';
     return {
       view: 'docs',
       chapterId,
+      sectionId,
+    };
+  }
+
+  let pathPart = clean;
+  let sectionId: string | undefined;
+  if (pathPart.includes('#')) {
+    const [path, hashAnchor] = pathPart.split('#', 2);
+    pathPart = path || '';
+    if (hashAnchor?.startsWith('section-')) {
+      sectionId = hashAnchor.replace(/^section-/, '');
+    }
+  }
+
+  const parts = pathPart.split('/').filter(Boolean);
+  if (parts[0] === 'docs') {
+    const chapterId = parts[1] || 'overview';
+    if (!sectionId && parts[2]) {
+      sectionId = parts[2].replace(/^section-/, '');
+    }
+    return {
+      view: 'docs',
+      chapterId,
+      sectionId,
     };
   }
   return { view: 'landing' };
@@ -76,8 +97,17 @@ export function App() {
   const currentChapter = CHAPTERS.find((ch) => ch.id === activeChapterId) || CHAPTERS[0]!;
 
   useEffect(() => {
+    if (route.sectionId) {
+      const target = document.getElementById(`section-${route.sectionId}`);
+      if (target) {
+        if (typeof target.scrollIntoView === 'function') {
+          target.scrollIntoView({ behavior: 'smooth' });
+        }
+        return;
+      }
+    }
     window.scrollTo(0, 0);
-  }, [route.view, route.chapterId]);
+  }, [route.view, route.chapterId, route.sectionId]);
 
   const handleChapterJump = (event: ChangeEvent<HTMLSelectElement>) => {
     window.location.hash = `#/docs/${event.target.value}`;

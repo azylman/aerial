@@ -90,7 +90,7 @@ export function HandbookView({ chapterId, onSelectChapter }: HandbookViewProps) 
   const handleTocClick = (event: React.MouseEvent<HTMLAnchorElement>, sectionId: string) => {
     event.preventDefault();
     const target = document.getElementById(`section-${sectionId}`);
-    if (target) {
+    if (target && typeof target.scrollIntoView === 'function') {
       target.scrollIntoView({ behavior: 'smooth' });
     }
   };

@@ -121,7 +121,7 @@ bazel test //services/... //pkg/...`,
         id: 'architecture-philosophy',
         title: 'Architecture Philosophy & Decoupled Repositories',
         lead:
-          'Aerial separates generic platform logic from private user customizations through a strict multi-repository architecture and physical filesystem immutability.',
+          'Aerial separates generic platform logic from private user customizations through a strict multi-repository architecture and ephemeral scratch workspaces.',
         paragraphs: [
           'A key failure mode of personal assistant projects is entangling private user details—names, home addresses, smart home device IDs, personal API keys—into the core application source code. This prevents the codebase from being open-sourced, shared, or cleanly upgraded.',
           'Aerial enforces a strict two-repository model. The core monorepo (azylman/aerial) contains 100% domain-agnostic, generic infrastructure code, microservices, and base system rules. The user configuration repository (aerial-config) contains private user persona rules, smart home skills, service configurations, and Kubernetes cluster overrides.',
@@ -129,7 +129,7 @@ bazel test //services/... //pkg/...`,
         bullets: [
           'Domain-Agnostic Core: azylman/aerial has zero personal data, real names, or private credentials.',
           'Private Config Repository: All personal persona rules, household runbooks, and cluster-specific overrides live in a private GitOps repository.',
-          'Physical Immutability: Base repositories are mounted strictly read-only (:ro) inside execution containers to prevent tampering.',
+          'Repository Integrity: Base repositories (/share) are guarded against in-place modification; agents perform all work in isolated scratch clones managed via scripts/aerial-pr.sh.',
           'Ephemeral Scratch Workspaces: Agents perform all modifications in ephemeral scratch clones managed via scripts/aerial-pr.sh.',
         ],
       },
@@ -354,7 +354,7 @@ data:
           'A complete, self-contained telemetry platform stores metrics, logs, and distributed traces with automatic credential redaction.',
         paragraphs: [
           'Observability is native to the platform. VictoriaMetrics stores Prometheus-compatible metrics scraped via vm-operator. VictoriaLogs ingests all node and container stdout/stderr through Fluent Bit with 60-day local retention.',
-          'Distributed tracing is provided by an OpenTelemetry Collector routing to VictoriaTraces. Every span passes through an in-memory redaction processor that strips sensitive authentication tokens (GitHub PATs, Discord secrets, bearer tokens) across plaintext, URL-encoded, base64, and hexadecimal representations before persisting.',
+          'Distributed tracing is provided by an OpenTelemetry Collector routing to VictoriaTraces. Every span passes through an in-memory redaction processor that strips sensitive authentication tokens (GitHub PATs, Discord secrets, bearer tokens) across plaintext, URL-encoded, base64, and git basic-auth representations before persisting.',
         ],
         bullets: [
           'Zero-Cloud Telemetry: 100% self-hosted monitoring with zero recurring SaaS costs.',
@@ -497,7 +497,7 @@ scripts/aerial-build.sh status <build-id>`,
         bullets: [
           'Engine Agnostic: Standardized process orchestration, I/O streaming, and pre-tool interception.',
           'Declarative Configuration: Seamlessly configure default engine and models in config.yaml.',
-          'Process Isolation: Agent CLI processes execute in isolated containers with strict resource quotas.',
+          'Subprocess Management: Agent CLI processes execute as scoped subprocesses under their own process groups, sharing the eri-restate worker container resource boundaries.',
         ],
         codeSnippets: [
           {
@@ -561,15 +561,15 @@ channels:
     sections: [
       {
         id: 'filesystem-immutability',
-        title: 'Physical Immutability & Ephemeral Scratch Workspaces',
+        title: 'Repository Integrity & Ephemeral Scratch Workspaces',
         lead:
-          'Base repositories and credential volumes mount read-only into execution pods; all agent work occurs in ephemeral scratch workspaces.',
+          'Base repositories are protected from direct in-place mutation; all agent work occurs in ephemeral scratch workspaces.',
         paragraphs: [
-          'Granting an autonomous AI agent unrestricted write access to your primary codebase or server filesystem is an enormous security hazard. A buggy prompt or hallucinatory command could delete files, corrupt git history, or overwrite critical configuration.',
-          'In Aerial, production repository volumes (/share/aerial and /share/aerial-config) are mounted strictly read-only (:ro). Local git mutations or file writes directly to /share/* fail with EROFS (Read-only file system). Agents must clone isolated scratch workspaces via scripts/aerial-pr.sh, test changes in isolation, and submit PRs through standard GitOps pull request workflows.',
+          'Granting an autonomous AI agent unrestricted write access to your primary codebase or live server working copy is an enormous security hazard. A buggy prompt or hallucinatory command could delete files, corrupt git history, or overwrite critical configuration.',
+          'In Aerial, agents are strictly prohibited from mutating base repositories (/share/aerial and /share/aerial-config) directly. The compiled hook-guard pre-tool interceptor blocks destructive commands and in-place git mutations targeting /share, while read-only mounts protect ingress pods. Agents must clone isolated scratch workspaces via scripts/aerial-pr.sh, test changes in isolation, and submit PRs through standard GitOps pull request workflows.',
         ],
         bullets: [
-          'Physical Kernel Immutability: Read-only container mounts prevent accidental filesystem destruction.',
+          'Pre-Tool Enforcement: hook-guard intercepts and denies direct writes and git mutations targeting /share.',
           'Scratch Isolation: Every build and task runs in a dedicated ephemeral directory in /data/scratch/.',
           'GitOps Boundary: Changes enter production strictly through reviewed and verified pull requests.',
         ],
@@ -580,24 +580,24 @@ channels:
             code: `# Initialize an isolated scratch workspace for safe code modification
 /share/aerial/scripts/aerial-pr.sh init aerial
 
-# Direct modifications to /share/ are physically blocked
-# touch /share/aerial/test.txt -> EROFS: Read-only file system`,
+# In-place modifications to /share/ are intercepted and denied by hook-guard`,
           },
         ],
       },
       {
         id: 'credential-sanitization',
-        title: 'Zero Plaintext Tokens & Multi-Encoding Redaction',
+        title: 'Zero Plaintext Tokens & Multi-Layer Redaction',
         lead:
-          'Credentials never touch disk in plaintext, and all outbound log streams, trace spans, and chat messages undergo real-time redaction.',
+          'Credentials never touch disk in plaintext, and all outbound log streams, trace spans, and chat messages undergo pipeline-specific redaction.',
         paragraphs: [
           'Aerial enforces a Zero Plaintext Token Invariant: authentication tokens (e.g. GITHUB_PAT) are never saved into .git/config on disk. Git authentication uses ephemeral in-memory HTTP basic auth headers injected JIT during network calls.',
-          'Outbound telemetry is sanitized using multi-encoding regex maskers. Redaction rules detect and mask tokens in plaintext, URL-encoded form, base64 encoding, and hex byte arrays before data leaves container boundaries.',
+          'Outbound telemetry is sanitized across each pipeline using registered secret values: the OpenTelemetry Collector masks exact token values along with their base64, URL-encoded, and git basic-auth variants in trace spans, while the Fluent Bit log pipeline matches exact raw and JSON-escaped values, sensitive JSON fields, and PEM private keys before logs are stored.',
         ],
         bullets: [
           'Zero Disk Tokens: No tokens stored in git configs, shell histories, or workspace files.',
-          'Multi-Encoding Redaction: Sanitizes tokens across ASCII, URL-encoded, Base64, and Hex formats.',
-          'Redaction Bundle: Shared secrets are mounted in-memory at /secrets to configure regex masks dynamically.',
+          'Trace Span Masking: Sanitizes sensitive credentials and their base64, URL-encoded, and git basic-auth variants in VictoriaTraces.',
+          'Log Pipeline Filtering: Fluent Bit redacts raw tokens, JSON-escaped strings, and PEM blocks before writing to VictoriaLogs.',
+          'Redaction Bundle: Shared secrets are mounted in-memory at /secrets to populate pipeline redaction targets dynamically.',
         ],
       },
       {
@@ -607,7 +607,7 @@ channels:
           'A compiled Go binary intercepts every tool call before execution to enforce operational invariants and block hazardous commands.',
         paragraphs: [
           'Relying solely on LLM prompt instructions to prevent unsafe actions is insufficient. Aerial compiles a native Go pre-tool hook (hook-guard) into execution environments. Before any tool call executes, hook-guard inspects the command and arguments.',
-          'Prohibited actions—such as ephemeral CLI scheduling commands that bypass durable Haro storage, dangerous filesystem mutations, or attempts to access internal credential stores—are rejected deterministically at the kernel boundary before the shell is invoked.',
+          'Prohibited actions—such as ephemeral CLI scheduling commands that bypass durable Haro storage, dangerous filesystem mutations, or attempts to access internal credential stores—are rejected deterministically by hook-guard as a userspace pre-tool check before the command executes.',
         ],
         bullets: [
           'Deterministic Interception: Compiled Go binary runs prior to every tool execution.',
@@ -622,12 +622,12 @@ channels:
           'Multi-user message authentication validates administrator privileges before executing sensitive operations.',
         paragraphs: [
           'In multi-user Discord channels or shared household environments, unauthorized users must not be permitted to trigger system updates, restart containers, or modify configuration files.',
-          'Aerial tags every inbound message with an is_admin flag verified against the admin_users list in config.yaml. Informational queries, smart home status checks, and public conversations are open to all users; sensitive infrastructure modifications, cron adjustments, and GitOps syncs require verified admin privileges.',
+          'Aerial verifies administrator status against the configured admin_users list and injects the verified is_admin flag into the agent context. Agent security rules enforce privilege boundaries: standard conversational and read-only informational requests are answered for all users, while sensitive operational tasks (infrastructure modifications, cron adjustments, container management) are restricted to verified admins and rejected for non-admin users.',
         ],
         bullets: [
-          'Role-Based Access Control: Granular separation between standard conversational use and admin operations.',
-          'Polite Rejection: Unauthorized privileged attempts are rejected succinctly without executing sensitive commands.',
-          'Audit Logging: Privileged commands record structured audit logs with user IDs and timestamps.',
+          'Role-Based Context: Inbound turns carry a verified is_admin flag derived from config.yaml admin lists.',
+          'Agent Rule Enforcement: System security rules instruct agents to decline sensitive modifications from non-admin users.',
+          'Polite Rejection: Unauthorized privileged attempts are rejected succinctly without executing requested changes.',
         ],
       },
     ],
@@ -803,4 +803,17 @@ export function filterChapters(
       return null;
     })
     .filter((ch): ch is HandbookChapter => ch !== null);
+}
+
+/**
+ * Resolves a section ID to its containing chapter ID.
+ */
+export function findChapterForSection(sectionId: string): string | undefined {
+  const sId = sectionId.toLowerCase();
+  for (const ch of HANDBOOK_CHAPTERS) {
+    if (ch.sections.some((s) => s.id.toLowerCase() === sId)) {
+      return ch.id;
+    }
+  }
+  return undefined;
 }

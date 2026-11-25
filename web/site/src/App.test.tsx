@@ -18,15 +18,27 @@ describe('parseRouteHash', () => {
   });
 
   it('parses docs hashes correctly', () => {
-    expect(parseRouteHash('#/docs')).toEqual({ view: 'docs', chapterId: 'overview' });
-    expect(parseRouteHash('#/docs/')).toEqual({ view: 'docs', chapterId: 'overview' });
+    expect(parseRouteHash('#/docs')).toEqual({ view: 'docs', chapterId: 'overview', sectionId: undefined });
+    expect(parseRouteHash('#/docs/')).toEqual({ view: 'docs', chapterId: 'overview', sectionId: undefined });
     expect(parseRouteHash('#/docs/software-factory')).toEqual({
       view: 'docs',
       chapterId: 'software-factory',
+      sectionId: undefined,
     });
     expect(parseRouteHash('#section-closed-loop-thesis')).toEqual({
       view: 'docs',
       chapterId: 'overview',
+      sectionId: 'closed-loop-thesis',
+    });
+    expect(parseRouteHash('#section-stateless-ingress')).toEqual({
+      view: 'docs',
+      chapterId: 'multimodal-agent',
+      sectionId: 'stateless-ingress',
+    });
+    expect(parseRouteHash('#/docs/multimodal-agent#section-stateless-ingress')).toEqual({
+      view: 'docs',
+      chapterId: 'multimodal-agent',
+      sectionId: 'stateless-ingress',
     });
   });
 });
@@ -250,6 +262,20 @@ describe('App component', () => {
     expect(screen.getByText('CHAPTER 1')).toBeTruthy();
     expect(screen.queryByTestId('landing-view')).toBeNull();
     expect(scrollSpy).toHaveBeenCalled();
+  });
+
+  it('opens owning chapter and renders handbook when navigating directly to a section hash', () => {
+    render(<App />);
+
+    act(() => {
+      window.location.hash = '#section-stateless-ingress';
+      window.dispatchEvent(new HashChangeEvent('hashchange'));
+    });
+
+    expect(screen.getByTestId('handbook-view')).toBeTruthy();
+    expect(screen.getByText('CHAPTER 5')).toBeTruthy();
+    expect(screen.getByRole('heading', { level: 1 }).textContent).toBe('The Multimodal AI Agent');
+    expect(screen.getByTestId('section-stateless-ingress')).toBeTruthy();
   });
 
   it('toggles theme when clicking the theme button in navbar', () => {
