@@ -34,7 +34,7 @@ func TestCheckLiveState(t *testing.T) {
 		{"mutating binary in live cwd", "run_command", bash("touch x", "/data/ssh"), deny},
 		{"write tool on live config", "Write", ToolArgs{FilePathSnake: "/data/ssh/config"}, deny},
 		{"edit tool on live key", "edit_file", ToolArgs{Path: "/data/ssh/id_ed25519"}, deny},
-		{"ssh to host", "run_command", bash("ssh calibarn whoami", "/data"), allow},
+		{"ssh to host", "run_command", bash("ssh node-1 whoami", "/data"), allow},
 		{"fingerprint public key", "run_command", bash("ssh-keygen -lf /data/ssh/id_ed25519.pub", "/data"), allow},
 		{"read live config", "run_command", bash("cat /data/ssh/config", "/data"), allow},
 		{"rm unrelated ssh dir", "run_command", bash("rm -rf /tmp/t/ssh", "/tmp"), allow},
