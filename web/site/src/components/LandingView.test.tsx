@@ -1,11 +1,11 @@
 import { act, cleanup, fireEvent, render, screen, within } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { ArchitectureMap } from './ArchitectureMap';
-import { ComparisonMatrix } from './ComparisonMatrix';
-import { FactoryStepper } from './FactoryStepper';
-import { GlassBoxShowcase } from './GlassBoxShowcase';
+import { ArchitectureMap, TOPOLOGY_NODES } from './ArchitectureMap';
+import { ComparisonMatrix, COMPETITORS, DIMENSIONS } from './ComparisonMatrix';
+import { FactoryStepper, FACTORY_STAGES } from './FactoryStepper';
+import { GlassBoxShowcase, SHOWCASE_TABS } from './GlassBoxShowcase';
 import { LandingView } from './LandingView';
-import { QuickstartSteps } from './QuickstartSteps';
+import { QuickstartSteps, QUICKSTART_STEPS } from './QuickstartSteps';
 
 describe('LandingView Component', () => {
   afterEach(() => {
@@ -37,7 +37,7 @@ describe('ArchitectureMap Component', () => {
 
     // Default inspector node
     const inspector = screen.getByTestId('node-inspector');
-    expect(within(inspector).getByText('Eri + Eri-Restate')).toBeTruthy();
+    expect(within(inspector).getByText('Agent Execution Engine')).toBeTruthy();
 
     // Filter by platform pillar
     fireEvent.click(screen.getByTestId('filter-platform'));
@@ -68,12 +68,12 @@ describe('ArchitectureMap Component', () => {
 
     const inspector = screen.getByTestId('node-inspector');
     expect(inspector.textContent).toContain('k3s / NGINX Gateway');
-    expect(inspector.textContent).toContain(':80 / :443');
+    expect(inspector.textContent).toContain('Gateway API (LAN & Edge HTTPRoutes)');
 
     // Select with Enter key
     const nodeVikunja = screen.getByTestId('node-vikunja-docket');
     fireEvent.keyDown(nodeVikunja, { key: 'Enter' });
-    expect(inspector.textContent).toContain('Vikunja + Docket MCP');
+    expect(inspector.textContent).toContain('Vikunja DAG Backlog');
 
     // Select with Space key
     const nodePostgres = screen.getByTestId('node-cnpg-postgres');
@@ -179,7 +179,7 @@ describe('FactoryStepper Component', () => {
     expect(prevBtn.hasAttribute('disabled')).toBe(false);
 
     fireEvent.click(nextBtn);
-    expect(detail.textContent).toContain('Stage 3: Vanadis + Restate + NATS Multi-PR Pipeline');
+    expect(detail.textContent).toContain('Stage 3: Restate + NATS Multi-PR Build Pipeline');
 
     fireEvent.click(nextBtn);
     expect(detail.textContent).toContain('Stage 4: GitHub Actions CI & Automated Code Review');
@@ -395,5 +395,186 @@ describe('QuickstartSteps Component', () => {
     // Unmount cancels pending timer via effect cleanup
     unmount();
     expect(vi.getTimerCount()).toBe(0);
+  });
+});
+
+describe('ASD-STE100 and zero-codename compliance', () => {
+  afterEach(() => {
+    cleanup();
+  });
+
+  const CODENAME_REGEX = /\b(eri|coven|haro|vanadis|synapse|prospera|senses|pjev|docket-mcp|docket-store)\b/i;
+  const PORT_REGEX = /:[0-9]{2,5}\b/;
+
+  function splitSentences(text: string): string[] {
+    const sanitized = text
+      .replace(/\be\.g\./gi, 'eg')
+      .replace(/\bi\.e\./gi, 'ie')
+      .replace(/(\d+)\.(\d+)/g, '$1_$2');
+    return sanitized
+      .split(/(?<=[.!?])\s+|\n+/)
+      .map((s) => s.trim())
+      .filter((s) => s.length > 0);
+  }
+
+  function countWords(sentence: string): number {
+    return sentence
+      .trim()
+      .split(/\s+/)
+      .filter((w) => w.length > 0).length;
+  }
+
+  it('contains zero internal service codenames and zero port numbers in rendered LandingView', () => {
+    const { container } = render(<LandingView />);
+    const text = container.textContent || '';
+
+    expect(text).not.toMatch(CODENAME_REGEX);
+    expect(text).not.toMatch(PORT_REGEX);
+  });
+
+  it('contains zero internal service codenames and zero port numbers across exported data structures', () => {
+    // TOPOLOGY_NODES
+    for (const node of TOPOLOGY_NODES) {
+      const nodeTexts = [
+        node.name,
+        node.displayName || '',
+        node.role,
+        node.ports,
+        node.displayPorts || '',
+        node.description,
+        node.chapterTitle,
+      ];
+      for (const t of nodeTexts) {
+        expect(t).not.toMatch(CODENAME_REGEX);
+        expect(t).not.toMatch(PORT_REGEX);
+      }
+    }
+
+    // FACTORY_STAGES
+    for (const stage of FACTORY_STAGES) {
+      const stageTexts = [
+        stage.title,
+        stage.subtitle,
+        stage.component,
+        ...stage.inputs,
+        ...stage.actions,
+        ...stage.outputs,
+        ...stage.guardrails,
+      ];
+      for (const t of stageTexts) {
+        expect(t).not.toMatch(CODENAME_REGEX);
+        expect(t).not.toMatch(PORT_REGEX);
+      }
+    }
+
+    // SHOWCASE_TABS
+    for (const tab of SHOWCASE_TABS) {
+      const tabTexts = [tab.title, tab.badge, tab.route, tab.description];
+      for (const t of tabTexts) {
+        expect(t).not.toMatch(CODENAME_REGEX);
+        expect(t).not.toMatch(PORT_REGEX);
+      }
+    }
+
+    // COMPETITORS
+    for (const comp of COMPETITORS) {
+      const compTexts = [
+        comp.name,
+        comp.categoryLabel,
+        comp.aerialAdvantage,
+        ...comp.strengths,
+        ...comp.limitations,
+      ];
+      for (const t of compTexts) {
+        expect(t).not.toMatch(CODENAME_REGEX);
+        expect(t).not.toMatch(PORT_REGEX);
+      }
+    }
+
+    // DIMENSIONS
+    for (const dim of DIMENSIONS) {
+      const dimTexts = [dim.dimension, dim.homelab, dim.factory, dim.agent, dim.aerial];
+      for (const t of dimTexts) {
+        expect(t).not.toMatch(CODENAME_REGEX);
+        expect(t).not.toMatch(PORT_REGEX);
+      }
+    }
+
+    // QUICKSTART_STEPS
+    for (const step of QUICKSTART_STEPS) {
+      const stepTexts = [step.title, step.badge, step.summary, step.command, ...step.notes];
+      for (const t of stepTexts) {
+        expect(t).not.toMatch(CODENAME_REGEX);
+        expect(t).not.toMatch(PORT_REGEX);
+      }
+    }
+  });
+
+  it('enforces ASD-STE100 sentence length limits for descriptive texts (<= 25 words)', () => {
+    // TOPOLOGY_NODES descriptions
+    for (const node of TOPOLOGY_NODES) {
+      const sentences = splitSentences(node.description);
+      for (const s of sentences) {
+        expect(countWords(s)).toBeLessThanOrEqual(25);
+      }
+    }
+
+    // FACTORY_STAGES actions & items
+    for (const stage of FACTORY_STAGES) {
+      for (const item of [...stage.inputs, ...stage.actions, ...stage.outputs, ...stage.guardrails]) {
+        const sentences = splitSentences(item);
+        for (const s of sentences) {
+          expect(countWords(s)).toBeLessThanOrEqual(25);
+        }
+      }
+    }
+
+    // SHOWCASE_TABS descriptions
+    for (const tab of SHOWCASE_TABS) {
+      const sentences = splitSentences(tab.description);
+      for (const s of sentences) {
+        expect(countWords(s)).toBeLessThanOrEqual(25);
+      }
+    }
+
+    // COMPETITORS
+    for (const comp of COMPETITORS) {
+      const advantageSentences = splitSentences(comp.aerialAdvantage);
+      for (const s of advantageSentences) {
+        expect(countWords(s)).toBeLessThanOrEqual(25);
+      }
+      for (const str of [...comp.strengths, ...comp.limitations]) {
+        const sentences = splitSentences(str);
+        for (const s of sentences) {
+          expect(countWords(s)).toBeLessThanOrEqual(25);
+        }
+      }
+    }
+
+    // DIMENSIONS
+    for (const dim of DIMENSIONS) {
+      for (const val of [dim.homelab, dim.factory, dim.agent, dim.aerial]) {
+        const sentences = splitSentences(val);
+        for (const s of sentences) {
+          expect(countWords(s)).toBeLessThanOrEqual(25);
+        }
+      }
+    }
+  });
+
+  it('enforces ASD-STE100 sentence length limits for procedural quickstart texts (<= 20 words)', () => {
+    for (const step of QUICKSTART_STEPS) {
+      const summarySentences = splitSentences(step.summary);
+      for (const s of summarySentences) {
+        expect(countWords(s)).toBeLessThanOrEqual(20);
+      }
+
+      for (const note of step.notes) {
+        const noteSentences = splitSentences(note);
+        for (const s of noteSentences) {
+          expect(countWords(s)).toBeLessThanOrEqual(20);
+        }
+      }
+    }
   });
 });

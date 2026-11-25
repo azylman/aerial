@@ -18,7 +18,7 @@ export const FACTORY_STAGES: readonly FactoryStage[] = [
     title: 'Vikunja DAG Ready Queue',
     subtitle: 'Dependency-aware backlog discovery',
     icon: '📋',
-    component: 'Vikunja + docket-mcp + PostgreSQL 19',
+    component: 'Vikunja + Issue Tracker MCP + PostgreSQL 19',
     inputs: [
       'Feature specifications & architectural epics',
       'Bug reports & mid-flight out-of-scope discoveries',
@@ -66,17 +66,17 @@ export const FACTORY_STAGES: readonly FactoryStage[] = [
   },
   {
     id: 3,
-    title: 'Vanadis + Restate + NATS Multi-PR Pipeline',
+    title: 'Restate + NATS Multi-PR Build Pipeline',
     subtitle: 'Durable cross-repo DAG orchestration',
     icon: '🏗️',
-    component: 'vanadis + vanadis-restate + NATS JetStream',
+    component: 'Restate Virtual Objects + NATS JetStream',
     inputs: [
       'Multi-chunk build plan (e.g. upstream engine PR before downstream config PR)',
       'Ordered chunk DAG dependencies and repository targets',
     ],
     actions: [
       'Restate Build and BuildRouter virtual objects coordinate chunk sequence',
-      'Publishes aerial.pr.> event facts to NATS JetStream durable stream',
+      'Publishes pull request event facts to NATS JetStream durable stream',
       'Coordinates GitHub auto-squash upon CI check approval',
     ],
     outputs: [
@@ -117,14 +117,14 @@ export const FACTORY_STAGES: readonly FactoryStage[] = [
     title: 'Self-Healing Remediation & Flux Push GitOps',
     subtitle: 'Zero-touch deploy or automatic branch repair',
     icon: '🔄',
-    component: 'synapse + Flux CD + vanadis-restate',
+    component: 'Webhook Router + Flux CD + Restate',
     inputs: [
       'GitHub push events or failed CI/RoboRev check runs',
       'edge-gateway webhook forwarder',
     ],
     actions: [
-      'Success path: vanadis-restate updates image tags and triggers instant Flux GitOps reconcile',
-      'Failure path: On CI failure, vanadis-restate wakes eri-restate with failure logs',
+      'Success path: Build orchestrator updates image tags and triggers instant Flux GitOps reconcile',
+      'Failure path: On CI failure, build orchestrator wakes agent execution engine with failure logs',
       'Agent inspects failure in scratch, writes targeted fix, and re-verifies automatically',
     ],
     outputs: [
@@ -188,15 +188,15 @@ export function FactoryStepper() {
             <h4 className="banner-title">Autonomous Self-Healing Loop Active</h4>
             <p className="banner-text">
               When <strong>Stage 4 (GitHub Actions CI or RoboRev)</strong> detects a test failure or code change request,
-              the pipeline does <strong>not</strong> break or wait for human triage. <strong>synapse</strong> captures the{' '}
-              <code>check_run.completed</code> webhook, <strong>vanadis-restate</strong> extracts failure logs, and wakes{' '}
-              <strong>eri-restate</strong> with exact line coordinates. The agent automatically initializes a scratch fix in{' '}
-              <strong>Stage 2</strong>, pushes a remediation commit, and restarts Stage 4 verification!
+              the pipeline does <strong>not</strong> break or wait for human triage. The <strong>webhook router</strong> captures
+              the <code>check_run.completed</code> webhook, the <strong>build orchestrator</strong> extracts failure logs, and Restate
+              wakes the <strong>agent execution engine</strong> with exact line coordinates. The agent automatically initializes a
+              scratch fix in <strong>Stage 2</strong>, pushes a remediation commit, and restarts Stage 4 verification.
             </p>
             <div className="remediation-diagram-pills">
               <span className="diagram-pill pill-fail">Stage 4: CI / RoboRev Fails</span>
               <span className="diagram-arrow">➔</span>
-              <span className="diagram-pill pill-wake">Synapse / Restate Wake</span>
+              <span className="diagram-pill pill-wake">Router / Restate Wake</span>
               <span className="diagram-arrow">➔</span>
               <span className="diagram-pill pill-scratch">Stage 2: Scratch Fix</span>
               <span className="diagram-arrow">➔</span>

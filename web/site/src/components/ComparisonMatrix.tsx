@@ -28,16 +28,16 @@ export const COMPETITORS: readonly Competitor[] = [
     categoryLabel: 'Homelab & PaaS',
     strengths: [
       'Declarative GitOps using Flux CD or Argo CD',
-      'Mature Kubernetes infrastructure & network policies',
-      'Community battle-tested cluster blueprints',
+      'Mature Kubernetes infrastructure and network policies',
+      'Community cluster blueprints with extensive documentation',
     ],
     limitations: [
       'Treats applications as static targets deployed by humans',
-      'Zero autonomous coding agent or backlog discovery',
-      'Manual multi-repository rollout coordination',
+      'Lacks autonomous coding agents and backlog discovery',
+      'Requires manual multi-repository rollout coordination',
     ],
     aerialAdvantage:
-      'Provides the same rock-solid Flux CD GitOps foundation, but embeds an autonomous software factory and AI agent that writes, tests, and deploys its own services onto the cluster.',
+      'Aerial builds on Flux CD GitOps. It embeds an autonomous software factory that writes, tests, and deploys services to the cluster.',
   },
   {
     id: 'coolify-dokploy',
@@ -45,17 +45,17 @@ export const COMPETITORS: readonly Competitor[] = [
     category: 'homelab',
     categoryLabel: 'Homelab & PaaS',
     strengths: [
-      'Intuitive web dashboards for single-server container PaaS',
+      'Intuitive web dashboards for single-server container deployment',
       'Simple Git push webhooks and database provisioning',
-      'Clean developer ergonomics for hobbyists',
+      'Clean developer ergonomics for application hosting',
     ],
     limitations: [
-      'Lacks durable workflow state machines and event buses',
-      'No autonomous agent loop or DAG task scheduling',
-      'Single-server Docker Compose focus rather than Kubernetes scale',
+      'Lacks durable workflow state machines and event streams',
+      'Contains no autonomous agent loop or DAG task scheduling',
+      'Focuses on single-server Docker Compose rather than Kubernetes clusters',
     ],
     aerialAdvantage:
-      'Runs on Kubernetes (k3s) with Restate durable virtual objects, CloudNativePG PostgreSQL 19 + pgvector, and NATS JetStream, supporting true multi-node homelab topologies.',
+      'Aerial runs on Kubernetes with Restate virtual objects, PostgreSQL 19 with pgvector, and NATS JetStream for multi-node clusters.',
   },
   {
     id: 'gas-town-beads',
@@ -64,16 +64,16 @@ export const COMPETITORS: readonly Competitor[] = [
     categoryLabel: 'Software Factory',
     strengths: [
       'Git-backed issue graphs and DAG dependency tracking',
-      'Clean unblocked task resolution for coding agents',
-      'Local development workflow focus',
+      'Unblocked task resolution for coding agents',
+      'Clear focus on local development workflows',
     ],
     limitations: [
       'Runs in local development sandboxes without live deployment targets',
-      'Lacks self-hosted GitOps or push deployment pipelines',
-      'No persistent multi-modal assistant or household integrations',
+      'Lacks self-hosted GitOps and push deployment pipelines',
+      'Contains no persistent multimodal assistant or device integrations',
     ],
     aerialAdvantage:
-      'Pairs a Vikunja DAG issue graph with Restate durable multi-PR build pipelines and push-driven Flux CD deployments, taking tasks from ready queue all the way to production.',
+      'Aerial pairs a Vikunja task graph with Restate multi-PR pipelines and Flux CD deployments. It takes tasks from backlog to production.',
   },
   {
     id: 'attractor-openhands',
@@ -81,17 +81,17 @@ export const COMPETITORS: readonly Competitor[] = [
     category: 'factory',
     categoryLabel: 'Software Factory',
     strengths: [
-      'Powerful autonomous coding agent execution loops',
-      'Containerized development environments & terminal sandboxes',
+      'Autonomous coding agent execution loops',
+      'Containerized development environments and terminal sandboxes',
       'Interactive debugging and benchmark evaluation suites',
     ],
     limitations: [
       'Operates in ephemeral testbeds without persistent platform state',
-      'No native GitOps delivery, telephony, or voice interfaces',
-      'Lacks cognitive temporal memory decay or procedural skill synthesis',
+      'Lacks native GitOps delivery, telephony, and voice interfaces',
+      'Omits cognitive temporal memory decay and procedural skill synthesis',
     ],
     aerialAdvantage:
-      'Closes the loop between code authoring and live operations, with proactive CI self-healing wakes, Discord/voice/SMS multimodal interaction, and ACT-R cognitive memory.',
+      'Aerial connects code authoring with cluster operations. It provides proactive CI remediation, Discord and voice interaction, and ACT-R memory.',
   },
   {
     id: 'hermes-openclaw',
@@ -99,17 +99,17 @@ export const COMPETITORS: readonly Competitor[] = [
     category: 'agent',
     categoryLabel: 'AI Agent',
     strengths: [
-      'Extensible conversational chat daemons and channel plugins',
+      'Extensible chat daemons and channel plugins',
       'Support for local LLM inference engines',
       'Community tool registries and assistant scripting',
     ],
     limitations: [
       'Ephemeral background daemons without durable state machines',
-      'Lack multi-PR build orchestration or Kubernetes delivery',
-      'Missing defense-in-depth read-only mounts and pre-tool hook firewalls',
+      'Lacks multi-PR build orchestration and Kubernetes delivery',
+      'Omits read-only mounts and pre-tool security firewalls',
     ],
     aerialAdvantage:
-      'Backed by RocksDB-persisted Restate Virtual Objects, read-only container mounts (:ro), child-process secret scrubbing, and full Victoria telemetry.',
+      'Restate virtual objects, read-only repository mounts, secret scrubbing, and VictoriaMetrics telemetry protect the platform.',
   },
 ];
 
@@ -117,7 +117,7 @@ export const DIMENSIONS: readonly DimensionComparison[] = [
   {
     dimension: 'Primary Architecture',
     homelab: 'Declarative GitOps or container app dashboards',
-    factory: 'CLI/tmux loops or standalone runner sandboxes',
+    factory: 'Terminal loops or standalone runner sandboxes',
     agent: 'Chat daemon or long-polling desktop service',
     aerial: 'Unified k3s GitOps platform + Restate durable execution + multimodal agent',
   },
@@ -130,38 +130,38 @@ export const DIMENSIONS: readonly DimensionComparison[] = [
   },
   {
     dimension: 'Delivery & Backlog',
-    homelab: 'Manual human commits & PR reviews',
-    factory: 'Issue graphs or CLI prompt queues',
+    homelab: 'Manual human commits and pull request reviews',
+    factory: 'Issue graphs or terminal prompt queues',
     agent: 'Conversational chat reminders or simple tasks',
-    aerial: 'Integrated Vikunja + PostgreSQL 19 hybrid RRF (vector + FTS) ready queue',
+    aerial: 'Integrated Vikunja + PostgreSQL 19 hybrid text and vector search queue',
   },
   {
     dimension: 'Multi-PR Workflows',
-    homelab: 'Manual multi-repo coordination',
-    factory: 'Single-repo focus or manual sequence',
-    agent: 'Subagents without cross-repo coordination',
-    aerial: 'Restate Build / BuildRouter state machines coordinating multi-PR DAG rollouts',
+    homelab: 'Manual multi-repository coordination',
+    factory: 'Single-repository focus or manual sequence',
+    agent: 'Subagents without cross-repository coordination',
+    aerial: 'Restate state machines coordinating multi-PR DAG rollouts',
   },
   {
     dimension: 'Deployment & Self-Healing',
-    homelab: 'GitOps sync alerts (human triages)',
-    factory: 'Sandbox-only; no live cluster GitOps',
+    homelab: 'GitOps sync alerts with manual triage',
+    factory: 'Sandbox testbeds without live cluster GitOps',
     agent: 'No built-in Kubernetes delivery',
-    aerial: 'Push GitOps (Flux CD) + automated reactive wake on CI failure for branch remediation',
+    aerial: 'Push GitOps via Flux CD with automated CI failure remediation',
   },
   {
     dimension: 'Glass-Box Observability',
-    homelab: 'Cluster Grafana/Prometheus (app-level)',
-    factory: 'CLI stdout or local task inspectors',
+    homelab: 'Cluster Grafana and Prometheus monitoring',
+    factory: 'Command line logs or local task inspectors',
     agent: 'Chat logs or terminal output',
-    aerial: 'Operator Console, AgentsView transcripts, Restate UI, Grafana, and VictoriaLogs/Traces',
+    aerial: 'Operator Console, AgentsView transcripts, Restate UI, and VictoriaMetrics telemetry',
   },
   {
     dimension: 'Security & Guardrails',
-    homelab: 'Standard Linux / Kubernetes RBAC',
+    homelab: 'Standard Linux and Kubernetes access controls',
     factory: 'Container sandboxes or workspace boundaries',
     agent: 'Direct tool execution or simple prompts',
-    aerial: 'Read-only repo mounts (:ro), child-process secret scrubbing, pre-tool hook interceptors',
+    aerial: 'Read-only repository mounts, secret scrubbing, and pre-tool hook interceptors',
   },
 ];
 
@@ -213,9 +213,8 @@ export function ComparisonMatrix() {
         <div className="section-eyebrow">Market Positioning</div>
         <h2 className="section-title">Why Aerial & How It Compares</h2>
         <p className="section-subtitle">
-          Where standard GitOps homelabs stop at cluster infrastructure, standalone coding orchestrators lack a
-          deployment target, and chat assistants lack durable infrastructure, Aerial unifies all three into a
-          closed loop.
+          GitOps platforms lack autonomous coding agents. Standalone coding agents lack production clusters. Aerial unifies
+          platform infrastructure, software delivery, and autonomous agents.
         </p>
 
         {/* Filter and Search Controls */}
