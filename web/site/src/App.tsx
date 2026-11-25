@@ -1,5 +1,6 @@
 import { type ChangeEvent, useEffect, useState } from 'react';
 import { useAerialTheme } from './theme';
+import { LandingView } from './components/LandingView';
 
 export { useAerialTheme };
 
@@ -198,69 +199,7 @@ export function App() {
       {/* Main Content Area */}
       <main className="site-main" id="main-content">
         {route.view === 'landing' ? (
-          <section className="landing-view" data-testid="landing-view">
-            <div className="hero-section">
-              <div className="hero-tag">
-                <span>XVX-016 Gundam Aerial</span>
-                <span>•</span>
-                <span>Production Architecture</span>
-              </div>
-              <h1 className="hero-title">Autonomous AI Personal Assistant & Software Factory</h1>
-              <p className="hero-subtitle">
-                A closed-loop, self-hosted platform pairing continuous software delivery with multimodal intelligence.
-                From Discord and voice interactions to multi-PR DAG builds and automated GitHub review loops.
-              </p>
-              <div className="hero-actions">
-                <a href="#/docs/overview" className="btn-primary">
-                  Read the Handbook
-                </a>
-                <a href="#/docs/getting-started" className="btn-secondary">
-                  Getting Started Guide
-                </a>
-              </div>
-            </div>
-
-            <div className="features-grid">
-              <div className="feature-card">
-                <div className="feature-card-header">
-                  <span className="feature-icon" role="img" aria-label="factory">
-                    ⚡
-                  </span>
-                  <h2 className="feature-title">Autonomous Software Factory</h2>
-                </div>
-                <p className="feature-desc">
-                  Vikunja DAG backlog, tiered multi-agent review panel (the girl gang), Vanadis multi-chunk builds, and
-                  automated CI self-healing remediation wakes.
-                </p>
-              </div>
-
-              <div className="feature-card">
-                <div className="feature-card-header">
-                  <span className="feature-icon" role="img" aria-label="platform">
-                    🪐
-                  </span>
-                  <h2 className="feature-title">Self-Hosted Platform</h2>
-                </div>
-                <p className="feature-desc">
-                  3-node NixOS k3s cluster, CloudNativePG PostgreSQL 19 + pgvector, Restate durable execution, NATS
-                  JetStream, and VictoriaMetrics telemetry.
-                </p>
-              </div>
-
-              <div className="feature-card">
-                <div className="feature-card-header">
-                  <span className="feature-icon" role="img" aria-label="agent">
-                    🛰️
-                  </span>
-                  <h2 className="feature-title">Multimodal Intelligence</h2>
-                </div>
-                <p className="feature-desc">
-                  Stateless Eri ingress, Coven ACT-R memory decay & procedural skill synthesis, Haro scheduler, Discord,
-                  voice, and headless browser automation.
-                </p>
-              </div>
-            </div>
-          </section>
+          <LandingView />
         ) : (
           <section className="handbook-view" data-testid="handbook-view">
             <div className="handbook-container">
