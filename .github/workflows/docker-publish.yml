@@ -303,7 +303,7 @@ jobs:
 
       # Pull requests set the builder up before login (above). Push runs decide first whether the
       # PR tree-cache image exists: a hit is a registry-side crane copy that needs only the
-      # GHCR login, so the shared calibarn-buildkit builder is set up on a miss only.
+      # GHCR login, so the shared aerial-buildkit builder is set up on a miss only.
       - name: Set up Persistent Local Buildx Builder (Cache Miss)
         if: matrix.type == 'docker' && github.event_name != 'pull_request' && steps.tree_check.outputs.exists != 'true' && runner.environment == 'self-hosted'
         uses: ./.github/actions/setup-buildx-builder
@@ -412,11 +412,9 @@ jobs:
     if: >
       github.repository == 'azylman/aerial' &&
       github.event_name == 'pull_request' &&
-      (github.actor == 'azylman' || github.actor == 'mcarmody' || github.actor == 'brockventures' || github.actor == 'dependabot[bot]' || github.actor == 'aerial-synapse[bot]') &&
-      (github.event.pull_request.user.login == 'azylman' || github.event.pull_request.user.login == 'mcarmody' || github.event.pull_request.user.login == 'brockventures' || github.event.pull_request.user.login == 'dependabot[bot]') &&
-      (github.event.pull_request.head.repo.full_name == github.repository ||
-       github.event.pull_request.head.repo.full_name == 'mcarmody/aerial' ||
-       github.event.pull_request.head.repo.full_name == 'brockventures/aerial')
+      (github.actor == 'azylman' || github.actor == 'dependabot[bot]' || github.actor == 'aerial-synapse[bot]') &&
+      (github.event.pull_request.user.login == 'azylman' || github.event.pull_request.user.login == 'dependabot[bot]') &&
+      github.event.pull_request.head.repo.full_name == github.repository
     runs-on: [self-hosted, roborev]
     timeout-minutes: 20
     permissions:
@@ -531,7 +529,7 @@ jobs:
       NEEDS_JSON: ${{ toJSON(needs) }}
       EVENT_NAME: ${{ github.event_name }}
       HAS_BUILDS: ${{ needs.changes.outputs.has_builds }}
-      ROBOREV_REQUIRED: ${{ github.repository == 'azylman/aerial' && (github.event_name == 'pull_request' && (github.event.pull_request.head.repo.full_name == 'azylman/aerial' || github.event.pull_request.head.repo.full_name == 'mcarmody/aerial' || github.event.pull_request.head.repo.full_name == 'brockventures/aerial')) }}
+      ROBOREV_REQUIRED: ${{ github.repository == 'azylman/aerial' && github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == 'azylman/aerial' }}
     steps:
       - uses: actions/checkout@v7
       - name: Verify All Upstream Jobs & Container Builds

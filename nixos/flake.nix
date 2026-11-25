@@ -68,7 +68,7 @@
         ];
       };
 
-      cockpit-kexec = nixpkgs.lib.nixosSystem {
+      kiosk-kexec = nixpkgs.lib.nixosSystem {
         system = defaultSystem;
         inherit specialArgs;
         modules = [
