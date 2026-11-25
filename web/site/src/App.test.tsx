@@ -18,12 +18,19 @@ describe('parseRouteHash', () => {
   });
 
   it('parses landing section hashes correctly', () => {
-    expect(parseRouteHash('#use-cases')).toEqual({ view: 'landing', sectionId: 'use-cases' });
-    expect(parseRouteHash('#/use-cases')).toEqual({ view: 'landing', sectionId: 'use-cases' });
-    expect(parseRouteHash('#architecture')).toEqual({ view: 'landing', sectionId: 'architecture' });
-    expect(parseRouteHash('#comparison')).toEqual({ view: 'landing', sectionId: 'comparison' });
-    expect(parseRouteHash('#quickstart')).toEqual({ view: 'landing', sectionId: 'quickstart' });
-    expect(parseRouteHash('#faq')).toEqual({ view: 'landing', sectionId: 'faq' });
+    expect(LANDING_SECTIONS).toEqual([
+      'use-cases',
+      'architecture',
+      'software-factory',
+      'observability',
+      'comparison',
+      'quickstart',
+      'faq',
+    ]);
+    for (const section of LANDING_SECTIONS) {
+      expect(parseRouteHash(`#${section}`)).toEqual({ view: 'landing', sectionId: section });
+      expect(parseRouteHash(`#/${section}`)).toEqual({ view: 'landing', sectionId: section });
+    }
   });
 
   it('parses docs hashes correctly', () => {
