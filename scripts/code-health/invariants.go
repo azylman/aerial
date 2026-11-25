@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strings"
 )
 
@@ -194,6 +195,305 @@ func checkDependabotCoverage(absRoot string) []string {
 		violations = append(violations, ".github/dependabot.yml: no package-ecosystem entries defined")
 	} else if ecoCount != verCount || ecoCount != secCount {
 		violations = append(violations, fmt.Sprintf(".github/dependabot.yml: grouping mismatch (package-ecosystems=%d, version-updates=%d, security-updates=%d)", ecoCount, verCount, secCount))
+	}
+
+	return violations
+}
+
+type communitySkillCheck struct {
+	repoName  string
+	dockerArg string
+	bazelName string
+	dockerDir string
+	skills    []string
+}
+
+var communitySkillsToCheck = []communitySkillCheck{
+	{
+		repoName:  "android_skills",
+		dockerArg: "ANDROID_SKILLS",
+		bazelName: "android_skills",
+		dockerDir: "android-skills",
+		skills: []string{
+			"wear-compose-m3",
+			"wear-widgets",
+			"jetpack-compose-performance",
+			"android-intent-security",
+			"android-permissions-security",
+			"anr-audit-and-fix",
+			"testing-setup",
+		},
+	},
+	{
+		repoName:  "cc_skills_golang",
+		dockerArg: "CC_SKILLS_GOLANG",
+		bazelName: "cc_skills_golang",
+		dockerDir: "golang-skills",
+		skills: []string{
+			"golang-code-style",
+			"golang-concurrency",
+			"golang-context",
+			"golang-error-handling",
+			"golang-modernize",
+			"golang-performance",
+			"golang-safety",
+			"golang-structs-interfaces",
+			"golang-testing",
+		},
+	},
+	{
+		repoName:  "beautiful_rust",
+		dockerArg: "BEAUTIFUL_RUST",
+		bazelName: "beautiful_rust",
+		dockerDir: "rust-skills",
+		skills: []string{
+			"rust-best-practices",
+			"rust-port",
+			"rust-review",
+		},
+	},
+	{
+		repoName:  "kotlin_agent_skills",
+		dockerArg: "KOTLIN_AGENT_SKILLS",
+		bazelName: "kotlin_agent_skills",
+		dockerDir: "kotlin-agent-skills",
+		skills: []string{
+			"kotlin-tooling-agp9-migration",
+			"kotlin-tooling-kotlin-toolchain",
+		},
+	},
+	{
+		repoName:  "kotlin_footguns",
+		dockerArg: "KOTLIN_FOOTGUNS",
+		bazelName: "kotlin_footguns",
+		dockerDir: "kotlin-footguns",
+		skills: []string{
+			"compose-screens-footguns",
+			"footgun-scan",
+			"remote-api-footguns",
+			"state-and-background-footguns",
+		},
+	},
+}
+
+func readParityFile(path string) (string, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return "", err
+	}
+	return string(data), nil
+}
+
+func findBazelArchiveBlock(moduleBazel, bazelName string) string {
+	const target = "http_archive("
+	idx := 0
+	for {
+		start := strings.Index(moduleBazel[idx:], target)
+		if start == -1 {
+			return ""
+		}
+		archiveStart := idx + start
+		idx = archiveStart + len(target)
+
+		nextArchive := strings.Index(moduleBazel[idx:], target)
+		var block string
+		if nextArchive == -1 {
+			block = moduleBazel[archiveStart:]
+		} else {
+			block = moduleBazel[archiveStart : idx+nextArchive]
+		}
+
+		if strings.Contains(block, `name = "`+bazelName+`"`) {
+			return block
+		}
+	}
+}
+
+var (
+	dockerForLoopRegex = regexp.MustCompile(`for\s+skill\s+in\s+([^;]+);`)
+	dockerCpRegex      = regexp.MustCompile(`cp\s+-a\s+\S*?([a-zA-Z0-9_-]+)\s+/opt/skills/`)
+	bazelGlobRegex     = regexp.MustCompile(`"skills/([a-zA-Z0-9_-]+)(?:/\*\*)?"`)
+	bazelMvRegex       = regexp.MustCompile(`mv\s+([^"]+)\s+skills/`)
+)
+
+func extractDockerfileSkills(dockerContent string, chk communitySkillCheck) []string {
+	blockStart := strings.Index(dockerContent, "/tmp/"+chk.dockerDir)
+	if blockStart == -1 {
+		return nil
+	}
+	block := dockerContent[blockStart:]
+	if blockEnd := strings.Index(block, "rm -rf /tmp/"+chk.dockerDir); blockEnd != -1 {
+		block = block[:blockEnd]
+	}
+
+	seen := make(map[string]bool)
+	var skills []string
+
+	if m := dockerForLoopRegex.FindStringSubmatch(block); len(m) >= 2 {
+		for s := range strings.FieldsSeq(m[1]) {
+			s = strings.Trim(s, "\\ \t\r\n")
+			if s != "" && !seen[s] {
+				seen[s] = true
+				skills = append(skills, s)
+			}
+		}
+	}
+
+	for _, m := range dockerCpRegex.FindAllStringSubmatch(block, -1) {
+		if len(m) >= 2 {
+			s := m[1]
+			if s != "" && !seen[s] {
+				seen[s] = true
+				skills = append(skills, s)
+			}
+		}
+	}
+
+	sort.Strings(skills)
+	return skills
+}
+
+func extractBazelSkills(repoBlock string) []string {
+	seen := make(map[string]bool)
+	var skills []string
+
+	for _, m := range bazelGlobRegex.FindAllStringSubmatch(repoBlock, -1) {
+		if len(m) >= 2 {
+			s := m[1]
+			if s != "" && !seen[s] {
+				seen[s] = true
+				skills = append(skills, s)
+			}
+		}
+	}
+
+	if m := bazelMvRegex.FindStringSubmatch(repoBlock); len(m) >= 2 {
+		for item := range strings.FieldsSeq(m[1]) {
+			parts := strings.Split(strings.TrimSpace(item), "/")
+			s := parts[len(parts)-1]
+			if s != "" && s != "skills" && !seen[s] {
+				seen[s] = true
+				skills = append(skills, s)
+			}
+		}
+	}
+
+	sort.Strings(skills)
+	return skills
+}
+
+func checkRepoVersionAndSha(chk communitySkillCheck, dockerContent, repoBlockMatch string) []string {
+	var violations []string
+
+	argRevRegex := regexp.MustCompile(`ARG\s+` + chk.dockerArg + `_REV=([^\s]+)`)
+	argShaRegex := regexp.MustCompile(`ARG\s+` + chk.dockerArg + `_SHA256=([^\s]+)`)
+
+	dockerRevMatch := argRevRegex.FindStringSubmatch(dockerContent)
+	if len(dockerRevMatch) < 2 {
+		violations = append(violations, "services/eri-restate/Dockerfile: missing ARG "+chk.dockerArg+"_REV")
+	}
+	dockerShaMatch := argShaRegex.FindStringSubmatch(dockerContent)
+	if len(dockerShaMatch) < 2 {
+		violations = append(violations, "services/eri-restate/Dockerfile: missing ARG "+chk.dockerArg+"_SHA256")
+	}
+
+	bazelShaRegex := regexp.MustCompile(`sha256\s*=\s*"([^"]+)"`)
+	bazelRevRegex := regexp.MustCompile(`urls\s*=\s*\[\s*"https://github\.com/[^/]+/[^/]+/archive/([^"/]+)\.tar\.gz"`)
+
+	bazelShaMatch := bazelShaRegex.FindStringSubmatch(repoBlockMatch)
+	if len(bazelShaMatch) < 2 {
+		violations = append(violations, "MODULE.bazel: missing or invalid sha256 for "+chk.bazelName)
+	}
+	bazelRevMatch := bazelRevRegex.FindStringSubmatch(repoBlockMatch)
+	if len(bazelRevMatch) < 2 {
+		violations = append(violations, "MODULE.bazel: missing or invalid url revision for "+chk.bazelName)
+	}
+
+	if len(dockerRevMatch) >= 2 && len(bazelRevMatch) >= 2 && dockerRevMatch[1] != bazelRevMatch[1] {
+		violations = append(violations, "community skills parity: revision mismatch for "+chk.repoName+
+			" (Dockerfile="+dockerRevMatch[1]+" vs MODULE.bazel="+bazelRevMatch[1]+")")
+	}
+	if len(dockerShaMatch) >= 2 && len(bazelShaMatch) >= 2 && dockerShaMatch[1] != bazelShaMatch[1] {
+		violations = append(violations, "community skills parity: sha256 mismatch for "+chk.repoName+
+			" (Dockerfile="+dockerShaMatch[1]+" vs MODULE.bazel="+bazelShaMatch[1]+")")
+	}
+
+	return violations
+}
+
+func checkRepoSkillSets(chk communitySkillCheck, dockerContent, repoBlockMatch string) []string {
+	var violations []string
+
+	dfSkills := extractDockerfileSkills(dockerContent, chk)
+	bazelSkills := extractBazelSkills(repoBlockMatch)
+
+	dockerSkillSet := make(map[string]bool, len(dfSkills))
+	for _, s := range dfSkills {
+		dockerSkillSet[s] = true
+	}
+	bazelSkillSet := make(map[string]bool, len(bazelSkills))
+	for _, s := range bazelSkills {
+		bazelSkillSet[s] = true
+	}
+
+	for _, s := range dfSkills {
+		if !bazelSkillSet[s] {
+			violations = append(violations, "community skills parity: skill "+s+" packaged in Dockerfile but missing in MODULE.bazel for "+chk.repoName)
+		}
+	}
+	for _, s := range bazelSkills {
+		if !dockerSkillSet[s] {
+			violations = append(violations, "community skills parity: skill "+s+" packaged in MODULE.bazel but missing in Dockerfile for "+chk.repoName)
+		}
+	}
+
+	for _, s := range chk.skills {
+		if !dockerSkillSet[s] && !bazelSkillSet[s] {
+			violations = append(violations, "community skills parity: required skill "+s+" missing in both Dockerfile and MODULE.bazel for "+chk.repoName)
+		}
+	}
+
+	return violations
+}
+
+func checkRepoSkillsParity(chk communitySkillCheck, dockerContent, moduleBazel string) []string {
+	repoBlockMatch := findBazelArchiveBlock(moduleBazel, chk.bazelName)
+	if repoBlockMatch == "" {
+		return []string{"MODULE.bazel: missing http_archive for " + chk.bazelName}
+	}
+
+	violations := checkRepoVersionAndSha(chk, dockerContent, repoBlockMatch)
+	return append(violations, checkRepoSkillSets(chk, dockerContent, repoBlockMatch)...)
+}
+
+func checkCommunitySkillsParity(root string) []string {
+	absRoot, err := filepath.Abs(root)
+	if err != nil {
+		return []string{err.Error()}
+	}
+
+	dockerfilePath := filepath.Join(absRoot, "services", "eri-restate", "Dockerfile")
+	moduleBazelPath := filepath.Join(absRoot, "MODULE.bazel")
+
+	dockerContent, err := readParityFile(dockerfilePath)
+	if os.IsNotExist(err) {
+		return nil
+	}
+	if err != nil {
+		return []string{err.Error()}
+	}
+
+	bazelContent, err := readParityFile(moduleBazelPath)
+	if os.IsNotExist(err) {
+		return nil
+	}
+	if err != nil {
+		return []string{err.Error()}
+	}
+
+	var violations []string
+	for _, chk := range communitySkillsToCheck {
+		violations = append(violations, checkRepoSkillsParity(chk, dockerContent, bazelContent)...)
 	}
 
 	return violations

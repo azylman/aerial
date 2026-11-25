@@ -127,3 +127,121 @@ http_archive(
     strip_prefix = "restate-server-aarch64-unknown-linux-musl",
     urls = ["https://github.com/restatedev/restate/releases/download/v1.8.1-hotfix.2/restate-server-aarch64-unknown-linux-musl.tar.xz"],
 )
+
+http_archive(
+    name = "android_skills",
+    build_file_content = """
+load("@rules_pkg//pkg:tar.bzl", "pkg_tar")
+
+pkg_tar(
+    name = "skills_tar",
+    srcs = glob(["skills/**"]),
+    package_dir = "/opt/skills",
+    strip_prefix = "/external/+http_archive+android_skills/skills",
+    visibility = ["//visibility:public"],
+)
+""",
+    patch_cmds = [
+        "mkdir -p skills && mv wear/wear-compose-m3 wear/wear-widgets jetpack-compose/jetpack-compose-performance security/android-intent-security security/android-permissions-security performance/anr-audit-and-fix testing/testing-setup skills/",
+    ],
+    sha256 = "37604cc723c5c5a8e51344047a7312b98f9fea02f5b01b149ce8718f32b638d0",
+    strip_prefix = "skills-7f7b21730a605d112ca9f79b6e40105ce7b670ee",
+    urls = ["https://github.com/android/skills/archive/7f7b21730a605d112ca9f79b6e40105ce7b670ee.tar.gz"],
+)
+
+http_archive(
+    name = "cc_skills_golang",
+    build_file_content = """
+load("@rules_pkg//pkg:tar.bzl", "pkg_tar")
+
+pkg_tar(
+    name = "skills_tar",
+    srcs = glob(
+        [
+            "skills/golang-code-style/**",
+            "skills/golang-concurrency/**",
+            "skills/golang-context/**",
+            "skills/golang-error-handling/**",
+            "skills/golang-modernize/**",
+            "skills/golang-performance/**",
+            "skills/golang-safety/**",
+            "skills/golang-structs-interfaces/**",
+            "skills/golang-testing/**",
+        ],
+        exclude = ["**/evals/**"],
+    ),
+    package_dir = "/opt/skills",
+    strip_prefix = "/external/+http_archive+cc_skills_golang/skills",
+    visibility = ["//visibility:public"],
+)
+""",
+    sha256 = "07f2429c459d23f3b724b943e7f4c42e4a8e4a193122d4847a7f77ebfcd1a90f",
+    strip_prefix = "cc-skills-golang-d68d80aec298e1b74b37c2a472c002b5217248b3",
+    urls = ["https://github.com/samber/cc-skills-golang/archive/d68d80aec298e1b74b37c2a472c002b5217248b3.tar.gz"],
+)
+
+http_archive(
+    name = "beautiful_rust",
+    build_file_content = """
+load("@rules_pkg//pkg:tar.bzl", "pkg_tar")
+
+pkg_tar(
+    name = "skills_tar",
+    srcs = glob([
+        "skills/rust-best-practices/**",
+        "skills/rust-port/**",
+        "skills/rust-review/**",
+    ]),
+    package_dir = "/opt/skills",
+    strip_prefix = "/external/+http_archive+beautiful_rust/skills",
+    visibility = ["//visibility:public"],
+)
+""",
+    sha256 = "45b36f271ec54b39694412017923b528db2a8c5fe5e9b9ce5bd28cbc8b133a7c",
+    strip_prefix = "BeautifulRust-b9718436d77ee7bcf17cdcb6aa27628feb95d97a",
+    urls = ["https://github.com/morganlinton/BeautifulRust/archive/b9718436d77ee7bcf17cdcb6aa27628feb95d97a.tar.gz"],
+)
+
+http_archive(
+    name = "kotlin_agent_skills",
+    build_file_content = """
+load("@rules_pkg//pkg:tar.bzl", "pkg_tar")
+
+pkg_tar(
+    name = "skills_tar",
+    srcs = glob([
+        "skills/kotlin-tooling-agp9-migration/**",
+        "skills/kotlin-tooling-kotlin-toolchain/**",
+    ]),
+    package_dir = "/opt/skills",
+    strip_prefix = "/external/+http_archive+kotlin_agent_skills/skills",
+    visibility = ["//visibility:public"],
+)
+""",
+    sha256 = "b1703675a525ae8f364ca85f459b44fd027673834839e09239b15c13633042e6",
+    strip_prefix = "kotlin-agent-skills-087f5689c1934135ed58718cdf524525e452b7e9",
+    urls = ["https://github.com/Kotlin/kotlin-agent-skills/archive/087f5689c1934135ed58718cdf524525e452b7e9.tar.gz"],
+)
+
+http_archive(
+    name = "kotlin_footguns",
+    build_file_content = """
+load("@rules_pkg//pkg:tar.bzl", "pkg_tar")
+
+pkg_tar(
+    name = "skills_tar",
+    srcs = glob([
+        "skills/compose-screens-footguns/**",
+        "skills/footgun-scan/**",
+        "skills/remote-api-footguns/**",
+        "skills/state-and-background-footguns/**",
+    ]),
+    package_dir = "/opt/skills",
+    strip_prefix = "/external/+http_archive+kotlin_footguns/skills",
+    visibility = ["//visibility:public"],
+)
+""",
+    sha256 = "693ddb93796ef1af8cba93546a27ad5532341afcb848737f5a04bb5eed6dc895",
+    strip_prefix = "kotlin-footguns-2c391bc9c9f873580aa855d7a7b1c3a2ed9e68ae",
+    urls = ["https://github.com/maxrave-dev/kotlin-footguns/archive/2c391bc9c9f873580aa855d7a7b1c3a2ed9e68ae.tar.gz"],
+)
