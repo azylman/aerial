@@ -360,3 +360,4 @@ describe('HandbookView component', () => {
     expect(scrollSpy).not.toHaveBeenCalled();
   });
 });
+
