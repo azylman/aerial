@@ -410,6 +410,7 @@ jobs:
   roborev:
     name: roborev
     if: >
+      github.repository == 'azylman/aerial' &&
       github.event_name == 'pull_request' &&
       (github.actor == 'azylman' || github.actor == 'mcarmody' || github.actor == 'brockventures' || github.actor == 'dependabot[bot]' || github.actor == 'aerial-synapse[bot]') &&
       (github.event.pull_request.user.login == 'azylman' || github.event.pull_request.user.login == 'mcarmody' || github.event.pull_request.user.login == 'brockventures' || github.event.pull_request.user.login == 'dependabot[bot]') &&
