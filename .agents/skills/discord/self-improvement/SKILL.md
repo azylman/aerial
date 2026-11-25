@@ -44,7 +44,7 @@ Scale review rigor and subagent orchestration dynamically by blast radius:
   - **Execution**: Once approved, enqueue multi-PR/multi-chunk plans via `scripts/aerial-build.sh enqueue <plan.json>` (default), or execute single-PR changes with a full 4-discipline Girl Gang diff audit before `scripts/aerial-pr.sh submit`.
 
 ### Review Panel Composition & Subagent Execution Invariants
-- **The Girl Gang (4 Disciplines)**: 3 domain specialists dynamically tailored to the change (e.g., Systems/Concurrency, Architecture, Security, Data Integrity, or PWA/Frontend when user-facing UI is touched) + 1 mandatory Adversarial Devil's Advocate. For plans or diffs touching Restate services, Virtual Objects, or durable workflows (`github.com/restatedev/sdk-go`), the Systems/Concurrency and Devil's Advocate reviewers must audit against [`references/restate-workflows.md`](references/restate-workflows.md) (enforcing dedicated `*-restate` `RestateDeployment` worker service separation, zero pre-ingress Postgres state tracking, RunContext isolation, replay determinism, non-blocking exclusive lock hygiene, and recoverable pause state invariants).
+- **The Girl Gang (4 Disciplines)**: 3 domain specialists dynamically tailored to the change (e.g., Systems/Concurrency, Architecture, Security, Data Integrity, or PWA/Frontend when user-facing UI is touched) + 1 mandatory Adversarial Devil's Advocate. For plans or diffs touching Restate services, Virtual Objects, or durable workflows (`github.com/restatedev/sdk-go`), the Systems/Concurrency and Devil's Advocate reviewers must audit against [`references/restate-workflows.md`](references/restate-workflows.md) (enforcing dedicated `*-restate` `RestateDeployment` worker service separation vs in-process `:9080` Restate servers, zero pre-ingress Postgres state tracking, RunContext isolation, replay determinism, non-blocking exclusive lock hygiene, and recoverable pause state invariants).
 - **DAG Disjointness, Non-Mutating Pre-Cutover Action Gate & Control-Plane Continuity Checks**:
   During Tier 2/3 plan audits, the Devil's Advocate and Architecture reviewers MUST explicitly verify the following invariants across any proposed Vanadis build plan:
   1. **Parallel-First DAG Decomposition & Same-Repo PR Disjointness**: The Devil's Advocate and Architecture reviewers must:
@@ -88,7 +88,7 @@ Scale review rigor and subagent orchestration dynamically by blast radius:
 2. Reconcile actual diff metrics against the initial tier:
    - **Tier 0 -> Tier 1/2**: Diff > 5 LOC escalates to Tier 1 (> 50 LOC to Tier 2).
    - **Tier 1 -> Tier 2/3**: Diff > 50 LOC escalates to Tier 2 (requires Devil's Advocate diff audit).
-   - **Auto-Escalation to Tier 3**: If cumulative diff exceeds **200 LOC** OR touches **core queue logic** (`pkg/queue`), **core runner logic** (`pkg/runner`), or **database schemas**:
+   - **Auto-Escalation to Tier 3**: If cumulative diff exceeds **200 LOC** OR touches **core queue logic** (`services/eri/pkg/queue`), **core runner logic** (`services/eri/pkg/runner`), or **database schemas**:
      - Run the full 4-discipline **Girl Gang** diff review subagent.
      - **MANDATORY HUMAN ESCALATION CHECKPOINT (STOP BEFORE AUTO-MERGE)**: Do NOT submit with auto-merge armed. Pause, report the scope escalation and diff metrics to Discord with the panel's review synthesis, and await explicit user authorization.
 
@@ -105,7 +105,7 @@ Scale review rigor and subagent orchestration dynamically by blast radius:
 
 ## 3. Event-Driven CI Remediation & RoboRev Disagreement Playbook
 
-When `synapse` wakes the agent on a CI check failure or `roborev` review failure, Aerial **must proactively remediate the PR** rather than merely reporting the failure:
+When `vanadis-restate` (`PRObject`) dispatches a CI check failure or `roborev` review failure wake, Aerial **must proactively remediate the PR** rather than merely reporting the failure:
 
 ### 3.1 Deterministic CI Check Failures (Tests, Lint, Coverage, Build)
 1. Inspect the pre-extracted failure log in the wake prompt (or fetch check details if needed).
