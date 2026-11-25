@@ -4,7 +4,34 @@ import { FactoryStepper } from './FactoryStepper';
 import { ComparisonMatrix } from './ComparisonMatrix';
 import { QUICKSTART_STEPS, QuickstartSteps } from './QuickstartSteps';
 import { UseCaseGallery, USE_CASE_SCENARIOS } from './UseCaseGallery';
+import { FaqSection, FAQ_ITEMS, type FaqItem } from './FaqSection';
 import { useCopyToClipboard } from '../useCopyToClipboard';
+
+export interface IntegrationBadge {
+  id: string;
+  group: string;
+  label: string;
+}
+
+export const INTEGRATION_BADGES: readonly IntegrationBadge[] = [
+  // Surfaces
+  { id: 'discord-gateway', group: 'Surfaces', label: 'Discord Gateway' },
+  { id: 'webrtc-kiosk-voice', group: 'Surfaces', label: 'WebRTC & Touch Kiosk Voice' },
+  { id: 'pstn-voice-sms', group: 'Surfaces', label: 'PSTN Voice & SMS' },
+  { id: 'console-hud', group: 'Surfaces', label: 'Live Web Console HUD' },
+
+  // AI Engines
+  { id: 'claude-code', group: 'AI Engines', label: 'Claude Code' },
+  { id: 'codex-cli', group: 'AI Engines', label: 'Codex CLI' },
+  { id: 'google-antigravity', group: 'AI Engines', label: 'Google Antigravity' },
+  { id: 'local-onnx-speech', group: 'AI Engines', label: 'Local CUDA ONNX Speech' },
+
+  // Core Stack
+  { id: 'k3s-kubernetes', group: 'Core Stack', label: 'Kubernetes (k3s)' },
+  { id: 'restate-durable', group: 'Core Stack', label: 'Restate Durable Execution' },
+  { id: 'cnpg-postgres', group: 'Core Stack', label: 'CloudNativePG Postgres 19' },
+  { id: 'flux-infisical', group: 'Core Stack', label: 'Flux CD & Infisical' },
+] as const;
 
 export {
   ArchitectureMap,
@@ -14,6 +41,9 @@ export {
   QuickstartSteps,
   UseCaseGallery,
   USE_CASE_SCENARIOS,
+  FaqSection,
+  FAQ_ITEMS,
+  type FaqItem,
 };
 
 export const HERO_INSTALL_COMMAND = QUICKSTART_STEPS[0]!.command;
@@ -76,6 +106,20 @@ export function LandingView() {
           >
             GitHub Repository ↗
           </a>
+        </div>
+      </div>
+
+      {/* Supported Surfaces, Engines & Integrations Strip */}
+      <div className="integration-strip" data-testid="integration-strip">
+        <div className="integration-strip-label">Supported Surfaces, Engines & Integrations</div>
+        <div className="integration-badges-grid">
+          {INTEGRATION_BADGES.map((badge) => (
+            <span key={badge.id} className="integration-badge" data-testid={`integration-badge-${badge.id}`}>
+              <span className="badge-group">{badge.group}</span>
+              <span className="badge-separator">•</span>
+              <span className="badge-label">{badge.label}</span>
+            </span>
+          ))}
         </div>
       </div>
 
@@ -149,6 +193,11 @@ export function LandingView() {
       {/* Single-Node k3s Quickstart */}
       <section className="landing-section" id="quickstart" data-testid="section-quickstart">
         <QuickstartSteps />
+      </section>
+
+      {/* Frequently Asked Questions */}
+      <section className="landing-section" id="faq" data-testid="section-faq">
+        <FaqSection />
       </section>
 
       {/* Bottom CTA Banner */}

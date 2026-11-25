@@ -17,6 +17,22 @@ describe('parseRouteHash', () => {
     expect(parseRouteHash('#/unknown-route')).toEqual({ view: 'landing' });
   });
 
+  it('parses landing section hashes correctly', () => {
+    const landingSections = [
+      'use-cases',
+      'architecture',
+      'software-factory',
+      'observability',
+      'comparison',
+      'quickstart',
+      'faq',
+    ];
+    for (const section of landingSections) {
+      expect(parseRouteHash(`#${section}`)).toEqual({ view: 'landing', sectionId: section });
+      expect(parseRouteHash(`#/${section}`)).toEqual({ view: 'landing', sectionId: section });
+    }
+  });
+
   it('parses docs hashes correctly', () => {
     expect(parseRouteHash('#/docs')).toEqual({ view: 'docs', chapterId: 'overview', sectionId: undefined });
     expect(parseRouteHash('#/docs/')).toEqual({ view: 'docs', chapterId: 'overview', sectionId: undefined });
@@ -250,6 +266,66 @@ describe('App component', () => {
       const target = screen.getByTestId('section-stateless-ingress');
       expect(target).toBeTruthy();
       expect(scrollSpy).toHaveBeenCalledWith(target, { behavior: 'smooth' });
+    } finally {
+      if (originalScrollIntoView) {
+        Element.prototype.scrollIntoView = originalScrollIntoView;
+      } else {
+        delete (Element.prototype as { scrollIntoView?: unknown }).scrollIntoView;
+      }
+    }
+  });
+
+  it('smooth scrolls to landing sections when clicking navbar section links', () => {
+    const scrollSpy = vi.fn();
+    const originalScrollIntoView = Element.prototype.scrollIntoView;
+    Element.prototype.scrollIntoView = function (this: Element, ...args: unknown[]) {
+      scrollSpy(this, ...args);
+    };
+
+    try {
+      render(<App />);
+
+      const nav = screen.getByRole('navigation', { name: 'Main Navigation' });
+
+      // Check all 6 section links exist in navbar
+      const useCasesLink = within(nav).getByTestId('nav-link-use-cases');
+      expect(useCasesLink.getAttribute('href')).toBe('#use-cases');
+
+      const archLink = within(nav).getByTestId('nav-link-architecture');
+      expect(archLink.getAttribute('href')).toBe('#architecture');
+
+      const factoryLink = within(nav).getByTestId('nav-link-factory');
+      expect(factoryLink.getAttribute('href')).toBe('#software-factory');
+
+      const compLink = within(nav).getByTestId('nav-link-comparison');
+      expect(compLink.getAttribute('href')).toBe('#comparison');
+
+      const quickLink = within(nav).getByTestId('nav-link-quickstart');
+      expect(quickLink.getAttribute('href')).toBe('#quickstart');
+
+      const faqLink = within(nav).getByTestId('nav-link-faq');
+      expect(faqLink.getAttribute('href')).toBe('#faq');
+
+      // Navigate to #use-cases
+      act(() => {
+        window.location.hash = '#use-cases';
+        window.dispatchEvent(new HashChangeEvent('hashchange'));
+      });
+
+      const sectionUseCases = screen.getByTestId('section-use-cases');
+      expect(sectionUseCases).toBeTruthy();
+      expect(scrollSpy).toHaveBeenCalledWith(sectionUseCases, { behavior: 'smooth' });
+
+      // Navigate to #faq
+      scrollSpy.mockClear();
+      act(() => {
+        window.location.hash = '#faq';
+        window.dispatchEvent(new HashChangeEvent('hashchange'));
+      });
+
+      const sectionFaq = screen.getByTestId('section-faq');
+      expect(sectionFaq).toBeTruthy();
+      expect(scrollSpy).toHaveBeenCalledWith(sectionFaq, { behavior: 'smooth' });
     } finally {
       if (originalScrollIntoView) {
         Element.prototype.scrollIntoView = originalScrollIntoView;

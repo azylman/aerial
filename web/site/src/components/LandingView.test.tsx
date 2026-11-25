@@ -4,7 +4,12 @@ import { ArchitectureMap } from './ArchitectureMap';
 import { ComparisonMatrix } from './ComparisonMatrix';
 import { FactoryStepper } from './FactoryStepper';
 import { GlassBoxShowcase } from './GlassBoxShowcase';
-import { HERO_INSTALL_COMMAND, LandingView } from './LandingView';
+import {
+  FAQ_ITEMS,
+  FaqSection,
+  HERO_INSTALL_COMMAND,
+  LandingView,
+} from './LandingView';
 import { QuickstartSteps } from './QuickstartSteps';
 import { UseCaseGallery } from './UseCaseGallery';
 
@@ -22,6 +27,7 @@ describe('LandingView Component', () => {
     expect(within(screen.getByTestId('section-showcase')).getByTestId('glassbox-showcase')).toBeTruthy();
     expect(within(screen.getByTestId('section-comparison')).getByTestId('comparison-matrix')).toBeTruthy();
     expect(within(screen.getByTestId('section-quickstart')).getByTestId('quickstart-steps')).toBeTruthy();
+    expect(within(screen.getByTestId('section-faq')).getByTestId('faq-section')).toBeTruthy();
   });
 });
 
@@ -492,5 +498,48 @@ describe('UseCaseGallery Component', () => {
     expect(screen.getByTestId('usecase-prompt').textContent).toContain('Turn off hallway lights');
     expect(screen.getByTestId('usecase-outcome').textContent).toContain('Routines survive service restarts');
     expect(screen.getByTestId('usecase-step-0').textContent).toContain('Schedule durable one-shot timer');
+  });
+});
+
+describe('FaqSection Component', () => {
+  afterEach(() => {
+    cleanup();
+  });
+
+  it('renders FAQ section and handles accordion toggle state across all items', () => {
+    render(<FaqSection />);
+
+    const section = screen.getByTestId('faq-section');
+    expect(section).toBeTruthy();
+
+    // First item is expanded by default
+    const firstBtn = screen.getByTestId(`faq-btn-${FAQ_ITEMS[0]!.id}`);
+    expect(firstBtn.getAttribute('aria-expanded')).toBe('true');
+    expect(screen.getByTestId(`faq-answer-${FAQ_ITEMS[0]!.id}`)).toBeTruthy();
+    expect(screen.getByTestId(`faq-answer-${FAQ_ITEMS[0]!.id}`).textContent).toContain(FAQ_ITEMS[0]!.answer);
+
+    // Clicking first item collapses it
+    fireEvent.click(firstBtn);
+    expect(firstBtn.getAttribute('aria-expanded')).toBe('false');
+    expect(screen.queryByTestId(`faq-answer-${FAQ_ITEMS[0]!.id}`)).toBeNull();
+
+    // Re-expanding first item
+    fireEvent.click(firstBtn);
+    expect(firstBtn.getAttribute('aria-expanded')).toBe('true');
+    expect(screen.getByTestId(`faq-answer-${FAQ_ITEMS[0]!.id}`)).toBeTruthy();
+
+    // Clicking through remaining items: each expands when clicked
+    for (let i = 1; i < FAQ_ITEMS.length; i++) {
+      const item = FAQ_ITEMS[i]!;
+      const btn = screen.getByTestId(`faq-btn-${item.id}`);
+      expect(btn.getAttribute('aria-expanded')).toBe('false');
+      expect(screen.queryByTestId(`faq-answer-${item.id}`)).toBeNull();
+
+      fireEvent.click(btn);
+      expect(btn.getAttribute('aria-expanded')).toBe('true');
+      const answerPanel = screen.getByTestId(`faq-answer-${item.id}`);
+      expect(answerPanel).toBeTruthy();
+      expect(answerPanel.textContent).toContain(item.answer);
+    }
   });
 });
