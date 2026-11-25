@@ -99,7 +99,7 @@ export const FACTORY_STAGES: readonly FactoryStage[] = [
       'GitHub webhook notifications (check_run, workflow_run, pull_request)',
     ],
     actions: [
-      'Dynamic runs-on routing: local ARC runners for same-repo, ubuntu-latest for forks',
+      'Executes CI test suites on self-hosted ARC runners across same-repo and fork PRs',
       'Runs Bazel remote cache, Go test suites, and Atlas schema linting',
       'Executes RoboRev automated LLM review passes with change requests',
     ],
@@ -109,7 +109,7 @@ export const FACTORY_STAGES: readonly FactoryStage[] = [
     ],
     guardrails: [
       'Branch protection rulesets and required status checks',
-      'Zero cluster credentials exposed to external forks',
+      'Image publish and secret-dependent steps strictly restricted to same-repo PRs and main',
     ],
   },
   {

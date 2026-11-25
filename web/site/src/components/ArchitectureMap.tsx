@@ -137,7 +137,7 @@ export const TOPOLOGY_NODES: readonly TopologyNode[] = [
     name: 'Synapse + Flux CD',
     pillar: 'factory',
     role: 'Discord Gateway & Push GitOps',
-    ports: ':4020 (Synapse) / :9090 (Flux Webhook)',
+    ports: ':4020 (Synapse /webhooks/flux)',
     displayPorts: ':4020 (Synapse) / Flux CD',
     description:
       'Discord gateway manager and stateless edge forwarder routing GitHub and Discord events to Restate, paired with Flux CD for declarative push GitOps delivery.',
@@ -193,7 +193,7 @@ export const TOPOLOGY_EDGES: readonly TopologyEdge[] = [
     to: 'eri-restate',
     label: 'HTTP Ingress & Webhooks',
     pillar: 'agent',
-    path: 'M 305 86 C 480 86, 520 146, 655 146',
+    path: 'M 305 86 C 330 86, 330 50, 360 50 L 610 50 C 635 50, 635 146, 655 146',
   },
   {
     id: 'edge-eri-postgres',
@@ -201,7 +201,7 @@ export const TOPOLOGY_EDGES: readonly TopologyEdge[] = [
     to: 'cnpg-postgres',
     label: 'Session State & Vectors',
     pillar: 'platform',
-    path: 'M 655 166 C 500 166, 480 196, 305 196',
+    path: 'M 655 166 C 630 166, 630 176, 605 176 L 350 176 C 325 176, 325 196, 305 196',
   },
   {
     id: 'edge-eri-restate',
@@ -209,7 +209,7 @@ export const TOPOLOGY_EDGES: readonly TopologyEdge[] = [
     to: 'restate-nats',
     label: 'Durable Sessions',
     pillar: 'platform',
-    path: 'M 655 186 C 500 186, 480 290, 305 290',
+    path: 'M 655 186 C 630 186, 630 296, 605 296 L 340 296 C 320 296, 320 290, 305 290',
   },
   {
     id: 'edge-eri-coven',

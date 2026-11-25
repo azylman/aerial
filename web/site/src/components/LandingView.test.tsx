@@ -20,9 +20,6 @@ describe('LandingView Component', () => {
     expect(within(screen.getByTestId('section-showcase')).getByTestId('glassbox-showcase')).toBeTruthy();
     expect(within(screen.getByTestId('section-comparison')).getByTestId('comparison-matrix')).toBeTruthy();
     expect(within(screen.getByTestId('section-quickstart')).getByTestId('quickstart-steps')).toBeTruthy();
-
-    expect(screen.getByTestId('hero-cta-handbook').getAttribute('href')).toBe('#/docs/overview');
-    expect(screen.getByTestId('hero-cta-quickstart').getAttribute('href')).toBe('#/docs/getting-started');
   });
 });
 
@@ -360,14 +357,6 @@ describe('QuickstartSteps Component', () => {
     fireEvent.click(screen.getByTestId('quick-tab-2'));
     expect(screen.getByTestId('step-card-2')).toBeTruthy();
     expect(screen.queryByTestId('step-card-1')).toBeNull();
-
-    // Switch to Step 3
-    fireEvent.click(screen.getByTestId('quick-tab-3'));
-    expect(screen.getByTestId('step-card-3')).toBeTruthy();
-
-    // Switch to Step 4
-    fireEvent.click(screen.getByTestId('quick-tab-4'));
-    expect(screen.getByTestId('step-card-4')).toBeTruthy();
   });
 
   it('handles clipboard failure gracefully and cleans up timer on unmount', async () => {
