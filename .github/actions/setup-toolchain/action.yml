@@ -1,0 +1,54 @@
+name: Set up Hermetic Monorepo Toolchain
+description: Hydrates hermetic Go, Bazel, Postgres 19, and CI CLI binaries from the pre-baked runner image on ubuntu-latest runners; 0ms no-op on self-hosted ARC runners.
+runs:
+  using: composite
+  steps:
+    - name: Set up Monorepo Toolchain
+      shell: bash
+      run: |
+        set -euo pipefail
+
+        if [ "${{ runner.environment }}" = "self-hosted" ]; then
+          exit 0
+        fi
+
+        echo "Hydrating toolchain from ghcr.io/azylman/aerial-github-runner:latest on ${{ runner.environment }} runner..."
+        IMAGE="ghcr.io/azylman/aerial-github-runner:latest"
+        docker pull "$IMAGE"
+        CID=$(docker create "$IMAGE")
+
+        sudo rm -rf /usr/local/go
+        sudo docker cp "$CID:/usr/local/go" /usr/local/go
+
+        sudo mkdir -p /usr/local/bin
+        for bin in bazel bazelisk gazelle buildifier crane deadcode golangci-lint atlas oapi-codegen; do
+          sudo docker cp -L "$CID:/usr/local/bin/$bin" "/usr/local/bin/$bin"
+          sudo chmod 0755 "/usr/local/bin/$bin"
+        done
+
+        sudo rm -rf /opt/bazel-cache
+        sudo docker cp "$CID:/opt/bazel-cache" /opt/bazel-cache
+        sudo chmod -R a+rX /opt/bazel-cache
+
+        sudo mkdir -p /usr/lib/postgresql /usr/share/postgresql
+        sudo rm -rf /usr/lib/postgresql/19 /usr/share/postgresql/19
+        sudo docker cp "$CID:/usr/lib/postgresql/19" /usr/lib/postgresql/19
+        sudo docker cp "$CID:/usr/share/postgresql/19" /usr/share/postgresql/19
+
+        sudo mkdir -p /usr/lib/x86_64-linux-gnu
+        for lib in $(docker run --rm "$IMAGE" find /usr/lib/x86_64-linux-gnu -maxdepth 1 -name 'libpq*' 2>/dev/null || true); do
+          sudo docker cp -L "$CID:$lib" /usr/lib/x86_64-linux-gnu/ 2>/dev/null || true
+        done
+        sudo ldconfig 2>/dev/null || true
+
+        docker rm -f "$CID" >/dev/null
+
+        echo "/usr/local/go/bin" >> "$GITHUB_PATH"
+        echo "/usr/local/bin" >> "$GITHUB_PATH"
+        echo "BAZELISK_HOME=/opt/bazel-cache" >> "$GITHUB_ENV"
+
+        export PATH="/usr/local/go/bin:/usr/local/bin:$PATH"
+        export BAZELISK_HOME=/opt/bazel-cache
+
+        /usr/lib/postgresql/19/bin/initdb --version
+        bazel --version
