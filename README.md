@@ -8,7 +8,7 @@ Where standard GitOps homelabs stop at cluster infrastructure, standalone coding
 
 1. **Self-Hosted Application Platform**: Gives your homelab a declarative Kubernetes compute fabric, LAN and edge gateway routing, centralized secret management, durable workflow state machines, persistent event streaming, relational and vector storage, and unified metrics, logs, and distributed tracing.
 2. **Autonomous Software Factory**: Runs a lights-out, spec-to-production delivery loop (*DAG Backlog → Multi-Agent Plan & Review → Durable Multi-PR Rollout → In-Cluster CI & LLM Review → Self-Healing Flux GitOps*) directly on the platform's primitives—taking features from dependency-tracked issues through isolated scratch Pull Requests, scale-to-zero in-cluster CI and automated code review, and push-driven GitOps rollouts with proactive CI failure remediation.
-3. **Multimodal AI Agent**: Connects your assistant directly to your homelab and software factory over Discord, real-time voice, and phone/SMS—backed by persistent cron, heartbeat, and event-watch scheduling, hybrid semantic memory, and extensible **Model Context Protocol (MCP)** connectors and custom `SKILL.md` workflows.
+3. **AI Agent**: Connects your agent directly to your everyday workflows, homelab, and software factory over Discord, real-time voice, and phone calls—automating browser errands, calendars, and persistent cron/heartbeat/event-watch schedules with hybrid semantic memory, **Model Context Protocol (MCP)** connectors, and custom `SKILL.md` workflows.
 
 ---
 
@@ -24,7 +24,7 @@ Where standard GitOps homelabs stop at cluster infrastructure, standalone coding
 | **Observability** | **VictoriaMetrics** (TSDB) + **`vmalert`** (MAD anomaly and alert rules), **Fluent Bit** + **VictoriaLogs** (LogsQL log analytics, 60-day retention), **VictoriaTraces** (OTLP distributed tracing, 30-day retention), **Grafana**, **Headlamp** (Kubernetes/Flux UI), and **Prometheus Exporters** (**Kubelet / cAdvisor**, **Node Exporter**, **CloudNativePG**) |
 | **Software Factory & GitOps** | **Vikunja** (DAG issue and backlog graph), **GitHub Actions CI & Automated Code Review** (`check_run`, `workflow_run`, `pull_request`, and `push` webhooks, with scale-to-zero in-cluster ARC runners and RoboRev), **Ariga Atlas** (declarative SQL schema migrations), and **Flux CD** (webhook-driven push GitOps) |
 | **Agent Core & Memory** | Configurable CLI execution engines (**`agy`**, **Claude Code**, **Codex**, **Muse**), **Hybrid RRF (`pgvector` + FTS) & ACT-R Memory** (semantic fact retrieval, temporal decay, and procedural skill synthesis), **Streamable HTTP MCP Servers**, **`SKILL.md` Workflows** (`agentskills.io`), and **AgentsView** (web transcript and trace inspector) |
-| **Multimodal I/O & Browser Automation** | **Discord Gateway/REST**, **Real-Time Voice** (with optional STT/TTS sidecars), **Twilio PSTN** (inbound/outbound voice calls and SMS), **Kernel Browser** (headful CDP browser control), **1Password CLI** (scoped vault credential retrieval), and **Stripe Link** (`@stripe/link-cli` one-time virtual payment tokens) |
+| **Voice, Telephony & Browser Automation** | **Discord Gateway/REST**, **Real-Time Voice** (with optional STT/TTS sidecars), **Twilio PSTN** (inbound/outbound voice calls), **Kernel Browser** (headful CDP browser control), **1Password CLI** (scoped vault credential retrieval), and **Stripe Link** (`@stripe/link-cli` one-time virtual payment tokens) |
 
 ---
 
@@ -120,7 +120,7 @@ azylman/aerial (Engine Repo)              your-aerial-config (Private Overlay Re
 ├───────────────────────────────┬─────────────────────────────────┬────────────────────────────────┤
 │ Voice & Telephony Ingress     │ HTTP REST & Event Webhooks      │ Discord Gateway Funnel         │
 │ • /voice/ask Voice Pipeline   │ • /prompt (Prompt Injection)    │ • Discord Gateway WebSocket    │
-│ • Twilio PSTN Voice & SMS     │ • /discord/message Outbound     │ • Catch-up Sweeps & JetStream  │
+│ • Twilio PSTN Voice Calls     │ • /discord/message Outbound     │ • Catch-up Sweeps & JetStream  │
 │ • Optional STT/TTS Sidecars   │ • Edge Gateway Webhooks         │ • POST /internal/discord/      │
 │ • Low-Latency Audio Routing   │                                 │   message & interaction        │
 │                               │                                 │ • Ambient Wake Classification  │
@@ -221,7 +221,7 @@ Modern developer platforms typically fall into one of three silos: infrastructur
 | **Deployment & Self-Healing** | GitOps sync alerts (human triages build/deploy breaks) | Development/evaluation sandboxes; no built-in cluster GitOps deployment | Standalone assistant without built-in Kubernetes GitOps delivery | **Push GitOps (Flux CD) + automated reactive wake on CI/review failure for instant branch remediation** |
 | **Glass-Box Observability** | Cluster Grafana/Prometheus (app-level only) | CLI stdout, terminal webviews, or task trace inspectors | Terminal output, chat logs, or developer UI inspectors | **Operator HUD (`console`), transcript timeline (`agentsview`), Restate UI, Grafana, and VictoriaLogs/Traces** |
 | **Memory & Knowledge** | None (infrastructure only) | Repository context, workspace notes, or session history | Vector search, markdown memory files, or dynamic skill synthesis | **ACT-R cognitive memory decay + PostgreSQL 19 hybrid RRF (`pgvector` + FTS) + procedural skill synthesis** |
-| **Multi-Modal Interaction** | Web UI dashboards | CLI terminal or local web sandbox UI | Discord/Telegram chat, with available voice/telephony or browser plugins | **Discord Gateway, real-time voice, PSTN telephony/SMS, and headful browser automation** |
+| **Multi-Modal Interaction** | Web UI dashboards | CLI terminal or local web sandbox UI | Discord/Telegram chat, with available voice/telephony or browser plugins | **Discord Gateway, real-time voice, PSTN phone calls, and headful browser automation** |
 | **Security & Guardrails** | Standard Linux/RBAC permissions | Container environment isolation, OS-level sandboxes, or workspace boundaries | Direct host tool execution, permission prompts, or container isolation | **Defense-in-depth: `:ro` repository mounts, child-process secret scrubbing, and pre-tool compiled interceptors** |
 
 ### 1. Homelab & Self-Hosted PaaS (*home-ops, khuedoan/homelab, Coolify, Dokploy*)
