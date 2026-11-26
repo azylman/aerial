@@ -195,6 +195,14 @@ func PrewarmProcessPoolsSequentially(ctx context.Context, pools ...runner.AgentP
 	}()
 }
 
+// PrewarmAmbientResolver primes configured ambient contexts at startup.
+func PrewarmAmbientResolver(ctx context.Context, resolver *ambient.Resolver) {
+	if resolver == nil || ctx.Err() != nil {
+		return
+	}
+	resolver.PrimeConfigured(ctx)
+}
+
 // AppOption configures optional dependencies for RunApp.
 type AppOption func(*appOptions)
 
@@ -460,6 +468,7 @@ func RunApp(ctx context.Context, cfg Config, opts ...AppOption) error {
 	})
 
 	PrewarmProcessPoolsSequentially(ctx, pools.allPools...)
+	PrewarmAmbientResolver(ctx, ambientResolver)
 	startUsagePoller(ctx, cur, pools.ephemeralHome, pools.discordHome, pools.poolEnv)
 
 	dgSession, closeBus := wireOutboundIntegrations(ctx, cur, workerPool)

@@ -215,6 +215,16 @@ func (p *Provider) fetchAndRender(ctx context.Context) (string, error) {
 			return nil, err
 		}
 
+		if ctx.Err() != nil {
+			p.mu.RLock()
+			prevCache := p.cache
+			p.mu.RUnlock()
+			if prevCache != "" {
+				p.triggerBackgroundRefresh(ctx)
+				return prevCache, nil
+			}
+		}
+
 		var buf bytes.Buffer
 		if err := p.parsedTmpl.Execute(&buf, data); err != nil {
 			return "", fmt.Errorf("ambient template execution error: %w", err)

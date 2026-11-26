@@ -1014,3 +1014,70 @@ func TestMakeVoiceAmbientContextRetriever(t *testing.T) {
 		})
 	}
 }
+
+func TestPrewarmAmbientResolver(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name        string
+		nilResolver bool
+		cancelCtx   bool
+		hasAmbient  bool
+	}{
+		{
+			name:        "nil resolver is a safe no-op",
+			nilResolver: true,
+			cancelCtx:   false,
+			hasAmbient:  false,
+		},
+		{
+			name:        "canceled context is a safe no-op",
+			nilResolver: false,
+			cancelCtx:   true,
+			hasAmbient:  true,
+		},
+		{
+			name:        "active context primes configured ambient resolver",
+			nilResolver: false,
+			cancelCtx:   false,
+			hasAmbient:  true,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			if tc.cancelCtx {
+				cancel()
+			}
+
+			var resolver *ambient.Resolver
+			var appCfg *config.Config
+			if !tc.nilResolver {
+				var voiceAmb *config.AmbientContextConfig
+				if tc.hasAmbient {
+					voiceAmb = &config.AmbientContextConfig{Template: "Prewarmed Voice Ambient"}
+				}
+				appCfg = config.NewFromData(&config.ConfigData{
+					Voice: config.VoiceConfig{
+						AmbientContext: voiceAmb,
+					},
+				})
+				resolver = ambient.NewResolver(appCfg)
+			}
+
+			PrewarmAmbientResolver(ctx, resolver)
+
+			if !tc.nilResolver && !tc.cancelCtx && tc.hasAmbient {
+				vAmb := appCfg.Current().VoiceAmbientContext()
+				require.NotNil(t, vAmb)
+				out, err := resolver.Resolve(context.Background(), vAmb)
+				require.NoError(t, err)
+				assert.Contains(t, out, "Prewarmed Voice Ambient")
+			}
+		})
+	}
+}

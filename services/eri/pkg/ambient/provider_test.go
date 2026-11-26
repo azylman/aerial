@@ -657,3 +657,132 @@ func TestProvider_AtomicCAS_PreventsConcurrentRefresh(t *testing.T) {
 		t.Errorf("expected exactly 2 tool calls (1 initial + 1 bg refresh), got %d", total)
 	}
 }
+
+type preservesCacheTestCase struct {
+	name          string
+	prePrime      bool
+	advanceBy     time.Duration
+	cancelContext bool
+	wantSubstring string
+	wantRefreshes bool
+}
+
+func runPreservesCacheCase(t *testing.T, tc preservesCacheTestCase) {
+	t.Helper()
+	var toolCalls atomic.Int32
+	refreshDone := make(chan struct{})
+
+	inv := &mockInvoker{
+		execFunc: func(ctx context.Context, name string, args map[string]any) (string, error) {
+			c := toolCalls.Add(1)
+			if c == 1 && tc.prePrime {
+				return fmt.Sprintf(`{"val": %d}`, c), nil
+			}
+			if ctx.Err() != nil {
+				return "", ctx.Err()
+			}
+			select {
+			case <-refreshDone:
+			default:
+				close(refreshDone)
+			}
+			return fmt.Sprintf(`{"val": %d}`, c), nil
+		},
+	}
+
+	cfg := config.AmbientContextConfig{
+		CacheTTL:  "5s",
+		TimeoutMs: 1000,
+		Template:  "Val: {{default .tool.error .tool.val}}",
+		Tools: []config.AmbientToolConfig{
+			{Name: "tool", Tool: "val_tool"},
+		},
+	}
+
+	p, err := NewProvider(cfg, inv)
+	if err != nil {
+		t.Fatalf("NewProvider failed: %v", err)
+	}
+
+	simulatedTime := time.Date(2026, 10, 1, 10, 0, 0, 0, time.UTC)
+	var timeMu sync.Mutex
+	p.SetNowFunc(func() time.Time {
+		timeMu.Lock()
+		defer timeMu.Unlock()
+		return simulatedTime
+	})
+
+	if tc.prePrime {
+		resPrime, pErr := p.Retrieve(context.Background())
+		if pErr != nil {
+			t.Fatalf("pre-prime Retrieve failed: %v", pErr)
+		}
+		if !strings.Contains(resPrime, "Val: 1") {
+			t.Fatalf("expected initial 'Val: 1', got %q", resPrime)
+		}
+	}
+
+	if tc.advanceBy > 0 {
+		timeMu.Lock()
+		simulatedTime = simulatedTime.Add(tc.advanceBy)
+		timeMu.Unlock()
+	}
+
+	reqCtx := context.Background()
+	if tc.cancelContext {
+		cCtx, cancel := context.WithCancel(context.Background())
+		cancel()
+		reqCtx = cCtx
+	}
+
+	res, err := p.Retrieve(reqCtx)
+	if err != nil {
+		t.Fatalf("Retrieve failed: %v", err)
+	}
+	if !strings.Contains(res, tc.wantSubstring) {
+		t.Errorf("Retrieve = %q, want substring %q", res, tc.wantSubstring)
+	}
+
+	if tc.wantRefreshes {
+		select {
+		case <-refreshDone:
+		case <-time.After(2 * time.Second):
+			t.Fatal("timed out waiting for background refresh to complete")
+		}
+
+		deadline := time.Now().Add(2 * time.Second)
+		for p.refreshing.Load() != 0 && time.Now().Before(deadline) {
+			runtime.Gosched()
+		}
+	}
+}
+
+func TestProvider_Retrieve_PreservesCacheOnDeadlineExceeded(t *testing.T) {
+	t.Parallel()
+
+	tests := []preservesCacheTestCase{
+		{
+			name:          "primed cache preserved on canceled context past hard TTL",
+			prePrime:      true,
+			advanceBy:     15 * time.Second,
+			cancelContext: true,
+			wantSubstring: "Val: 1",
+			wantRefreshes: true,
+		},
+		{
+			name:          "unprimed cold cache surfaces canceled error without panic",
+			prePrime:      false,
+			advanceBy:     0,
+			cancelContext: true,
+			wantSubstring: "context canceled",
+			wantRefreshes: false,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			runPreservesCacheCase(t, tc)
+		})
+	}
+}
