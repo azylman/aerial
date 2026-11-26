@@ -399,3 +399,81 @@ func TestValidateUpdateChunkInput(t *testing.T) {
 		})
 	}
 }
+
+func TestValidateSteerChunkInput(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name     string
+		buildID  string
+		chunkRef string
+		prompt   string
+		wantErr  string
+	}{
+		{
+			name:     "valid input",
+			buildID:  "build-1",
+			chunkRef: "chunk-a",
+			prompt:   "steer me",
+			wantErr:  "",
+		},
+		{
+			name:     "valid input with whitespace padding",
+			buildID:  "  build-1  ",
+			chunkRef: "  0  ",
+			prompt:   "  change direction  ",
+			wantErr:  "",
+		},
+		{
+			name:     "empty build id",
+			buildID:  "",
+			chunkRef: "chunk-a",
+			prompt:   "steer me",
+			wantErr:  "build id is required",
+		},
+		{
+			name:     "whitespace build id",
+			buildID:  "   ",
+			chunkRef: "chunk-a",
+			prompt:   "steer me",
+			wantErr:  "build id is required",
+		},
+		{
+			name:     "empty chunk ref",
+			buildID:  "build-1",
+			chunkRef: "",
+			prompt:   "steer me",
+			wantErr:  "chunk ref is required",
+		},
+		{
+			name:     "whitespace chunk ref",
+			buildID:  "build-1",
+			chunkRef: "  \t ",
+			prompt:   "steer me",
+			wantErr:  "chunk ref is required",
+		},
+		{
+			name:     "empty prompt",
+			buildID:  "build-1",
+			chunkRef: "chunk-a",
+			prompt:   "",
+			wantErr:  "prompt is required",
+		},
+		{
+			name:     "whitespace prompt",
+			buildID:  "build-1",
+			chunkRef: "chunk-a",
+			prompt:   "   \n  ",
+			wantErr:  "prompt is required",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			err := ValidateSteerChunkInput(tc.buildID, tc.chunkRef, tc.prompt)
+			if gotErr := errString(err); gotErr != tc.wantErr {
+				t.Errorf("ValidateSteerChunkInput(%q, %q, %q) = %q, want %q", tc.buildID, tc.chunkRef, tc.prompt, gotErr, tc.wantErr)
+			}
+		})
+	}
+}

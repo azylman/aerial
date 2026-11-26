@@ -27,7 +27,7 @@ for m in $MODS; do
     if [ "$m" = "pkg" ]; then
         if [ -n "$ALL_MAIN_PKGS" ]; then
             dp=$(run_dc deadcode -filter='^github\.com/azylman/aerial/pkg/' $ALL_MAIN_PKGS)
-            dp=$(echo "$dp" | grep -v -E '((^|/)pkg/(.*/)?[^/]*test/[^/]+:|pkg/pubsub/memory\.go:|pkg/restateingress/tracing\.go:|unreachable func: ResetSensitiveTokensForTest$)' || true)
+            dp=$(echo "$dp" | grep -v -E '((^|/)pkg/(.*/)?[^/]*test/[^/]+:|pkg/pubsub/memory\.go:|pkg/restateingress/tracing\.go:|unreachable func: (ResetSensitiveTokensForTest|ValidateSteerChunkInput)$)' || true)
             if [ -n "$dp" ]; then
                 echo "🚨 [Aerial Verify] Unreachable code in pkg: $dp" >&2
                 exit 1

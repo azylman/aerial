@@ -2,14 +2,18 @@ package guard
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"io"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"reflect"
 	"slices"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -607,9 +611,12 @@ func TestOptionsFromEnv(t *testing.T) {
 		wantBatchDir string
 		wantSQL      bool
 		wantScratch  string
+		wantSteerer  bool
+		wantDaemonID string
 	}{
-		{"empty env uses defaults", nil, "/tmp/aerial-batch-guard", false, ""},
-		{"overrides carried through", map[string]string{"AERIAL_BATCH_GUARD_DIR": "/tmp/guard-test", "DATABASE_URL": "postgres://127.0.0.1:1/x", "SCRATCH_DIR": "/tmp/s"}, "/tmp/guard-test", true, "/tmp/s"},
+		{"empty env uses defaults", nil, "/tmp/aerial-batch-guard", false, "", false, ""},
+		{"overrides carried through", map[string]string{"AERIAL_BATCH_GUARD_DIR": "/tmp/guard-test", "DATABASE_URL": "postgres://127.0.0.1:1/x", "SCRATCH_DIR": "/tmp/s"}, "/tmp/guard-test", true, "/tmp/s", false, ""},
+		{"daemon id sets steerer", map[string]string{"ERI_DAEMON_ID": "daemon-alpha"}, "/tmp/aerial-batch-guard", false, "", true, "daemon-alpha"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -622,8 +629,359 @@ func TestOptionsFromEnv(t *testing.T) {
 			if !ok || scanner.URL != "http://127.0.0.1:4028/internal/guard/egress-scan" || scanner.Client == nil || scanner.Client.Timeout != 2*time.Second {
 				t.Fatalf("OptionsFromEnv EgressScanner = %#v, want HTTP scanner on loopback 4028 with 2s timeout", opts.EgressScanner)
 			}
+			if tc.wantSteerer {
+				httpSteerer, ok := opts.Steerer.(*HTTPTurnSteerer)
+				if !ok || httpSteerer == nil || httpSteerer.Endpoint != SteerDrainURL || httpSteerer.DaemonID != tc.wantDaemonID {
+					t.Fatalf("OptionsFromEnv Steerer = %#v, want HTTPTurnSteerer with endpoint %q and daemonID %q", opts.Steerer, SteerDrainURL, tc.wantDaemonID)
+				}
+			} else if opts.Steerer != nil {
+				t.Fatalf("OptionsFromEnv Steerer = %#v, want nil", opts.Steerer)
+			}
 		})
 	}
+	t.Run("nil getenv fallback", func(t *testing.T) {
+		t.Parallel()
+		opts := OptionsFromEnv(nil)
+		if opts.BatchDir != DefaultBatchDir || opts.Steerer != nil {
+			t.Fatalf("OptionsFromEnv(nil) = %+v, want default batch dir and nil steerer", opts)
+		}
+	})
+}
+
+func TestHTTPTurnSteerer_DrainPending(t *testing.T) {
+	t.Parallel()
+	t.Run("invalid URL fails open", func(t *testing.T) {
+		t.Parallel()
+		invalidURL := &HTTPTurnSteerer{Endpoint: "http://[::1]:namedport", DaemonID: "d1"}
+		if invalidURL.DrainPending(context.Background(), Payload{ConversationID: "c1"}) != nil {
+			t.Errorf("expected nil for invalid request URL")
+		}
+	})
+
+	t.Run("nil client default", func(t *testing.T) {
+		t.Parallel()
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`{"prompts":["default client ok"]}`))
+		}))
+		defer srv.Close()
+
+		steerer := &HTTPTurnSteerer{
+			Endpoint: srv.URL,
+			DaemonID: "test-daemon",
+			Client:   nil, // exercises client == nil fallback to http.DefaultClient
+		}
+		prompts := steerer.DrainPending(context.Background(), Payload{ConversationID: "c1"})
+		if !slices.Equal(prompts, []string{"default client ok"}) {
+			t.Errorf("DrainPending(ctx, ...) = %v, want [default client ok]", prompts)
+		}
+	})
+
+	tests := []struct {
+		name        string
+		statusCode  int
+		respBody    string
+		hangServer  bool
+		wantPrompts []string
+	}{
+		{
+			name:        "valid prompts returned",
+			statusCode:  http.StatusOK,
+			respBody:    `{"prompts": ["first prompt", "second prompt"]}`,
+			wantPrompts: []string{"first prompt", "second prompt"},
+		},
+		{
+			name:        "whitespace prompts filtered",
+			statusCode:  http.StatusOK,
+			respBody:    `{"prompts": ["  valid  ", "   ", ""]}`,
+			wantPrompts: []string{"valid"},
+		},
+		{
+			name:        "non-200 status fails open",
+			statusCode:  http.StatusInternalServerError,
+			respBody:    `{"error": "fail"}`,
+			wantPrompts: nil,
+		},
+		{
+			name:        "malformed json fails open",
+			statusCode:  http.StatusOK,
+			respBody:    `{invalid-json`,
+			wantPrompts: nil,
+		},
+		{
+			name:        "server timeout fails open",
+			statusCode:  http.StatusOK,
+			hangServer:  true,
+			wantPrompts: nil,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			hangCh := make(chan struct{})
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if tc.hangServer {
+					<-hangCh
+					return
+				}
+				w.WriteHeader(tc.statusCode)
+				_, _ = w.Write([]byte(tc.respBody))
+			}))
+			defer srv.Close()
+			defer close(hangCh)
+
+			steerer := &HTTPTurnSteerer{
+				Endpoint: srv.URL,
+				DaemonID: "test-daemon",
+				Client:   srv.Client(),
+			}
+
+			prompts := steerer.DrainPending(context.Background(), Payload{ConversationID: "c1"})
+			if !slices.Equal(prompts, tc.wantPrompts) {
+				t.Fatalf("DrainPending() = %v, want %v", prompts, tc.wantPrompts)
+			}
+		})
+	}
+}
+
+type invocationSteerCase struct {
+	name         string
+	inputPayload string
+	serverStatus int
+	serverBody   string
+	withSteerer  bool
+	wantSteps    []string
+	wantCalls    int
+}
+
+func runInvocationSteerCase(t *testing.T, tc invocationSteerCase) {
+	t.Helper()
+	opts := testOptions(t)
+	var calls atomic.Int32
+	if tc.withSteerer {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			calls.Add(1)
+			w.WriteHeader(tc.serverStatus)
+			_, _ = w.Write([]byte(tc.serverBody))
+		}))
+		defer srv.Close()
+		opts.Steerer = &HTTPTurnSteerer{Endpoint: srv.URL, DaemonID: "d1", Client: srv.Client()}
+	}
+
+	var out bytes.Buffer
+	if err := ProcessWithOptions(strings.NewReader(tc.inputPayload), &out, "pre-invocation", opts); err != nil {
+		t.Fatalf("ProcessWithOptions error: %v", err)
+	}
+	var invResp InvocationResponse
+	if err := json.Unmarshal(out.Bytes(), &invResp); err != nil {
+		t.Fatalf("Unmarshal(InvocationResponse) error: %v", err)
+	}
+	gotSteps := make([]string, 0, len(invResp.InjectSteps))
+	for _, step := range invResp.InjectSteps {
+		gotSteps = append(gotSteps, step.UserMessage)
+	}
+	if !slices.Equal(gotSteps, tc.wantSteps) {
+		t.Fatalf("InjectSteps = %v, want %v", gotSteps, tc.wantSteps)
+	}
+	if gotCalls := int(calls.Load()); gotCalls != tc.wantCalls {
+		t.Fatalf("drain server calls = %d, want %d", gotCalls, tc.wantCalls)
+	}
+}
+
+type claudeSteerCase struct {
+	name         string
+	inputPayload string
+	serverStatus int
+	serverBody   string
+	withSteerer  bool
+	wantDecision string
+	wantContext  string
+	wantCalls    int
+}
+
+func runClaudeSteerCase(t *testing.T, tc claudeSteerCase) {
+	t.Helper()
+	opts := testOptions(t)
+	var calls atomic.Int32
+	if tc.withSteerer {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			calls.Add(1)
+			w.WriteHeader(tc.serverStatus)
+			_, _ = w.Write([]byte(tc.serverBody))
+		}))
+		defer srv.Close()
+		opts.Steerer = &HTTPTurnSteerer{Endpoint: srv.URL, DaemonID: "d1", Client: srv.Client()}
+	}
+
+	var out bytes.Buffer
+	if err := ProcessWithOptions(strings.NewReader(tc.inputPayload), &out, "all", opts); err != nil {
+		t.Fatalf("ProcessWithOptions error: %v", err)
+	}
+	var claudeResp ClaudeHookResponse
+	if err := json.Unmarshal(out.Bytes(), &claudeResp); err != nil {
+		t.Fatalf("Unmarshal(ClaudeHookResponse) error: %v", err)
+	}
+	if claudeResp.HookSpecificOutput.PermissionDecision != tc.wantDecision {
+		t.Errorf("PermissionDecision = %q, want %q", claudeResp.HookSpecificOutput.PermissionDecision, tc.wantDecision)
+	}
+	if claudeResp.HookSpecificOutput.AdditionalContext != tc.wantContext {
+		t.Errorf("AdditionalContext = %q, want %q", claudeResp.HookSpecificOutput.AdditionalContext, tc.wantContext)
+	}
+	if gotCalls := int(calls.Load()); gotCalls != tc.wantCalls {
+		t.Fatalf("drain server calls = %d, want %d", gotCalls, tc.wantCalls)
+	}
+}
+
+func TestProcessWithOptions_Invocation(t *testing.T) {
+	t.Parallel()
+	tests := []invocationSteerCase{
+		{
+			name:         "invocationNum 1 ignores steerer",
+			inputPayload: `{"conversationId": "c1", "invocationNum": 1}`,
+			serverStatus: http.StatusOK,
+			serverBody:   `{"prompts": ["steering text"]}`,
+			withSteerer:  true,
+			wantSteps:    nil,
+			wantCalls:    0,
+		},
+		{
+			name:         "invocationNum 2 injects steerer steps",
+			inputPayload: `{"conversationId": "c1", "invocationNum": 2}`,
+			serverStatus: http.StatusOK,
+			serverBody:   `{"prompts": ["steer msg 1", "steer msg 2"]}`,
+			withSteerer:  true,
+			wantSteps:    []string{"steer msg 1", "steer msg 2"},
+			wantCalls:    1,
+		},
+		{
+			name:         "invocationNum 2 with nil steerer",
+			inputPayload: `{"conversationId": "c1", "invocationNum": 2}`,
+			withSteerer:  false,
+			wantSteps:    nil,
+			wantCalls:    0,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			runInvocationSteerCase(t, tc)
+		})
+	}
+}
+
+func TestProcessWithOptions_Claude(t *testing.T) {
+	t.Parallel()
+	tests := []claudeSteerCase{
+		{
+			name:         "allowed injects additional context",
+			inputPayload: `{"session_id": "sess-1", "hook_event_name": "PreToolUse", "tool_name": "run_command", "tool_input": {"CommandLine": "echo safe", "Cwd": "/data"}}`,
+			serverStatus: http.StatusOK,
+			serverBody:   `{"prompts": ["prompt A", "prompt B"]}`,
+			withSteerer:  true,
+			wantDecision: "allow",
+			wantContext:  "prompt A\n\nprompt B",
+			wantCalls:    1,
+		},
+		{
+			name:         "allowed with empty steerer",
+			inputPayload: `{"session_id": "sess-1", "hook_event_name": "PreToolUse", "tool_name": "run_command", "tool_input": {"CommandLine": "echo safe", "Cwd": "/data"}}`,
+			serverStatus: http.StatusOK,
+			serverBody:   `{"prompts": []}`,
+			withSteerer:  true,
+			wantDecision: "allow",
+			wantContext:  "",
+			wantCalls:    1,
+		},
+		{
+			name:         "allowed with nil steerer",
+			inputPayload: `{"session_id": "sess-1", "hook_event_name": "PreToolUse", "tool_name": "run_command", "tool_input": {"CommandLine": "echo safe", "Cwd": "/data"}}`,
+			withSteerer:  false,
+			wantDecision: "allow",
+			wantContext:  "",
+			wantCalls:    0,
+		},
+		{
+			name:         "denied does not inject context",
+			inputPayload: `{"session_id": "sess-1", "hook_event_name": "PreToolUse", "tool_name": "write_to_file", "tool_input": {"TargetFile": "/share/aerial/main.go"}}`,
+			serverStatus: http.StatusOK,
+			serverBody:   `{"prompts": ["prompt should not appear"]}`,
+			withSteerer:  true,
+			wantDecision: "deny",
+			wantContext:  "",
+			wantCalls:    0,
+		},
+		{
+			name:         "allowed subagent does not inject context",
+			inputPayload: `{"session_id": "sess-1", "agent_id": "subagent-1", "hook_event_name": "PreToolUse", "tool_name": "run_command", "tool_input": {"CommandLine": "echo safe", "Cwd": "/data"}}`,
+			serverStatus: http.StatusOK,
+			serverBody:   `{"prompts": ["prompt should stay queued"]}`,
+			withSteerer:  true,
+			wantDecision: "allow",
+			wantContext:  "",
+			wantCalls:    0,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			runClaudeSteerCase(t, tc)
+		})
+	}
+}
+
+func TestProcessWithOptions(t *testing.T) {
+	t.Parallel()
+
+	t.Run("general tool mode with steerer", func(t *testing.T) {
+		t.Parallel()
+		var calls atomic.Int32
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			calls.Add(1)
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`{"prompts": ["some prompt"]}`))
+		}))
+		defer srv.Close()
+
+		opts := testOptions(t)
+		opts.Steerer = &HTTPTurnSteerer{Endpoint: srv.URL, DaemonID: "d1", Client: srv.Client()}
+
+		var out bytes.Buffer
+		inputPayload := `{"toolCall": {"name": "run_command", "args": {"CommandLine": "echo hi", "Cwd": "/data"}}, "conversationId": "c1"}`
+		if err := ProcessWithOptions(strings.NewReader(inputPayload), &out, "all", opts); err != nil {
+			t.Fatalf("ProcessWithOptions error: %v", err)
+		}
+		var d Decision
+		if err := json.Unmarshal(out.Bytes(), &d); err != nil {
+			t.Fatalf("Unmarshal(Decision) error: %v", err)
+		}
+		if d.Decision != DecisionAllow {
+			t.Errorf("Decision = %q, want allow", d.Decision)
+		}
+		if gotCalls := int(calls.Load()); gotCalls != 0 {
+			t.Errorf("drain server calls = %d, want 0", gotCalls)
+		}
+	})
+
+	t.Run("nil getenv fallback in options", func(t *testing.T) {
+		t.Parallel()
+		var out bytes.Buffer
+		opts := Options{BatchDir: t.TempDir()} // Getenv is nil
+		inputPayload := `{"toolCall": {"name": "run_command", "args": {"CommandLine": "git commit -m ` + testPAT + `"}}, "conversationId": "c1"}`
+		err := ProcessWithOptions(strings.NewReader(inputPayload), &out, "commit", opts)
+		if err != nil {
+			t.Fatalf("unexpected error with nil Getenv: %v", err)
+		}
+		var d Decision
+		if err := json.Unmarshal(out.Bytes(), &d); err != nil {
+			t.Fatalf("Unmarshal(Decision) error: %v", err)
+		}
+		if d.Decision != DecisionDeny {
+			t.Errorf("Decision = %q, want deny (detecting sensitive token with nil Getenv fallback)", d.Decision)
+		}
+	})
 }
 
 func TestCheckSchedule(t *testing.T) {
