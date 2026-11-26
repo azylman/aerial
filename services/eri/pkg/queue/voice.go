@@ -105,6 +105,31 @@ func finalizeVoiceTurnOutcome(ctx context.Context, outcome runner.TurnOutcome, t
 	return "", activeSession, fmt.Errorf("%s", outcome.ErrorDetail)
 }
 
+func (p *WorkerPool) persistVoiceTurnSession(ctx context.Context, deviceKey, convID string) {
+	store := p.Store()
+	if store == nil {
+		return
+	}
+	cleanConv := strings.TrimSpace(convID)
+	if cleanConv == "" {
+		return
+	}
+	key := voiceSessionKey(deviceKey)
+	noCancelCtx := context.WithoutCancel(ctx)
+	currentSess, err := store.GetSessionID(noCancelCtx, key)
+	if err != nil {
+		log.Printf("[WorkerPool] Warning getting current voice session ID for %s: %v", deviceKey, err)
+	}
+	if currentSess != cleanConv {
+		if rotErr := store.RotateSessionID(noCancelCtx, key, cleanConv); rotErr != nil {
+			log.Printf("[WorkerPool] Warning rotating voice session ID for %s (%s): %v", deviceKey, cleanConv, rotErr)
+		}
+	}
+	if _, err := store.IncrementSessionTurnCount(noCancelCtx, key); err != nil {
+		log.Printf("[WorkerPool] Warning incrementing voice session turn count for %s: %v", deviceKey, err)
+	}
+}
+
 // ExecuteVoiceTurn synchronously executes a turn for voice queries.
 func (p *WorkerPool) ExecuteVoiceTurn(ctx context.Context, prompt, sessionID string, onStatus func(status string), onSentence ...func(sentence string)) (string, string, error) {
 	deviceKey, err := p.checkVoiceTurnReady(ctx, sessionID)
@@ -130,6 +155,9 @@ func (p *WorkerPool) ExecuteVoiceTurn(ctx context.Context, prompt, sessionID str
 	turnPrompt := prompt
 	if reply, conv, handled, customErr := p.executeCustomVoiceRunner(ctx, turnPrompt, deviceKey, onStatus, sentenceCb); handled {
 		if conv != "" {
+			if customErr == nil {
+				p.persistVoiceTurnSession(ctx, deviceKey, conv)
+			}
 			p.EnqueueTranscriptPublish(TranscriptPublishJob{SessionID: conv, ThreadID: threadID})
 		}
 		return reply, conv, customErr
@@ -196,6 +224,9 @@ func (p *WorkerPool) ExecuteVoiceTurn(ctx context.Context, prompt, sessionID str
 	outcome := runner.NewTurnResolver().Resolve(ctx, turnRes, turnErr, activeSession)
 	turnStatus, turnUsage = voiceTurnStatus(ctx, outcome), outcome.Usage
 	reply, conv, err := finalizeVoiceTurnOutcome(ctx, outcome, turnErr, activeSession, model, start, sink, detector, sentenceCb)
+	if err == nil {
+		p.persistVoiceTurnSession(ctx, deviceKey, conv)
+	}
 	p.EnqueueTranscriptPublish(TranscriptPublishJob{SessionID: activeSession, ThreadID: threadID})
 	return reply, conv, err
 }

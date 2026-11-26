@@ -304,6 +304,63 @@ func (p *UnifiedProcessPool) Initialize(ctx context.Context) error {
 	return nil
 }
 
+// isStaleIsolatedSession reports whether homeDir has an isolated conversation or brain
+// directory (a real non-symlinked directory) that lacks the given session ID on disk.
+func isStaleIsolatedSession(homeDir, sessionID string) bool {
+	cleanHome, cleanID := strings.TrimSpace(homeDir), strings.TrimSpace(sessionID)
+	if cleanHome == "" || cleanID == "" {
+		return false
+	}
+	cliDir := filepath.Join(cleanHome, ".gemini", "antigravity-cli")
+	convDir, brainDir := filepath.Join(cliDir, "conversations"), filepath.Join(cliDir, "brain")
+
+	isRealDir := func(p string) bool {
+		fi, err := os.Lstat(p)
+		return err == nil && fi.Mode()&os.ModeSymlink == 0 && fi.IsDir()
+	}
+	if !isRealDir(convDir) && !isRealDir(brainDir) {
+		return false
+	}
+	if _, err := os.Stat(filepath.Join(convDir, cleanID+".pb")); err == nil {
+		return false
+	}
+	if _, err := os.Stat(filepath.Join(convDir, cleanID+".db")); err == nil {
+		return false
+	}
+	if _, err := os.Stat(filepath.Join(brainDir, cleanID)); err == nil {
+		return false
+	}
+	return true
+}
+
+// resolveTargetSessionRecord resolves the session record for targetKey, clearing stale isolated session state.
+func (p *UnifiedProcessPool) resolveTargetSessionRecord(ctx context.Context, targetKey string) SessionRecord {
+	trimmedKey := strings.TrimSpace(targetKey)
+	if trimmedKey == "" {
+		return SessionRecord{}
+	}
+
+	p.mu.RLock()
+	getRec, homeDir := p.cfg.GetSessionRecord, p.cfg.GeminiHomeDir
+	p.mu.RUnlock()
+
+	var rec SessionRecord
+	if getRec != nil && !strings.Contains(trimmedKey, ":") {
+		if r, err := getRec(ctx, trimmedKey); err == nil {
+			rec = r
+		}
+	}
+
+	if rec.ActiveSessionID != "" {
+		d, ok := p.Get(trimmedKey)
+		matchesLiveDaemon := ok && d != nil && !d.IsDirty() && d.SessionID() == rec.ActiveSessionID
+		if !matchesLiveDaemon && isStaleIsolatedSession(homeDir, rec.ActiveSessionID) {
+			rec.ActiveSessionID, rec.TurnCount = "", 0
+		}
+	}
+	return rec
+}
+
 func (p *UnifiedProcessPool) prewarmTarget(ctx context.Context, targetKey string) error {
 	if p.Draining() {
 		return nil
@@ -323,7 +380,8 @@ func (p *UnifiedProcessPool) prewarmTarget(ctx context.Context, targetKey string
 	if d, ok := p.Get(trimmed); ok && !d.IsDirty() {
 		return nil
 	}
-	_, err := p.GetOrCreate(ctx, trimmed, "")
+	rec := p.resolveTargetSessionRecord(ctx, trimmed)
+	_, err := p.GetOrCreate(ctx, trimmed, rec.ActiveSessionID, rec.TurnCount)
 	return err
 }
 
@@ -932,6 +990,16 @@ func (p *UnifiedProcessPool) Model() string {
 	return p.cfg.Model
 }
 
+// Engine returns the engine new daemons are spawned with, or "" when the pool is nil.
+func (p *UnifiedProcessPool) Engine() string {
+	if p == nil {
+		return ""
+	}
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	return p.cfg.Engine
+}
+
 // EphemeralLLMFunc returns a runner.LLMFunc that executes prompts against targetKey.
 func (p *UnifiedProcessPool) EphemeralLLMFunc(targetKey string) LLMFunc {
 	return func(ctx context.Context, model, prompt string) (string, error) {
@@ -1080,12 +1148,7 @@ func (p *UnifiedProcessPool) AcquireLease(ctx context.Context, targetKey string)
 		return nil, ErrPoolDraining
 	}
 
-	var rec SessionRecord
-	if p.cfg.GetSessionRecord != nil {
-		if r, rErr := p.cfg.GetSessionRecord(ctx, trimmedKey); rErr == nil {
-			rec = r
-		}
-	}
+	rec := p.resolveTargetSessionRecord(ctx, trimmedKey)
 	d, dErr := p.GetOrCreate(ctx, trimmedKey, rec.ActiveSessionID, rec.TurnCount)
 	if dErr != nil {
 		p.releaseTargetLock(trimmedKey, tl)

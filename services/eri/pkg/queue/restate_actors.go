@@ -244,13 +244,6 @@ func (v *VoiceSessionObject) Ask(ctx restate.ObjectContext, req VoiceSessionRequ
 			ConversationID: convID,
 		})
 
-		if v.pool.Store() != nil && strings.TrimSpace(convID) != "" {
-			threadID := "voice-" + strings.TrimSpace(deviceKey)
-			if rErr := v.pool.Store().RotateSessionID(rc, threadID, convID); rErr != nil {
-				log.Printf("[VoiceSession] Warning rotating voice session in DB for %s: %v", threadID, rErr)
-			}
-		}
-
 		v.pool.EnqueueTranscriptPublish(TranscriptPublishJob{
 			SessionID: convID,
 			ThreadID:  "voice-" + deviceKey,
