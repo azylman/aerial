@@ -14,6 +14,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -842,32 +843,64 @@ func TestWireOutboundIntegrations(t *testing.T) {
 	}
 }
 
+type recordingSpawner struct {
+	mu      sync.Mutex
+	lastCfg runner.DaemonConfig
+}
+
+func (s *recordingSpawner) Spawn(ctx context.Context, cfg runner.DaemonConfig) (io.WriteCloser, io.ReadCloser, io.ReadCloser, runner.ProcessHandle, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.lastCfg = cfg
+	return nil, nil, nil, nil, errors.New("recording spawner stop")
+}
+
 func TestInitializeAgentPools_VoiceConfiguration(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
 		name             string
+		engine           string
+		voiceEngine      string
 		voiceModel       string
 		lowEffortModel   string
 		prewarmedTargets []string
+		wantEngine       string
 		wantModel        string
 		wantTargets      []string
 	}{
 		{
-			name:             "explicit voice model and targets",
+			name:             "explicit voice model, engine, and targets",
+			engine:           "agy",
+			voiceEngine:      "gemini_api",
 			voiceModel:       "gemini-3.8-flash-voice",
 			lowEffortModel:   "gemini-3.8-flash-low",
 			prewarmedTargets: []string{"kiosk-kitchen", "galaxy-watch7"},
+			wantEngine:       "gemini_api",
 			wantModel:        "gemini-3.8-flash-voice",
 			wantTargets:      []string{"kiosk-kitchen", "galaxy-watch7"},
 		},
 		{
-			name:             "fallback to low effort model when voice model empty",
+			name:             "fallback to low effort model and default agy engine when unspecified",
+			engine:           "",
+			voiceEngine:      "",
 			voiceModel:       "",
 			lowEffortModel:   "gemini-3.8-flash-low",
 			prewarmedTargets: []string{"kiosk-bedroom"},
+			wantEngine:       "agy",
 			wantModel:        "gemini-3.8-flash-low",
 			wantTargets:      []string{"kiosk-bedroom"},
+		},
+		{
+			name:             "global engine claude without voice engine inherits claude in pool and spawned daemon config",
+			engine:           "claude",
+			voiceEngine:      "",
+			voiceModel:       "claude-haiku-voice",
+			lowEffortModel:   "claude-haiku-low",
+			prewarmedTargets: []string{"kiosk-living"},
+			wantEngine:       "claude",
+			wantModel:        "claude-haiku-voice",
+			wantTargets:      []string{"kiosk-living"},
 		},
 	}
 
@@ -876,10 +909,12 @@ func TestInitializeAgentPools_VoiceConfiguration(t *testing.T) {
 			t.Parallel()
 			subTmp := t.TempDir()
 			cur := &config.ConfigData{
+				Engine:         tc.engine,
 				DataDir:        subTmp + "/data",
 				Model:          "claude-opus-3",
 				LowEffortModel: tc.lowEffortModel,
 				Voice: config.VoiceConfig{
+					Engine:           tc.voiceEngine,
 					Model:            tc.voiceModel,
 					PrewarmedTargets: tc.prewarmedTargets,
 				},
@@ -893,14 +928,27 @@ func TestInitializeAgentPools_VoiceConfiguration(t *testing.T) {
 				AgentName:  "aerial",
 			}
 
-			bundle := initializeAgentPools(appCfg, cur, cfg, sessionMgr, &dummySpawner{}, ambientResolver)
+			spawner := &recordingSpawner{}
+			bundle := initializeAgentPools(appCfg, cur, cfg, sessionMgr, spawner, ambientResolver)
 			require.NotNil(t, bundle.voicePool)
 
 			underlying := bundle.voicePool.Underlying()
 			require.NotNil(t, underlying)
 
 			assert.Equal(t, tc.wantModel, underlying.Model())
+			assert.Equal(t, tc.wantEngine, underlying.Engine())
 			assert.Equal(t, tc.wantTargets, underlying.PrewarmedTargets())
+
+			target := "target-test"
+			if len(tc.prewarmedTargets) > 0 {
+				target = tc.prewarmedTargets[0]
+			}
+			_, spawnErr := underlying.GetOrCreate(context.Background(), target, "")
+			assert.Error(t, spawnErr)
+			spawner.mu.Lock()
+			spawnedCfg := spawner.lastCfg
+			spawner.mu.Unlock()
+			assert.Equal(t, tc.wantEngine, spawnedCfg.Engine)
 		})
 	}
 }

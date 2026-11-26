@@ -990,6 +990,16 @@ func (p *UnifiedProcessPool) Model() string {
 	return p.cfg.Model
 }
 
+// Engine returns the engine new daemons are spawned with, or "" when the pool is nil.
+func (p *UnifiedProcessPool) Engine() string {
+	if p == nil {
+		return ""
+	}
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	return p.cfg.Engine
+}
+
 // EphemeralLLMFunc returns a runner.LLMFunc that executes prompts against targetKey.
 func (p *UnifiedProcessPool) EphemeralLLMFunc(targetKey string) LLMFunc {
 	return func(ctx context.Context, model, prompt string) (string, error) {

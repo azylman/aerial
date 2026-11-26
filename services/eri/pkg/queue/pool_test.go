@@ -283,6 +283,8 @@ type mockFullVoicePool struct {
 	rescuerSet    bool
 	managerSet    bool
 	callbacksSet  bool
+	getFn         func(context.Context, string) (runner.SessionRecord, error)
+	saveFn        func(context.Context, string, string, string) error
 }
 
 func (m *mockFullVoicePool) UpdateModel(model string) {
@@ -307,6 +309,8 @@ func (m *mockFullVoicePool) SetSessionManager(mgr *session.Manager) {
 
 func (m *mockFullVoicePool) SetSessionCallbacks(getFn func(context.Context, string) (runner.SessionRecord, error), saveFn func(context.Context, string, string, string) error) {
 	m.callbacksSet = getFn != nil && saveFn != nil
+	m.getFn = getFn
+	m.saveFn = saveFn
 }
 
 func TestVoiceSessionKey(t *testing.T) {
@@ -408,7 +412,44 @@ func TestWireVoicePoolSessionDependencies(t *testing.T) {
 			if voiceMock.callbacksSet != tc.wantCallbacksSet {
 				t.Errorf("callbacksSet = %v, want %v", voiceMock.callbacksSet, tc.wantCallbacksSet)
 			}
+			if tc.wantCallbacksSet {
+				assertWiredVoiceSessionCallbacks(t, voiceMock, testStore)
+			}
 		})
+	}
+}
+
+func assertWiredVoiceSessionCallbacks(t *testing.T, voiceMock *mockFullVoicePool, testStore db.Store) {
+	t.Helper()
+	if voiceMock.getFn == nil || voiceMock.saveFn == nil {
+		t.Fatal("expected non-nil callbacks on mock")
+	}
+	ctx := context.Background()
+	if err := testStore.SaveSessionID(ctx, "voice-kiosk-1", "sess-init"); err != nil {
+		t.Fatalf("seed session err: %v", err)
+	}
+	if err := testStore.RotateSessionID(ctx, "voice-kiosk-1", "sess-active"); err != nil {
+		t.Fatalf("seed rotate err: %v", err)
+	}
+	if _, err := testStore.IncrementSessionTurnCount(ctx, "voice-kiosk-1"); err != nil {
+		t.Fatalf("seed increment err: %v", err)
+	}
+	rec, err := voiceMock.getFn(ctx, "kiosk-1")
+	if err != nil {
+		t.Fatalf("getFn err: %v", err)
+	}
+	if rec.ActiveSessionID != "sess-active" || rec.PreviousSessionID != "sess-init" || rec.TurnCount != 1 {
+		t.Fatalf("getFn returned unexpected record: %+v", rec)
+	}
+	if saveErr := voiceMock.saveFn(ctx, "kiosk-1", "sess-active", "sess-rotated"); saveErr != nil {
+		t.Fatalf("saveFn err: %v", saveErr)
+	}
+	recAfter, err := voiceMock.getFn(ctx, "kiosk-1")
+	if err != nil {
+		t.Fatalf("getFn after rot err: %v", err)
+	}
+	if recAfter.ActiveSessionID != "sess-rotated" || recAfter.PreviousSessionID != "sess-active" || recAfter.TurnCount != 0 {
+		t.Fatalf("getFn after rot returned unexpected record: %+v", recAfter)
 	}
 }
 
@@ -437,6 +478,20 @@ func TestReconcilePoolModelsAndVoiceTargets_Engine(t *testing.T) {
 
 	if voiceMock.updatedEngine != "gemini_api" {
 		t.Fatalf("expected voiceMock.updatedEngine = %q, got %q", "gemini_api", voiceMock.updatedEngine)
+	}
+
+	appCfgClaude := config.NewFromData(&config.ConfigData{
+		Engine: "claude",
+		Model:  "base-model",
+	})
+	poolClaude := &WorkerPool{
+		appCfg:            appCfgClaude,
+		hasExplicitAppCfg: true,
+	}
+	voiceMockClaude := &mockFullVoicePool{}
+	poolClaude.reconcilePoolModelsAndVoiceTargets(poolByKey, voiceMockClaude, true, []string{"kiosk-1"})
+	if voiceMockClaude.updatedEngine != "claude" {
+		t.Fatalf("expected voiceMockClaude.updatedEngine = %q, got %q", "claude", voiceMockClaude.updatedEngine)
 	}
 }
 
@@ -475,6 +530,71 @@ func assertUnpersistedVoiceTurn(t *testing.T, store db.Store, key string) {
 	if gotSess != "" {
 		t.Fatalf("expected empty session, got %q", gotSess)
 	}
+	turns, turnErr := store.GetSessionTurnCount(context.Background(), key)
+	if turnErr != nil {
+		t.Fatalf("unexpected GetSessionTurnCount error: %v", turnErr)
+	}
+	if turns != 0 {
+		t.Fatalf("turn count = %d, want 0", turns)
+	}
+}
+
+func seedVoiceSessionTurns(t *testing.T, store db.Store, key, sessID string, turns int) {
+	t.Helper()
+	ctx := context.Background()
+	if err := store.SaveSessionID(ctx, key, sessID); err != nil {
+		t.Fatalf("seed session err: %v", err)
+	}
+	for range turns {
+		if _, err := store.IncrementSessionTurnCount(ctx, key); err != nil {
+			t.Fatalf("seed turns err: %v", err)
+		}
+	}
+}
+
+func assertVoiceSessionRotated(t *testing.T, store db.Store, key, wantConvID, wantPrevSession string) {
+	t.Helper()
+	ctx := context.Background()
+	gotSess, err := store.GetSessionID(ctx, key)
+	if err != nil {
+		t.Fatalf("GetSessionID err: %v", err)
+	}
+	if gotSess != wantConvID {
+		t.Fatalf("session = %q, want %q", gotSess, wantConvID)
+	}
+	gotPrev, err := store.GetPreviousSessionID(ctx, key)
+	if err != nil {
+		t.Fatalf("GetPreviousSessionID err: %v", err)
+	}
+	if gotPrev != wantPrevSession {
+		t.Fatalf("prev session = %q, want %q", gotPrev, wantPrevSession)
+	}
+	gotTurns, err := store.GetSessionTurnCount(ctx, key)
+	if err != nil {
+		t.Fatalf("GetSessionTurnCount err: %v", err)
+	}
+	if gotTurns != 1 {
+		t.Fatalf("turn count after rotation = %d, want 1", gotTurns)
+	}
+}
+
+func assertVoiceSessionUnchanged(t *testing.T, store db.Store, key, wantSessID string, wantTurns int) {
+	t.Helper()
+	ctx := context.Background()
+	gotSess, err := store.GetSessionID(ctx, key)
+	if err != nil {
+		t.Fatalf("GetSessionID err: %v", err)
+	}
+	if gotSess != wantSessID {
+		t.Fatalf("session = %q, want %q", gotSess, wantSessID)
+	}
+	gotTurns, err := store.GetSessionTurnCount(ctx, key)
+	if err != nil {
+		t.Fatalf("GetSessionTurnCount err: %v", err)
+	}
+	if gotTurns != wantTurns {
+		t.Fatalf("turns = %d, want %d", gotTurns, wantTurns)
+	}
 }
 
 func TestWorkerPool_PersistVoiceTurnSession(t *testing.T) {
@@ -484,12 +604,23 @@ func TestWorkerPool_PersistVoiceTurnSession(t *testing.T) {
 		name          string
 		deviceKey     string
 		convID        string
+		seedSession   string
+		seedTurns     int
 		wantPersisted bool
+		wantRotated   bool
 	}{
 		{
 			name:          "empty conv id is no-op",
 			deviceKey:     "kiosk-living",
 			convID:        "",
+			wantPersisted: false,
+		},
+		{
+			name:          "empty conv id with seeded session is complete no-op",
+			deviceKey:     "kiosk-living-seeded",
+			convID:        "",
+			seedSession:   "sess-existing",
+			seedTurns:     4,
 			wantPersisted: false,
 		},
 		{
@@ -503,6 +634,15 @@ func TestWorkerPool_PersistVoiceTurnSession(t *testing.T) {
 			deviceKey:     "voice-kiosk-bedroom",
 			convID:        "conv-bedroom-1",
 			wantPersisted: true,
+		},
+		{
+			name:          "replacing conversation resets turn count and preserves previous session",
+			deviceKey:     "kiosk-rotated",
+			convID:        "conv-new",
+			seedSession:   "conv-old",
+			seedTurns:     8,
+			wantPersisted: true,
+			wantRotated:   true,
 		},
 	}
 
@@ -518,13 +658,23 @@ func TestWorkerPool_PersistVoiceTurnSession(t *testing.T) {
 					Store: sqlStore,
 				},
 			}
-			pool.persistVoiceTurnSession(context.Background(), tc.deviceKey, tc.convID)
 			key := voiceSessionKey(tc.deviceKey)
-			if tc.wantPersisted {
-				assertPersistedVoiceTurn(t, pool, sqlStore, tc.deviceKey, tc.convID, key)
-				return
+			if tc.seedSession != "" {
+				seedVoiceSessionTurns(t, sqlStore, key, tc.seedSession, tc.seedTurns)
 			}
-			assertUnpersistedVoiceTurn(t, sqlStore, key)
+
+			pool.persistVoiceTurnSession(context.Background(), tc.deviceKey, tc.convID)
+
+			switch {
+			case tc.wantRotated:
+				assertVoiceSessionRotated(t, sqlStore, key, tc.convID, tc.seedSession)
+			case tc.wantPersisted:
+				assertPersistedVoiceTurn(t, pool, sqlStore, tc.deviceKey, tc.convID, key)
+			case tc.seedSession != "":
+				assertVoiceSessionUnchanged(t, sqlStore, key, tc.seedSession, tc.seedTurns)
+			default:
+				assertUnpersistedVoiceTurn(t, sqlStore, key)
+			}
 		})
 	}
 }

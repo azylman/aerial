@@ -921,7 +921,7 @@ func (c *ConfigData) VoiceAllowedTools() []string {
 	return tools
 }
 
-// VoiceEngine returns the configured voice engine ("agy" or "gemini_api"), defaulting to "agy".
+// VoiceEngine returns the configured voice engine, defaulting to the process-wide engine when unset.
 func (c *Config) VoiceEngine() string {
 	if c == nil {
 		return EngineAgy
@@ -929,15 +929,26 @@ func (c *Config) VoiceEngine() string {
 	return c.Current().VoiceEngine()
 }
 
-// VoiceEngine returns the configured voice engine ("agy" or "gemini_api"), defaulting to "agy".
+// VoiceEngine returns the configured voice engine, defaulting to the process-wide engine when unset.
 func (c *ConfigData) VoiceEngine() string {
 	if c == nil {
 		return EngineAgy
 	}
 	engine := strings.ToLower(strings.TrimSpace(c.Voice.Engine))
+	if engine == "" {
+		return c.GetEngine()
+	}
 	switch engine {
 	case VoiceEngineGeminiAPI, "gemini", "direct_api":
 		return VoiceEngineGeminiAPI
+	case EngineClaude:
+		return EngineClaude
+	case EngineCodex:
+		return EngineCodex
+	case EngineMuse:
+		return EngineMuse
+	case EngineAgy:
+		return EngineAgy
 	default:
 		return EngineAgy
 	}

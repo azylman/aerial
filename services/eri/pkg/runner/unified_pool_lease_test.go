@@ -1047,16 +1047,20 @@ func TestUnifiedProcessPool_ResolveTargetSessionRecord(t *testing.T) {
 		wantTurns     int
 	}{
 		{
-			name:        "empty targetKey returns empty record",
-			targetKey:   "  ",
-			wantSession: "",
-			wantTurns:   0,
+			name:          "empty targetKey returns empty record",
+			targetKey:     "  ",
+			recordSession: "sess-should-not-reach",
+			recordTurns:   7,
+			hasFileOnDisk: true,
+			wantSession:   "",
+			wantTurns:     0,
 		},
 		{
 			name:          "targetKey containing colon skips getRec",
 			targetKey:     "ephemeral:worker-0",
 			recordSession: "sess-ephem",
 			recordTurns:   3,
+			hasFileOnDisk: true,
 			wantSession:   "",
 			wantTurns:     0,
 		},

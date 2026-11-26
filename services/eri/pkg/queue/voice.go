@@ -116,8 +116,14 @@ func (p *WorkerPool) persistVoiceTurnSession(ctx context.Context, deviceKey, con
 	}
 	key := voiceSessionKey(deviceKey)
 	noCancelCtx := context.WithoutCancel(ctx)
-	if err := store.SaveSessionID(noCancelCtx, key, cleanConv); err != nil {
-		log.Printf("[WorkerPool] Warning saving voice session ID for %s (%s): %v", deviceKey, cleanConv, err)
+	currentSess, err := store.GetSessionID(noCancelCtx, key)
+	if err != nil {
+		log.Printf("[WorkerPool] Warning getting current voice session ID for %s: %v", deviceKey, err)
+	}
+	if currentSess != cleanConv {
+		if rotErr := store.RotateSessionID(noCancelCtx, key, cleanConv); rotErr != nil {
+			log.Printf("[WorkerPool] Warning rotating voice session ID for %s (%s): %v", deviceKey, cleanConv, rotErr)
+		}
 	}
 	if _, err := store.IncrementSessionTurnCount(noCancelCtx, key); err != nil {
 		log.Printf("[WorkerPool] Warning incrementing voice session turn count for %s: %v", deviceKey, err)

@@ -337,6 +337,35 @@ func runVoiceEngineTests(t *testing.T) {
 		})
 	}
 
+	globalInheritanceTests := []struct {
+		name         string
+		globalEngine string
+		voiceEngine  string
+		want         string
+	}{
+		{"claude inherits when voice unset", "claude", "", "claude"},
+		{"claude inherits when voice whitespace", "claude", "   ", "claude"},
+		{"codex inherits when voice unset", "codex", "", "codex"},
+		{"muse inherits when voice unset", "muse", "", "muse"},
+		{"explicit gemini_api overrides global claude", "claude", "gemini_api", "gemini_api"},
+		{"explicit agy overrides global claude", "claude", "agy", "agy"},
+		{"explicit claude overrides global agy", "agy", "claude", "claude"},
+	}
+	for _, tc := range globalInheritanceTests {
+		t.Run("inheritance_"+tc.name, func(t *testing.T) {
+			cfg := NewTestConfig(func(c *ConfigData) {
+				c.Engine = tc.globalEngine
+				c.Voice.Engine = tc.voiceEngine
+			})
+			if got := cfg.VoiceEngine(); got != tc.want {
+				t.Fatalf("VoiceEngine(global=%q, voice=%q) = %q, want %q", tc.globalEngine, tc.voiceEngine, got, tc.want)
+			}
+			if got := cfg.Current().VoiceEngine(); got != tc.want {
+				t.Fatalf("Current().VoiceEngine(global=%q, voice=%q) = %q, want %q", tc.globalEngine, tc.voiceEngine, got, tc.want)
+			}
+		})
+	}
+
 	processEngineTests := []struct{ in, want string }{
 		{"", "agy"},
 		{"   ", "agy"},
