@@ -492,12 +492,12 @@ describe('UseCaseGallery Component', () => {
     expect(screen.getByTestId('usecase-outcome').textContent).toContain('Engineers receive root-cause diagnosis');
     expect(screen.getByTestId('usecase-step-2').textContent).toContain('Publish incident diagnosis');
 
-    // Switch to smart-home-scheduler
-    fireEvent.click(screen.getByTestId('usecase-tab-smart-home-scheduler'));
-    expect(screen.getByTestId('usecase-tab-smart-home-scheduler').classList.contains('active')).toBe(true);
-    expect(screen.getByTestId('usecase-prompt').textContent).toContain('Turn off hallway lights');
-    expect(screen.getByTestId('usecase-outcome').textContent).toContain('Routines survive service restarts');
-    expect(screen.getByTestId('usecase-step-0').textContent).toContain('Schedule durable one-shot timer');
+    // Switch to personal-agent-errands
+    fireEvent.click(screen.getByTestId('usecase-tab-personal-agent-errands'));
+    expect(screen.getByTestId('usecase-tab-personal-agent-errands').classList.contains('active')).toBe(true);
+    expect(screen.getByTestId('usecase-prompt').textContent).toContain('Check the city permit portal');
+    expect(screen.getByTestId('usecase-outcome').textContent).toContain('Everyday web errands, phone calls, and recurring schedules');
+    expect(screen.getByTestId('usecase-step-0').textContent).toContain('Navigate the municipal portal');
   });
 });
 
