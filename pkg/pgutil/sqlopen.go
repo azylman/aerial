@@ -99,7 +99,13 @@ func (c connector) open(ctx context.Context, dsn string, opts SQLOptions) (*sql.
 
 // ping runs one open+ping attempt, closing the handle when the ping fails.
 func (c connector) ping(ctx context.Context, dsn string) (*sql.DB, error) {
-	database, err := sql.Open(c.driver, dsn)
+	var database *sql.DB
+	var err error
+	if c.driver == "pgx" {
+		database, err = OpenTracedPgxDB(dsn)
+	} else {
+		database, err = sql.Open(c.driver, dsn)
+	}
 	if err != nil {
 		return nil, err
 	}

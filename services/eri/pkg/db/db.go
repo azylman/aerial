@@ -12,6 +12,7 @@ import (
 	_ "github.com/jackc/pgx/v5/stdlib"
 
 	"github.com/azylman/aerial/pkg/httpkit"
+	"github.com/azylman/aerial/pkg/pgutil"
 	"github.com/azylman/aerial/services/eri/pkg/config"
 	"github.com/azylman/aerial/services/eri/pkg/metrics"
 )
@@ -40,7 +41,7 @@ func Open(dsn string) (*sql.DB, error) {
 	if !strings.HasPrefix(dsn, "postgres://") && !strings.HasPrefix(dsn, "postgresql://") {
 		return nil, fmt.Errorf("unsupported database DSN scheme in %q: only postgres:// and postgresql:// are supported in production", dsn)
 	}
-	db, err := sql.Open("pgx", dsn)
+	db, err := pgutil.OpenTracedPgxDB(dsn)
 	if err != nil {
 		return nil, fmt.Errorf("failed to open postgres database: %w", err)
 	}

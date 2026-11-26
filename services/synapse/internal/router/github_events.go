@@ -448,7 +448,7 @@ func (s *RouterServer) processOwnedPush(ctx context.Context, body []byte, res *R
 	if p.HeadCommit != nil && p.HeadCommit.ID != "" {
 		res.HeadSHA = p.HeadCommit.ID
 	}
-	if !strings.HasPrefix(p.Ref, "refs/heads/main") {
+	if p.Ref != "refs/heads/main" {
 		res.ResolutionSource = "non_main_branch"
 		return res, nil
 	}
@@ -484,6 +484,11 @@ func (s *RouterServer) processOwnedPush(ctx context.Context, body []byte, res *R
 			Repo: res.Repo, MainSHA: res.HeadSHA, PRNumber: res.PRNumber, Ref: p.Ref,
 		}); err != nil {
 			return nil, err
+		}
+		if res.PRNumber > 0 && buildmeta.MetadataWorkflowPath(res.Repo) == "" {
+			if err := s.ownedCompleteNoDeploy(ctx, res.Repo, res.HeadSHA, res.PRNumber, res.Branch); err != nil {
+				return nil, err
+			}
 		}
 	}
 	return res, nil
