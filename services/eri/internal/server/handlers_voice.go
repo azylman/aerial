@@ -69,7 +69,7 @@ func persistVoiceConversationID(ctx context.Context, pool *queue.WorkerPool, ses
 	}
 	threadID := "voice-" + strings.TrimSpace(sessionID)
 	newSessionID := strings.TrimSpace(convID)
-	if err := pool.Store().RotateSessionID(context.WithoutCancel(ctx), threadID, newSessionID); err != nil {
+	if err := pool.Store().SaveSessionID(context.WithoutCancel(ctx), threadID, newSessionID); err != nil {
 		log.Printf("[VoiceAsk] Failed to persist voice conversation id for %s: %v", threadID, err)
 	}
 }

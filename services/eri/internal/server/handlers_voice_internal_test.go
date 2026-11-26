@@ -3,7 +3,6 @@ package server
 import (
 	"bytes"
 	"context"
-	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -117,17 +116,55 @@ func TestHandleVoiceAsk_Validation(t *testing.T) {
 	})
 }
 
+func seedVoiceTestSession(t *testing.T, store *db.SQLStore, sessionID, seedSession string, seedTurnCount int) {
+	t.Helper()
+	if seedSession == "" {
+		return
+	}
+	threadKey := "voice-" + strings.TrimSpace(sessionID)
+	if err := store.SaveSessionID(context.Background(), threadKey, seedSession); err != nil {
+		t.Fatalf("SaveSessionID seed failed: %v", err)
+	}
+	for range seedTurnCount {
+		if _, err := store.IncrementSessionTurnCount(context.Background(), threadKey); err != nil {
+			t.Fatalf("IncrementSessionTurnCount seed failed: %v", err)
+		}
+	}
+}
+
+func initTestWorkerPool(t *testing.T, nilPool, nilStore bool, sabotageSQL string) (*queue.WorkerPool, *db.SQLStore) {
+	t.Helper()
+	if nilPool {
+		return nil, nil
+	}
+	if nilStore {
+		p := newTestWorkerPool(nil)
+		p.Start()
+		return p, nil
+	}
+	store, database := newTestStoreDB(t)
+	if sabotageSQL != "" {
+		mustExec(t, database, sabotageSQL)
+	}
+	p := newTestWorkerPool(store)
+	p.Start()
+	return p, store
+}
+
 func TestPersistVoiceConversationID(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
-		name        string
-		nilPool     bool
-		nilStore    bool
-		sessionID   string
-		convID      string
-		sabotageSQL string
-		wantSession string
+		name          string
+		nilPool       bool
+		nilStore      bool
+		sessionID     string
+		convID        string
+		seedSession   string
+		seedTurnCount int
+		sabotageSQL   string
+		wantSession   string
+		wantTurnCount int
 	}{
 		{name: "nil pool", nilPool: true, sessionID: "s1", convID: "c1"},
 		{name: "nil store in pool", nilStore: true, sessionID: "s1", convID: "c1"},
@@ -137,34 +174,39 @@ func TestPersistVoiceConversationID(t *testing.T) {
 		{name: "whitespace convID", sessionID: "s1", convID: "   "},
 		{name: "store error logged", sessionID: "s-err", convID: "c-err", sabotageSQL: failTriggerSQL("sessions", "INSERT", "40001")},
 		{name: "success persisted", sessionID: "s-ok", convID: "c-ok", wantSession: "c-ok"},
+		{
+			name:          "preserves existing turn count",
+			sessionID:     "s-count",
+			convID:        "c-count",
+			seedSession:   "c-count",
+			seedTurnCount: 3,
+			wantSession:   "c-count",
+			wantTurnCount: 3,
+		},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			var pool *queue.WorkerPool
-			var store *db.SQLStore
-			if !tc.nilPool {
-				if !tc.nilStore {
-					var database *sql.DB
-					store, database = newTestStoreDB(t)
-					if tc.sabotageSQL != "" {
-						mustExec(t, database, tc.sabotageSQL)
-					}
-					pool = newTestWorkerPool(store)
-				} else {
-					pool = newTestWorkerPool(nil)
-				}
-				pool.Start()
+			pool, store := initTestWorkerPool(t, tc.nilPool, tc.nilStore, tc.sabotageSQL)
+			if pool != nil {
 				defer pool.Stop()
+			}
+			if store != nil {
+				seedVoiceTestSession(t, store, tc.sessionID, tc.seedSession, tc.seedTurnCount)
 			}
 			persistVoiceConversationID(context.Background(), pool, tc.sessionID, tc.convID)
 			if store == nil {
 				return
 			}
-			got, err := store.GetSessionID(context.Background(), "voice-"+strings.TrimSpace(tc.sessionID))
+			threadKey := "voice-" + strings.TrimSpace(tc.sessionID)
+			got, err := store.GetSessionID(context.Background(), threadKey)
 			if err != nil || got != tc.wantSession {
 				t.Fatalf("GetSessionID = %q, err = %v, want %q", got, err, tc.wantSession)
+			}
+			gotCount, err := store.GetSessionTurnCount(context.Background(), threadKey)
+			if err != nil || gotCount != tc.wantTurnCount {
+				t.Fatalf("GetSessionTurnCount = %d, err = %v, want %d", gotCount, err, tc.wantTurnCount)
 			}
 		})
 	}
