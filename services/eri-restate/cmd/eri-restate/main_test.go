@@ -18,34 +18,49 @@ func TestMain_Execution(t *testing.T) {
 	})
 
 	tests := []struct {
-		name       string
-		runErr     error
-		wantExited bool
+		name        string
+		tracingCfg  tracing.Config
+		runErr      error
+		wantExited  bool
+		wantContent bool
 	}{
 		{
-			name:       "success case does not exit",
-			runErr:     nil,
-			wantExited: false,
+			name:        "success case does not exit without content capture",
+			tracingCfg:  tracing.Config{Enabled: true, CaptureContent: false},
+			runErr:      nil,
+			wantExited:  false,
+			wantContent: false,
 		},
 		{
-			name:       "error case calls exit",
-			runErr:     errors.New("startup failed"),
-			wantExited: true,
+			name:        "success case enables trace content when capture content configured",
+			tracingCfg:  tracing.Config{Enabled: true, CaptureContent: true},
+			runErr:      nil,
+			wantExited:  false,
+			wantContent: true,
+		},
+		{
+			name:        "error case calls exit",
+			tracingCfg:  tracing.Config{},
+			runErr:      errors.New("startup failed"),
+			wantExited:  true,
+			wantContent: false,
 		},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			var tracedService string
+			var receivedCfg app.Config
 			flushes := 0
 			initTracingFn = func(_ context.Context, service, _ string) (tracing.Config, func()) {
 				tracedService = service
-				return tracing.Config{}, func() { flushes++ }
+				return tc.tracingCfg, func() { flushes++ }
 			}
 			loadConfigFn = func() app.Config {
 				return app.Config{HealthPort: "4028", RestatePort: "9080", AgentName: "aerial"}
 			}
 			runAppFn = func(ctx context.Context, cfg app.Config, opts ...app.AppOption) error {
+				receivedCfg = cfg
 				return tc.runErr
 			}
 			exited := false
@@ -58,6 +73,7 @@ func TestMain_Execution(t *testing.T) {
 			assert.Equal(t, tc.wantExited, exited)
 			assert.Equal(t, "eri-restate", tracedService)
 			assert.Equal(t, 1, flushes)
+			assert.Equal(t, tc.wantContent, receivedCfg.TraceContent)
 		})
 	}
 }
