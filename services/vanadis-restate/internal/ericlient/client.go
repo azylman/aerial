@@ -111,9 +111,6 @@ type SyncChunkPRWidgetRequest struct {
 	PRFound    bool   `json:"pr_found"`
 }
 
-// DispatchRequest aliases the brain dispatch request wire type.
-type DispatchRequest = eriwire.BrainDispatchRequest
-
 // EriClient describes the outbound communication interface to Eri.
 type EriClient interface {
 	Dispatch(ctx context.Context, req eriwire.BrainDispatchRequest) error

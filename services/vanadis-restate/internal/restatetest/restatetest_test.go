@@ -84,12 +84,10 @@ func TestMetadataMutationStore(t *testing.T) {
 			t.Parallel()
 			s := &MetadataMutationStore{Err: tc.err}
 			b, err := s.UpdateBuild(context.Background(), "b1", store.UpdateBuildRequest{})
-			stRes, stErr := s.SteerChunk(context.Background(), "b1", "c1", store.SteerChunkRequest{Prompt: "p"})
 			_, err2 := s.LookupChunkBuildID(context.Background(), "c1")
 			_, _, err3 := s.LookupPRChunk(context.Background(), "r", 1)
 			_, err4 := s.LookupPRBuildRoutes(context.Background(), "r", 1)
 			assert.Equal(t, tc.err, err)
-			assert.Equal(t, tc.err, stErr)
 			assert.Equal(t, tc.err, err2)
 			assert.Equal(t, tc.err, err3)
 			assert.Equal(t, tc.err, err4)
@@ -100,8 +98,6 @@ func TestMetadataMutationStore(t *testing.T) {
 			if tc.err == nil {
 				require.NotNil(t, b)
 				assert.Equal(t, "b1", b.ID)
-				require.NotNil(t, stRes)
-				assert.Equal(t, "b1", stRes.BuildID)
 			}
 		})
 	}

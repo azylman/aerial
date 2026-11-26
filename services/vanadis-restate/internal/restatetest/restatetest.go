@@ -94,19 +94,6 @@ func (s *MetadataMutationStore) UpdateBuild(_ context.Context, id string, req st
 	return &model.VanadisBuild{ID: id, Title: req.Title}, nil
 }
 
-func (s *MetadataMutationStore) SteerChunk(_ context.Context, buildID, chunkRef string, req store.SteerChunkRequest) (*store.SteerChunkResult, error) {
-	if s.Err != nil {
-		return nil, s.Err
-	}
-	return &store.SteerChunkResult{
-		Accepted:     true,
-		BuildID:      buildID,
-		ChunkID:      chunkRef,
-		ChunkStatus:  "running",
-		Instructions: req.Prompt,
-	}, nil
-}
-
 func (s *MetadataMutationStore) LookupChunkBuildID(context.Context, string) (store.BuildRoute, error) {
 	return store.BuildRoute{}, s.Err
 }

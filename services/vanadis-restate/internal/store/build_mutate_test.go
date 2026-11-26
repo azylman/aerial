@@ -558,6 +558,8 @@ func TestPostgresVanadisStore_SteerChunk(t *testing.T) {
 	runningChunk := mutateChunks(ch("c1", "pr", "running"))
 	runningChunk[0].Instructions = "Original Instructions"
 	completedChunk := mutateChunks(ch("c1", "pr", "completed"))
+	alreadySteeredCompletedChunk := mutateChunks(ch("c1", "pr", "completed"))
+	alreadySteeredCompletedChunk[0].Instructions = "Original Instructions\n\n### [Operator Steering]\nFocus on edge cases"
 	running := bmBuilds("running")
 	failed := bmBuilds("failed")
 
@@ -597,6 +599,15 @@ func TestPostgresVanadisStore_SteerChunk(t *testing.T) {
 			req:              SteerChunkRequest{Prompt: "Focus on edge cases"},
 			db:               bmFixture{builds: failed, chunks: runningChunk},
 			wantStatus:       "running",
+			wantInstructions: "Original Instructions\n\n### [Operator Steering]\nFocus on edge cases",
+		},
+		{
+			name:             "idempotent replay returns success on completed chunk",
+			buildID:          "b1",
+			chunkRef:         "c1",
+			req:              SteerChunkRequest{Prompt: "Focus on edge cases"},
+			db:               bmFixture{builds: running, chunks: alreadySteeredCompletedChunk},
+			wantStatus:       "completed",
 			wantInstructions: "Original Instructions\n\n### [Operator Steering]\nFocus on edge cases",
 		},
 		{
