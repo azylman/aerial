@@ -41,7 +41,7 @@ export const FAQ_ITEMS: readonly FaqItem[] = [
     category: 'Software Factory',
     question: 'How does Aerial prevent autonomous code changes from breaking the live cluster?',
     answer:
-      'Autonomous workflows execute exclusively inside ephemeral scratch workspaces isolated from the live system. An adversarial multi-agent review panel inspects every proposed change across code quality and security. Isolated cluster runners execute strict unit tests and regression checks before creating pull requests. Flux CD synchronizes container images and manifests only after all automated continuous integration checks pass.',
+      'Autonomous workflows execute exclusively inside ephemeral scratch workspaces isolated from the live system. An adversarial multi-agent review panel inspects every proposed change across code quality and security. Local verification scripts run strict unit tests and regression checks before creating pull requests. Flux CD synchronizes container images and manifests only after all automated continuous integration checks pass.',
   },
 ] as const;
 

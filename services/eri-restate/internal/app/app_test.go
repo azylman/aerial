@@ -1043,6 +1043,161 @@ func TestMakeVoiceAmbientContextRetriever(t *testing.T) {
 	}
 }
 
+func newPrewarmTestMCPServer(t *testing.T, toolCalled chan<- struct{}) *httptest.Server {
+	t.Helper()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		method, _ := req["method"].(string)
+		id := req["id"]
+		if id == nil {
+			id = 1
+		}
+		w.Header().Set("Content-Type", "application/json")
+		switch method {
+		case "initialize":
+			w.Header().Set("Mcp-Session-Id", "sess-prewarm")
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"jsonrpc": "2.0", "id": id,
+				"result": map[string]any{"protocolVersion": "2024-11-05"},
+			})
+		case "notifications/initialized":
+			w.WriteHeader(http.StatusOK)
+		case "tools/list":
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"jsonrpc": "2.0", "id": id,
+				"result": map[string]any{"tools": []map[string]any{{"name": "prewarm_tool", "description": "test"}}},
+			})
+		case "tools/call":
+			select {
+			case toolCalled <- struct{}{}:
+			default:
+			}
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"jsonrpc": "2.0", "id": id,
+				"result": map[string]any{"content": []map[string]any{{"type": "text", "text": `{"state":"ready"}`}}},
+			})
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	t.Cleanup(srv.Close)
+	return srv
+}
+
+func setupPrewarmTestResolver(t *testing.T, hasAmbient bool) (*ambient.Resolver, *config.Config, string, <-chan struct{}) {
+	t.Helper()
+	var voiceAmb *config.AmbientContextConfig
+	var commonServers map[string]json.RawMessage
+	var tmplPath string
+	toolCalled := make(chan struct{}, 1)
+	if hasAmbient {
+		srv := newPrewarmTestMCPServer(t, toolCalled)
+		commonServers = map[string]json.RawMessage{
+			"srv-prewarm": []byte(fmt.Sprintf(`{"serverUrl":%q}`, srv.URL)),
+		}
+		tmplPath = filepath.Join(t.TempDir(), "voice-ambient.tmpl")
+		require.NoError(t, os.WriteFile(tmplPath, []byte("Prewarmed Voice Ambient: {{.pw.state}}"), 0o644))
+		voiceAmb = &config.AmbientContextConfig{
+			TemplatePath: tmplPath,
+			Tools:        []config.AmbientToolConfig{{Name: "pw", Tool: "prewarm_tool"}},
+		}
+	}
+	appCfg := config.NewFromData(&config.ConfigData{
+		McpServers: config.TargetMcpConfig{
+			Common: commonServers,
+		},
+		Voice: config.VoiceConfig{
+			AmbientContext: voiceAmb,
+		},
+	})
+	return ambient.NewResolver(appCfg), appCfg, tmplPath, toolCalled
+}
+
+func runPrewarmTestCase(t *testing.T, nilResolver, cancelCtx, hasAmbient bool) {
+	t.Helper()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	if cancelCtx {
+		cancel()
+	}
+
+	var resolver *ambient.Resolver
+	var appCfg *config.Config
+	var tmplPath string
+	var toolCalled <-chan struct{}
+	if !nilResolver {
+		resolver, appCfg, tmplPath, toolCalled = setupPrewarmTestResolver(t, hasAmbient)
+	}
+
+	stopPrewarm := PrewarmAmbientResolver(ctx, resolver)
+	defer stopPrewarm()
+
+	if nilResolver || !hasAmbient {
+		return
+	}
+	if !cancelCtx {
+		select {
+		case <-toolCalled:
+		case <-time.After(2 * time.Second):
+			t.Fatal("timed out waiting for PrewarmAmbientResolver to invoke ambient tool")
+		}
+	}
+	stopPrewarm()
+	// Remove the template file after prewarming finishes so ResolveVoice can only succeed
+	// if PrewarmAmbientResolver already cached the primed provider.
+	require.NoError(t, os.Remove(tmplPath))
+	vAmb := appCfg.Current().VoiceAmbientContext()
+	require.NotNil(t, vAmb)
+	out, err := resolver.ResolveVoice(context.Background(), vAmb)
+	if cancelCtx {
+		require.Error(t, err)
+		return
+	}
+	require.NoError(t, err)
+	assert.Contains(t, out, "Prewarmed Voice Ambient: ready")
+}
+
+func TestPrewarmAmbientResolver(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name        string
+		nilResolver bool
+		cancelCtx   bool
+		hasAmbient  bool
+	}{
+		{
+			name:        "nil resolver is a safe no-op",
+			nilResolver: true,
+			cancelCtx:   false,
+			hasAmbient:  false,
+		},
+		{
+			name:        "canceled context does not prewarm ambient resolver",
+			nilResolver: false,
+			cancelCtx:   true,
+			hasAmbient:  true,
+		},
+		{
+			name:        "active context primes configured ambient resolver before ResolveVoice",
+			nilResolver: false,
+			cancelCtx:   false,
+			hasAmbient:  true,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			runPrewarmTestCase(t, tc.nilResolver, tc.cancelCtx, tc.hasAmbient)
+		})
+	}
+}
+
 func replyDaemonSpawner(reply string) *replySpawner {
 	return &replySpawner{reply: reply}
 }

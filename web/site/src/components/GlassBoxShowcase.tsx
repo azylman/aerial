@@ -204,13 +204,13 @@ export function GlassBoxShowcase() {
                   <div className="build-card">
                     <div className="build-card-header">
                       <span className="badge badge-accent">BUILD build-1795589299-bb34c38b</span>
-                      <span className="build-title">Public Launch ARC Split and React Site</span>
+                      <span className="build-title">Public Launch Docs and React Site</span>
                       <span className="badge badge-success">5 / 8 CHUNKS COMPLETE</span>
                     </div>
                     <div className="chunks-pipeline-bar">
-                      <span className="chunk-pill chunk-done">Ch.1: Adopt ARC</span>
+                      <span className="chunk-pill chunk-done">Ch.1: Schema Migration</span>
                       <span className="chunk-pill chunk-done">Ch.2: Verify Prune</span>
-                      <span className="chunk-pill chunk-done">Ch.3: Strip Base ARC</span>
+                      <span className="chunk-pill chunk-done">Ch.3: Gateway Routes</span>
                       <span className="chunk-pill chunk-done">Ch.4: Refresh README</span>
                       <span className="chunk-pill chunk-done">Ch.5: Scaffold Site</span>
                       <span className="chunk-pill chunk-active">Ch.6: Landing Views</span>
@@ -346,7 +346,7 @@ export function GlassBoxShowcase() {
                     <span className="journal-time">+0.045s</span>
                     <span className="journal-fn">appendChunk(chunk-1)</span>
                     <span className="journal-status val-ok">COMPLETED</span>
-                    <span className="journal-note">Enqueued chunk-1-arc-adoption (repo: aerial-config)</span>
+                    <span className="journal-note">Enqueued chunk-1-schema-migration (repo: aerial)</span>
                   </div>
                   <div className="journal-entry">
                     <span className="journal-time">+0.089s</span>
@@ -370,7 +370,7 @@ export function GlassBoxShowcase() {
               ) : (
                 <div className="restate-json-view" data-testid="restate-state-content">
                   <pre>
-                    <code>{`{\n  "build_id": "build-1795589299-bb34c38b",\n  "title": "Public Launch ARC Split and React Site",\n  "status": "RUNNING",\n  "active_chunk_id": "chunk-6-site-interactive-landing-views",\n  "chunks": [\n    {"id": "chunk-1", "status": "COMPLETED", "pr": 1462},\n    {"id": "chunk-2", "status": "COMPLETED", "pr": 1463},\n    {"id": "chunk-3", "status": "COMPLETED", "pr": 1464},\n    {"id": "chunk-4", "status": "COMPLETED", "pr": 1465},\n    {"id": "chunk-5", "status": "COMPLETED", "pr": 1466},\n    {"id": "chunk-6", "status": "RUNNING", "pr": null}\n  ],\n  "auto_squash": true\n}`}</code>
+                    <code>{`{\n  "build_id": "build-1795589299-bb34c38b",\n  "title": "Public Launch Docs and React Site",\n  "status": "RUNNING",\n  "active_chunk_id": "chunk-6-site-interactive-landing-views",\n  "chunks": [\n    {"id": "chunk-1", "status": "COMPLETED", "pr": 1462},\n    {"id": "chunk-2", "status": "COMPLETED", "pr": 1463},\n    {"id": "chunk-3", "status": "COMPLETED", "pr": 1464},\n    {"id": "chunk-4", "status": "COMPLETED", "pr": 1465},\n    {"id": "chunk-5", "status": "COMPLETED", "pr": 1466},\n    {"id": "chunk-6", "status": "RUNNING", "pr": null}\n  ],\n  "auto_squash": true\n}`}</code>
                   </pre>
                 </div>
               )}
@@ -420,7 +420,7 @@ export function GlassBoxShowcase() {
                       <span className="task-id">#102</span>
                       <span className="task-priority">MED</span>
                     </div>
-                    <div className="task-name">Dynamic CI Runner Routing in docker-publish.yml</div>
+                    <div className="task-name">Declarative Atlas Schema Validation in CI</div>
                     <div className="task-tags">
                       <span className="tag">ci</span>
                       <span className="tag">actions</span>
@@ -444,7 +444,7 @@ export function GlassBoxShowcase() {
                       <span className="task-id">#101</span>
                       <span className="task-priority val-ok">DONE</span>
                     </div>
-                    <div className="task-name">Adopt ARC CI Runners in Config Overrides</div>
+                    <div className="task-name">Configure Flux Kustomization Prune Protection</div>
                     <div className="task-tags">
                       <span className="tag">k8s</span>
                       <span className="tag">flux</span>
