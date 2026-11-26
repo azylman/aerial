@@ -448,7 +448,7 @@ func (s *RouterServer) processOwnedPush(ctx context.Context, body []byte, res *R
 	if p.HeadCommit != nil && p.HeadCommit.ID != "" {
 		res.HeadSHA = p.HeadCommit.ID
 	}
-	if !strings.HasPrefix(p.Ref, "refs/heads/main") {
+	if p.Ref != "refs/heads/main" {
 		res.ResolutionSource = "non_main_branch"
 		return res, nil
 	}

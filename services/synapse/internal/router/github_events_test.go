@@ -661,6 +661,8 @@ func restateOwnedPushCases() []restateOwnedGitHubCase {
 			wantBodies: []string{`"main_sha":"` + ownedMerge + `"`, `"pr_number":42`, `"auto_update":{"default_owner":true}`, `"pr_number":42,"head_sha":"","ref":"refs/heads/main"`, `"jobs":["other-repo"]`},
 		},
 		{name: "branch push sends nothing", event: "push", body: pushPayload("refs/heads/feat", "wip")},
+		{name: "maintenance branch push with pr commit sends nothing", event: "push", cfg: Config{DefaultOwner: true}, body: pushPayloadRepo("azylman/other-repo", "refs/heads/maintenance/v1", "Fix it (#42)")},
+		{name: "main-v2 branch push with pr commit sends nothing", event: "push", cfg: Config{DefaultOwner: true}, body: pushPayloadRepo("azylman/other-repo", "refs/heads/main-v2", "Fix it (#42)")},
 		{name: "tag push sends nothing", event: "push", body: pushPayload("refs/tags/v1", "tag")},
 		{name: "deleted branch sends nothing", event: "push", body: []byte(`{"ref":"refs/heads/main","deleted":true,"after":"0000000000000000000000000000000000000000","repository":{"full_name":"azylman/aerial"}}`)},
 		{name: "ping sends nothing", event: "ping", body: []byte(`{"zen":"hi","hook_id":1,"repository":{"full_name":"azylman/aerial"}}`)},
