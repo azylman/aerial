@@ -449,21 +449,11 @@ func (s *Store) SteerChunk(ctx context.Context, buildID, chunkRef string, req St
 		return nil, ErrChunkNotFound
 	}
 	target := existingChunks[targetIdx]
-	steerBlock := "\n\n### [Operator Steering]\n" + strings.TrimSpace(req.Prompt)
-	if strings.HasSuffix(target.Instructions, steerBlock) {
-		return &SteerChunkResult{
-			Accepted:     true,
-			BuildID:      buildID,
-			ChunkID:      target.ID,
-			ChunkStatus:  target.Status,
-			Instructions: target.Instructions,
-		}, nil
-	}
 	if target.Status != statusPending && target.Status != statusRunning {
 		return nil, fmt.Errorf("%w: cannot steer chunk %s with status %q (must be pending or running)", ErrBuildConflict, target.ID, target.Status)
 	}
 
-	updatedInstructions := target.Instructions + steerBlock
+	updatedInstructions := target.Instructions + "\n\n### [Operator Steering]\n" + strings.TrimSpace(req.Prompt)
 	const updQ = `UPDATE vanadis_chunks SET instructions = $3, updated_at = CURRENT_TIMESTAMP WHERE id = $1 AND build_id = $2;`
 	if _, err := tx.Exec(ctx, updQ, target.ID, buildID, updatedInstructions); err != nil {
 		return nil, fmt.Errorf("execute steer chunk %s: %w", target.ID, err)

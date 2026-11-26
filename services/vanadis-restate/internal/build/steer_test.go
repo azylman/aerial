@@ -105,13 +105,6 @@ func TestBuildObject_SteerChunk(t *testing.T) {
 			terminalCode:  404,
 		},
 		{
-			name:          "store transient error stays retryable",
-			buildKey:      "b1",
-			req:           store.SteerChunkRequest{ChunkRef: "c1", Prompt: "test prompt"},
-			storeSteerErr: transient,
-			wantErr:       true,
-		},
-		{
 			name:         "pending chunk steered without eri dispatch",
 			buildKey:     "b1",
 			req:          store.SteerChunkRequest{ChunkRef: "c1", Prompt: "operator guidance"},
@@ -211,4 +204,22 @@ func TestOnDispatchOutcome_IgnoresSteerDispatch(t *testing.T) {
 	}
 	err := bo.OnDispatchOutcome(ctx, ev)
 	assert.NoError(t, err)
+}
+
+func TestBuildObject_SteerChunk_TransientErrorStaysRetryable(t *testing.T) {
+	t.Parallel()
+	transient := errors.New("db temporarily unavailable")
+	mc := mocks.NewMockContext(t)
+	mc.EXPECT().Key().Return("b1").Maybe()
+	mc.EXPECT().Value(mock.Anything).Return(nil).Maybe()
+	mc.EXPECT().Request().Return(&restate.Request{ID: "inv-test"}).Maybe()
+	restatetest.ObserveJournalCallback(t, mc, transient, 0)
+
+	st := &steerMockStore{
+		steerErr: transient,
+		build:    &model.VanadisBuild{ID: "b1", Agent: "aerial", ThreadID: "th-1"},
+	}
+	bo := NewBuildObject("", nil).WithAuthority(st, nil)
+	_, err := bo.SteerChunk(restate.WithMockContext(mc), store.SteerChunkRequest{ChunkRef: "c1", Prompt: "test prompt"})
+	require.Error(t, err)
 }

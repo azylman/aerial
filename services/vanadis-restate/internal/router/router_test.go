@@ -465,7 +465,7 @@ func TestBuildRouterService_RouteSteerChunk(t *testing.T) {
 		{name: "chunk not found", db: found, req: store.SteerChunkRequest{ChunkRef: "c-missing", Prompt: "more tests"}, wantErr: true},
 		{name: "nil store is chunk not found", req: store.SteerChunkRequest{ChunkRef: "c1", Prompt: "more tests"}, wantErr: true},
 		{name: "query error records metric", db: &dbFixture{closed: true}, req: store.SteerChunkRequest{ChunkRef: "c1", Prompt: "more tests"}, wantErr: true, wantMetric: 1},
-		{name: "provided build id bypasses lookup", db: found, req: store.SteerChunkRequest{BuildID: "b-steer", ChunkRef: "c1", Prompt: "more tests"}, wantBuildID: "b-steer"},
+		{name: "provided build id bypasses lookup", db: &dbFixture{closed: true}, req: store.SteerChunkRequest{BuildID: "b-steer", ChunkRef: "c1", Prompt: "more tests"}, wantBuildID: "b-steer"},
 		{name: "resolved build id from chunk lookup", db: found, req: store.SteerChunkRequest{ChunkRef: "c1", Prompt: "more tests"}, wantBuildID: "b-steer"},
 	}
 	for _, tc := range tests {
