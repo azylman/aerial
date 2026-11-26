@@ -1411,6 +1411,7 @@ func (l *unifiedSessionLease) Release() error {
 		l.mu.RLock()
 		targetKey := l.targetKey
 		oldSessionID := l.sessionID
+		oldTurns := l.turnCount
 		l.mu.RUnlock()
 
 		l.pool.mu.RLock()
@@ -1426,12 +1427,12 @@ func (l *unifiedSessionLease) Release() error {
 		log.Printf("[UnifiedProcessPool] Session rotation triggered for %s (reason: %s)", targetKey, reason)
 		metrics.RecordSessionRotation("turn_end", "pool", reason)
 
-		go l.pool.rotateReleasedTarget(targetKey, oldSessionID, l.lock)
+		go l.pool.rotateReleasedTarget(targetKey, oldSessionID, oldTurns, l.lock)
 	})
 	return releaseErr
 }
 
-func (p *UnifiedProcessPool) rotateReleasedTarget(targetKey, oldSessionID string, lock *targetLock) {
+func (p *UnifiedProcessPool) rotateReleasedTarget(targetKey, oldSessionID string, oldTurns int, lock *targetLock) {
 	defer p.bgWg.Done()
 	defer p.releaseTargetLock(targetKey, lock)
 
@@ -1461,6 +1462,14 @@ func (p *UnifiedProcessPool) rotateReleasedTarget(targetKey, oldSessionID string
 		return
 	}
 
+	if p.isSessionRecordSuperseded(rotCtx, targetKey, oldSessionID, oldTurns) {
+		log.Printf("[UnifiedProcessPool] Session for %s was superseded in store; aborting rotation save and evicting daemon", targetKey)
+		if evictErr := p.EvictSession(targetKey); evictErr != nil {
+			log.Printf("[UnifiedProcessPool] Warning evicting session for %s: %v", targetKey, evictErr)
+		}
+		return
+	}
+
 	if newSessionID := newDaemon.SessionID(); p.cfg.OnSessionRotated != nil && newSessionID != "" {
 		if rotErr := p.cfg.OnSessionRotated(rotCtx, targetKey, oldSessionID, newSessionID); rotErr != nil {
 			log.Printf("[UnifiedProcessPool] Persistence callback failed during rotation for %s: %v. Evicting daemon to maintain DB truth.", targetKey, rotErr)
@@ -1469,4 +1478,15 @@ func (p *UnifiedProcessPool) rotateReleasedTarget(targetKey, oldSessionID string
 			}
 		}
 	}
+}
+
+func (p *UnifiedProcessPool) isSessionRecordSuperseded(ctx context.Context, targetKey, oldSessionID string, oldTurns int) bool {
+	if p.cfg.GetSessionRecord == nil {
+		return false
+	}
+	rec, err := p.cfg.GetSessionRecord(ctx, targetKey)
+	if err != nil || rec.ActiveSessionID == "" {
+		return false
+	}
+	return (oldSessionID != "" && rec.ActiveSessionID != oldSessionID) || rec.TurnCount > oldTurns
 }

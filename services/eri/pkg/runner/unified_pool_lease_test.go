@@ -1176,3 +1176,109 @@ func TestUnifiedProcessPool_ResolveTargetSessionRecord(t *testing.T) {
 		})
 	}
 }
+
+type supersededSessionCase struct {
+	name        string
+	storeSessID string
+	storeTurns  int
+}
+
+func runSupersededSessionCase(t *testing.T, tc supersededSessionCase) {
+	t.Helper()
+	ctx := context.Background()
+	var mu sync.Mutex
+	storeRecord := SessionRecord{ActiveSessionID: "00000000-0000-0000-0000-000000000001", TurnCount: 2}
+	var onRotatedCalled atomic.Bool
+	spawnStarted := make(chan struct{})
+	proceedSpawn := make(chan struct{})
+	var spawnCount atomic.Int32
+
+	mock := newPipeMockSpawner(pipeMockSpawnerOpts{
+		pid:        450,
+		initSessID: "00000000-0000-0000-0000-000000000001",
+		echoRes:    "ok",
+		onSpawn: func(cfg DaemonConfig) {
+			if spawnCount.Add(1) == 2 {
+				close(spawnStarted)
+				<-proceedSpawn
+			}
+		},
+	})
+
+	pool := NewUnifiedProcessPool(PoolConfig{
+		MaxSessionTurns: 1,
+		GetSessionRecord: func(ctx context.Context, targetKey string) (SessionRecord, error) {
+			mu.Lock()
+			defer mu.Unlock()
+			return storeRecord, nil
+		},
+		OnSessionRotated: func(ctx context.Context, targetKey, oldSessionID, newSessionID string) error {
+			onRotatedCalled.Store(true)
+			mu.Lock()
+			defer mu.Unlock()
+			storeRecord.ActiveSessionID = newSessionID
+			storeRecord.TurnCount = 0
+			return nil
+		},
+	}, mock)
+	defer pool.Close()
+
+	const targetKey = "target-superseded"
+	lease, err := pool.AcquireLease(ctx, targetKey)
+	if err != nil {
+		t.Fatalf("AcquireLease failed: %v", err)
+	}
+	requireType[*unifiedSessionLease](t, lease).turnCount = 2
+
+	if err := lease.Release(); err != nil {
+		t.Fatalf("Release failed: %v", err)
+	}
+
+	<-spawnStarted
+	mu.Lock()
+	if tc.storeSessID != "" {
+		storeRecord.ActiveSessionID = tc.storeSessID
+	}
+	if tc.storeTurns > 0 {
+		storeRecord.TurnCount = tc.storeTurns
+	}
+	savedRecord := storeRecord
+	mu.Unlock()
+
+	close(proceedSpawn)
+	waitPoolBackground(pool)
+
+	if onRotatedCalled.Load() {
+		t.Errorf("expected OnSessionRotated NOT to be called when session record is superseded")
+	}
+	mu.Lock()
+	currentRecord := storeRecord
+	mu.Unlock()
+	if currentRecord != savedRecord {
+		t.Errorf("expected store record to remain %v, got %v", savedRecord, currentRecord)
+	}
+	if poolHasDaemon(pool, targetKey) {
+		t.Errorf("expected daemon to be evicted when session was superseded")
+	}
+}
+
+func TestUnifiedProcessPool_SupersededSessionDuringBackgroundRotation(t *testing.T) {
+	t.Parallel()
+	tests := []supersededSessionCase{
+		{
+			name:       "newer turn resumed same session",
+			storeTurns: 5,
+		},
+		{
+			name:        "different session rotated by other pod",
+			storeSessID: "00000000-0000-0000-0000-000000000099",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			runSupersededSessionCase(t, tc)
+		})
+	}
+}
