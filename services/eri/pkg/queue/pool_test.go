@@ -799,9 +799,14 @@ func TestWorkerPool_TwoPools_SupersededLeaseDoesNotChangeRecord(t *testing.T) {
 	// was superseded, and must NOT overwrite the session record.
 	close(proceedSpawn)
 
-	// Close pool1 to wait for its background rotation goroutines to complete.
-	if closeErr := pool1.Close(); closeErr != nil {
-		t.Fatalf("pool1 Close failed: %v", closeErr)
+	// Wait for Pool 1's background rotation to complete and release the target lock
+	// without canceling Pool 1's context.
+	syncLease, err := pool1.AcquireLease(ctx, targetKey)
+	if err != nil {
+		t.Fatalf("pool1 post-rotation AcquireLease failed: %v", err)
+	}
+	if relErr := syncLease.Release(); relErr != nil {
+		t.Fatalf("pool1 post-rotation Release failed: %v", relErr)
 	}
 
 	// Verify the stored session was not changed by Pool 1's aborted rotation.
