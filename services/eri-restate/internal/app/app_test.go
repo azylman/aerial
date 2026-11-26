@@ -22,6 +22,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/azylman/aerial/pkg/pgtest"
+	"github.com/azylman/aerial/services/eri/pkg/ambient"
 	"github.com/azylman/aerial/services/eri/pkg/bootstrap"
 	"github.com/azylman/aerial/services/eri/pkg/config"
 	"github.com/azylman/aerial/services/eri/pkg/db"
@@ -29,6 +30,7 @@ import (
 	"github.com/azylman/aerial/services/eri/pkg/metrics"
 	"github.com/azylman/aerial/services/eri/pkg/queue"
 	"github.com/azylman/aerial/services/eri/pkg/runner"
+	"github.com/azylman/aerial/services/eri/pkg/session"
 )
 
 func WithStore(store db.Store, txStore db.TranscriptStore) AppOption {
@@ -836,6 +838,135 @@ func TestWireOutboundIntegrations(t *testing.T) {
 			if closeFn != nil {
 				closeFn()
 			}
+		})
+	}
+}
+
+func TestInitializeAgentPools_VoiceConfiguration(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name             string
+		voiceModel       string
+		lowEffortModel   string
+		voiceEngine      string
+		prewarmedTargets []string
+		wantModel        string
+		wantTargets      []string
+	}{
+		{
+			name:             "explicit voice model and targets",
+			voiceModel:       "gemini-3.8-flash-voice",
+			lowEffortModel:   "gemini-3.8-flash-low",
+			voiceEngine:      "gemini_api",
+			prewarmedTargets: []string{"kiosk-kitchen", "galaxy-watch7"},
+			wantModel:        "gemini-3.8-flash-voice",
+			wantTargets:      []string{"kiosk-kitchen", "galaxy-watch7"},
+		},
+		{
+			name:             "fallback to low effort model when voice model empty",
+			voiceModel:       "",
+			lowEffortModel:   "gemini-3.8-flash-low",
+			voiceEngine:      "agy",
+			prewarmedTargets: []string{"kiosk-bedroom"},
+			wantModel:        "gemini-3.8-flash-low",
+			wantTargets:      []string{"kiosk-bedroom"},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			subTmp := t.TempDir()
+			cur := &config.ConfigData{
+				DataDir:        subTmp + "/data",
+				Model:          "claude-opus-3",
+				LowEffortModel: tc.lowEffortModel,
+				Voice: config.VoiceConfig{
+					Model:            tc.voiceModel,
+					Engine:           tc.voiceEngine,
+					PrewarmedTargets: tc.prewarmedTargets,
+				},
+			}
+			appCfg := config.NewFromData(cur)
+			sessionMgr := session.New(subTmp+"/home", subTmp+"/data")
+			ambientResolver := ambient.NewResolver(appCfg)
+
+			cfg := Config{
+				HealthPort: "4028",
+				AgentName:  "aerial",
+			}
+
+			bundle := initializeAgentPools(appCfg, cur, cfg, sessionMgr, &dummySpawner{}, ambientResolver)
+			require.NotNil(t, bundle.voicePool)
+
+			underlying := bundle.voicePool.Underlying()
+			require.NotNil(t, underlying)
+
+			assert.Equal(t, tc.wantModel, underlying.Model())
+			assert.Equal(t, tc.wantTargets, underlying.PrewarmedTargets())
+		})
+	}
+}
+
+func TestMakeVoiceAmbientContextRetriever(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name          string
+		nilAppCfg     bool
+		nilResolver   bool
+		voiceAmbient  string
+		wantRetriever bool
+		wantContent   string
+	}{
+		{
+			name:          "nil appCfg returns nil",
+			nilAppCfg:     true,
+			wantRetriever: false,
+		},
+		{
+			name:          "nil resolver returns nil",
+			nilResolver:   true,
+			wantRetriever: false,
+		},
+		{
+			name:          "configured voice ambient context resolves",
+			voiceAmbient:  "Current time is 5pm",
+			wantRetriever: true,
+			wantContent:   "<ambient_context>\nCurrent time is 5pm\n</ambient_context>",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			var appCfg *config.Config
+			if !tc.nilAppCfg {
+				var ambientCfg *config.AmbientContextConfig
+				if tc.voiceAmbient != "" {
+					ambientCfg = &config.AmbientContextConfig{Template: tc.voiceAmbient}
+				}
+				appCfg = config.NewFromData(&config.ConfigData{
+					Voice: config.VoiceConfig{
+						AmbientContext: ambientCfg,
+					},
+				})
+			}
+			var resolver *ambient.Resolver
+			if !tc.nilResolver {
+				resolver = ambient.NewResolver(appCfg)
+			}
+
+			retriever := makeVoiceAmbientContextRetriever(appCfg, resolver)
+			if !tc.wantRetriever {
+				assert.Nil(t, retriever)
+				return
+			}
+			require.NotNil(t, retriever)
+			content, err := retriever(context.Background())
+			assert.NoError(t, err)
+			assert.Equal(t, tc.wantContent, content)
 		})
 	}
 }

@@ -9,6 +9,8 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/azylman/aerial/services/eri/pkg/session"
 )
 
 // Fingerprint returns the current configuration fingerprint under RLock.
@@ -351,5 +353,177 @@ func TestDynamicVoicePool_SerializedReloadsAndDrain(t *testing.T) {
 
 	if err := <-closeDone; err != nil || atomic.LoadInt32(&mock1.closeCalled) != 1 || atomic.LoadInt32(&mock2.closeCalled) != 1 {
 		t.Fatalf("unexpected Close outcome: err=%v, c1=%d, c2=%d", err, mock1.closeCalled, mock2.closeCalled)
+	}
+}
+
+type mockConfigurableVoicePool struct {
+	*mockVoicePool
+
+	underlying       *UnifiedProcessPool
+	rescuerSet       bool
+	managerSet       bool
+	callbacksSet     bool
+	modelUpdated     string
+	engineUpdated    string
+	initHadRescuer   bool
+	initHadManager   bool
+	initHadCallbacks bool
+}
+
+func newMockConfigurableVoicePool(m string) *mockConfigurableVoicePool {
+	return &mockConfigurableVoicePool{mockVoicePool: newMockVoicePool(m)}
+}
+
+func (m *mockConfigurableVoicePool) Underlying() *UnifiedProcessPool {
+	if m == nil {
+		return nil
+	}
+	return m.underlying
+}
+
+func (m *mockConfigurableVoicePool) SetTranscriptRescuer(r func(context.Context, string, time.Time) string) {
+	if m != nil {
+		m.rescuerSet = r != nil
+	}
+}
+
+func (m *mockConfigurableVoicePool) SetSessionManager(sm *session.Manager) {
+	if m != nil {
+		m.managerSet = sm != nil
+	}
+}
+
+func (m *mockConfigurableVoicePool) SetSessionCallbacks(getRec func(ctx context.Context, targetKey string) (SessionRecord, error), onRot func(ctx context.Context, targetKey, oldSessionID, newSessionID string) error) {
+	if m != nil {
+		m.callbacksSet = getRec != nil && onRot != nil
+	}
+}
+
+func (m *mockConfigurableVoicePool) UpdateModel(model string) {
+	if m != nil {
+		m.modelUpdated = model
+	}
+}
+
+func (m *mockConfigurableVoicePool) UpdateEngine(engine, claudeBin string, extraBins ...string) {
+	if m != nil {
+		m.engineUpdated = engine
+	}
+}
+
+func (m *mockConfigurableVoicePool) Initialize(ctx context.Context) error {
+	if m != nil {
+		m.initHadRescuer = m.rescuerSet
+		m.initHadManager = m.managerSet
+		m.initHadCallbacks = m.callbacksSet
+	}
+	return m.mockVoicePool.Initialize(ctx)
+}
+
+func TestDynamicVoicePool_Underlying(t *testing.T) {
+	t.Parallel()
+
+	fakeUnified := &UnifiedProcessPool{}
+	wrapper := newMockConfigurableVoicePool("wrapped")
+	wrapper.underlying = fakeUnified
+
+	testCases := []struct {
+		name      string
+		pool      *DynamicVoicePool
+		wantFound bool
+	}{
+		{
+			name:      "nil dynamic voice pool",
+			pool:      nil,
+			wantFound: false,
+		},
+		{
+			name:      "dynamic voice pool with nil current pool",
+			pool:      NewDynamicVoicePoolWithInitial(nil, "k", nil),
+			wantFound: false,
+		},
+		{
+			name:      "dynamic voice pool wrapping unified process pool directly",
+			pool:      NewDynamicVoicePoolWithInitial(fakeUnified, "k", nil),
+			wantFound: true,
+		},
+		{
+			name:      "dynamic voice pool wrapping pool with Underlying method",
+			pool:      NewDynamicVoicePoolWithInitial(wrapper, "k", nil),
+			wantFound: true,
+		},
+		{
+			name:      "dynamic voice pool wrapping plain mock without Underlying",
+			pool:      NewDynamicVoicePoolWithInitial(newMockVoicePool("plain"), "k", nil),
+			wantFound: false,
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			got := tc.pool.Underlying()
+			if tc.wantFound && got == nil {
+				t.Fatalf("expected non-nil Underlying, got nil")
+			}
+			if !tc.wantFound && got != nil {
+				t.Fatalf("expected nil Underlying, got %v", got)
+			}
+		})
+	}
+}
+
+func TestDynamicVoicePool_WiringAndPropagations(t *testing.T) {
+	t.Parallel()
+
+	initialPool := newMockConfigurableVoicePool("initial-model")
+	candidatePool := newMockConfigurableVoicePool("candidate-model")
+
+	sf := &swappablePoolFactory{pool: initialPool, fp: "fp-1"}
+	dyn := NewDynamicVoicePool(sf.factory)
+	defer dyn.Close()
+
+	rescuer := func(context.Context, string, time.Time) string { return "rescued" }
+	sessMgr := &session.Manager{}
+	getRec := func(context.Context, string) (SessionRecord, error) { return SessionRecord{}, nil }
+	onRot := func(context.Context, string, string, string) error { return nil }
+
+	dyn.SetTranscriptRescuer(rescuer)
+	dyn.SetSessionManager(sessMgr)
+	dyn.SetSessionCallbacks(getRec, onRot)
+	dyn.UpdateModel("gemini-3.8-flash-low")
+	dyn.UpdateEngine("gemini_api", "/bin/claude")
+
+	if !initialPool.rescuerSet || !initialPool.managerSet || !initialPool.callbacksSet {
+		t.Fatalf("expected initial pool to have rescuer, manager, and callbacks set")
+	}
+	if initialPool.modelUpdated != "gemini-3.8-flash-low" {
+		t.Fatalf("expected initial pool modelUpdated = %q, got %q", "gemini-3.8-flash-low", initialPool.modelUpdated)
+	}
+	if initialPool.engineUpdated != "gemini_api" {
+		t.Fatalf("expected initial pool engineUpdated = %q, got %q", "gemini_api", initialPool.engineUpdated)
+	}
+
+	// Swap factory to return candidatePool with new fingerprint, then MarkDirty()
+	sf.set(candidatePool, "fp-2", nil)
+	dyn.MarkDirty()
+
+	if !candidatePool.initHadRescuer || !candidatePool.initHadManager || !candidatePool.initHadCallbacks {
+		t.Fatalf("expected candidate pool to receive dependencies before Initialize: rescuer=%v manager=%v callbacks=%v",
+			candidatePool.initHadRescuer, candidatePool.initHadManager, candidatePool.initHadCallbacks)
+	}
+}
+
+func TestDynamicVoicePool_NilReceiverSafety(t *testing.T) {
+	t.Parallel()
+
+	var nilPool *DynamicVoicePool
+	nilPool.SetTranscriptRescuer(nil)
+	nilPool.SetSessionManager(nil)
+	nilPool.SetSessionCallbacks(nil, nil)
+	nilPool.UpdateModel("model")
+	nilPool.UpdateEngine("engine", "")
+	if nilPool.Underlying() != nil {
+		t.Fatalf("expected nil Underlying for nil pool")
 	}
 }

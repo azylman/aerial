@@ -952,3 +952,189 @@ func requireType[T any](t *testing.T, v any) T {
 	}
 	return got
 }
+
+func TestIsStaleIsolatedSession(t *testing.T) {
+	t.Parallel()
+
+	tmpDir := t.TempDir()
+
+	// Scenario 1: Symlinked conversations directory
+	symlinkHome := filepath.Join(tmpDir, "symlink-home")
+	realStorage := filepath.Join(tmpDir, "shared-storage")
+	if err := os.MkdirAll(realStorage, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(symlinkHome, ".gemini", "antigravity-cli"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(realStorage, filepath.Join(symlinkHome, ".gemini", "antigravity-cli", "conversations")); err != nil {
+		t.Fatal(err)
+	}
+
+	// Scenario 2: Real isolated directory without session files
+	isolatedEmptyHome := filepath.Join(tmpDir, "isolated-empty-home")
+	if err := os.MkdirAll(filepath.Join(isolatedEmptyHome, ".gemini", "antigravity-cli", "conversations"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(isolatedEmptyHome, ".gemini", "antigravity-cli", "brain"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	// Scenario 3: Real isolated directory with pb file
+	isolatedPbHome := filepath.Join(tmpDir, "isolated-pb-home")
+	convPbDir := filepath.Join(isolatedPbHome, ".gemini", "antigravity-cli", "conversations")
+	if err := os.MkdirAll(convPbDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(convPbDir, "sess-1.pb"), []byte("data"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Scenario 4: Real isolated directory with db file
+	isolatedDbHome := filepath.Join(tmpDir, "isolated-db-home")
+	convDbDir := filepath.Join(isolatedDbHome, ".gemini", "antigravity-cli", "conversations")
+	if err := os.MkdirAll(convDbDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(convDbDir, "sess-2.db"), []byte("data"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Scenario 5: Real isolated directory with brain/<id> dir
+	isolatedBrainHome := filepath.Join(tmpDir, "isolated-brain-home")
+	brainSubDir := filepath.Join(isolatedBrainHome, ".gemini", "antigravity-cli", "brain", "sess-3")
+	if err := os.MkdirAll(brainSubDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	testCases := []struct {
+		name      string
+		homeDir   string
+		sessionID string
+		wantStale bool
+	}{
+		{name: "empty home dir", homeDir: "", sessionID: "sess-1", wantStale: false},
+		{name: "empty session id", homeDir: isolatedEmptyHome, sessionID: "", wantStale: false},
+		{name: "non-existent home dir", homeDir: filepath.Join(tmpDir, "non-existent"), sessionID: "sess-1", wantStale: false},
+		{name: "symlinked conversations dir", homeDir: symlinkHome, sessionID: "sess-1", wantStale: false},
+		{name: "isolated empty dir lacking session", homeDir: isolatedEmptyHome, sessionID: "sess-unknown", wantStale: true},
+		{name: "isolated dir with pb file present", homeDir: isolatedPbHome, sessionID: "sess-1", wantStale: false},
+		{name: "isolated dir with db file present", homeDir: isolatedDbHome, sessionID: "sess-2", wantStale: false},
+		{name: "isolated dir with brain dir present", homeDir: isolatedBrainHome, sessionID: "sess-3", wantStale: false},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			got := isStaleIsolatedSession(tc.homeDir, tc.sessionID)
+			if got != tc.wantStale {
+				t.Fatalf("isStaleIsolatedSession(%q, %q) = %v, want %v", tc.homeDir, tc.sessionID, got, tc.wantStale)
+			}
+		})
+	}
+}
+
+func TestUnifiedProcessPool_ResolveTargetSessionRecord(t *testing.T) {
+	t.Parallel()
+
+	tmpDir := t.TempDir()
+	isolatedHome := filepath.Join(tmpDir, "voice-home")
+	convDir := filepath.Join(isolatedHome, ".gemini", "antigravity-cli", "conversations")
+	if err := os.MkdirAll(convDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	testCases := []struct {
+		name          string
+		nilPool       bool
+		targetKey     string
+		recordSession string
+		recordTurns   int
+		hasFileOnDisk bool
+		wantSession   string
+		wantTurns     int
+	}{
+		{
+			name:        "nil pool returns empty record",
+			nilPool:     true,
+			targetKey:   "kiosk",
+			wantSession: "",
+			wantTurns:   0,
+		},
+		{
+			name:        "empty targetKey returns empty record",
+			targetKey:   "  ",
+			wantSession: "",
+			wantTurns:   0,
+		},
+		{
+			name:          "targetKey containing colon skips getRec",
+			targetKey:     "ephemeral:worker-0",
+			recordSession: "sess-ephem",
+			recordTurns:   3,
+			wantSession:   "",
+			wantTurns:     0,
+		},
+		{
+			name:          "valid session on disk preserved",
+			targetKey:     "living-room",
+			recordSession: "sess-valid",
+			recordTurns:   5,
+			hasFileOnDisk: true,
+			wantSession:   "sess-valid",
+			wantTurns:     5,
+		},
+		{
+			name:          "stale session lacking on disk cleared",
+			targetKey:     "kitchen",
+			recordSession: "sess-stale",
+			recordTurns:   8,
+			hasFileOnDisk: false,
+			wantSession:   "",
+			wantTurns:     0,
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if tc.nilPool {
+				var nilPool *UnifiedProcessPool
+				got := nilPool.resolveTargetSessionRecord(context.Background(), tc.targetKey)
+				if got.ActiveSessionID != tc.wantSession || got.TurnCount != tc.wantTurns {
+					t.Fatalf("expected session=%q turns=%d, got session=%q turns=%d", tc.wantSession, tc.wantTurns, got.ActiveSessionID, got.TurnCount)
+				}
+				return
+			}
+
+			subTmp := t.TempDir()
+			isolatedHome := filepath.Join(subTmp, "voice-home")
+			convDir := filepath.Join(isolatedHome, ".gemini", "antigravity-cli", "conversations")
+			if err := os.MkdirAll(convDir, 0o755); err != nil {
+				t.Fatal(err)
+			}
+
+			if tc.hasFileOnDisk && tc.recordSession != "" {
+				if err := os.WriteFile(filepath.Join(convDir, tc.recordSession+".pb"), []byte("data"), 0o644); err != nil {
+					t.Fatal(err)
+				}
+			}
+
+			pool := NewUnifiedProcessPool(PoolConfig{
+				GeminiHomeDir: isolatedHome,
+				GetSessionRecord: func(ctx context.Context, key string) (SessionRecord, error) {
+					return SessionRecord{
+						ActiveSessionID: tc.recordSession,
+						TurnCount:       tc.recordTurns,
+					}, nil
+				},
+			}, &MockDaemonSpawner{})
+			defer pool.Close()
+
+			got := pool.resolveTargetSessionRecord(context.Background(), tc.targetKey)
+			if got.ActiveSessionID != tc.wantSession || got.TurnCount != tc.wantTurns {
+				t.Fatalf("expected session=%q turns=%d, got session=%q turns=%d", tc.wantSession, tc.wantTurns, got.ActiveSessionID, got.TurnCount)
+			}
+		})
+	}
+}

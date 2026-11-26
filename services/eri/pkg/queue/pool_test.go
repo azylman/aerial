@@ -9,6 +9,7 @@ import (
 	"github.com/azylman/aerial/services/eri/pkg/config"
 	"github.com/azylman/aerial/services/eri/pkg/db"
 	"github.com/azylman/aerial/services/eri/pkg/runner"
+	"github.com/azylman/aerial/services/eri/pkg/session"
 )
 
 func TestLogInterruptWarning(t *testing.T) {
@@ -269,6 +270,265 @@ func TestWorkerPool_NilReceiverAccessors(t *testing.T) {
 			if tc.pool != nil && tc.pool.GetRuntimeConfig() != tc.wantRuntimeModel {
 				t.Errorf("GetRuntimeConfig() = %q, want %q", tc.pool.GetRuntimeConfig(), tc.wantRuntimeModel)
 			}
+		})
+	}
+}
+
+type mockFullVoicePool struct {
+	runner.AgentPool
+
+	updatedModel  string
+	prewarmed     []string
+	updatedEngine string
+	rescuerSet    bool
+	managerSet    bool
+	callbacksSet  bool
+}
+
+func (m *mockFullVoicePool) UpdateModel(model string) {
+	m.updatedModel = model
+}
+
+func (m *mockFullVoicePool) UpdatePrewarmedTargets(targets []string) {
+	m.prewarmed = append([]string(nil), targets...)
+}
+
+func (m *mockFullVoicePool) UpdateEngine(engine, claudeBin string, extraBins ...string) {
+	m.updatedEngine = engine
+}
+
+func (m *mockFullVoicePool) SetTranscriptRescuer(fn func(context.Context, string, time.Time) string) {
+	m.rescuerSet = fn != nil
+}
+
+func (m *mockFullVoicePool) SetSessionManager(mgr *session.Manager) {
+	m.managerSet = mgr != nil
+}
+
+func (m *mockFullVoicePool) SetSessionCallbacks(getFn func(context.Context, string) (runner.SessionRecord, error), saveFn func(context.Context, string, string, string) error) {
+	m.callbacksSet = getFn != nil && saveFn != nil
+}
+
+func TestVoiceSessionKey(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name      string
+		targetKey string
+		want      string
+	}{
+		{name: "empty key", targetKey: "", want: ""},
+		{name: "whitespace key", targetKey: "   ", want: ""},
+		{name: "bare target key", targetKey: "kiosk-1", want: "voice-kiosk-1"},
+		{name: "already prefixed key", targetKey: "voice-kiosk-1", want: "voice-kiosk-1"},
+		{name: "trimmed target key", targetKey: "  device-watch  ", want: "voice-device-watch"},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			got := voiceSessionKey(tc.targetKey)
+			if got != tc.want {
+				t.Fatalf("voiceSessionKey(%q) = %q, want %q", tc.targetKey, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestWireVoicePoolSessionDependencies(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name             string
+		nilVoicePool     bool
+		inDiscordPools   bool
+		withSessionMgr   bool
+		withStore        bool
+		wantRescuerSet   bool
+		wantManagerSet   bool
+		wantCallbacksSet bool
+	}{
+		{
+			name:         "nil voice pool is no-op",
+			nilVoicePool: true,
+		},
+		{
+			name:             "standalone voice pool receives rescuer, manager, and callbacks",
+			withSessionMgr:   true,
+			withStore:        true,
+			wantRescuerSet:   true,
+			wantManagerSet:   true,
+			wantCallbacksSet: true,
+		},
+		{
+			name:             "voice pool in discord pools receives manager and rescuer but skips voice callbacks",
+			inDiscordPools:   true,
+			withSessionMgr:   true,
+			withStore:        true,
+			wantRescuerSet:   true,
+			wantManagerSet:   true,
+			wantCallbacksSet: false,
+		},
+		{
+			name:             "voice pool without store skips callbacks",
+			withSessionMgr:   true,
+			withStore:        false,
+			wantRescuerSet:   true,
+			wantManagerSet:   true,
+			wantCallbacksSet: false,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if tc.nilVoicePool {
+				wireVoicePoolSessionDependencies(nil, nil, nil, nil)
+				return
+			}
+
+			voiceMock := &mockFullVoicePool{}
+			discordPools := make(map[PoolKey]runner.AgentPool)
+			if tc.inDiscordPools {
+				discordPools[PoolKey{Ephemeral: false, Effort: config.EffortHigh}] = voiceMock
+			}
+
+			var mgr *session.Manager
+			if tc.withSessionMgr {
+				mgr = &session.Manager{}
+			}
+
+			var testStore db.Store
+			if tc.withStore {
+				sqlStore, testDB := newTestStore(t)
+				if testDB == nil {
+					t.Fatal("expected testDB not nil")
+				}
+				testStore = sqlStore
+			}
+
+			wireVoicePoolSessionDependencies(voiceMock, discordPools, mgr, testStore)
+
+			if voiceMock.rescuerSet != tc.wantRescuerSet {
+				t.Errorf("rescuerSet = %v, want %v", voiceMock.rescuerSet, tc.wantRescuerSet)
+			}
+			if voiceMock.managerSet != tc.wantManagerSet {
+				t.Errorf("managerSet = %v, want %v", voiceMock.managerSet, tc.wantManagerSet)
+			}
+			if voiceMock.callbacksSet != tc.wantCallbacksSet {
+				t.Errorf("callbacksSet = %v, want %v", voiceMock.callbacksSet, tc.wantCallbacksSet)
+			}
+		})
+	}
+}
+
+func TestReconcilePoolModelsAndVoiceTargets_Engine(t *testing.T) {
+	t.Parallel()
+
+	appCfg := config.NewFromData(&config.ConfigData{
+		Model: "base-model",
+		Voice: config.VoiceConfig{
+			Engine: "gemini_api",
+		},
+	})
+
+	pool := &WorkerPool{
+		appCfg:            appCfg,
+		hasExplicitAppCfg: true,
+	}
+
+	voiceMock := &mockFullVoicePool{}
+	poolByKey := make(map[PoolKey]runner.AgentPool)
+	for _, k := range AllValidPoolKeys() {
+		poolByKey[k] = &mockFullVoicePool{}
+	}
+
+	pool.reconcilePoolModelsAndVoiceTargets(poolByKey, voiceMock, true, []string{"kiosk-1"})
+
+	if voiceMock.updatedEngine != "gemini_api" {
+		t.Fatalf("expected voiceMock.updatedEngine = %q, got %q", "gemini_api", voiceMock.updatedEngine)
+	}
+}
+
+func assertPersistedVoiceTurn(t *testing.T, pool *WorkerPool, store db.Store, threadID, convID, key string) {
+	t.Helper()
+	gotSess, getErr := store.GetSessionID(context.Background(), key)
+	if getErr != nil {
+		t.Fatalf("unexpected GetSessionID error: %v", getErr)
+	}
+	turns, turnErr := store.GetSessionTurnCount(context.Background(), key)
+	if turnErr != nil {
+		t.Fatalf("unexpected GetSessionTurnCount error: %v", turnErr)
+	}
+	if gotSess != convID {
+		t.Fatalf("session = %q, want %q", gotSess, convID)
+	}
+	if turns != 1 {
+		t.Fatalf("turn count = %d, want 1", turns)
+	}
+	pool.persistVoiceTurnSession(context.Background(), threadID, convID)
+	turns2, turnErr2 := store.GetSessionTurnCount(context.Background(), key)
+	if turnErr2 != nil {
+		t.Fatalf("unexpected GetSessionTurnCount error: %v", turnErr2)
+	}
+	if turns2 != 2 {
+		t.Fatalf("turn count after 2nd turn = %d, want 2", turns2)
+	}
+}
+
+func assertUnpersistedVoiceTurn(t *testing.T, store db.Store, key string) {
+	t.Helper()
+	gotSess, getErr := store.GetSessionID(context.Background(), key)
+	if getErr != nil {
+		t.Fatalf("unexpected GetSessionID error: %v", getErr)
+	}
+	if gotSess != "" {
+		t.Fatalf("expected empty session, got %q", gotSess)
+	}
+}
+
+func TestWorkerPool_PersistVoiceTurnSession(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name          string
+		threadID      string
+		convID        string
+		wantPersisted bool
+	}{
+		{
+			name:          "empty conv id is no-op",
+			threadID:      "kiosk-living",
+			convID:        "",
+			wantPersisted: false,
+		},
+		{
+			name:          "saves session and increments turn count",
+			threadID:      "kiosk-kitchen",
+			convID:        "conv-kitchen-1",
+			wantPersisted: true,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			sqlStore, testDB := newTestStore(t)
+			if testDB == nil {
+				t.Fatal("expected testDB not nil")
+			}
+			pool := &WorkerPool{
+				cfg: WorkerPoolConfig{
+					Store: sqlStore,
+				},
+			}
+			pool.persistVoiceTurnSession(context.Background(), tc.threadID, tc.convID)
+			key := voiceSessionKey(tc.threadID)
+			if tc.wantPersisted {
+				assertPersistedVoiceTurn(t, pool, sqlStore, tc.threadID, tc.convID, key)
+				return
+			}
+			assertUnpersistedVoiceTurn(t, sqlStore, key)
 		})
 	}
 }

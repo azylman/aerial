@@ -242,7 +242,20 @@ type agentPoolsBundle struct {
 	poolEnv       []string
 }
 
-func initializeAgentPools(cur *config.ConfigData, cfg Config, sessionMgr *session.Manager, spawner runner.DaemonSpawner) agentPoolsBundle {
+func makeVoiceAmbientContextRetriever(appCfg *config.Config, ambientResolver *ambient.Resolver) func(context.Context) (string, error) {
+	if ambientResolver == nil || appCfg == nil {
+		return nil
+	}
+	return func(ctx context.Context) (string, error) {
+		currentCfg := appCfg.Current()
+		if currentCfg == nil {
+			return "", nil
+		}
+		return ambientResolver.Resolve(ctx, currentCfg.VoiceAmbientContext())
+	}
+}
+
+func initializeAgentPools(appCfg *config.Config, cur *config.ConfigData, cfg Config, sessionMgr *session.Manager, spawner runner.DaemonSpawner, ambientResolver *ambient.Resolver) agentPoolsBundle {
 	runtimeBase := cur.DataDir
 	discordHome := filepath.Join(runtimeBase, "runtimes", "discord")
 	ephemeralHome := filepath.Join(runtimeBase, "runtimes", "ephemeral")
@@ -304,7 +317,11 @@ func initializeAgentPools(cur *config.ConfigData, cfg Config, sessionMgr *sessio
 		KeyPrefix:   "ephemeral:worker",
 	})
 
-	voiceUnderlying := runner.NewUnifiedProcessPool(basePoolCfg(voiceHome, lowEffortModel, nil), spawner)
+	voiceModel := strutil.FirstNonEmpty(strings.TrimSpace(cur.Voice.Model), lowEffortModel)
+	voicePoolCfg := basePoolCfg(voiceHome, voiceModel, cur.Voice.PrewarmedTargets)
+	voicePoolCfg.Engine = cur.VoiceEngine()
+	voicePoolCfg.AmbientContextRetriever = makeVoiceAmbientContextRetriever(appCfg, ambientResolver)
+	voiceUnderlying := runner.NewUnifiedProcessPool(voicePoolCfg, spawner)
 	voicePool := runner.NewDynamicVoicePool(func() (runner.AgentPool, string, error) {
 		return voiceUnderlying, "voice-static", nil
 	})
@@ -407,7 +424,8 @@ func RunApp(ctx context.Context, cfg Config, opts ...AppOption) error {
 	}
 
 	sessionMgr := session.New(appCfg.GeminiHomeDir(), appCfg.DataDir())
-	pools := initializeAgentPools(cur, cfg, sessionMgr, appOpts.processSpawner)
+	ambientResolver := ambient.NewResolver(appCfg)
+	pools := initializeAgentPools(appCfg, cur, cfg, sessionMgr, appOpts.processSpawner, ambientResolver)
 	defer func() {
 		for _, p := range pools.allPools {
 			if cErr := p.Close(); cErr != nil {
@@ -416,17 +434,12 @@ func RunApp(ctx context.Context, cfg Config, opts ...AppOption) error {
 		}
 	}()
 
-	PrewarmProcessPoolsSequentially(ctx, pools.allPools...)
-	startUsagePoller(ctx, cur, pools.ephemeralHome, pools.discordHome, pools.poolEnv)
-
 	cls := classifier.New(appCfg, classifier.WithProcessPool(pools.ephemeralPool))
 
 	llmFn := appOpts.llmFn
 	if llmFn == nil {
 		llmFn = pools.ephemeralPool.EphemeralLLMFunc("ephemeral:summarizer")
 	}
-
-	ambientResolver := ambient.NewResolver(appCfg)
 
 	workerPool := queue.New(appCfg, queue.WorkerPoolConfig{
 		ParentContext:          ctx,
@@ -445,6 +458,9 @@ func RunApp(ctx context.Context, cfg Config, opts ...AppOption) error {
 		TranscriptsIndexerURL:  cur.Transcripts.IndexerURL,
 		SATokenPath:            k8sauth.DefaultTokenPath,
 	})
+
+	PrewarmProcessPoolsSequentially(ctx, pools.allPools...)
+	startUsagePoller(ctx, cur, pools.ephemeralHome, pools.discordHome, pools.poolEnv)
 
 	dgSession, closeBus := wireOutboundIntegrations(ctx, cur, workerPool)
 	if closeBus != nil {
