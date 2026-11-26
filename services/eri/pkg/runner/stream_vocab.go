@@ -41,6 +41,7 @@ const (
 	itemTypeToolCall          = "toolCall"
 	statusCancelled           = "cancelled"
 	statusFailed              = "failed"
+	engineAgy                 = "agy"
 	engineCodex               = "codex"
 	engineMuse                = "muse"
 	engineClaude              = "claude"
