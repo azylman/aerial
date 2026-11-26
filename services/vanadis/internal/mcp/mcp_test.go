@@ -226,9 +226,15 @@ func mockMCPCheckPreconditions(w http.ResponseWriter, path, bodyStr string) bool
 		}
 		return false
 	}
-	if strings.Contains(path, "build-mcp-2") || strings.Contains(bodyStr, `"chunk_ref":"0"`) {
-		w.WriteHeader(http.StatusConflict)
-		if _, err := w.Write([]byte(`{"message":"vanadis build state conflict"}`)); err != nil {
+	if strings.Contains(path, "build-mcp-2") || (!strings.Contains(path, "SteerChunk") && strings.Contains(bodyStr, `"chunk_ref":"0"`)) {
+		status := http.StatusConflict
+		msg := `{"message":"vanadis build state conflict"}`
+		if strings.Contains(path, "SteerChunk") {
+			status = http.StatusPreconditionFailed
+			msg = `{"message":"chunk cannot be steered in current status"}`
+		}
+		w.WriteHeader(status)
+		if _, err := w.Write([]byte(msg)); err != nil {
 			return false
 		}
 		return false
@@ -278,6 +284,20 @@ func mockMCPRestateHandler(action bool) http.HandlerFunc {
 		case strings.Contains(path, "AppendChunks"):
 			w.Header().Set("Content-Type", "application/json")
 			_ = json.NewEncoder(w).Encode([]model.VanadisChunk{{ID: "chunk-3", Status: "pending"}})
+		case strings.Contains(path, "SteerChunk"):
+			var steerReq model.SteerChunkRequest
+			if err := json.Unmarshal(bodyBytes, &steerReq); err != nil {
+				w.WriteHeader(http.StatusBadRequest)
+				return
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(model.SteerChunkResult{
+				Accepted:     true,
+				BuildID:      steerReq.BuildID,
+				ChunkID:      steerReq.ChunkRef,
+				ChunkStatus:  "running",
+				Instructions: "steered instructions",
+			})
 		default:
 			w.WriteHeader(http.StatusOK)
 		}
@@ -406,6 +426,16 @@ func TestMCP_Tools(t *testing.T) {
 		{"cancel_build", "not found", `{"build_id":"nonexistent"}`, true, "build not found", fxSeeded},
 		{"cancel_build", "conflict status", `{"build_id":"build-mcp-2"}`, true, "vanadis build state conflict", fxSeeded},
 		{"cancel_build", "valid cancel", `{"build_id":"build-mcp-1"}`, false, `"status":"cancelled"`, fxSeeded},
+
+		{"steer_chunk", "nil store", `{"build_id":"build-mcp-1","chunk_ref":"chunk-1","prompt":"steer"}`, true, "vanadis store not configured", fxNilStore},
+		{"steer_chunk", "missing prompt schema error", `{}`, true, `missing properties: [\"prompt\"]`, fxSeeded},
+		{"steer_chunk", "missing chunk ref", `{"prompt":"steer"}`, true, "chunk_id or chunk_ref is required", fxSeeded},
+		{"steer_chunk", "empty prompt", `{"build_id":"build-mcp-1","chunk_ref":"chunk-1","prompt":""}`, true, "invalid vanadis build input", fxSeeded},
+		{"steer_chunk", "running chunk steer", `{"build_id":"build-mcp-1","chunk_ref":"0","prompt":"steer running"}`, false, `"chunk_status":"running"`, fxSeeded},
+		{"steer_chunk", "conflict status", `{"build_id":"build-mcp-2","chunk_ref":"0","prompt":"steer"}`, true, "vanadis build state conflict", fxSeeded},
+		{"steer_chunk", "by thread_id", `{"thread_id":"stateful_medium:discord-1234567890","chunk_ref":"chunk-1","prompt":"steer thread"}`, false, `"status":"steered"`, fxSeeded},
+		{"steer_chunk", "by chunk_id only", `{"chunk_id":"chunk-1","prompt":"steer chunk id"}`, false, `"build_id":"build-mcp-1"`, fxSeeded},
+		{"steer_chunk", "chunk not found", `{"chunk_id":"nonexistent-chunk","prompt":"steer"}`, true, "chunk not found", fxSeeded},
 	}
 	for _, tc := range tests {
 		t.Run(tc.tool+" "+tc.name, func(t *testing.T) {

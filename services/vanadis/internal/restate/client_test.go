@@ -31,6 +31,7 @@ func TestMapRestateError(t *testing.T) {
 		{name: "not found chunk maps to chunk not found", statusCode: http.StatusNotFound, msg: "chunk-123 not found in build", wantErrIs: model.ErrChunkNotFound, wantSubstr: "chunk-123 not found in build"},
 		{name: "not found build maps to build not found", statusCode: http.StatusNotFound, msg: "build-abc not found", wantErrIs: model.ErrBuildNotFound, wantSubstr: "build-abc not found"},
 		{name: "conflict maps to build conflict", statusCode: http.StatusConflict, msg: "build cannot be mutated in current status", wantErrIs: model.ErrBuildConflict, wantSubstr: "build cannot be mutated in current status"},
+		{name: "precondition failed maps to build conflict", statusCode: http.StatusPreconditionFailed, msg: "chunk cannot be steered in current status", wantErrIs: model.ErrBuildConflict, wantSubstr: "chunk cannot be steered in current status"},
 		{name: "server error keeps ingress prefix", statusCode: http.StatusInternalServerError, msg: "restate execution failure", wantSubstr: "restate ingress error (500): restate execution failure"},
 	}
 	for _, tc := range tests {

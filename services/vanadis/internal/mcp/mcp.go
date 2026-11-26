@@ -39,7 +39,7 @@ const (
 // ServerInstructions is sent on initialize so clients that defer tool schemas
 // still learn build/chunk lifecycle rules and ID provenance.
 const ServerInstructions = `Read state first: get_build (by build_id, or by thread_id which resolves to that thread's latest running build, else its most recent build) returns status and chunk IDs; get_chunk returns full instructions by chunk_id or build_id + chunk_ref (chunk ID or 0-based index).
-update_chunk and remove_chunk only work on chunks still pending; running, completed or failed chunks are rejected with a conflict. append_chunk adds pending chunks to the end of a build; update_build replaces the build title, objective or shared_context.
+update_chunk and remove_chunk only work on pending chunks; running, completed or failed chunks conflict. append_chunk adds pending chunks; update_build replaces metadata; steer_chunk steers an active or pending chunk.
 An action chunk passes only by calling complete_chunk with its dispatch_id and a summary of the PASS evidence; a turn that ends without it is resumed automatically, then failed (blocking only its dependents).
 fail_chunk fails the chunk and blocks only its dependents; other chunks keep running and retry_action_chunk repairs it in place. Use it for blockers, not for fixable test, lint or CI failures; fix forward instead.`
 
@@ -229,6 +229,25 @@ type MCPCompleteChunkOutput struct {
 	BuildID   string `json:"build_id"`
 	ChunkID   string `json:"chunk_id"`
 	Completed bool   `json:"completed"`
+}
+
+// MCPSteerChunkArgs defines arguments for steer_chunk tool.
+type MCPSteerChunkArgs struct {
+	BuildID  string `json:"build_id,omitempty"  jsonschema:"Optional parent Vanadis build identifier containing the chunk."`
+	ThreadID string `json:"thread_id,omitempty" jsonschema:"Optional Discord thread snowflake resolving to the target build."`
+	ChunkID  string `json:"chunk_id,omitempty"  jsonschema:"Unique chunk identifier to steer directly."`
+	ChunkRef string `json:"chunk_ref,omitempty" jsonschema:"Chunk identifier or 0-based chunk_index within the target build."`
+	Prompt   string `json:"prompt"              jsonschema:"Steering instructions or corrections to inject into the chunk."`
+}
+
+// MCPSteerChunkOutput defines output for steer_chunk tool.
+type MCPSteerChunkOutput struct {
+	Status       string `json:"status"`
+	BuildID      string `json:"build_id"`
+	ChunkID      string `json:"chunk_id"`
+	ChunkStatus  string `json:"chunk_status"`
+	DispatchID   string `json:"dispatch_id,omitempty"`
+	Instructions string `json:"instructions"`
 }
 
 // completeChunkPayload mirrors the Restate CompleteChunk ingress body.
@@ -748,6 +767,71 @@ func (h *Handler) handleMCPCompleteChunk(ctx context.Context, args MCPCompleteCh
 	return MCPCompleteChunkOutput(resp), nil
 }
 
+func (h *Handler) handleMCPSteerChunk(ctx context.Context, args MCPSteerChunkArgs) (MCPSteerChunkOutput, error) {
+	if h.Store == nil {
+		return MCPSteerChunkOutput{}, errors.New("vanadis store not configured")
+	}
+	chunkRef := strutil.FirstNonEmpty(strings.TrimSpace(args.ChunkRef), strings.TrimSpace(args.ChunkID))
+	buildID := strings.TrimSpace(args.BuildID)
+	threadID := discordutil.NormalizeThreadID(args.ThreadID)
+
+	var targetBuild *model.VanadisBuild
+	switch {
+	case buildID != "" || threadID != "":
+		targetBuildID, err := h.resolveTargetBuildID(ctx, buildID, threadID)
+		if err != nil {
+			return MCPSteerChunkOutput{}, err
+		}
+		b, _, err := h.Store.GetBuild(ctx, targetBuildID)
+		if err != nil {
+			return MCPSteerChunkOutput{}, err
+		}
+		if b == nil {
+			return MCPSteerChunkOutput{}, model.ErrBuildNotFound
+		}
+		targetBuild = b
+	case chunkRef != "":
+		_, parentBuild, err := h.Store.GetChunk(ctx, chunkRef)
+		if err != nil {
+			return MCPSteerChunkOutput{}, err
+		}
+		if parentBuild == nil {
+			return MCPSteerChunkOutput{}, model.ErrBuildNotFound
+		}
+		targetBuild = parentBuild
+	default:
+		return MCPSteerChunkOutput{}, fmt.Errorf("%w: chunk_id or chunk_ref is required", model.ErrInvalidBuildInput)
+	}
+
+	if _, err := h.authorizeBuildMutation(ctx, targetBuild.ID); err != nil {
+		return MCPSteerChunkOutput{}, err
+	}
+
+	if err := model.ValidateSteerChunkInput(targetBuild.ID, chunkRef, args.Prompt); err != nil {
+		return MCPSteerChunkOutput{}, fmt.Errorf("%w: %w", model.ErrInvalidBuildInput, err)
+	}
+
+	req := model.SteerChunkRequest{
+		BuildID:  targetBuild.ID,
+		ChunkRef: chunkRef,
+		Prompt:   strings.TrimSpace(args.Prompt),
+	}
+	var res model.SteerChunkResult
+	path := h.Restate.ObjectPath(buildplan.BuildServiceName(targetBuild.Agent), targetBuild.ID, "SteerChunk")
+	if err := h.Restate.CallIngress(ctx, path, req, &res); err != nil {
+		return MCPSteerChunkOutput{}, err
+	}
+
+	return MCPSteerChunkOutput{
+		Status:       "steered",
+		BuildID:      res.BuildID,
+		ChunkID:      res.ChunkID,
+		ChunkStatus:  res.ChunkStatus,
+		DispatchID:   res.DispatchID,
+		Instructions: res.Instructions,
+	}, nil
+}
+
 func (h *Handler) handleMCPCreateBuild(ctx context.Context, args MCPCreateBuildArgs) (MCPCreateBuildOutput, error) {
 	if h.Store == nil {
 		return MCPCreateBuildOutput{}, errors.New("vanadis store not configured")
@@ -934,6 +1018,14 @@ func (h *Handler) RegisterTools(mcpServer *mcp.Server) {
 		Description: "Complete an action chunk with an explicit verdict. An action chunk passes only by calling complete_chunk with its dispatch_id and a summary of the PASS evidence; a turn that ends without it is resumed automatically, then failed (blocking only its dependents).",
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, args MCPCompleteChunkArgs) (*mcp.CallToolResult, MCPCompleteChunkOutput, error) {
 		out, err := h.handleMCPCompleteChunk(ctx, args)
+		return nil, out, err
+	})
+
+	mcp.AddTool(mcpServer, &mcp.Tool{
+		Name:        "steer_chunk",
+		Description: "Inject mid-turn steering instructions or corrections into an active or pending Vanadis chunk.",
+	}, func(ctx context.Context, _ *mcp.CallToolRequest, args MCPSteerChunkArgs) (*mcp.CallToolResult, MCPSteerChunkOutput, error) {
+		out, err := h.handleMCPSteerChunk(ctx, args)
 		return nil, out, err
 	})
 }

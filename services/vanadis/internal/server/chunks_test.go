@@ -171,7 +171,11 @@ func mockRestateCheckErrors(w http.ResponseWriter, path, bodyStr string) bool {
 		return true
 	}
 	if strings.Contains(path, "b-done") || strings.Contains(path, "conflict") || strings.Contains(bodyStr, "conflict") {
-		w.WriteHeader(http.StatusConflict)
+		status := http.StatusConflict
+		if strings.Contains(path, "SteerChunk") {
+			status = http.StatusPreconditionFailed
+		}
+		w.WriteHeader(status)
 		_, _ = w.Write([]byte(`{"message":"build state conflict"}`))
 		return true
 	}
@@ -217,6 +221,22 @@ func mockRestateRouteSuccess(w http.ResponseWriter, path string, bodyBytes []byt
 	}
 	if strings.Contains(path, "RemoveChunk") {
 		w.WriteHeader(http.StatusOK)
+		return
+	}
+	if strings.Contains(path, "SteerChunk") {
+		var steerReq buildplan.SteerChunkRequest
+		if err := json.Unmarshal(bodyBytes, &steerReq); err != nil {
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(buildplan.SteerChunkResult{
+			Accepted:     true,
+			BuildID:      steerReq.BuildID,
+			ChunkID:      steerReq.ChunkRef,
+			ChunkStatus:  "running",
+			Instructions: "steered instructions",
+		})
 		return
 	}
 	if strings.Contains(path, "Cancel") {
