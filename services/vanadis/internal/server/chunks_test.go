@@ -225,12 +225,16 @@ func mockRestateRouteSuccess(w http.ResponseWriter, path string, bodyBytes []byt
 			w.WriteHeader(http.StatusBadRequest)
 			return
 		}
+		chunkStatus := "running"
+		if steerReq.ChunkRef == "c2" || steerReq.ChunkRef == "chunk-2" {
+			chunkStatus = "pending"
+		}
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(buildplan.SteerChunkResult{
 			Accepted:     true,
 			BuildID:      steerReq.BuildID,
 			ChunkID:      steerReq.ChunkRef,
-			ChunkStatus:  "running",
+			ChunkStatus:  chunkStatus,
 			Instructions: "steered instructions",
 		})
 		return

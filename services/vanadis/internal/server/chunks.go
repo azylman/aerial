@@ -488,25 +488,10 @@ type steerRequestBody struct {
 	Prompt   string `json:"prompt"`
 }
 
-func (s *VanadisServer) handleBuildChunkSteer(w http.ResponseWriter, r *http.Request, buildID, chunkRef string) {
-	if r.Method != http.MethodPost {
-		writeErr(w, http.StatusMethodNotAllowed, "method not allowed")
-		return
-	}
-
-	build, ok := s.authorizeBuildMutation(w, r, strings.TrimSpace(buildID))
-	if !ok {
-		return
-	}
-
-	var req steerRequestBody
-	if !s.decodeJSONBody(w, r, &req) {
-		return
-	}
-
+func (s *VanadisServer) steerChunk(w http.ResponseWriter, r *http.Request, build *VanadisBuild, chunkRef, prompt string) {
 	cleanChunkRef := strings.TrimSpace(chunkRef)
-	prompt := strings.TrimSpace(req.Prompt)
-	if err := model.ValidateSteerChunkInput(build.ID, cleanChunkRef, prompt); err != nil {
+	cleanPrompt := strings.TrimSpace(prompt)
+	if err := model.ValidateSteerChunkInput(build.ID, cleanChunkRef, cleanPrompt); err != nil {
 		writeStoreErr(r.Context(), w, fmt.Errorf("%w: %w", ErrInvalidBuildInput, err))
 		return
 	}
@@ -514,7 +499,7 @@ func (s *VanadisServer) handleBuildChunkSteer(w http.ResponseWriter, r *http.Req
 	steerReq := model.SteerChunkRequest{
 		BuildID:  build.ID,
 		ChunkRef: cleanChunkRef,
-		Prompt:   prompt,
+		Prompt:   cleanPrompt,
 	}
 	var res model.SteerChunkResult
 	path := s.restateObjectPath(build.Agent, build.ID, "SteerChunk")
@@ -536,6 +521,25 @@ func (s *VanadisServer) handleBuildChunkSteer(w http.ResponseWriter, r *http.Req
 	httpkit.WriteJSON(w, http.StatusOK, resp)
 }
 
+func (s *VanadisServer) handleBuildChunkSteer(w http.ResponseWriter, r *http.Request, buildID, chunkRef string) {
+	if r.Method != http.MethodPost {
+		writeErr(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+
+	build, ok := s.authorizeBuildMutation(w, r, strings.TrimSpace(buildID))
+	if !ok {
+		return
+	}
+
+	var req steerRequestBody
+	if !s.decodeJSONBody(w, r, &req) {
+		return
+	}
+
+	s.steerChunk(w, r, build, chunkRef, req.Prompt)
+}
+
 func (s *VanadisServer) handleSteerChunk(w http.ResponseWriter, r *http.Request) {
 	if s.store == nil {
 		writeErr(w, http.StatusInternalServerError, "vanadis store not configured")
@@ -549,8 +553,6 @@ func (s *VanadisServer) handleSteerChunk(w http.ResponseWriter, r *http.Request)
 
 	targetBuildID := strings.TrimSpace(req.BuildID)
 	chunkRef := strutil.FirstNonEmpty(strings.TrimSpace(req.ChunkRef), strings.TrimSpace(req.ChunkID))
-	prompt := strings.TrimSpace(req.Prompt)
-
 	if targetBuildID == "" && chunkRef != "" {
 		_, parentBuild, err := s.store.GetChunk(r.Context(), chunkRef)
 		if err != nil {
@@ -572,32 +574,5 @@ func (s *VanadisServer) handleSteerChunk(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	if err := model.ValidateSteerChunkInput(targetBuildID, chunkRef, prompt); err != nil {
-		writeStoreErr(r.Context(), w, fmt.Errorf("%w: %w", ErrInvalidBuildInput, err))
-		return
-	}
-
-	steerReq := model.SteerChunkRequest{
-		BuildID:  build.ID,
-		ChunkRef: chunkRef,
-		Prompt:   prompt,
-	}
-	var res model.SteerChunkResult
-	path := s.restateObjectPath(build.Agent, build.ID, "SteerChunk")
-	if err := s.callRestateIngress(r.Context(), path, steerReq, &res); err != nil {
-		writeStoreErr(r.Context(), w, err)
-		return
-	}
-
-	resp := map[string]any{
-		fieldStatus:    "steered",
-		fieldBuildID:   res.BuildID,
-		fieldChunkID:   res.ChunkID,
-		"chunk_status": res.ChunkStatus,
-		"instructions": res.Instructions,
-	}
-	if res.DispatchID != "" {
-		resp["dispatch_id"] = res.DispatchID
-	}
-	httpkit.WriteJSON(w, http.StatusOK, resp)
+	s.steerChunk(w, r, build, chunkRef, req.Prompt)
 }

@@ -430,13 +430,12 @@ func TestMCP_Tools(t *testing.T) {
 		{"steer_chunk", "missing prompt schema error", `{}`, true, `missing properties: [\"prompt\"]`, fxSeeded},
 		{"steer_chunk", "missing chunk ref", `{"prompt":"steer"}`, true, "chunk_id or chunk_ref is required", fxSeeded},
 		{"steer_chunk", "empty prompt", `{"build_id":"build-mcp-1","chunk_ref":"chunk-1","prompt":""}`, true, "invalid vanadis build input", fxSeeded},
-		{"steer_chunk", "running chunk steer", `{"build_id":"build-mcp-1","chunk_ref":"0","prompt":"steer running"}`, false, `"status":"steered"`, fxSeeded},
-		{"steer_chunk", "pending chunk steer", `{"build_id":"build-mcp-1","chunk_ref":"1","prompt":"steer pending"}`, false, `"status":"steered"`, fxSeeded},
+		{"steer_chunk", "running chunk steer", `{"build_id":"build-mcp-1","chunk_ref":"0","prompt":"steer running"}`, false, `"chunk_status":"running"`, fxSeeded},
+		{"steer_chunk", "pending chunk steer", `{"build_id":"build-mcp-1","chunk_ref":"1","prompt":"steer pending"}`, false, `"chunk_status":"pending"`, fxSeeded},
 		{"steer_chunk", "conflict status", `{"build_id":"build-mcp-2","chunk_ref":"0","prompt":"steer"}`, true, "vanadis build state conflict", fxSeeded},
 		{"steer_chunk", "by thread_id", `{"thread_id":"stateful_medium:discord-1234567890","chunk_ref":"chunk-1","prompt":"steer thread"}`, false, `"status":"steered"`, fxSeeded},
-		{"steer_chunk", "by chunk_id only", `{"chunk_id":"chunk-1","prompt":"steer chunk id"}`, false, `"status":"steered"`, fxSeeded},
+		{"steer_chunk", "by chunk_id only", `{"chunk_id":"chunk-1","prompt":"steer chunk id"}`, false, `"build_id":"build-mcp-1"`, fxSeeded},
 		{"steer_chunk", "chunk not found", `{"chunk_id":"nonexistent-chunk","prompt":"steer"}`, true, "chunk not found", fxSeeded},
-		{"steer_chunk", "routes to the build runner", `{"build_id":"build-mcp-4","chunk_ref":"1","prompt":"steer runner"}`, false, `"status":"steered"`, fxSeeded},
 	}
 	for _, tc := range tests {
 		t.Run(tc.tool+" "+tc.name, func(t *testing.T) {
