@@ -186,7 +186,7 @@ func pubSpan(key, parent, subject, msgID string) spanShape {
 	if msgID != "" {
 		attrs["messaging.message.id"] = msgID
 	}
-	return spanShape{key: key, name: subject + " publish", kind: trace.SpanKindProducer, parent: parent, attrs: attrs}
+	return spanShape{key: key, name: SpanSubject(subject) + " publish", kind: trace.SpanKindProducer, parent: parent, attrs: attrs}
 }
 
 // procSpan is the expected consumer span for one delivery of subject; an empty group or msgID
@@ -202,7 +202,7 @@ func procSpan(key, parent, subject, group, msgID string, delivered int) spanShap
 	if msgID != "" {
 		attrs["messaging.message.id"] = msgID
 	}
-	return spanShape{key: key, name: subject + " process", kind: trace.SpanKindConsumer, parent: parent, attrs: attrs}
+	return spanShape{key: key, name: SpanSubject(subject) + " process", kind: trace.SpanKindConsumer, parent: parent, attrs: attrs}
 }
 
 // failed marks the expected span as ended with an error status.
@@ -523,6 +523,31 @@ func TestMessage_SettledSettlementIsNoop(t *testing.T) {
 			}
 			if gotDeliv := tc.msg.NumDelivered(); gotDeliv != tc.wantDelivered {
 				t.Errorf("NumDelivered() = %d, want %d", gotDeliv, tc.wantDelivered)
+			}
+		})
+	}
+}
+
+func TestSpanSubject(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name    string
+		subject string
+		want    string
+	}{
+		{"transcript steps normalized", "aerial.transcripts.steps.eri.123", "aerial.transcripts.steps.*"},
+		{"voice stream normalized", "voice.stream.abc", "voice.stream.*"},
+		{"coalesced topic normalized", "aerial.coalesced.coven_extract.eri.thread-1", "aerial.coalesced.coven_extract.*"},
+		{"coalesced single segment normalized", "aerial.coalesced.task", "aerial.coalesced.*"},
+		{"pr action normalized", "aerial.pr.merged.123", "aerial.pr.merged.*"},
+		{"static event subject untouched", "aerial.events.turn.completed", "aerial.events.turn.completed"},
+		{"static job subject untouched", "aerial.jobs.prospera.report", "aerial.jobs.prospera.report"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got := SpanSubject(tc.subject); got != tc.want {
+				t.Errorf("SpanSubject(%q) = %q, want %q", tc.subject, got, tc.want)
 			}
 		})
 	}

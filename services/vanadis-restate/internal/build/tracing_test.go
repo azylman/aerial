@@ -4,9 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
-	"iter"
 	"log/slog"
-	"maps"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -62,29 +60,6 @@ func TestTraceparentFromRequest(t *testing.T) {
 		})
 	}
 }
-
-// fakeHeaders satisfies restate.Request.Headers without the SDK's internal constructor.
-type fakeHeaders map[string]string
-
-func (h fakeHeaders) Get(key string) string { return h[key] }
-
-func (h fakeHeaders) Iter() iter.Seq2[string, string] {
-	return func(yield func(string, string) bool) {
-		for k, v := range h {
-			if !yield(k, v) {
-				return
-			}
-		}
-	}
-}
-
-func (h fakeHeaders) ToMap() map[string]string {
-	out := make(map[string]string, len(h))
-	maps.Copy(out, h)
-	return out
-}
-
-func (h fakeHeaders) MarshalJSON() ([]byte, error) { return json.Marshal(map[string]string(h)) }
 
 type requestRunContext struct {
 	context.Context

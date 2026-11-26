@@ -49,7 +49,7 @@ func (b *MemoryBus) Publish(ctx context.Context, subject string, msgID string, d
 // PublishWithHeader publishes a message with custom headers and trace context.
 // Like JetStreamBus, the send is wrapped in a messaging producer span.
 func (b *MemoryBus) PublishWithHeader(ctx context.Context, subject string, msgID string, data any, header nats.Header) (err error) {
-	ctx, span := tracing.Tracer().Start(ctx, subject+" publish", publishSpanOptions(subject, msgID)...)
+	ctx, span := tracing.Tracer().Start(ctx, SpanSubject(subject)+" publish", publishSpanOptions(subject, msgID)...)
 	defer func() {
 		failSpan(span, err)
 		span.End()
@@ -164,7 +164,7 @@ func (b *MemoryBus) dispatchToSub(sub *memSubscription, subject string, data []b
 	if sub.queue != "" {
 		group = sub.queue
 	}
-	ctx, span := tracing.Tracer().Start(ctx, subject+" process", processSpanOptions(subject, group, delivered, header.Get(HeaderMsgID))...)
+	ctx, span := tracing.Tracer().Start(ctx, SpanSubject(subject)+" process", processSpanOptions(subject, group, delivered, header.Get(HeaderMsgID))...)
 	var err error
 	defer func() {
 		failSpan(span, err)
