@@ -200,6 +200,7 @@ func (p *Provider) collectAmbientToolData(ctx context.Context) (map[string]any, 
 }
 
 func (p *Provider) fetchAndRender(ctx context.Context) (string, error) {
+	var needRefresh bool
 	res, err, _ := p.sf.Do("ambient_fetch", func() (any, error) {
 		curNow := p.now()
 		p.mu.RLock()
@@ -215,6 +216,16 @@ func (p *Provider) fetchAndRender(ctx context.Context) (string, error) {
 			return nil, err
 		}
 
+		if ctx.Err() != nil {
+			p.mu.RLock()
+			prevCache := p.cache
+			p.mu.RUnlock()
+			if prevCache != "" {
+				needRefresh = true
+				return prevCache, nil
+			}
+		}
+
 		var buf bytes.Buffer
 		if err := p.parsedTmpl.Execute(&buf, data); err != nil {
 			return "", fmt.Errorf("ambient template execution error: %w", err)
@@ -227,15 +238,21 @@ func (p *Provider) fetchAndRender(ctx context.Context) (string, error) {
 			formatted = fmt.Sprintf("<ambient_context>\n%s\n</ambient_context>", trimmed)
 		}
 
-		p.mu.Lock()
-		p.cache = formatted
-		now := p.now()
-		p.expiresAt = now.Add(p.cacheTTL)
-		p.hardExpiresAt = now.Add(2 * p.cacheTTL)
-		p.mu.Unlock()
+		if ctx.Err() == nil {
+			p.mu.Lock()
+			p.cache = formatted
+			now := p.now()
+			p.expiresAt = now.Add(p.cacheTTL)
+			p.hardExpiresAt = now.Add(2 * p.cacheTTL)
+			p.mu.Unlock()
+		}
 
 		return formatted, nil
 	})
+
+	if needRefresh {
+		p.triggerBackgroundRefresh(ctx)
+	}
 
 	if err != nil {
 		return "", err
@@ -259,7 +276,7 @@ func (p *Provider) triggerBackgroundRefresh(ctx context.Context) {
 		if p.cfg.TimeoutMs > 0 {
 			timeout = time.Duration(p.cfg.TimeoutMs) * time.Millisecond
 		}
-		bgCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), timeout)
+		bgCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), timeout+2500*time.Millisecond)
 		defer cancel()
 		if _, err := p.fetchAndRender(bgCtx); err != nil {
 			log.Printf("[Ambient] SWR background refresh warning: %v", err)
