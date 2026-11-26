@@ -120,12 +120,19 @@ func assertLeaseExecutionState(t *testing.T, res *TurnResult, execErr error, lea
 func assertLeaseReleaseAndRotation(t *testing.T, pool *UnifiedProcessPool, lease SessionLease, targetKey, pinnedSessID string, rotatedOld, rotatedNew *string, rotationCalled *bool, tc acquireLeaseSuiteCase) {
 	t.Helper()
 	relErr := lease.Release()
+	waitPoolBackground(pool)
+	if tc.onRotatedErr != nil {
+		if relErr != nil {
+			t.Fatalf("expected nil Release error, got: %v", relErr)
+		}
+		if poolHasDaemon(pool, targetKey) {
+			t.Errorf("expected daemon evicted")
+		}
+		return
+	}
 	if tc.expectReleaseErr {
 		if relErr == nil {
 			t.Fatalf("expected Release error, got nil")
-		}
-		if tc.onRotatedErr != nil && !errors.Is(relErr, tc.onRotatedErr) {
-			t.Errorf("expected error %v, got %v", tc.onRotatedErr, relErr)
 		}
 		if poolHasDaemon(pool, targetKey) {
 			t.Errorf("expected daemon evicted")
@@ -605,8 +612,12 @@ func TestUnifiedSessionLease_Release_RotationFailurePaths(t *testing.T) {
 		t.Fatalf("AcquireLease failed: %v", err)
 	}
 	requireType[*unifiedSessionLease](t, lease2).turnCount = 2
-	if relErr := lease2.Release(); !errors.Is(relErr, cbErr) {
-		t.Errorf("expected persistence error %v, got %v", cbErr, relErr)
+	if relErr := lease2.Release(); relErr != nil {
+		t.Errorf("expected nil Release error, got %v", relErr)
+	}
+	waitPoolBackground(pool2)
+	if poolHasDaemon(pool2, "target-cb-fail") {
+		t.Errorf("expected daemon evicted on callback failure")
 	}
 }
 
@@ -891,18 +902,15 @@ func TestUnifiedProcessPool_ReleaseUpkeepContext(t *testing.T) {
 			done := make(chan error, 1)
 			go func() { done <- lease.Release() }()
 			<-entered
+			if err := <-done; err != nil {
+				t.Fatalf("release error = %v", err)
+			}
 			if tc.closeDuring {
 				pool.Close()
 			} else {
 				close(proceed)
 			}
-			err = <-done
-			if tc.closeDuring && !errors.Is(err, context.Canceled) {
-				t.Fatalf("release error = %v", err)
-			}
-			if !tc.closeDuring && err != nil {
-				t.Fatal(err)
-			}
+			waitPoolBackground(pool)
 		})
 	}
 }

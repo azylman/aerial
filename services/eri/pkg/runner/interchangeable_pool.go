@@ -459,6 +459,11 @@ func (l *interchangeableSessionLease) Release() error {
 	var err error
 	l.once.Do(func() {
 		if l.inner != nil {
+			if uLease, ok := l.inner.(*unifiedSessionLease); ok {
+				uLease.mu.Lock()
+				uLease.cancelRotation = true
+				uLease.mu.Unlock()
+			}
 			err = l.inner.Release()
 		}
 		if l.pool != nil {
