@@ -15,7 +15,6 @@ import (
 	"time"
 
 	"github.com/azylman/aerial/pkg/k8sauth"
-	"github.com/azylman/aerial/pkg/strutil"
 	"github.com/azylman/aerial/services/vanadis/internal/config"
 	"github.com/azylman/aerial/services/vanadis/internal/model"
 	"github.com/azylman/aerial/services/vanadis/internal/restate"
@@ -228,7 +227,11 @@ func mockMCPCheckPreconditions(w http.ResponseWriter, path, bodyStr string) bool
 		return false
 	}
 	if strings.Contains(path, "build-mcp-2") || (!strings.Contains(path, "SteerChunk") && strings.Contains(bodyStr, `"chunk_ref":"0"`)) {
-		w.WriteHeader(http.StatusConflict)
+		status := http.StatusConflict
+		if strings.Contains(path, "SteerChunk") {
+			status = http.StatusPreconditionFailed
+		}
+		w.WriteHeader(status)
 		if _, err := w.Write([]byte(`{"message":"vanadis build state conflict"}`)); err != nil {
 			return false
 		}
@@ -285,16 +288,12 @@ func mockMCPRestateHandler(action bool) http.HandlerFunc {
 				w.WriteHeader(http.StatusBadRequest)
 				return
 			}
-			chunkStatus := "running"
-			if steerReq.ChunkRef == "1" || steerReq.ChunkRef == "chunk-2" || steerReq.ChunkRef == "chunk-4-1" {
-				chunkStatus = "pending"
-			}
 			w.Header().Set("Content-Type", "application/json")
 			_ = json.NewEncoder(w).Encode(model.SteerChunkResult{
 				Accepted:     true,
 				BuildID:      steerReq.BuildID,
-				ChunkID:      strutil.FirstNonEmpty(steerReq.ChunkRef, "chunk-1"),
-				ChunkStatus:  chunkStatus,
+				ChunkID:      steerReq.ChunkRef,
+				ChunkStatus:  "running",
 				Instructions: "steered instructions",
 			})
 		default:
@@ -431,7 +430,6 @@ func TestMCP_Tools(t *testing.T) {
 		{"steer_chunk", "missing chunk ref", `{"prompt":"steer"}`, true, "chunk_id or chunk_ref is required", fxSeeded},
 		{"steer_chunk", "empty prompt", `{"build_id":"build-mcp-1","chunk_ref":"chunk-1","prompt":""}`, true, "invalid vanadis build input", fxSeeded},
 		{"steer_chunk", "running chunk steer", `{"build_id":"build-mcp-1","chunk_ref":"0","prompt":"steer running"}`, false, `"chunk_status":"running"`, fxSeeded},
-		{"steer_chunk", "pending chunk steer", `{"build_id":"build-mcp-1","chunk_ref":"1","prompt":"steer pending"}`, false, `"chunk_status":"pending"`, fxSeeded},
 		{"steer_chunk", "conflict status", `{"build_id":"build-mcp-2","chunk_ref":"0","prompt":"steer"}`, true, "vanadis build state conflict", fxSeeded},
 		{"steer_chunk", "by thread_id", `{"thread_id":"stateful_medium:discord-1234567890","chunk_ref":"chunk-1","prompt":"steer thread"}`, false, `"status":"steered"`, fxSeeded},
 		{"steer_chunk", "by chunk_id only", `{"chunk_id":"chunk-1","prompt":"steer chunk id"}`, false, `"build_id":"build-mcp-1"`, fxSeeded},
