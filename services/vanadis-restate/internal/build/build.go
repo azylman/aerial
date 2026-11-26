@@ -30,6 +30,7 @@ const (
 	labelUpdateChunk               = "UpdateChunk"
 	labelRemoveChunk               = "RemoveChunk"
 	labelFailChunk                 = "FailChunk"
+	labelSteerChunk                = "SteerChunk"
 	labelAttachPR                  = "AttachPR"
 	labelOnPREvent                 = "OnPREvent"
 	labelOnDispatchOutcome         = "OnDispatchOutcome"
@@ -49,6 +50,7 @@ const (
 	LabelRouteAttachPR             = "RouteAttachPR"
 	LabelRouteFailChunk            = "RouteFailChunk"
 	LabelRouteBuildReconcile       = "RouteBuildReconcile"
+	LabelRouteSteerChunk           = "RouteSteerChunk"
 )
 
 var reconcileErrorHandlerLabels = []string{
@@ -59,6 +61,7 @@ var reconcileErrorHandlerLabels = []string{
 	labelUpdateChunk,
 	labelRemoveChunk,
 	labelFailChunk,
+	labelSteerChunk,
 	labelAttachPR,
 	labelOnPREvent,
 	labelOnDispatchOutcome,
@@ -78,6 +81,7 @@ var reconcileErrorHandlerLabels = []string{
 	LabelRouteAttachPR,
 	LabelRouteFailChunk,
 	LabelRouteBuildReconcile,
+	LabelRouteSteerChunk,
 }
 
 var reconcileErrorsTotal = prometheus.NewCounterVec(
@@ -351,7 +355,7 @@ func (b *BuildObject) getRuntime(ctx restate.ObjectContext) objectRuntime {
 	return restateObjectRuntime{ctx: ctx, buildService: buildplan.BuildServiceName(agent)}
 }
 
-func ToTerminalErr(err error) error {
+func ToTerminalErr(err error, handler ...string) error {
 	if err == nil {
 		return nil
 	}

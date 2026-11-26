@@ -511,6 +511,10 @@ func (s *fakeStore) AppendChunks(context.Context, string, []store.CreateChunkInp
 	return nil, s.unimplemented("AppendChunks")
 }
 
+func (s *fakeStore) SteerChunk(context.Context, string, string, store.SteerChunkRequest) (*store.SteerChunkResult, error) {
+	return nil, s.unimplemented("SteerChunk")
+}
+
 // faultStore wraps the real pgtest-backed store. errs[method] fails the call
 // without reaching Postgres; lostAcks[method] lets the call commit and then
 // reports that error once, the way a connection dropped after COMMIT does.

@@ -92,11 +92,11 @@ func TestBuildRouterService_InvokerWiring(t *testing.T) {
 			mc := mocks.NewMockContext(t)
 			mClient := mocks.NewMockClient(t)
 			mInv := mocks.NewMockInvocation(t)
-			for _, handler := range []string{"OnPREvent", "OnDispatchOutcome", "AttachPR", "FailChunk", "Reconcile"} {
+			for _, handler := range []string{"OnPREvent", "OnDispatchOutcome", "AttachPR", "FailChunk", "Reconcile", "SteerChunk"} {
 				mc.EXPECT().Object(tc.wantService, "b1", handler).Return(mClient).Once()
 			}
 			mClient.EXPECT().Send(mock.Anything).Return(mInv).Times(3)
-			mClient.EXPECT().Request(mock.Anything, mock.Anything).Return(nil).Times(2)
+			mClient.EXPECT().Request(mock.Anything, mock.Anything).Return(nil).Times(3)
 			r := NewBuildRouterServiceWithAgent(nil, tc.routerAgent)
 			inv, ok := r.getInvoker(restate.WithMockContext(mc)).(restateBuildObjectInvoker)
 			require.True(t, ok)
@@ -108,6 +108,8 @@ func TestBuildRouterService_InvokerWiring(t *testing.T) {
 			_, err = inv.RouteFailChunk(ctx, "b1", model.FailChunkRequest{ChunkID: "c1"})
 			require.NoError(t, err)
 			require.NoError(t, inv.RouteReconcile(ctx, "b1", build.ReconcileBuildRequest{Reason: build.ReconcileReasonWidgetSync}))
+			_, err = inv.RouteSteerChunk(ctx, "b1", store.SteerChunkRequest{ChunkRef: "c1", Prompt: "more tests"})
+			require.NoError(t, err)
 		})
 	}
 }
@@ -121,6 +123,8 @@ type mockInvoker struct {
 	lastFailDispatchID   string
 	lastReconcileBuildID string
 	lastReconcileReason  string
+	lastSteerBuildID     string
+	lastSteerReq         store.SteerChunkRequest
 }
 
 func (m *mockInvoker) RoutePREvent(_ context.Context, buildID string, _ pubsub.PRLifecycleEvent) error {
@@ -147,6 +151,12 @@ func (m *mockInvoker) RouteFailChunk(_ context.Context, buildID string, req mode
 func (m *mockInvoker) RouteReconcile(_ context.Context, buildID string, req build.ReconcileBuildRequest) error {
 	m.lastReconcileBuildID, m.lastReconcileReason = buildID, req.Reason
 	return nil
+}
+
+func (m *mockInvoker) RouteSteerChunk(_ context.Context, buildID string, req store.SteerChunkRequest) (store.SteerChunkResult, error) {
+	m.lastSteerBuildID = buildID
+	m.lastSteerReq = req
+	return store.SteerChunkResult{BuildID: buildID, ChunkID: req.ChunkRef, Accepted: true}, nil
 }
 
 func makeRouterMockContext(t *testing.T) restate.Context {
@@ -433,6 +443,41 @@ func TestBuildRouterService_RouteBuildReconcile(t *testing.T) {
 			}
 			assert.Equal(t, tc.wantBuildID, inv.lastReconcileBuildID)
 			assert.Equal(t, tc.wantReason, inv.lastReconcileReason)
+		})
+	}
+}
+
+func TestBuildRouterService_RouteSteerChunk(t *testing.T) {
+	found := &dbFixture{
+		builds: []model.VanadisBuild{{ID: "b-steer"}},
+		chunks: []model.VanadisChunk{{BuildID: "b-steer", ID: "c1"}},
+	}
+	tests := []struct {
+		name        string
+		db          *dbFixture
+		req         store.SteerChunkRequest
+		wantBuildID string
+		wantErr     bool
+		wantMetric  float64
+	}{
+		{name: "validation failure empty chunk", db: found, req: store.SteerChunkRequest{Prompt: "hello"}, wantErr: true},
+		{name: "validation failure empty prompt", db: found, req: store.SteerChunkRequest{ChunkRef: "c1"}, wantErr: true},
+		{name: "chunk not found", db: found, req: store.SteerChunkRequest{ChunkRef: "c-missing", Prompt: "more tests"}, wantErr: true},
+		{name: "nil store is chunk not found", req: store.SteerChunkRequest{ChunkRef: "c1", Prompt: "more tests"}, wantErr: true},
+		{name: "query error records metric", db: &dbFixture{closed: true}, req: store.SteerChunkRequest{ChunkRef: "c1", Prompt: "more tests"}, wantErr: true, wantMetric: 1},
+		{name: "provided build id bypasses lookup", db: found, req: store.SteerChunkRequest{BuildID: "b-steer", ChunkRef: "c1", Prompt: "more tests"}, wantBuildID: "b-steer"},
+		{name: "resolved build id from chunk lookup", db: found, req: store.SteerChunkRequest{ChunkRef: "c1", Prompt: "more tests"}, wantBuildID: "b-steer"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			inv := &mockInvoker{}
+			router := NewBuildRouterService(openFixture(t, tc.db), func(restate.Context) BuildObjectInvoker { return inv })
+			before := restatetest.MetricValue(t, "vanadis_restate_reconcile_errors_total", "RouteSteerChunk")
+			res, err := router.RouteSteerChunk(makeRouterMockContext(t), tc.req)
+			assert.Equal(t, tc.wantErr, err != nil, "err = %v", err)
+			assert.Equal(t, tc.wantBuildID, res.BuildID)
+			assert.Equal(t, tc.wantBuildID, inv.lastSteerBuildID)
+			assert.Equal(t, before+tc.wantMetric, restatetest.MetricValue(t, "vanadis_restate_reconcile_errors_total", "RouteSteerChunk"))
 		})
 	}
 }

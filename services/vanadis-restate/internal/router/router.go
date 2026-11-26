@@ -23,6 +23,7 @@ type BuildObjectInvoker interface {
 	RouteAttachPR(ctx context.Context, buildID string, req store.AttachChunkPRRequest) (model.AttachChunkPRResponse, error)
 	RouteFailChunk(ctx context.Context, buildID string, req model.FailChunkRequest) (model.FailChunkResponse, error)
 	RouteReconcile(ctx context.Context, buildID string, req build.ReconcileBuildRequest) error
+	RouteSteerChunk(ctx context.Context, buildID string, req store.SteerChunkRequest) (store.SteerChunkResult, error)
 }
 
 type restateBuildObjectInvoker struct {
@@ -55,6 +56,11 @@ func (r restateBuildObjectInvoker) RouteReconcile(ctx context.Context, buildID s
 	_ = ctx
 	_ = restate.ObjectSend(r.ctx, buildplan.BuildServiceName(""), buildID, "Reconcile").Send(req)
 	return nil
+}
+
+func (r restateBuildObjectInvoker) RouteSteerChunk(ctx context.Context, buildID string, req store.SteerChunkRequest) (store.SteerChunkResult, error) {
+	_ = ctx
+	return restate.Object[store.SteerChunkResult](r.ctx, buildplan.BuildServiceName(""), buildID, "SteerChunk").Request(req)
 }
 
 // BuildRouterService resolves non-build-keyed requests and delegates them to the authoritative Build object.
@@ -324,4 +330,36 @@ func (s *BuildRouterService) RouteBuildReconcile(ctx restate.Context, buildID st
 	}
 	inv := s.getInvoker(ctx)
 	return inv.RouteReconcile(ctx, route.BuildID, build.ReconcileBuildRequest{Reason: build.ReconcileReasonWidgetSync})
+}
+
+// RouteSteerChunk resolves the target build and delegates steering to the Build object.
+func (s *BuildRouterService) RouteSteerChunk(ctx restate.Context, req store.SteerChunkRequest) (store.SteerChunkResult, error) {
+	buildID := strings.TrimSpace(req.BuildID)
+	chunkRef := strings.TrimSpace(req.ChunkRef)
+	prompt := strings.TrimSpace(req.Prompt)
+
+	if chunkRef == "" || prompt == "" {
+		err := fmt.Errorf("%w: chunk_ref and prompt required", store.ErrInvalidBuildInput)
+		build.RecordReconcileError(build.LabelRouteSteerChunk, err)
+		return store.SteerChunkResult{}, restate.ToTerminalError(err, restate.WithErrorCode(400))
+	}
+
+	if buildID == "" {
+		route, err := build.RunJournaled(ctx, build.LabelRouteSteerChunk, "lookup-steer-chunk-build", func(rc restate.RunContext) (store.BuildRoute, error) {
+			if s.store == nil {
+				return store.BuildRoute{}, build.ErrChunkNotFound
+			}
+			return s.store.LookupChunkBuildID(rc, chunkRef)
+		})
+		if err != nil {
+			if errors.Is(err, build.ErrChunkNotFound) {
+				return store.SteerChunkResult{}, restate.ToTerminalError(build.ErrChunkNotFound, restate.WithErrorCode(404))
+			}
+			return store.SteerChunkResult{}, err
+		}
+		buildID = route.BuildID
+	}
+
+	inv := s.getInvoker(ctx)
+	return inv.RouteSteerChunk(ctx, buildID, req)
 }

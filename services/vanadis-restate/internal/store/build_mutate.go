@@ -419,6 +419,58 @@ func (s *Store) RemoveChunk(ctx context.Context, buildID, chunkRef string) (*mod
 	return &removed, validatedRemaining, nil
 }
 
+// SteerChunk modifies a pending or running chunk's instructions by appending operator steering guidance.
+func (s *Store) SteerChunk(ctx context.Context, buildID, chunkRef string, req SteerChunkRequest) (*SteerChunkResult, error) {
+	buildID, chunkRef = strings.TrimSpace(buildID), strings.TrimSpace(chunkRef)
+	if err := buildplan.ValidateSteerChunkInput(buildID, chunkRef, req.Prompt); err != nil {
+		return nil, fmt.Errorf("%w: %w", ErrInvalidBuildInput, err)
+	}
+	if s == nil || s.db == nil {
+		return nil, errors.New("database connection is nil")
+	}
+
+	tx, err := s.db.Begin(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("begin steer chunk tx: %w", err)
+	}
+	defer func() {
+		if rbErr := tx.Rollback(ctx); rbErr != nil && !errors.Is(rbErr, pgx.ErrTxClosed) {
+			log.Printf("[vanadis] steer chunk tx rollback error: %v", rbErr)
+		}
+	}()
+
+	existingChunks, err := lockBuildAndChunks(ctx, tx, buildID)
+	if err != nil {
+		return nil, err
+	}
+
+	targetIdx := buildplan.ResolveChunkRef(existingChunks, chunkRef)
+	if targetIdx < 0 {
+		return nil, ErrChunkNotFound
+	}
+	target := existingChunks[targetIdx]
+	if target.Status != statusPending && target.Status != statusRunning {
+		return nil, fmt.Errorf("%w: cannot steer chunk %s with status %q (must be pending or running)", ErrBuildConflict, target.ID, target.Status)
+	}
+
+	updatedInstructions := target.Instructions + "\n\n### [Operator Steering]\n" + strings.TrimSpace(req.Prompt)
+	const updQ = `UPDATE vanadis_chunks SET instructions = $3, updated_at = CURRENT_TIMESTAMP WHERE id = $1 AND build_id = $2;`
+	if _, err := tx.Exec(ctx, updQ, target.ID, buildID, updatedInstructions); err != nil {
+		return nil, fmt.Errorf("execute steer chunk %s: %w", target.ID, err)
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		return nil, fmt.Errorf("commit steer chunk tx: %w", err)
+	}
+	return &SteerChunkResult{
+		Accepted:     true,
+		BuildID:      buildID,
+		ChunkID:      target.ID,
+		ChunkStatus:  target.Status,
+		Instructions: updatedInstructions,
+	}, nil
+}
+
 func lockBuildAndChunks(ctx context.Context, tx pgx.Tx, buildID string) ([]model.VanadisChunk, error) {
 	var buildStatus string
 	bErr := tx.QueryRow(ctx, `SELECT status FROM vanadis_builds WHERE id = $1 FOR UPDATE;`, buildID).Scan(&buildStatus)

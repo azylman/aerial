@@ -487,3 +487,215 @@ func TestPostgresVanadisStore_RemoveChunk(t *testing.T) {
 		})
 	}
 }
+
+func assertSteerChunkSuccess(t *testing.T, pool *pgxpool.Pool, res *SteerChunkResult, buildID, wantStatus, wantInstructions string) {
+	t.Helper()
+	if res == nil {
+		t.Fatal("res is nil")
+	}
+	if !res.Accepted {
+		t.Errorf("res.Accepted = false, want true")
+	}
+	if res.BuildID != buildID {
+		t.Errorf("res.BuildID = %q, want %q", res.BuildID, buildID)
+	}
+	if res.ChunkStatus != wantStatus {
+		t.Errorf("res.ChunkStatus = %q, want %q", res.ChunkStatus, wantStatus)
+	}
+	if res.Instructions != wantInstructions {
+		t.Errorf("res.Instructions = %q, want %q", res.Instructions, wantInstructions)
+	}
+	var storedInstructions string
+	if err := pool.QueryRow(context.Background(), "SELECT instructions FROM vanadis_chunks WHERE id = $1", res.ChunkID).Scan(&storedInstructions); err != nil {
+		t.Fatalf("scan stored instructions: %v", err)
+	}
+	if storedInstructions != wantInstructions {
+		t.Errorf("storedInstructions = %q, want %q", storedInstructions, wantInstructions)
+	}
+}
+
+func TestPostgresVanadisStore_SteerChunk_ValidationErrors(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name     string
+		buildID  string
+		chunkRef string
+		req      SteerChunkRequest
+	}{
+		{
+			name:     "empty build id",
+			buildID:  "",
+			chunkRef: "c1",
+			req:      SteerChunkRequest{Prompt: "Focus on edge cases"},
+		},
+		{
+			name:     "empty chunk ref",
+			buildID:  "b1",
+			chunkRef: "",
+			req:      SteerChunkRequest{Prompt: "Focus on edge cases"},
+		},
+		{
+			name:     "empty prompt",
+			buildID:  "b1",
+			chunkRef: "c1",
+			req:      SteerChunkRequest{Prompt: "   "},
+		},
+	}
+	st := &Store{}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			_, err := st.SteerChunk(context.Background(), tc.buildID, tc.chunkRef, tc.req)
+			assertMutateErr(t, err, ErrInvalidBuildInput, "")
+		})
+	}
+}
+
+func TestPostgresVanadisStore_SteerChunk(t *testing.T) {
+	t.Parallel()
+	pendingChunk := mutateChunks(ch("c1", "pr", "pending"))
+	pendingChunk[0].Instructions = "Original Instructions"
+	runningChunk := mutateChunks(ch("c1", "pr", "running"))
+	runningChunk[0].Instructions = "Original Instructions"
+	completedChunk := mutateChunks(ch("c1", "pr", "completed"))
+	running := bmBuilds("running")
+	failed := bmBuilds("failed")
+
+	tests := []struct {
+		name             string
+		buildID          string
+		chunkRef         string
+		req              SteerChunkRequest
+		db               bmFixture
+		wantErrIs        error
+		wantErr          string
+		wantStatus       string
+		wantInstructions string
+	}{
+		{
+			name:             "success steering pending chunk",
+			buildID:          "b1",
+			chunkRef:         "c1",
+			req:              SteerChunkRequest{Prompt: "Focus on edge cases"},
+			db:               bmFixture{builds: running, chunks: pendingChunk},
+			wantStatus:       "pending",
+			wantInstructions: "Original Instructions\n\n### [Operator Steering]\nFocus on edge cases",
+		},
+		{
+			name:             "success steering running chunk",
+			buildID:          "b1",
+			chunkRef:         "c1",
+			req:              SteerChunkRequest{Prompt: "Focus on edge cases"},
+			db:               bmFixture{builds: running, chunks: runningChunk},
+			wantStatus:       "running",
+			wantInstructions: "Original Instructions\n\n### [Operator Steering]\nFocus on edge cases",
+		},
+		{
+			name:             "success steering on failed build",
+			buildID:          "b1",
+			chunkRef:         "c1",
+			req:              SteerChunkRequest{Prompt: "Focus on edge cases"},
+			db:               bmFixture{builds: failed, chunks: runningChunk},
+			wantStatus:       "running",
+			wantInstructions: "Original Instructions\n\n### [Operator Steering]\nFocus on edge cases",
+		},
+		{
+			name:     "nil db",
+			buildID:  "b1",
+			chunkRef: "c1",
+			req:      SteerChunkRequest{Prompt: "Focus on edge cases"},
+			db:       bmFixture{nilDB: true},
+			wantErr:  "database connection is nil",
+		},
+		{
+			name:     "begin error",
+			buildID:  "b1",
+			chunkRef: "c1",
+			req:      SteerChunkRequest{Prompt: "Focus on edge cases"},
+			db:       bmFixture{closed: true},
+			wantErr:  "begin steer chunk tx",
+		},
+		{
+			name:      "build not found",
+			buildID:   "b1",
+			chunkRef:  "c1",
+			req:       SteerChunkRequest{Prompt: "Focus on edge cases"},
+			wantErrIs: ErrBuildNotFound,
+		},
+		{
+			name:      "build not running or failed",
+			buildID:   "b1",
+			chunkRef:  "c1",
+			req:       SteerChunkRequest{Prompt: "Focus on edge cases"},
+			db:        bmFixture{builds: bmBuilds("completed")},
+			wantErrIs: ErrBuildConflict,
+		},
+		{
+			name:     "lock build error",
+			buildID:  "b1",
+			chunkRef: "c1",
+			req:      SteerChunkRequest{Prompt: "Focus on edge cases"},
+			db:       bmFixture{builds: running, sabotage: bmBreakBuildStatus},
+			wantErr:  "lock build",
+		},
+		{
+			name:     "lock query error",
+			buildID:  "b1",
+			chunkRef: "c1",
+			req:      SteerChunkRequest{Prompt: "Focus on edge cases"},
+			db:       bmFixture{builds: running, sabotage: bmBreakChunkSelect},
+			wantErr:  "lock chunks",
+		},
+		{
+			name:     "lock scan error",
+			buildID:  "b1",
+			chunkRef: "c1",
+			req:      SteerChunkRequest{Prompt: "Focus on edge cases"},
+			db:       bmFixture{builds: running, chunks: pendingChunk, sabotage: breakChunkScanSQL},
+			wantErr:  "failed to scan vanadis chunk",
+		},
+		{
+			name:      "chunk not found",
+			buildID:   "b1",
+			chunkRef:  "c-missing",
+			req:       SteerChunkRequest{Prompt: "Focus on edge cases"},
+			db:        bmFixture{builds: running, chunks: pendingChunk},
+			wantErrIs: ErrChunkNotFound,
+		},
+		{
+			name:      "chunk status not pending or running",
+			buildID:   "b1",
+			chunkRef:  "c1",
+			req:       SteerChunkRequest{Prompt: "Focus on edge cases"},
+			db:        bmFixture{builds: running, chunks: completedChunk},
+			wantErrIs: ErrBuildConflict,
+		},
+		{
+			name:     "exec update error",
+			buildID:  "b1",
+			chunkRef: "c1",
+			req:      SteerChunkRequest{Prompt: "Focus on edge cases"},
+			db:       bmFixture{builds: running, chunks: pendingChunk, sabotage: failStatement("vanadis_chunks", "UPDATE")},
+			wantErr:  "execute steer chunk",
+		},
+		{
+			name:     "commit error",
+			buildID:  "b1",
+			chunkRef: "c1",
+			req:      SteerChunkRequest{Prompt: "Focus on edge cases"},
+			db:       bmFixture{builds: running, chunks: pendingChunk, sabotage: failCommit("vanadis_chunks", "UPDATE")},
+			wantErr:  "commit steer chunk tx",
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			st, pool := bmOpen(t, tc.db)
+			res, err := st.SteerChunk(context.Background(), tc.buildID, tc.chunkRef, tc.req)
+			assertMutateErr(t, err, tc.wantErrIs, tc.wantErr)
+			if tc.wantErrIs == nil && tc.wantErr == "" {
+				assertSteerChunkSuccess(t, pool, res, tc.buildID, tc.wantStatus, tc.wantInstructions)
+			}
+		})
+	}
+}

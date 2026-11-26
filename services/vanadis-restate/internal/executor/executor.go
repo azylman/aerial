@@ -236,6 +236,51 @@ func ConflictRemediationDispatchID(chunkID, headSHA string) string {
 	return "vanadis-conflict-" + cleanChunk
 }
 
+// IsSteerDispatchID reports whether dispatchID is a steering dispatch for chunkID.
+func IsSteerDispatchID(chunkID, dispatchID string) bool {
+	cleanChunk := strings.TrimSpace(chunkID)
+	if cleanChunk == "" {
+		return false
+	}
+	prefix := "vanadis-" + cleanChunk + "-steer-"
+	cleanDispatchID := strings.TrimSpace(dispatchID)
+	return strings.HasPrefix(cleanDispatchID, prefix) && len(cleanDispatchID) > len(prefix)
+}
+
+func shortSHA256Hex(s string) string {
+	sum := sha256.Sum256([]byte(s))
+	return hex.EncodeToString(sum[:])
+}
+
+// DispatchChunkSteer dispatches an operator steering directive for an active chunk directly to Eri.
+func (e *Executor) DispatchChunkSteer(ctx context.Context, build model.VanadisBuild, chunk model.VanadisChunk, steerPrompt, idempotencySeed string) (string, error) {
+	if e == nil || e.EriClient == nil {
+		return "", errors.New("executor or eri client is nil")
+	}
+	cleanChunkID := strings.TrimSpace(chunk.ID)
+	cleanBuildID := strings.TrimSpace(build.ID)
+	cleanSteerPrompt := strings.TrimSpace(steerPrompt)
+	dispatchID := fmt.Sprintf("vanadis-%s-steer-%s", cleanChunkID, shortSHA256Hex(cleanBuildID + ":" + cleanChunkID + ":" + idempotencySeed + ":" + cleanSteerPrompt)[:12])
+	formattedPrompt := fmt.Sprintf("[VANADIS OPERATOR STEERING — MANDATORY]\nOperator guidance for active chunk %s (build %s):\n\n%s\n\nIncorporate this steering directive into your current execution immediately.", cleanChunkID, cleanBuildID, cleanSteerPrompt)
+
+	req := eriwire.BrainDispatchRequest{
+		Agent:          build.Agent,
+		ID:             dispatchID,
+		Source:         "vanadis",
+		SessionID:      "vanadis-" + cleanChunkID,
+		TargetID:       strings.TrimSpace(build.ThreadID),
+		VanadisChunkID: cleanChunkID,
+		VanadisBuildID: cleanBuildID,
+		Prompt:         formattedPrompt,
+		Effort:         chunk.Effort,
+		SkipIfActive:   false,
+	}
+	if err := e.EriClient.Dispatch(ctx, req); err != nil {
+		return "", err
+	}
+	return dispatchID, nil
+}
+
 // DispatchChunkRemediation delegates to Eri's POST /dispatch endpoint for PR failure remediation.
 func (e *Executor) DispatchChunkRemediation(ctx context.Context, req eriwire.BrainDispatchRequest) error {
 	if e == nil || e.EriClient == nil {

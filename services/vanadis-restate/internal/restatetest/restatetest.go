@@ -4,6 +4,7 @@ package restatetest
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -36,6 +37,9 @@ func (MockRunContext) Request() *restate.Request { return nil }
 func RunMockRunContext(fn func(restate.RunContext) (any, error), output any, _ ...restate.RunOption) restate.TerminalError {
 	res, err := fn(MockRunContext{Context: context.Background()})
 	if err != nil {
+		if term, ok := errors.AsType[restate.TerminalError](err); ok {
+			return term
+		}
 		return restate.TerminalErrorf("%v", err)
 	}
 	if output != nil && res != nil {
@@ -88,6 +92,19 @@ func (s *MetadataMutationStore) UpdateBuild(_ context.Context, id string, req st
 		return nil, s.Err
 	}
 	return &model.VanadisBuild{ID: id, Title: req.Title}, nil
+}
+
+func (s *MetadataMutationStore) SteerChunk(_ context.Context, buildID, chunkRef string, req store.SteerChunkRequest) (*store.SteerChunkResult, error) {
+	if s.Err != nil {
+		return nil, s.Err
+	}
+	return &store.SteerChunkResult{
+		Accepted:     true,
+		BuildID:      buildID,
+		ChunkID:      chunkRef,
+		ChunkStatus:  "running",
+		Instructions: req.Prompt,
+	}, nil
 }
 
 func (s *MetadataMutationStore) LookupChunkBuildID(context.Context, string) (store.BuildRoute, error) {
