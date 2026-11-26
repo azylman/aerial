@@ -485,6 +485,11 @@ func (s *RouterServer) processOwnedPush(ctx context.Context, body []byte, res *R
 		}); err != nil {
 			return nil, err
 		}
+		if res.PRNumber > 0 && buildmeta.MetadataWorkflowPath(res.Repo) == "" {
+			if err := s.ownedCompleteNoDeploy(ctx, res.Repo, res.HeadSHA, res.PRNumber, res.Branch); err != nil {
+				return nil, err
+			}
+		}
 	}
 	return res, nil
 }

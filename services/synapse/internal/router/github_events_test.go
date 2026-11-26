@@ -208,9 +208,13 @@ func workflowRunPayload(branch, conclusion string, withPR bool) []byte {
 	return workflowRunPayloadAttempt(branch, conclusion, 1, withPR)
 }
 
+func pushPayloadRepo(repo, ref, message string) []byte {
+	return fmt.Appendf(nil, `{"ref":%q,"before":%q,"after":%q,"head_commit":{"id":%q,"message":%q},"repository":{"full_name":%q}}`,
+		ref, ownedBefore, ownedMerge, ownedMerge, message, repo)
+}
+
 func pushPayload(ref, message string) []byte {
-	return fmt.Appendf(nil, `{"ref":%q,"before":%q,"after":%q,"head_commit":{"id":%q,"message":%q},"repository":{"full_name":"azylman/aerial"}}`,
-		ref, ownedBefore, ownedMerge, ownedMerge, message)
+	return pushPayloadRepo("azylman/aerial", ref, message)
 }
 
 func aerialBody(agent, target string) string {
@@ -234,7 +238,8 @@ func TestProcessGitHubEventRestateOwned(t *testing.T) {
 			if ghBody == "" {
 				ghBody = "{}"
 			}
-			h := newOwnedHarness(t, tc.cfg, &ownedIngress{sendCode: code, callCode: http.StatusOK, callBody: "{}"}, ghBody)
+			h := newOwnedHarness(t, tc.cfg, &ownedIngress{sendCode: code, callCode: http.StatusOK, callBody: "{}", handlerBodies: tc.bodies}, ghBody)
+			h.disp.repoKustomizations = tc.repoRefs
 			res, err := h.srv.ProcessGitHubEvent(ownedCtx(), tc.event, "d1", tc.body)
 			if (err != nil) != tc.wantErr {
 				t.Fatalf("ProcessGitHubEvent() err = %v, wantErr %v", err, tc.wantErr)
@@ -350,6 +355,8 @@ type restateOwnedGitHubCase struct {
 	event      string
 	body       []byte
 	ghBody     string
+	bodies     map[string]string
+	repoRefs   map[string][]fluxKustomizationRef
 	sendCode   int
 	wantErr    bool
 	wantPaths  []string
@@ -637,6 +644,21 @@ func restateOwnedPushCases() []restateOwnedGitHubCase {
 			body:       pushPayload("refs/heads/main", "Fix it (#42)"),
 			wantPaths:  []string{ownedRepoK + "HandleMainPush/send", ownedPRKey + "HandleMerged/send", ownedRepoK + "HandleAutoUpdate/send", ownedRepoK + "HandleGitPush/send"},
 			wantBodies: []string{`"main_sha"`, `"pr_number":42`, `"auto_update":{"default_owner":true}`, `"pr_number":42,"head_sha":"","ref":"refs/heads/main"`},
+		},
+		{
+			name: "default owner push on non-cluster repo completes with git-merge", wantPRNumber: 42, event: "push", ghBody: "[]", cfg: Config{DefaultOwner: true},
+			body:       pushPayloadRepo("azylman/other-repo", "refs/heads/main", "Fix it (#42)"),
+			bodies:     map[string]string{"GetDeployView": deployViewBody("other-repo", prMerged, "")},
+			wantPaths:  []string{ownedOtherR + "HandleMainPush/send", ownedOther + "HandleMerged/send", ownedOtherR + "HandleAutoUpdate/send", ownedOtherR + "HandleGitPush/send", ownedOther + "HandleDeploySuccess/send"},
+			wantBodies: []string{`"main_sha":"` + ownedMerge + `"`, `"pr_number":42`, `"auto_update":{"default_owner":true}`, `"pr_number":42,"head_sha":"","ref":"refs/heads/main"`, `"job_name":"git-merge"`},
+		},
+		{
+			name: "default owner push on non-cluster repo with flux defers to watcher", wantPRNumber: 42, event: "push", ghBody: "[]", cfg: Config{DefaultOwner: true},
+			body:       pushPayloadRepo("azylman/other-repo", "refs/heads/main", "Fix it (#42)"),
+			bodies:     map[string]string{"GetDeployView": deployViewBody("other-repo", prMerged, "")},
+			repoRefs:   map[string][]fluxKustomizationRef{"azylman/other-repo": {{Namespace: "flux-system", Name: "other-repo"}}},
+			wantPaths:  []string{ownedOtherR + "HandleMainPush/send", ownedOther + "HandleMerged/send", ownedOtherR + "HandleAutoUpdate/send", ownedOtherR + "HandleGitPush/send", ownedOther + "HandleKustomizationRequested/send"},
+			wantBodies: []string{`"main_sha":"` + ownedMerge + `"`, `"pr_number":42`, `"auto_update":{"default_owner":true}`, `"pr_number":42,"head_sha":"","ref":"refs/heads/main"`, `"jobs":["other-repo"]`},
 		},
 		{name: "branch push sends nothing", event: "push", body: pushPayload("refs/heads/feat", "wip")},
 		{name: "tag push sends nothing", event: "push", body: pushPayload("refs/tags/v1", "tag")},
