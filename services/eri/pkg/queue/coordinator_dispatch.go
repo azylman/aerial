@@ -10,6 +10,7 @@ import (
 	restate "github.com/restatedev/sdk-go"
 
 	"github.com/azylman/aerial/pkg/eriwire"
+	"github.com/azylman/aerial/pkg/restateingress"
 	"github.com/azylman/aerial/services/eri/pkg/db"
 	"github.com/azylman/aerial/services/eri/pkg/session"
 )
@@ -119,6 +120,9 @@ func (d *DispatchCoordinator) Enqueue(ctx restate.ObjectSharedContext, req eriwi
 
 	inserted, err := restate.Run(ctx, func(rc restate.RunContext) (bool, error) {
 		rec := buildEnqueuedDispatch(req, dispID, sessionKey, time.Now().UTC())
+		if strings.TrimSpace(rec.Traceparent) == "" {
+			rec.Traceparent = restateingress.RequestTraceparent(ctx)
+		}
 		ok, sErr := storeCall(rc, func(sc context.Context) (bool, error) {
 			return d.store.InsertDispatch(sc, rec)
 		})

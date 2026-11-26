@@ -48,6 +48,7 @@ func (j *fakeJournal) context(t *testing.T, key string) restate.ObjectContext {
 	mc := mocks.NewMockContext(t)
 	mc.EXPECT().Key().Return(key).Maybe()
 	mc.EXPECT().Log().Return(slog.Default()).Maybe()
+	mc.EXPECT().Request().Return(nil).Maybe()
 	pos := 0
 	mc.EXPECT().Run(mock.Anything, mock.Anything, mock.Anything).RunAndReturn(
 		func(fn func(restate.RunContext) (any, error), output any, _ ...restate.RunOption) restate.TerminalError {

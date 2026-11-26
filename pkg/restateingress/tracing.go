@@ -120,15 +120,11 @@ func ExecuteInSpan[T any](baseCtx context.Context, spanName, traceparent string,
 
 // RunInSpan runs fn inside a step span parented on the invocation's traceparent,
 // journaled via restate.Run. Step context inherits cancellation and deadlines from runCtx.
-func RunInSpan[T any](rc restate.Context, spanName string, fn func(context.Context, restate.RunContext) (T, error), opts ...restate.RunOption) (T, error) {
+func RunInSpan[T any](rc restate.Context, spanName string, fn func(context.Context, restate.RunContext) (T, error), opts ...restate.RunOption) (T, restate.TerminalError) {
 	tp := RequestTraceparent(rc)
-	out, err := restate.Run(rc, func(runCtx restate.RunContext) (T, error) {
+	return restate.Run(rc, func(runCtx restate.RunContext) (T, error) {
 		return ExecuteInSpan(runCtx, spanName, tp, func(stepCtx context.Context) (T, error) {
 			return fn(stepCtx, runCtx)
 		})
 	}, opts...)
-	if err != nil {
-		return out, err
-	}
-	return out, nil
 }

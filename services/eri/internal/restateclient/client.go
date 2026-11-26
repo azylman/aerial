@@ -13,6 +13,7 @@ import (
 
 	"github.com/azylman/aerial/pkg/eriwire"
 	"github.com/azylman/aerial/pkg/restateingress"
+	"github.com/azylman/aerial/pkg/tracing"
 	"github.com/azylman/aerial/services/eri/pkg/llmcall"
 	"github.com/azylman/aerial/services/eri/pkg/metrics"
 	"github.com/azylman/aerial/services/eri/pkg/queue"
@@ -119,15 +120,17 @@ func NewRestateIngressClient(ingressURL, agentName string, httpClient ...*http.C
 	if ingressURL == "" {
 		ingressURL = "http://restate.aerial:8080"
 	}
-	client := &http.Client{Timeout: 30 * time.Second}
+	baseClient := &http.Client{Timeout: 30 * time.Second}
 	if len(httpClient) > 0 && httpClient[0] != nil {
-		client = httpClient[0]
+		baseClient = httpClient[0]
 	}
+	client := tracing.Client(baseClient)
+	llmClient := tracing.Client(&http.Client{Transport: baseClient.Transport, Timeout: llmCallTimeout})
 	return &RestateIngressClient{
 		ingressURL: ingressURL,
 		agentName:  strings.TrimSpace(agentName),
 		httpClient: client,
-		llmClient:  &http.Client{Transport: client.Transport, Timeout: llmCallTimeout},
+		llmClient:  llmClient,
 	}
 }
 

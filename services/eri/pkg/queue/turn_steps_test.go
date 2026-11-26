@@ -1401,3 +1401,53 @@ func TestTurnRunner_EmitsTurnTraceAndRegistersActiveTurn(t *testing.T) {
 		})
 	}
 }
+
+func TestTurnExecution_ChildSpanTraceParentingWithoutTurnSpan(t *testing.T) {
+	t.Parallel()
+
+	const testTraceparent = "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01"
+	const wantTraceID = "4bf92f3577b34da6a3ce929d0e0e4736"
+	const wantParentSpanID = "00f067aa0ba902b7"
+
+	rec := tracetest.NewSpanRecorder()
+	tp := sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(rec))
+
+	pool := &WorkerPool{
+		cfg: WorkerPoolConfig{
+			TracerProvider: tp,
+		},
+	}
+
+	burst := []db.Message{
+		{
+			ID:          "msg-trace-test",
+			ThreadID:    "thread-trace",
+			Traceparent: testTraceparent,
+		},
+	}
+
+	te := pool.newStepTurnExecution(context.Background(), "thread-trace", burst)
+	if te.turnSpan != nil {
+		t.Fatalf("expected turnSpan to be nil")
+	}
+
+	spansToTest := []string{"turn.pre_turn_hook", "turn.post_turn_hook", "turn.summary_refresh"}
+	for _, spanName := range spansToTest {
+		_, span := te.startChildSpan(context.Background(), spanName)
+		span.End()
+	}
+
+	ended := rec.Ended()
+	if len(ended) != len(spansToTest) {
+		t.Fatalf("expected %d ended spans, got %d", len(spansToTest), len(ended))
+	}
+
+	for _, s := range ended {
+		if s.SpanContext().TraceID().String() != wantTraceID {
+			t.Errorf("span %s traceID = %s, want %s", s.Name(), s.SpanContext().TraceID().String(), wantTraceID)
+		}
+		if s.Parent().SpanID().String() != wantParentSpanID {
+			t.Errorf("span %s parent spanID = %s, want %s", s.Name(), s.Parent().SpanID().String(), wantParentSpanID)
+		}
+	}
+}
