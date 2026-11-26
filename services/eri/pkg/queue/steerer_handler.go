@@ -48,9 +48,6 @@ func (p *WorkerPool) drainHTTPClient() *http.Client {
 
 // RegisterSteerHandler mounts POST /internal/turn/drain-pending wrapped in httpkit.LoopbackOnly.
 func RegisterSteerHandler(mux *http.ServeMux, pool *WorkerPool) {
-	if mux == nil || pool == nil {
-		return
-	}
 	mux.Handle("POST "+SteerDrainPath, httpkit.LoopbackOnly(http.HandlerFunc(pool.HandleDrainPending)))
 }
 

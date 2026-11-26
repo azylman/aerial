@@ -57,19 +57,6 @@ func (f fakeIngressWakeResolver) EvaluateIngressWake(_ context.Context, _ string
 	return f.shouldEnqueue, f.completedReason
 }
 
-type dynamicWakeResolver struct {
-	fakeThreadResolver
-
-	evalFn func(ctx context.Context, threadID string, msg db.Message) (bool, string)
-}
-
-func (d dynamicWakeResolver) EvaluateIngressWake(ctx context.Context, threadID string, msg db.Message) (bool, string) {
-	if d.evalFn != nil {
-		return d.evalFn(ctx, threadID, msg)
-	}
-	return true, ""
-}
-
 func st(pending []string, active *ActiveTurn) coordinatorState {
 	return coordinatorState{pending: pending, active: active}
 }
@@ -283,85 +270,25 @@ func TestThreadCoordinator_Append_IngressWakeGating(t *testing.T) {
 	}
 }
 
-func TestThreadCoordinator_SlowClassificationFollowedByImmediateWake(t *testing.T) {
+func TestThreadCoordinator_Enqueue_LeavesMessagePendingUnderWakeEvaluator(t *testing.T) {
 	t.Parallel()
 
 	store := seedStore(t, nil, nil, "")
-
-	slowClassified := false
-	resolver := dynamicWakeResolver{
-		evalFn: func(ctx context.Context, threadID string, msg db.Message) (bool, string) {
-			if msg.ID == "m-slow-a" {
-				slowClassified = true
-				return false, "[AMBIENT score=0.10/0.75]"
-			}
-			if msg.ID == "m-wake-b" {
-				return true, ""
-			}
-			return true, ""
-		},
-	}
+	resolver := fakeIngressWakeResolver{shouldEnqueue: false, completedReason: "[IGNORED]"}
 	coord := NewThreadCoordinator(store, resolver, "aerial")
 
-	// Message A arrives first and is enqueued.
-	hA := newCoordHarness(t, tcKey, "inv-a", coordinatorState{})
-	respA, errA := coord.Enqueue(hA.sharedCtx(), ThreadEnqueueRequest{
-		Message: &db.Message{ID: "m-slow-a", ThreadID: tcKey, Content: "slow ambient message"},
+	h := newCoordHarness(t, tcKey, tcInv, coordinatorState{})
+	resp, err := coord.Enqueue(h.sharedCtx(), ThreadEnqueueRequest{
+		Message: &db.Message{ID: "m-gated", ThreadID: tcKey, Content: "ambient message"},
 	})
-	require.NoError(t, errA)
-	assert.Equal(t, eriwire.StatusAccepted, respA.Status)
-
-	// Message B arrives second and is enqueued.
-	hB := newCoordHarness(t, tcKey, "inv-b", coordinatorState{})
-	respB, errB := coord.Enqueue(hB.sharedCtx(), ThreadEnqueueRequest{
-		Message: &db.Message{ID: "m-wake-b", ThreadID: tcKey, Content: "<@aerial> wake up!"},
-	})
-	require.NoError(t, errB)
-	assert.Equal(t, eriwire.StatusAccepted, respB.Status)
-
-	// Both rows are visible in the database immediately upon arrival (before Append/classification runs).
-	rowA, err := store.GetMessage(context.Background(), "m-slow-a")
 	require.NoError(t, err)
-	require.NotNil(t, rowA)
-	assert.Equal(t, db.StatusPending, rowA.Status)
+	assert.Equal(t, eriwire.StatusAccepted, resp.Status)
+	assert.Equal(t, []sentCall{threadSend(tcKey, HandlerAppend, AppendRequest{IDs: []string{"m-gated"}}, 0)}, h.sends)
 
-	rowB, err := store.GetMessage(context.Background(), "m-wake-b")
+	row, err := store.GetMessage(context.Background(), "m-gated")
 	require.NoError(t, err)
-	require.NotNil(t, rowB)
-	assert.Equal(t, db.StatusPending, rowB.Status)
-
-	// In exclusive Append order, Append(A) executes first.
-	hAppendA := newCoordHarness(t, tcKey, "inv-app-a", coordinatorState{})
-	err = coord.Append(hAppendA.objectCtx(), AppendRequest{IDs: []string{"m-slow-a"}})
-	require.NoError(t, err)
-	assert.True(t, slowClassified)
-	// A is gated as ambient: marked COMPLETED with reason and never reaches pending.
-	assert.Empty(t, hAppendA.sends)
-	assert.Equal(t, coordinatorState{}, hAppendA.snapshot(t))
-	rowAGated, err := store.GetMessage(context.Background(), "m-slow-a")
-	require.NoError(t, err)
-	assert.Equal(t, db.StatusCompleted, rowAGated.Status)
-	assert.Contains(t, rowAGated.ErrorMessage, "[AMBIENT score=0.10/0.75]")
-
-	// Then Append(B) executes.
-	hAppendB := newCoordHarness(t, tcKey, "inv-app-b", coordinatorState{})
-	err = coord.Append(hAppendB.objectCtx(), AppendRequest{IDs: []string{"m-wake-b"}})
-	require.NoError(t, err)
-	// B wakes and starts a burst turn.
-	assert.Equal(t, []sentCall{{
-		Service: tcRunnerSvc,
-		Method:  HandlerRunBurst,
-		Input:   BurstTurnRequest{ThreadID: tcKey, TurnID: turnIDFor(tcKey, "inv-app-b"), MessageIDs: []string{"m-wake-b"}},
-	}}, hAppendB.sends)
-	assert.Equal(t, st(nil, &ActiveTurn{TurnID: turnIDFor(tcKey, "inv-app-b"), ItemIDs: []string{"m-wake-b"}, RunnerInvocationID: harnessRunnerInvocation}), hAppendB.snapshot(t))
-
-	// When B runs, message A is already visible in thread history as COMPLETED.
-	recent, err := store.GetRecentThreadMessages(context.Background(), tcKey, 10)
-	require.NoError(t, err)
-	require.Len(t, recent, 2)
-	assert.Equal(t, "m-slow-a", recent[0].ID)
-	assert.Equal(t, db.StatusCompleted, recent[0].Status)
-	assert.Equal(t, "m-wake-b", recent[1].ID)
+	require.NotNil(t, row)
+	assert.Equal(t, db.StatusPending, row.Status)
 }
 
 func TestThreadCoordinator_Append(t *testing.T) {

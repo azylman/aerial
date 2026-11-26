@@ -550,11 +550,7 @@ func TestHandleDrainPending_DispatchTurn(t *testing.T) {
 func TestRegisterSteerHandler(t *testing.T) {
 	t.Parallel()
 
-	// Nil arguments no-op safely
 	mux := http.NewServeMux()
-	RegisterSteerHandler(nil, NewWorkerPool(WorkerPoolConfig{}))
-	RegisterSteerHandler(mux, nil)
-
 	pool := NewWorkerPool(WorkerPoolConfig{})
 	RegisterSteerHandler(mux, pool)
 

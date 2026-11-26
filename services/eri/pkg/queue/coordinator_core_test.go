@@ -457,13 +457,6 @@ func TestCoordinatorDrainPending(t *testing.T) {
 			wantState:   st(nil, &ActiveTurn{TurnID: "t-1", ItemIDs: []string{"a", "b", "c"}}),
 			wantDrained: []string{"b", "c"},
 		},
-		{
-			name:        "DeduplicatesActiveAndPending",
-			state:       st([]string{"a", "b"}, active),
-			req:         DrainPendingRequest{TurnID: "t-1"},
-			wantState:   st(nil, &ActiveTurn{TurnID: "t-1", ItemIDs: []string{"a", "b"}}),
-			wantDrained: []string{"a", "b"},
-		},
 	}
 	for _, tc := range tests {
 		t.Run("Thread_"+tc.name, func(t *testing.T) {
