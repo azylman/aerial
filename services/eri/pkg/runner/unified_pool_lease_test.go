@@ -1070,6 +1070,7 @@ func TestUnifiedProcessPool_ResolveTargetSessionRecord(t *testing.T) {
 
 	testCases := []struct {
 		name          string
+		engine        string
 		targetKey     string
 		recordSession string
 		recordTurns   int
@@ -1113,6 +1114,16 @@ func TestUnifiedProcessPool_ResolveTargetSessionRecord(t *testing.T) {
 			wantSession:   "",
 			wantTurns:     0,
 		},
+		{
+			name:          "non-agy engine preserves voice session without agy artifacts",
+			engine:        "claude",
+			targetKey:     "office",
+			recordSession: "sess-claude",
+			recordTurns:   4,
+			hasFileOnDisk: false,
+			wantSession:   "sess-claude",
+			wantTurns:     4,
+		},
 	}
 
 	for _, tc := range testCases {
@@ -1132,6 +1143,7 @@ func TestUnifiedProcessPool_ResolveTargetSessionRecord(t *testing.T) {
 			}
 
 			pool := NewUnifiedProcessPool(PoolConfig{
+				Engine:        tc.engine,
 				GeminiHomeDir: isolatedHome,
 				GetSessionRecord: func(ctx context.Context, key string) (SessionRecord, error) {
 					return SessionRecord{

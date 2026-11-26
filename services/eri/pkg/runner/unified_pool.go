@@ -356,7 +356,7 @@ func (p *UnifiedProcessPool) resolveTargetSessionRecord(ctx context.Context, tar
 	}
 
 	p.mu.RLock()
-	getRec, homeDir := p.cfg.GetSessionRecord, p.cfg.GeminiHomeDir
+	getRec, homeDir, engine := p.cfg.GetSessionRecord, p.cfg.GeminiHomeDir, p.cfg.Engine
 	p.mu.RUnlock()
 
 	var rec SessionRecord
@@ -369,7 +369,9 @@ func (p *UnifiedProcessPool) resolveTargetSessionRecord(ctx context.Context, tar
 	if rec.ActiveSessionID != "" {
 		d, ok := p.Get(trimmedKey)
 		matchesLiveDaemon := ok && d != nil && !d.IsDirty() && d.SessionID() == rec.ActiveSessionID
-		if !matchesLiveDaemon && isStaleIsolatedSession(homeDir, rec.ActiveSessionID) {
+		eng := strings.ToLower(strings.TrimSpace(engine))
+		isAgyEngine := eng == "" || eng == engineAgy
+		if !matchesLiveDaemon && isAgyEngine && isStaleIsolatedSession(homeDir, rec.ActiveSessionID) {
 			rec.ActiveSessionID, rec.TurnCount = "", 0
 		}
 	}
