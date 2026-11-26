@@ -34,6 +34,7 @@ type connector struct {
 	retryBase   time.Duration
 	pingTimeout time.Duration
 	after       func(time.Duration) <-chan time.Time
+	openDB      func(driverName, dataSourceName string) (*sql.DB, error)
 }
 
 // defaultConnector is the policy OpenSQL uses; pgutil's own tests build
@@ -99,7 +100,16 @@ func (c connector) open(ctx context.Context, dsn string, opts SQLOptions) (*sql.
 
 // ping runs one open+ping attempt, closing the handle when the ping fails.
 func (c connector) ping(ctx context.Context, dsn string) (*sql.DB, error) {
-	database, err := sql.Open(c.driver, dsn)
+	var database *sql.DB
+	var err error
+	switch {
+	case c.openDB != nil:
+		database, err = c.openDB(c.driver, dsn)
+	case c.driver == "pgx":
+		database, err = OpenTracedPgxDB(dsn)
+	default:
+		database, err = sql.Open(c.driver, dsn)
+	}
 	if err != nil {
 		return nil, err
 	}

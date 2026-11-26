@@ -34,6 +34,9 @@ func TestNewPool(t *testing.T) {
 			if got := pool.Config().MaxConns; got != tc.opts.MaxConns {
 				t.Fatalf("MaxConns = %d, want %d", got, tc.opts.MaxConns)
 			}
+			if pool.Config().ConnConfig.Tracer == nil {
+				t.Fatalf("expected Tracer to be set on pool ConnConfig")
+			}
 			pool.Close()
 		})
 	}

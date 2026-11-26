@@ -144,6 +144,29 @@ func TestConnectorOpen(t *testing.T) {
 	}
 }
 
+func TestConnectorCustomOpen(t *testing.T) {
+	t.Parallel()
+	var customCalled bool
+	c := connector{
+		driver:      "custom",
+		maxAttempts: 1,
+		retryBase:   time.Millisecond,
+		pingTimeout: time.Second,
+		after:       immediateAfter,
+		openDB: func(driverName, dataSourceName string) (*sql.DB, error) {
+			customCalled = true
+			return nil, errors.New("custom open failure")
+		},
+	}
+	_, err := c.open(context.Background(), "postgres://u:p@db/app", SQLOptions{})
+	if err == nil || !strings.Contains(err.Error(), "custom open failure") {
+		t.Fatalf("expected custom open failure, got %v", err)
+	}
+	if !customCalled {
+		t.Fatalf("expected custom open function to be called")
+	}
+}
+
 func TestOpenSQL(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
