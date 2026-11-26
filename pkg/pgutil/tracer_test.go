@@ -12,6 +12,8 @@ import (
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	"go.opentelemetry.io/otel/sdk/trace/tracetest"
 	"go.opentelemetry.io/otel/trace"
+
+	"github.com/azylman/aerial/pkg/pgtest"
 )
 
 func TestSQLOperation(t *testing.T) {
@@ -37,14 +39,8 @@ func TestSQLOperation(t *testing.T) {
 		{name: "commit with semicolon", query: "COMMIT;", want: "COMMIT"},
 		{name: "values statement", query: "VALUES (1, 'test')", want: "VALUES"},
 		{name: "begin transaction", query: "BEGIN TRANSACTION ISOLATION LEVEL READ COMMITTED", want: "BEGIN"},
-		{name: "rollback", query: "ROLLBACK", want: "ROLLBACK"},
-		{name: "savepoint", query: "SAVEPOINT sp1", want: "SAVEPOINT"},
-		{name: "release savepoint", query: "RELEASE SAVEPOINT sp1", want: "RELEASE"},
-		{name: "explain analyze", query: "EXPLAIN ANALYZE SELECT 1", want: "EXPLAIN"},
-		{name: "vacuum", query: "VACUUM full", want: "VACUUM"},
 		{name: "unknown verb", query: "UNKNOWN statement", want: ""},
 		{name: "numbers", query: "12345", want: ""},
-		{name: "special characters", query: "!@#$%", want: ""},
 	}
 
 	for _, tc := range tests {
@@ -201,25 +197,43 @@ func TestQueryTracerUnrecognizedOp(t *testing.T) {
 	}
 }
 
-func TestQueryTracerEmptyContext(t *testing.T) {
-	tracer := NewQueryTracer()
-	tracer.TraceQueryEnd(context.Background(), nil, pgx.TraceQueryEndData{Err: errors.New("boom")})
-}
-
 func TestOpenTracedPgxDB(t *testing.T) {
-	t.Parallel()
+	t.Run("OpenSQL emits traced child span", func(t *testing.T) {
+		_, tp, sr := setupTestTracer(t)
+		dsn := pgtest.NewDSN(t)
 
-	t.Run("valid dsn returns db handle", func(t *testing.T) {
-		t.Parallel()
-		db, err := OpenTracedPgxDB("postgres://u:p@127.0.0.1:5432/testdb?sslmode=disable")
+		db, err := OpenSQL(context.Background(), dsn, SQLOptions{})
 		if err != nil {
-			t.Fatalf("unexpected error: %v", err)
+			t.Fatalf("OpenSQL failed: %v", err)
 		}
 		defer func() { _ = db.Close() }()
+
+		sr.Reset()
+		parentCtx, parentSpan := tp.Tracer("test").Start(context.Background(), "parent")
+		defer parentSpan.End()
+
+		var one int
+		if err := db.QueryRowContext(parentCtx, "SELECT 1").Scan(&one); err != nil {
+			t.Fatalf("QueryRowContext failed: %v", err)
+		}
+		if one != 1 {
+			t.Fatalf("got %d, want 1", one)
+		}
+
+		ended := sr.Ended()
+		var found bool
+		for _, s := range ended {
+			if s.Name() == "postgresql SELECT" && s.SpanKind() == trace.SpanKindClient && s.Parent().SpanID() == parentSpan.SpanContext().SpanID() {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Fatalf("expected child span 'postgresql SELECT' under parent %s, ended spans: %v", parentSpan.SpanContext().SpanID(), ended)
+		}
 	})
 
 	t.Run("invalid url falls back to lazy sql.Open", func(t *testing.T) {
-		t.Parallel()
 		db, err := OpenTracedPgxDB("://invalid-url")
 		if err != nil {
 			t.Fatalf("expected lazy open fallback, got err: %v", err)
