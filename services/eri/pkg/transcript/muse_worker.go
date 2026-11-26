@@ -55,12 +55,32 @@ func isSkippedRuntimeDir(name string) bool {
 	return name == "" || name == "ephemeral" || strings.HasPrefix(name, ".")
 }
 
-func runtimeBaseDirs(brainDir string) []string {
-	return []string{
-		filepath.Clean(filepath.Join(brainDir, "..", "runtimes")),
-		filepath.Clean(filepath.Join(brainDir, "..", "..", "..", "..")),
-		filepath.Clean(filepath.Join(brainDir, "..", "..", "..", "runtimes")),
+func isRuntimeBrainDir(brainDir string) (string, bool) {
+	cleaned := filepath.Clean(brainDir)
+	slash := filepath.ToSlash(cleaned)
+	if !strings.HasSuffix(slash, "/.gemini/antigravity-cli/brain") &&
+		!strings.HasSuffix(slash, "/.gemini/antigravity/brain") &&
+		slash != ".gemini/antigravity-cli/brain" &&
+		slash != ".gemini/antigravity/brain" {
+		return "", false
 	}
+	parent := filepath.Clean(filepath.Join(cleaned, "..", "..", "..", ".."))
+	if filepath.Base(parent) != "runtimes" {
+		return "", false
+	}
+	return parent, true
+}
+
+func runtimeBaseDirs(brainDir string) []string {
+	bases := []string{
+		filepath.Clean(filepath.Join(brainDir, "..", "runtimes")),
+	}
+	if parent, ok := isRuntimeBrainDir(brainDir); ok {
+		if parent != bases[0] {
+			bases = append(bases, parent)
+		}
+	}
+	return bases
 }
 
 func runtimeSubdirBases(brainDir, subDir string) []string {

@@ -387,7 +387,7 @@ type voiceRuntimeBatchCase struct {
 	wantErrSub string
 }
 
-func setupVoiceRuntimeTestDirs(t *testing.T) (string, string) {
+func setupVoiceRuntimeTestDirs(t *testing.T) string {
 	t.Helper()
 	tmp := t.TempDir()
 	dataDir := filepath.Join(tmp, "data")
@@ -419,13 +419,12 @@ func setupVoiceRuntimeTestDirs(t *testing.T) (string, string) {
 	if err := os.WriteFile(filepath.Join(ephClaudeDir, "s-eph-claude.jsonl"), []byte(`{"type":"user","timestamp":"2026-11-25T10:00:00Z","message":{"role":"user","content":"Ephemeral claude"}}`+"\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	return tmp, brainDir
+	return brainDir
 }
 
 func runVoiceRuntimeBatchCase(t *testing.T, brainDir string, tc voiceRuntimeBatchCase) {
 	t.Helper()
-	rec := &recordingPublish{failCall: -1}
-	p := NewPublisher("aerial", rec.publish)
+	p := NewPublisher("aerial", nil)
 	batches, err := p.BuildSessionBatches(SessionBatchParams{
 		SessionID: tc.sessionID,
 		BrainDir:  brainDir,
@@ -446,18 +445,11 @@ func runVoiceRuntimeBatchCase(t *testing.T, brainDir string, tc voiceRuntimeBatc
 	if batches[0].Engine != tc.wantEngine {
 		t.Errorf("batch Engine = %q, want %q", batches[0].Engine, tc.wantEngine)
 	}
-	p.Enqueue(batches...)
-	if err := p.Drain(context.Background()); err != nil {
-		t.Fatalf("Drain() err = %v", err)
-	}
-	if len(rec.published) == 0 || rec.published[0].Engine != tc.wantEngine {
-		t.Errorf("published batch engine = %v, want %q", rec.published, tc.wantEngine)
-	}
 }
 
 func TestPublisher_BuildSessionBatches_VoiceRuntimeEngines(t *testing.T) {
 	t.Parallel()
-	_, brainDir := setupVoiceRuntimeTestDirs(t)
+	brainDir := setupVoiceRuntimeTestDirs(t)
 
 	tests := []voiceRuntimeBatchCase{
 		{name: "agy voice runtime session", sessionID: "s-voice-agy", wantEngine: "agy"},

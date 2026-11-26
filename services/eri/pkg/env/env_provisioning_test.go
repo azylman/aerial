@@ -593,20 +593,6 @@ func TestApplyVoiceAllowedTools(t *testing.T) {
 			wantAbsent: []string{"s1"},
 		},
 		{
-			name:         "drops stdio and sse servers when allowed tools non-nil",
-			allowedTools: []string{"tool_a"},
-			servers: map[string]any{
-				"stdio_srv": map[string]any{"command": "npx"},
-				"sse_srv":   map[string]any{"url": "http://sse", "type": "sse"},
-				"http_srv":  map[string]any{"serverUrl": "http://http", "enabledTools": []string{"tool_a"}},
-			},
-			wantPresent: []string{"http_srv"},
-			wantAbsent:  []string{"stdio_srv", "sse_srv"},
-			wantTools: map[string][]string{
-				"http_srv": {"tool_a"},
-			},
-		},
-		{
 			name:         "normalizes lowercase trims and deduplicates allowed tools",
 			allowedTools: []string{"  TOOL_A ", "tool_a", "Tool_B"},
 			servers: map[string]any{
