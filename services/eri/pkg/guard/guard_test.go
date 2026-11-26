@@ -13,6 +13,7 @@ import (
 	"reflect"
 	"slices"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -751,13 +752,16 @@ type invocationSteerCase struct {
 	serverBody   string
 	withSteerer  bool
 	wantSteps    []string
+	wantCalls    int
 }
 
 func runInvocationSteerCase(t *testing.T, tc invocationSteerCase) {
 	t.Helper()
 	opts := testOptions(t)
+	var calls atomic.Int32
 	if tc.withSteerer {
 		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			calls.Add(1)
 			w.WriteHeader(tc.serverStatus)
 			_, _ = w.Write([]byte(tc.serverBody))
 		}))
@@ -780,6 +784,9 @@ func runInvocationSteerCase(t *testing.T, tc invocationSteerCase) {
 	if !slices.Equal(gotSteps, tc.wantSteps) {
 		t.Fatalf("InjectSteps = %v, want %v", gotSteps, tc.wantSteps)
 	}
+	if gotCalls := int(calls.Load()); gotCalls != tc.wantCalls {
+		t.Fatalf("drain server calls = %d, want %d", gotCalls, tc.wantCalls)
+	}
 }
 
 type claudeSteerCase struct {
@@ -790,13 +797,16 @@ type claudeSteerCase struct {
 	withSteerer  bool
 	wantDecision string
 	wantContext  string
+	wantCalls    int
 }
 
 func runClaudeSteerCase(t *testing.T, tc claudeSteerCase) {
 	t.Helper()
 	opts := testOptions(t)
+	var calls atomic.Int32
 	if tc.withSteerer {
 		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			calls.Add(1)
 			w.WriteHeader(tc.serverStatus)
 			_, _ = w.Write([]byte(tc.serverBody))
 		}))
@@ -818,6 +828,9 @@ func runClaudeSteerCase(t *testing.T, tc claudeSteerCase) {
 	if claudeResp.HookSpecificOutput.AdditionalContext != tc.wantContext {
 		t.Errorf("AdditionalContext = %q, want %q", claudeResp.HookSpecificOutput.AdditionalContext, tc.wantContext)
 	}
+	if gotCalls := int(calls.Load()); gotCalls != tc.wantCalls {
+		t.Fatalf("drain server calls = %d, want %d", gotCalls, tc.wantCalls)
+	}
 }
 
 func TestProcessWithOptions_Invocation(t *testing.T) {
@@ -830,6 +843,7 @@ func TestProcessWithOptions_Invocation(t *testing.T) {
 			serverBody:   `{"prompts": ["steering text"]}`,
 			withSteerer:  true,
 			wantSteps:    nil,
+			wantCalls:    0,
 		},
 		{
 			name:         "invocationNum 2 injects steerer steps",
@@ -838,12 +852,14 @@ func TestProcessWithOptions_Invocation(t *testing.T) {
 			serverBody:   `{"prompts": ["steer msg 1", "steer msg 2"]}`,
 			withSteerer:  true,
 			wantSteps:    []string{"steer msg 1", "steer msg 2"},
+			wantCalls:    1,
 		},
 		{
 			name:         "invocationNum 2 with nil steerer",
 			inputPayload: `{"conversationId": "c1", "invocationNum": 2}`,
 			withSteerer:  false,
 			wantSteps:    nil,
+			wantCalls:    0,
 		},
 	}
 
@@ -866,6 +882,7 @@ func TestProcessWithOptions_Claude(t *testing.T) {
 			withSteerer:  true,
 			wantDecision: "allow",
 			wantContext:  "prompt A\n\nprompt B",
+			wantCalls:    1,
 		},
 		{
 			name:         "allowed with empty steerer",
@@ -875,6 +892,7 @@ func TestProcessWithOptions_Claude(t *testing.T) {
 			withSteerer:  true,
 			wantDecision: "allow",
 			wantContext:  "",
+			wantCalls:    1,
 		},
 		{
 			name:         "allowed with nil steerer",
@@ -882,6 +900,7 @@ func TestProcessWithOptions_Claude(t *testing.T) {
 			withSteerer:  false,
 			wantDecision: "allow",
 			wantContext:  "",
+			wantCalls:    0,
 		},
 		{
 			name:         "denied does not inject context",
@@ -891,6 +910,7 @@ func TestProcessWithOptions_Claude(t *testing.T) {
 			withSteerer:  true,
 			wantDecision: "deny",
 			wantContext:  "",
+			wantCalls:    0,
 		},
 		{
 			name:         "allowed subagent does not inject context",
@@ -900,6 +920,7 @@ func TestProcessWithOptions_Claude(t *testing.T) {
 			withSteerer:  true,
 			wantDecision: "allow",
 			wantContext:  "",
+			wantCalls:    0,
 		},
 	}
 
@@ -916,7 +937,9 @@ func TestProcessWithOptions(t *testing.T) {
 
 	t.Run("general tool mode with steerer", func(t *testing.T) {
 		t.Parallel()
+		var calls atomic.Int32
 		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			calls.Add(1)
 			w.WriteHeader(http.StatusOK)
 			_, _ = w.Write([]byte(`{"prompts": ["some prompt"]}`))
 		}))
@@ -937,13 +960,16 @@ func TestProcessWithOptions(t *testing.T) {
 		if d.Decision != DecisionAllow {
 			t.Errorf("Decision = %q, want allow", d.Decision)
 		}
+		if gotCalls := int(calls.Load()); gotCalls != 0 {
+			t.Errorf("drain server calls = %d, want 0", gotCalls)
+		}
 	})
 
 	t.Run("nil getenv fallback in options", func(t *testing.T) {
 		t.Parallel()
 		var out bytes.Buffer
 		opts := Options{BatchDir: t.TempDir()} // Getenv is nil
-		inputPayload := `{"toolCall": {"name": "run_command", "args": {"CommandLine": "git commit -m ghp_111111111111111111111111111111"}}, "conversationId": "c1"}`
+		inputPayload := `{"toolCall": {"name": "run_command", "args": {"CommandLine": "git commit -m ` + testPAT + `"}}, "conversationId": "c1"}`
 		err := ProcessWithOptions(strings.NewReader(inputPayload), &out, "commit", opts)
 		if err != nil {
 			t.Fatalf("unexpected error with nil Getenv: %v", err)
