@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -707,6 +708,114 @@ func TestExecutor_SyncBuildWidget_ClearsTerminalBuildActiveSteps(t *testing.T) {
 				assert.True(t, ok)
 				assert.NotNil(t, val)
 			}
+		})
+	}
+}
+
+func TestIsSteerDispatchID(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name       string
+		chunkID    string
+		dispatchID string
+		want       bool
+	}{
+		{name: "empty chunk id", chunkID: "", dispatchID: "vanadis-c1-steer-abc", want: false},
+		{name: "empty dispatch id", chunkID: "c1", dispatchID: "", want: false},
+		{name: "exact prefix without suffix", chunkID: "c1", dispatchID: "vanadis-c1-steer-", want: false},
+		{name: "valid steer dispatch id", chunkID: "c1", dispatchID: "vanadis-c1-steer-123456789012", want: true},
+		{name: "mismatched chunk id", chunkID: "c1", dispatchID: "vanadis-c2-steer-123456789012", want: false},
+		{name: "chunk id containing steer false-match guard", chunkID: "my-steer-chunk", dispatchID: "vanadis-my-steer-chunk-cifail-1", want: false},
+		{name: "chunk id containing steer valid steer dispatch", chunkID: "my-steer-chunk", dispatchID: "vanadis-my-steer-chunk-steer-123456789012", want: true},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			got := IsSteerDispatchID(tc.chunkID, tc.dispatchID)
+			assert.Equal(t, tc.want, got)
+		})
+	}
+}
+
+func TestDispatchChunkSteer(t *testing.T) {
+	t.Parallel()
+	errDispatch := errors.New("dispatch rejected")
+	tests := []struct {
+		name        string
+		nilExec     bool
+		nilEri      bool
+		dispatchErr error
+		build       model.VanadisBuild
+		chunk       model.VanadisChunk
+		prompt      string
+		seed        string
+		wantErr     string
+		wantPrefix  string
+	}{
+		{
+			name:    "nil executor",
+			nilExec: true,
+			build:   model.VanadisBuild{ID: "b1"},
+			chunk:   model.VanadisChunk{ID: "c1"},
+			prompt:  "fix it",
+			wantErr: "executor or eri client is nil",
+		},
+		{
+			name:    "nil eri client",
+			nilEri:  true,
+			build:   model.VanadisBuild{ID: "b1"},
+			chunk:   model.VanadisChunk{ID: "c1"},
+			prompt:  "fix it",
+			wantErr: "executor or eri client is nil",
+		},
+		{
+			name:        "eri dispatch error propagates",
+			dispatchErr: errDispatch,
+			build:       model.VanadisBuild{ID: "b1", Agent: "aerial", ThreadID: "th-1"},
+			chunk:       model.VanadisChunk{ID: "c1", Effort: "high"},
+			prompt:      "steer prompt",
+			wantErr:     "dispatch rejected",
+		},
+		{
+			name:       "successful dispatch",
+			build:      model.VanadisBuild{ID: "b1", Agent: "custom-agent", ThreadID: "th-1"},
+			chunk:      model.VanadisChunk{ID: "c1", Effort: "high"},
+			prompt:     "steer prompt",
+			seed:       "seed-123",
+			wantPrefix: "vanadis-c1-steer-",
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			var exec *Executor
+			eri := &eritest.Client{DispatchErr: tc.dispatchErr}
+			if !tc.nilExec {
+				var client EriClient
+				if !tc.nilEri {
+					client = eri
+				}
+				exec = NewExecutor("", client, nil, "tok", "owner", nil)
+			}
+			dispatchID, err := exec.DispatchChunkSteer(context.Background(), tc.build, tc.chunk, tc.prompt, tc.seed)
+			if tc.wantErr != "" {
+				require.Error(t, err)
+				assert.Contains(t, err.Error(), tc.wantErr)
+				assert.Empty(t, dispatchID)
+				return
+			}
+			require.NoError(t, err)
+			assert.NotEmpty(t, dispatchID)
+			assert.True(t, strings.HasPrefix(dispatchID, tc.wantPrefix))
+			require.NotNil(t, eri.LastDispatch)
+			assert.Equal(t, tc.build.Agent, eri.LastDispatch.Agent)
+			assert.Equal(t, dispatchID, eri.LastDispatch.ID)
+			assert.Equal(t, "vanadis", eri.LastDispatch.Source)
+			assert.Equal(t, "vanadis-c1", eri.LastDispatch.SessionID)
+			assert.Equal(t, tc.build.ThreadID, eri.LastDispatch.TargetID)
+			assert.Equal(t, "medium", eri.LastDispatch.Effort)
+			assert.False(t, eri.LastDispatch.SkipIfActive)
+			assert.Contains(t, eri.LastDispatch.Prompt, tc.prompt)
 		})
 	}
 }

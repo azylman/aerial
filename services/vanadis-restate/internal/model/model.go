@@ -41,6 +41,12 @@ type FailChunkResponse = buildplan.FailChunkResponse
 // AttachChunkPRResponse represents the result of attaching a PR to a chunk or standalone build.
 type AttachChunkPRResponse = buildplan.AttachChunkPRResponse
 
+// SteerChunkRequest represents a request to inject a mid-turn steering prompt into an active chunk.
+type SteerChunkRequest = buildplan.SteerChunkRequest
+
+// SteerChunkResult reports the result of steering an active chunk.
+type SteerChunkResult = buildplan.SteerChunkResult
+
 // ErrInvalidBuildInput reports malformed build or chunk input; see pkg/buildplan.
 var ErrInvalidBuildInput = buildplan.ErrInvalidBuildInput
 

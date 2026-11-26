@@ -116,9 +116,14 @@ type RetryActionChunkRequest = buildplan.RetryActionChunkRequest
 
 type RetryActionChunkResult = buildplan.RetryActionChunkResult
 
+type SteerChunkRequest = buildplan.SteerChunkRequest
+
+type SteerChunkResult = buildplan.SteerChunkResult
+
 // VanadisStore is the persistence authority for multi-chunk builds.
 type VanadisStore interface {
 	RetryActionChunk(ctx context.Context, req RetryActionChunkRequest) (*RetryActionChunkResult, error)
+	SteerChunk(ctx context.Context, buildID, chunkRef string, req SteerChunkRequest) (*SteerChunkResult, error)
 	CreateBuild(ctx context.Context, build model.VanadisBuild, chunks []model.VanadisChunk) error
 	GetBuild(ctx context.Context, buildID string) (*model.VanadisBuild, []model.VanadisChunk, error)
 	ReserveChunkForLaunch(ctx context.Context, chunkID string) error
