@@ -536,6 +536,9 @@ func TestTraceparent(t *testing.T) {
 			if got := Traceparent(tc.ctx); got != tc.want {
 				t.Errorf("Traceparent = %q, want %q", got, tc.want)
 			}
+			if got := TraceparentFromContext(tc.ctx); got != tc.want {
+				t.Errorf("TraceparentFromContext = %q, want %q", got, tc.want)
+			}
 		})
 	}
 }

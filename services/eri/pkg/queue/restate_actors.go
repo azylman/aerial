@@ -1,6 +1,7 @@
 package queue
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"log"
@@ -11,6 +12,7 @@ import (
 	restate "github.com/restatedev/sdk-go"
 
 	"github.com/azylman/aerial/pkg/eriwire"
+	"github.com/azylman/aerial/pkg/restateingress"
 	"github.com/azylman/aerial/services/eri/pkg/config"
 	"github.com/azylman/aerial/services/eri/pkg/db"
 )
@@ -198,7 +200,7 @@ func (v *VoiceSessionObject) Ask(ctx restate.ObjectContext, req VoiceSessionRequ
 		turnID = uuid.New().String()
 	}
 
-	res, err := restate.Run(ctx, func(rc restate.RunContext) (VoiceSessionResult, error) {
+	res, err := restateingress.RunInSpan(ctx, "voice.ask", func(stepCtx context.Context, rc restate.RunContext) (VoiceSessionResult, error) {
 		if v.pool == nil {
 			return VoiceSessionResult{}, restate.ToTerminalError(errors.New("worker pool is nil"), restate.WithErrorCode(500))
 		}
@@ -207,7 +209,7 @@ func (v *VoiceSessionObject) Ask(ctx restate.ObjectContext, req VoiceSessionRequ
 		publishEvent := func(ev VoiceStreamEvent) {
 			if bus := v.pool.EventBus(); bus != nil {
 				msgID := fmt.Sprintf("%s:%s:%d", turnID, ev.Event, time.Now().UnixNano())
-				if pErr := bus.Publish(rc, subject, msgID, ev); pErr != nil {
+				if pErr := bus.Publish(stepCtx, subject, msgID, ev); pErr != nil {
 					log.Printf("[VoiceSession] Error publishing voice stream event: %v", pErr)
 				}
 			}
@@ -227,7 +229,7 @@ func (v *VoiceSessionObject) Ask(ctx restate.ObjectContext, req VoiceSessionRequ
 			})
 		}
 
-		reply, convID, turnErr := v.pool.ExecuteVoiceTurn(rc, req.Prompt, deviceKey, onStatus, onSentence)
+		reply, convID, turnErr := v.pool.ExecuteVoiceTurn(stepCtx, req.Prompt, deviceKey, onStatus, onSentence)
 		if turnErr != nil {
 			publishEvent(VoiceStreamEvent{
 				Event: "error",
