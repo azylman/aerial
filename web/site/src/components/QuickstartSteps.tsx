@@ -26,31 +26,19 @@ export const QUICKSTART_STEPS: readonly QuickstepItem[] = [
   },
   {
     id: 2,
-    title: 'Fork Config & Bootstrap via Flux CD',
+    title: 'Fork Config, Seed Secrets & Bootstrap Flux CD',
     badge: 'Two-Repo GitOps',
     summary:
-      'Fork azylman/aerial-config-example to create your private config repository and bootstrap Flux CD.',
-    command: `export GITHUB_PAT="your-github-pat"\n\ncurl -s https://fluxcd.io/install.sh | sudo bash\nGITHUB_TOKEN="$GITHUB_PAT" flux bootstrap github \\\n  --owner=your-username \\\n  --repository=my-aerial-config \\\n  --branch=main \\\n  --path=k8s \\\n  --personal`,
+      'Fork azylman/aerial-config-example, seed initial bootstrap credentials, and bootstrap Flux CD.',
+    command: `export GITHUB_PAT="your-github-pat"\nexport DISCORD_BOT_TOKEN="your-discord-bot-token"\n\nkubectl create secret generic aerial-bootstrap-secrets \\\n  --from-literal=DISCORD_BOT_TOKEN="$DISCORD_BOT_TOKEN" \\\n  --from-literal=GITHUB_PAT="$GITHUB_PAT"\n\ncurl -s https://fluxcd.io/install.sh | sudo bash\nGITHUB_TOKEN="$GITHUB_PAT" flux bootstrap github \\\n  --owner=your-username \\\n  --repository=my-aerial-config \\\n  --branch=main \\\n  --path=k8s \\\n  --personal`,
     notes: [
       'Set admin_users in config.yaml to your Discord user ID before running bootstrap.',
-      'Pass tokens in memory to prevent writing plaintext secrets to disk.',
-      'Flux reconciles base operators, databases, and platform services automatically.',
+      'Job/infisical-bootstrap and External Secrets Operator automatically initialize Infisical in-cluster.',
+      'Derives AERIAL_CONFIG_REPO_URL and syncs credentials into Infisical without requiring the Infisical CLI.',
     ],
   },
   {
     id: 3,
-    title: 'Bootstrap Infisical & Populate Secrets',
-    badge: 'Zero-Plaintext Vault',
-    summary:
-      'Initialize Infisical machine identity, store the authentication token in Kubernetes, and save API credentials.',
-    command: `# 1. Bootstrap Infisical and store the returned Machine Identity Token Auth token\nexport INFISICAL_TOKEN="$(infisical bootstrap \\\n  --domain http://<node-ip> \\\n  --email admin@example.com \\\n  --password 'your-admin-password' \\\n  --organization aerial \\\n  | jq -r '.identity.credentials.token')"\n\nkubectl create secret generic infisical-universal-auth \\\n  --from-literal=INFISICAL_TOKEN="$INFISICAL_TOKEN"\n\n# 2. Populate external application secrets in Infisical (project slug aerial, default environment)\ninfisical secrets set --env=default \\\n  DISCORD_BOT_TOKEN="your-discord-bot-token" \\\n  GITHUB_PAT="$GITHUB_PAT"`,
-    notes: [
-      'External Secrets Operator generates database, message broker, and webhook credentials.',
-      'Synchronize secrets directly into scoped Kubernetes Secrets without disk storage.',
-    ],
-  },
-  {
-    id: 4,
     title: 'Authenticate Agent CLI & Verify Rollout',
     badge: 'Engine Auth & Verify',
     summary:
