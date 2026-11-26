@@ -1390,18 +1390,22 @@ func (l *unifiedSessionLease) ShouldRotate() bool {
 }
 
 func (l *unifiedSessionLease) Release() error {
+	if l == nil || l.pool == nil {
+		return nil
+	}
 	var releaseErr error
 	l.releaseOnce.Do(func() {
-		defer l.pool.releaseTargetLock(l.targetKey, l.lock)
 		if l.pool.Draining() {
 			if evictErr := l.pool.EvictSession(l.targetKey); evictErr != nil {
 				log.Printf("[UnifiedProcessPool] Warning evicting session for %s during drain: %v", l.targetKey, evictErr)
 				releaseErr = evictErr
 			}
+			l.pool.releaseTargetLock(l.targetKey, l.lock)
 			return
 		}
 		shouldRotate, reason := l.evaluateRotation()
 		if !shouldRotate {
+			l.pool.releaseTargetLock(l.targetKey, l.lock)
 			return
 		}
 		l.mu.RLock()
@@ -1409,30 +1413,60 @@ func (l *unifiedSessionLease) Release() error {
 		oldSessionID := l.sessionID
 		l.mu.RUnlock()
 
+		l.pool.mu.RLock()
+		if l.pool.closed {
+			l.pool.mu.RUnlock()
+			l.pool.releaseTargetLock(targetKey, l.lock)
+			releaseErr = fmt.Errorf("process pool is closed")
+			return
+		}
+		l.pool.bgWg.Add(1)
+		l.pool.mu.RUnlock()
+
 		log.Printf("[UnifiedProcessPool] Session rotation triggered for %s (reason: %s)", targetKey, reason)
 		metrics.RecordSessionRotation("turn_end", "pool", reason)
 
-		rotCtx, cancel := context.WithTimeout(l.pool.ctx, 35*time.Second)
-		defer cancel()
-		newDaemon, rotErr := l.pool.RotateDaemon(rotCtx, targetKey, "")
-		if rotErr != nil {
-			log.Printf("[UnifiedProcessPool] Warning rotating daemon for %s: %v", targetKey, rotErr)
-			if evictErr := l.pool.EvictSession(targetKey); evictErr != nil {
-				log.Printf("[UnifiedProcessPool] Warning evicting session for %s: %v", targetKey, evictErr)
-			}
-			releaseErr = rotErr
-			return
-		}
-
-		if newSessionID := newDaemon.SessionID(); l.pool.cfg.OnSessionRotated != nil && newSessionID != "" {
-			if rotErr := l.pool.cfg.OnSessionRotated(rotCtx, targetKey, oldSessionID, newSessionID); rotErr != nil {
-				log.Printf("[UnifiedProcessPool] Persistence callback failed during rotation for %s: %v. Evicting daemon to maintain DB truth.", targetKey, rotErr)
-				if evictErr := l.pool.EvictSession(targetKey); evictErr != nil {
-					log.Printf("[UnifiedProcessPool] Warning evicting session for %s: %v", targetKey, evictErr)
-				}
-				releaseErr = rotErr
-			}
-		}
+		go l.pool.rotateReleasedTarget(targetKey, oldSessionID, l.lock)
 	})
 	return releaseErr
+}
+
+func (p *UnifiedProcessPool) rotateReleasedTarget(targetKey, oldSessionID string, lock *targetLock) {
+	defer p.bgWg.Done()
+	defer p.releaseTargetLock(targetKey, lock)
+
+	if p.Draining() {
+		if evictErr := p.EvictSession(targetKey); evictErr != nil {
+			log.Printf("[UnifiedProcessPool] Warning evicting session for %s during drain: %v", targetKey, evictErr)
+		}
+		return
+	}
+
+	rotCtx, cancel := context.WithTimeout(p.ctx, 35*time.Second)
+	defer cancel()
+
+	newDaemon, rotErr := p.RotateDaemon(rotCtx, targetKey, "")
+	if rotErr != nil {
+		log.Printf("[UnifiedProcessPool] Warning rotating daemon for %s: %v", targetKey, rotErr)
+		if evictErr := p.EvictSession(targetKey); evictErr != nil {
+			log.Printf("[UnifiedProcessPool] Warning evicting session for %s: %v", targetKey, evictErr)
+		}
+		return
+	}
+
+	if p.Draining() {
+		if evictErr := p.EvictSession(targetKey); evictErr != nil {
+			log.Printf("[UnifiedProcessPool] Warning evicting session for %s during drain: %v", targetKey, evictErr)
+		}
+		return
+	}
+
+	if newSessionID := newDaemon.SessionID(); p.cfg.OnSessionRotated != nil && newSessionID != "" {
+		if rotErr := p.cfg.OnSessionRotated(rotCtx, targetKey, oldSessionID, newSessionID); rotErr != nil {
+			log.Printf("[UnifiedProcessPool] Persistence callback failed during rotation for %s: %v. Evicting daemon to maintain DB truth.", targetKey, rotErr)
+			if evictErr := p.EvictSession(targetKey); evictErr != nil {
+				log.Printf("[UnifiedProcessPool] Warning evicting session for %s: %v", targetKey, evictErr)
+			}
+		}
+	}
 }

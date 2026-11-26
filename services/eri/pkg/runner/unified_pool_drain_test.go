@@ -3,6 +3,7 @@ package runner
 import (
 	"context"
 	"errors"
+	"sync/atomic"
 	"testing"
 
 	"github.com/google/uuid"
@@ -166,5 +167,67 @@ func TestUnifiedProcessPool_AcquireLease_DrainColdCheck_Suite(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			runDrainColdCase(t, tc)
 		})
+	}
+}
+
+func TestUnifiedProcessPool_DrainDuringBackgroundRotation(t *testing.T) {
+	ctx := context.Background()
+	spawnStarted := make(chan struct{})
+	proceedSpawn := make(chan struct{})
+	var spawnCount atomic.Int32
+	var onRotatedCalled atomic.Bool
+
+	mock := newPipeMockSpawner(pipeMockSpawnerOpts{
+		pid:        352,
+		initSessID: uuid.New().String(),
+		echoRes:    "ok",
+		onSpawn: func(cfg DaemonConfig) {
+			if spawnCount.Add(1) == 2 {
+				close(spawnStarted)
+				<-proceedSpawn
+			}
+		},
+	})
+
+	pool := NewUnifiedProcessPool(PoolConfig{
+		MaxSessionTurns: 1,
+		OnSessionRotated: func(ctx context.Context, targetKey, oldSessionID, newSessionID string) error {
+			onRotatedCalled.Store(true)
+			return nil
+		},
+	}, mock)
+	defer pool.Close()
+
+	const targetKey = "drain-bg-target"
+	lease, err := pool.AcquireLease(ctx, targetKey)
+	if err != nil {
+		t.Fatalf("AcquireLease failed: %v", err)
+	}
+
+	if _, err := lease.Execute(ctx, &TurnContext{TurnID: "t1", Prompt: "p1", Ctx: ctx}); err != nil {
+		t.Fatalf("Execute failed: %v", err)
+	}
+
+	// Release triggers background rotation (spawnCount reaches 2)
+	if err := lease.Release(); err != nil {
+		t.Fatalf("Release failed: %v", err)
+	}
+
+	<-spawnStarted
+	// While spawner is blocked in RotateDaemon during background rotation, begin drain:
+	pool.BeginDrain()
+	if !pool.Draining() {
+		t.Fatalf("expected pool to be draining")
+	}
+
+	// Unblock spawn and wait for background upkeep to settle
+	close(proceedSpawn)
+	waitPoolBackground(pool)
+
+	if poolHasDaemon(pool, targetKey) {
+		t.Errorf("expected daemon to be evicted when pool drained during background rotation")
+	}
+	if onRotatedCalled.Load() {
+		t.Errorf("expected OnSessionRotated NOT to be called when pool drains during background rotation")
 	}
 }
