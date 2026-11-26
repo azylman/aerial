@@ -69,6 +69,7 @@ type turnExecution struct {
 	drainedIDs                                                                                  []string
 	drainedPrompts                                                                              []string
 	steeredDispatches                                                                           []db.Dispatch
+	ingressGated                                                                                bool
 }
 
 func (te *turnExecution) touchSessionIDLocked(id string) {
@@ -626,15 +627,7 @@ func (te *turnExecution) startTurnIndicators() {
 }
 
 func (te *turnExecution) isIngressGated() bool {
-	if len(te.burst) == 0 {
-		return false
-	}
-	for _, m := range te.burst {
-		if m.ErrorMessage == IngressWakeTag {
-			return true
-		}
-	}
-	return false
+	return te != nil && te.ingressGated
 }
 
 func (te *turnExecution) evaluateAmbientWake() (shouldExit bool) {

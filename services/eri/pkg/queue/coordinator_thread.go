@@ -6,6 +6,7 @@ import (
 	"errors"
 	"log"
 	"strings"
+	"sync"
 	"time"
 
 	restate "github.com/restatedev/sdk-go"
@@ -32,6 +33,8 @@ type ThreadCoordinator struct {
 	resolver  threadResolver
 	agentName string
 	core      coordinatorCore
+	gateMu    sync.Mutex
+	gateLocks map[string]*sync.Mutex
 }
 
 // NewThreadCoordinator constructs a ThreadCoordinator for agentName.
@@ -41,12 +44,27 @@ func NewThreadCoordinator(store coordinatorStore, resolver threadResolver, agent
 		store:     store,
 		resolver:  resolver,
 		agentName: agentName,
+		gateLocks: make(map[string]*sync.Mutex),
 		core: coordinatorCore{
 			selfService:   ThreadSessionServiceName(agentName),
 			runnerService: TurnRunnerServiceName(agentName),
 			records:       threadRecords{store: store},
 		},
 	}
+}
+
+func (t *ThreadCoordinator) threadGateLock(threadID string) *sync.Mutex {
+	t.gateMu.Lock()
+	defer t.gateMu.Unlock()
+	if t.gateLocks == nil {
+		t.gateLocks = make(map[string]*sync.Mutex)
+	}
+	l, ok := t.gateLocks[threadID]
+	if !ok {
+		l = &sync.Mutex{}
+		t.gateLocks[threadID] = l
+	}
+	return l
 }
 
 // ServiceName returns the per-agent ThreadSession service name.
@@ -62,7 +80,7 @@ type threadRecords struct {
 func (threadRecords) runnerHandler() string { return HandlerRunBurst }
 
 func (threadRecords) runnerRequest(key, turnID string, ids []string) any {
-	return BurstTurnRequest{ThreadID: key, TurnID: turnID, MessageIDs: ids}
+	return BurstTurnRequest{ThreadID: key, TurnID: turnID, MessageIDs: ids, Gated: true}
 }
 
 func (threadRecords) turnCap() int { return maxCoalescedBurstMessages }
@@ -123,6 +141,54 @@ func buildEnqueuedMessage(req ThreadEnqueueRequest, finalThreadID, fallbackID st
 	return msg
 }
 
+// resolveFinalTarget journals thread resolution for prompt messages.
+func (t *ThreadCoordinator) resolveFinalTarget(ctx restate.ObjectSharedContext, target string, req ThreadEnqueueRequest) (string, error) {
+	if req.Message != nil || t.resolver == nil {
+		return target, nil
+	}
+	resolved, err := restate.Run(ctx, func(rc restate.RunContext) (string, error) {
+		channelID := t.resolver.RedirectBuildPrompt(target, req.Prompt)
+		return t.resolver.ResolveTargetThread(channelID, strings.TrimSpace(req.Title), req.Prompt, time.Now().UTC()), nil
+	}, restate.WithName(StepResolveTargetThread))
+	if err != nil {
+		return "", err
+	}
+	if trimmed := strings.TrimSpace(resolved); trimmed != "" {
+		return trimmed, nil
+	}
+	return target, nil
+}
+
+// evaluateGatedIngress runs ingress wake evaluation for Discord messages under a per-thread gate lock.
+func (t *ThreadCoordinator) evaluateGatedIngress(ctx restate.ObjectSharedContext, final, msgID string, msg *db.Message) (bool, error) {
+	eval, ok := t.resolver.(ingressWakeEvaluator)
+	if !ok || eval == nil {
+		return true, nil
+	}
+
+	gateLock := t.threadGateLock(final)
+	gateLock.Lock()
+	defer gateLock.Unlock()
+
+	msgCopy := *msg
+	msgCopy.ID = msgID
+	msgCopy.ThreadID = final
+
+	return restate.Run(ctx, func(rc restate.RunContext) (bool, error) {
+		allowed, reason := eval.EvaluateIngressWake(rc, final, msgCopy)
+		if allowed {
+			return true, nil
+		}
+		if _, sErr := storeCall(rc, func(sc context.Context) (struct{}, error) {
+			_, skipErr := t.store.SkipMessagesIfPending(sc, []string{msgID}, reason)
+			return struct{}{}, skipErr
+		}); sErr != nil {
+			return false, sErr
+		}
+		return false, nil
+	}, restate.WithName(StepGateIngressWake))
+}
+
 // Enqueue records a message or prompt as a PENDING row and appends it to the final thread's
 // coordinator. Thread resolution (redirect plus optional thread creation) is journaled once,
 // so a retry never creates a second Discord thread.
@@ -139,24 +205,15 @@ func (t *ThreadCoordinator) Enqueue(ctx restate.ObjectSharedContext, req ThreadE
 		}
 	}
 
-	final := target
-	if req.Message == nil && t.resolver != nil {
-		resolved, err := restate.Run(ctx, func(rc restate.RunContext) (string, error) {
-			channelID := t.resolver.RedirectBuildPrompt(target, req.Prompt)
-			return t.resolver.ResolveTargetThread(channelID, strings.TrimSpace(req.Title), req.Prompt, time.Now().UTC()), nil
-		}, restate.WithName(StepResolveTargetThread))
-		if err != nil {
-			return ThreadEnqueueResponse{}, coordinatorError(err)
-		}
-		if resolved = strings.TrimSpace(resolved); resolved != "" {
-			final = resolved
-		}
+	final, err := t.resolveFinalTarget(ctx, target, req)
+	if err != nil {
+		return ThreadEnqueueResponse{}, coordinatorError(err)
 	}
 
 	if req.SkipIfActive && final == key {
-		st, err := loadCoordinatorState(ctx)
-		if err != nil {
-			return ThreadEnqueueResponse{}, coordinatorError(err)
+		st, sErr := loadCoordinatorState(ctx)
+		if sErr != nil {
+			return ThreadEnqueueResponse{}, coordinatorError(sErr)
 		}
 		if st.busy() {
 			return ThreadEnqueueResponse{Status: eriwire.StatusSkippedActive, ThreadID: final}, nil
@@ -164,45 +221,42 @@ func (t *ThreadCoordinator) Enqueue(ctx restate.ObjectSharedContext, req ThreadE
 	}
 
 	fallbackID := deriveDeterministicMessageID(ctx, final)
-	recRes, err := t.recordQueuedMessage(ctx, req, final, fallbackID)
+	msgID, err := t.recordQueuedMessage(ctx, req, final, fallbackID)
 	if err != nil {
 		return ThreadEnqueueResponse{}, coordinatorError(err)
 	}
 
-	if recRes.ShouldEnqueue {
-		restate.ObjectSend(ctx, t.ServiceName(), final, HandlerAppend).Send(AppendRequest{IDs: []string{recRes.MessageID}, SkipIfActive: req.SkipIfActive})
-	}
-	return ThreadEnqueueResponse{Status: eriwire.StatusAccepted, ThreadID: final, MessageID: recRes.MessageID}, nil
-}
-
-type recordQueuedResult struct {
-	MessageID     string `json:"message_id"`
-	ShouldEnqueue bool   `json:"should_enqueue"`
-}
-
-func (t *ThreadCoordinator) recordQueuedMessage(ctx restate.ObjectSharedContext, req ThreadEnqueueRequest, final, fallbackID string) (recordQueuedResult, error) {
-	return restate.Run(ctx, func(rc restate.RunContext) (recordQueuedResult, error) {
-		msg := buildEnqueuedMessage(req, final, fallbackID, time.Now().UTC())
-		shouldEnqueue := true
-		if req.Message != nil {
-			if eval, ok := t.resolver.(ingressWakeEvaluator); ok && eval != nil {
-				var completedReason string
-				shouldEnqueue, completedReason = eval.EvaluateIngressWake(rc, final, msg)
-				if !shouldEnqueue {
-					msg.Status = db.StatusCompleted
-					msg.ErrorMessage = completedReason
-				} else {
-					msg.ErrorMessage = IngressWakeTag
-				}
-			}
+	shouldEnqueue := true
+	if req.Message != nil {
+		var gErr error
+		shouldEnqueue, gErr = t.evaluateGatedIngress(ctx, final, msgID, req.Message)
+		if gErr != nil {
+			return ThreadEnqueueResponse{}, coordinatorError(gErr)
 		}
+	} else {
+		gateLock := t.threadGateLock(final)
+		gateLock.Lock()
+		defer gateLock.Unlock()
+	}
+
+	if shouldEnqueue {
+		restate.ObjectSend(ctx, t.ServiceName(), final, HandlerAppend).Send(AppendRequest{IDs: []string{msgID}, SkipIfActive: req.SkipIfActive})
+	}
+	return ThreadEnqueueResponse{Status: eriwire.StatusAccepted, ThreadID: final, MessageID: msgID}, nil
+}
+
+func (t *ThreadCoordinator) recordQueuedMessage(ctx restate.ObjectSharedContext, req ThreadEnqueueRequest, final, fallbackID string) (string, error) {
+	return restate.Run(ctx, func(rc restate.RunContext) (string, error) {
+		msg := buildEnqueuedMessage(req, final, fallbackID, time.Now().UTC())
+		msg.Status = db.StatusPending
+		msg.ErrorMessage = ""
 		if _, sErr := storeCall(rc, func(sc context.Context) (struct{}, error) {
 			return struct{}{}, t.store.InsertMessage(sc, msg)
 		}); sErr != nil {
 			log.Printf("[ThreadSession] Error recording message %s: %v", msg.ID, sErr)
-			return recordQueuedResult{}, sErr
+			return "", sErr
 		}
-		return recordQueuedResult{MessageID: msg.ID, ShouldEnqueue: shouldEnqueue}, nil
+		return msg.ID, nil
 	}, restate.WithName(StepRecordQueued))
 }
 

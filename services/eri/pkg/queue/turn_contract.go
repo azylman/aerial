@@ -68,9 +68,6 @@ const (
 	StepFailTurn             = "fail-turn"
 )
 
-// IngressWakeTag marks a message row that was evaluated and accepted at ingress gating.
-const IngressWakeTag = "[INGRESS_WAKE]"
-
 // TurnOutcome is how a turn ended.
 type TurnOutcome string
 
@@ -87,6 +84,7 @@ type BurstTurnRequest struct {
 	ThreadID   string   `json:"thread_id"`
 	TurnID     string   `json:"turn_id"`
 	MessageIDs []string `json:"message_ids"`
+	Gated      bool     `json:"gated,omitempty"`
 }
 
 type DispatchTurnRequest struct {

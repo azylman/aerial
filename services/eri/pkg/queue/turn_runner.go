@@ -40,7 +40,7 @@ const (
 // turnSteps is the narrow set of WorkerPool step functions the TurnRunner journals.
 type turnSteps interface {
 	RecordBurstStarted(ctx context.Context, threadID string, ids []string) (StartedTurn, error)
-	PrepareBurstTurn(ctx context.Context, threadID, turnID string, ids []string) (TurnPrep, error)
+	PrepareBurstTurn(ctx context.Context, threadID, turnID string, ids []string, gated ...bool) (TurnPrep, error)
 	RunBurstAttempt(ctx context.Context, in AttemptInput) (AttemptResult, error)
 	RecordBurstOutcome(ctx context.Context, ids []string, summary AttemptSummary) error
 	RunBurstPostTurnHook(ctx context.Context, threadID string, ids []string, attempted bool, outcome TurnOutcome, hookMetadata map[string]string) error
@@ -97,7 +97,7 @@ func ReflectTurnRunner(svc *TurnRunnerService) restate.ServiceDefinition {
 
 // RunBurst runs one burst turn of a ThreadSession key.
 func (s *TurnRunnerService) RunBurst(ctx restate.Context, req BurstTurnRequest) (TurnRunResult, error) {
-	subj := burstRunner{steps: s.steps, threadID: req.ThreadID, ids: normalizeStepIDs(req.MessageIDs)}
+	subj := burstRunner{steps: s.steps, threadID: req.ThreadID, ids: normalizeStepIDs(req.MessageIDs), gated: req.Gated}
 	return s.drive(ctx, subj, ThreadSessionServiceName(s.agentName), req.ThreadID, req.TurnID)
 }
 
@@ -143,6 +143,7 @@ type burstRunner struct {
 	steps    turnSteps
 	threadID string
 	ids      []string
+	gated    bool
 }
 
 func (b burstRunner) inputIDs() []string { return b.ids }
@@ -152,7 +153,7 @@ func (b burstRunner) recordStarted(ctx context.Context) (StartedTurn, error) {
 }
 
 func (b burstRunner) prep(ctx context.Context, turnID string, ids []string) (TurnPrep, error) {
-	return b.steps.PrepareBurstTurn(ctx, b.threadID, turnID, ids)
+	return b.steps.PrepareBurstTurn(ctx, b.threadID, turnID, ids, b.gated)
 }
 
 func (b burstRunner) attemptInput(turnID string, ids []string, prep TurnPrep, ordinal int) AttemptInput {

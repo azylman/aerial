@@ -348,7 +348,7 @@ func (p *WorkerPool) preTurnDelayMs(delaySeconds int) int64 {
 // requeued are reported as reschedule again without another retry_count bump.
 //
 //nolint:contextcheck,nolintlint // the reused turn helpers own their contexts; store calls take ctx.
-func (p *WorkerPool) PrepareBurstTurn(ctx context.Context, threadID, turnID string, ids []string) (TurnPrep, error) {
+func (p *WorkerPool) PrepareBurstTurn(ctx context.Context, threadID, turnID string, ids []string, gated ...bool) (TurnPrep, error) {
 	s, err := p.stepStore()
 	if err != nil {
 		return TurnPrep{}, err
@@ -367,6 +367,9 @@ func (p *WorkerPool) PrepareBurstTurn(ctx context.Context, threadID, turnID stri
 	}
 
 	te := p.newStepTurnExecution(ctx, threadID, burst)
+	if len(gated) > 0 && gated[0] {
+		te.ingressGated = true
+	}
 	defer te.stopIndicators()
 
 	if !te.resolveTurnPolicy() {

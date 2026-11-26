@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"reflect"
+	"sync"
 	"testing"
 	"time"
 
@@ -32,6 +33,7 @@ type sentCall struct {
 // requests and invocation cancels. A Run step named cancelStep returns Restate's cancellation
 // error without executing, as the runtime does when the invocation is cancelled mid-step.
 type coordHarness struct {
+	mu         sync.Mutex
 	mc         *mocks.MockContext
 	state      map[string][]byte
 	sends      []sentCall
@@ -95,10 +97,14 @@ func newCoordHarness(t *testing.T, key, requestID string, st coordinatorState) *
 	inv.On("GetInvocationId").Return(harnessRunnerInvocation).Maybe()
 	client := mocks.NewMockClient(t)
 	mc.On("Object", mock.Anything, mock.Anything, mock.Anything).Run(func(args mock.Arguments) {
+		h.mu.Lock()
 		h.target = sentCall{Service: args.String(0), Key: args.String(1), Method: args.String(2)}
+		h.mu.Unlock()
 	}).Return(client).Maybe()
 	mc.On("Service", mock.Anything, mock.Anything).Run(func(args mock.Arguments) {
+		h.mu.Lock()
 		h.target = sentCall{Service: args.String(0), Method: args.String(1)}
+		h.mu.Unlock()
 	}).Return(client).Maybe()
 	client.On("Send", mock.Anything).Run(func(args mock.Arguments) {
 		h.record(args.Get(0), 0)
@@ -114,6 +120,8 @@ func newCoordHarness(t *testing.T, key, requestID string, st coordinatorState) *
 }
 
 func (h *coordHarness) record(input any, delay time.Duration) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
 	call := h.target
 	call.Input = input
 	call.Delay = delay
