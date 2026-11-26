@@ -433,11 +433,6 @@ func TestDynamicVoicePool_Underlying(t *testing.T) {
 		wantFound bool
 	}{
 		{
-			name:      "nil dynamic voice pool",
-			pool:      nil,
-			wantFound: false,
-		},
-		{
 			name:      "dynamic voice pool with nil current pool",
 			pool:      NewDynamicVoicePoolWithInitial(nil, "k", nil),
 			wantFound: false,
@@ -511,19 +506,5 @@ func TestDynamicVoicePool_WiringAndPropagations(t *testing.T) {
 	if !candidatePool.initHadRescuer || !candidatePool.initHadManager || !candidatePool.initHadCallbacks {
 		t.Fatalf("expected candidate pool to receive dependencies before Initialize: rescuer=%v manager=%v callbacks=%v",
 			candidatePool.initHadRescuer, candidatePool.initHadManager, candidatePool.initHadCallbacks)
-	}
-}
-
-func TestDynamicVoicePool_NilReceiverSafety(t *testing.T) {
-	t.Parallel()
-
-	var nilPool *DynamicVoicePool
-	nilPool.SetTranscriptRescuer(nil)
-	nilPool.SetSessionManager(nil)
-	nilPool.SetSessionCallbacks(nil, nil)
-	nilPool.UpdateModel("model")
-	nilPool.UpdateEngine("engine", "")
-	if nilPool.Underlying() != nil {
-		t.Fatalf("expected nil Underlying for nil pool")
 	}
 }

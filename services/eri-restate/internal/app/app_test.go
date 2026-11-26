@@ -849,7 +849,6 @@ func TestInitializeAgentPools_VoiceConfiguration(t *testing.T) {
 		name             string
 		voiceModel       string
 		lowEffortModel   string
-		voiceEngine      string
 		prewarmedTargets []string
 		wantModel        string
 		wantTargets      []string
@@ -858,7 +857,6 @@ func TestInitializeAgentPools_VoiceConfiguration(t *testing.T) {
 			name:             "explicit voice model and targets",
 			voiceModel:       "gemini-3.8-flash-voice",
 			lowEffortModel:   "gemini-3.8-flash-low",
-			voiceEngine:      "gemini_api",
 			prewarmedTargets: []string{"kiosk-kitchen", "galaxy-watch7"},
 			wantModel:        "gemini-3.8-flash-voice",
 			wantTargets:      []string{"kiosk-kitchen", "galaxy-watch7"},
@@ -867,7 +865,6 @@ func TestInitializeAgentPools_VoiceConfiguration(t *testing.T) {
 			name:             "fallback to low effort model when voice model empty",
 			voiceModel:       "",
 			lowEffortModel:   "gemini-3.8-flash-low",
-			voiceEngine:      "agy",
 			prewarmedTargets: []string{"kiosk-bedroom"},
 			wantModel:        "gemini-3.8-flash-low",
 			wantTargets:      []string{"kiosk-bedroom"},
@@ -884,7 +881,6 @@ func TestInitializeAgentPools_VoiceConfiguration(t *testing.T) {
 				LowEffortModel: tc.lowEffortModel,
 				Voice: config.VoiceConfig{
 					Model:            tc.voiceModel,
-					Engine:           tc.voiceEngine,
 					PrewarmedTargets: tc.prewarmedTargets,
 				},
 			}

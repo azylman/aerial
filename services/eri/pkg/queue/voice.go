@@ -105,10 +105,7 @@ func finalizeVoiceTurnOutcome(ctx context.Context, outcome runner.TurnOutcome, t
 	return "", activeSession, fmt.Errorf("%s", outcome.ErrorDetail)
 }
 
-func (p *WorkerPool) persistVoiceTurnSession(ctx context.Context, threadID, convID string) {
-	if p == nil {
-		return
-	}
+func (p *WorkerPool) persistVoiceTurnSession(ctx context.Context, deviceKey, convID string) {
 	store := p.Store()
 	if store == nil {
 		return
@@ -117,13 +114,13 @@ func (p *WorkerPool) persistVoiceTurnSession(ctx context.Context, threadID, conv
 	if cleanConv == "" {
 		return
 	}
-	key := voiceSessionKey(threadID)
+	key := voiceSessionKey(deviceKey)
 	noCancelCtx := context.WithoutCancel(ctx)
 	if err := store.SaveSessionID(noCancelCtx, key, cleanConv); err != nil {
-		log.Printf("[WorkerPool] Warning saving voice session ID for %s (%s): %v", threadID, cleanConv, err)
+		log.Printf("[WorkerPool] Warning saving voice session ID for %s (%s): %v", deviceKey, cleanConv, err)
 	}
 	if _, err := store.IncrementSessionTurnCount(noCancelCtx, key); err != nil {
-		log.Printf("[WorkerPool] Warning incrementing voice session turn count for %s: %v", threadID, err)
+		log.Printf("[WorkerPool] Warning incrementing voice session turn count for %s: %v", deviceKey, err)
 	}
 }
 
@@ -153,7 +150,7 @@ func (p *WorkerPool) ExecuteVoiceTurn(ctx context.Context, prompt, sessionID str
 	if reply, conv, handled, customErr := p.executeCustomVoiceRunner(ctx, turnPrompt, deviceKey, onStatus, sentenceCb); handled {
 		if conv != "" {
 			if customErr == nil {
-				p.persistVoiceTurnSession(ctx, threadID, conv)
+				p.persistVoiceTurnSession(ctx, deviceKey, conv)
 			}
 			p.EnqueueTranscriptPublish(TranscriptPublishJob{SessionID: conv, ThreadID: threadID})
 		}
@@ -222,7 +219,7 @@ func (p *WorkerPool) ExecuteVoiceTurn(ctx context.Context, prompt, sessionID str
 	turnStatus, turnUsage = voiceTurnStatus(ctx, outcome), outcome.Usage
 	reply, conv, err := finalizeVoiceTurnOutcome(ctx, outcome, turnErr, activeSession, model, start, sink, detector, sentenceCb)
 	if err == nil {
-		p.persistVoiceTurnSession(ctx, threadID, conv)
+		p.persistVoiceTurnSession(ctx, deviceKey, conv)
 	}
 	p.EnqueueTranscriptPublish(TranscriptPublishJob{SessionID: activeSession, ThreadID: threadID})
 	return reply, conv, err

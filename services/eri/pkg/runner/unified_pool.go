@@ -335,9 +335,6 @@ func isStaleIsolatedSession(homeDir, sessionID string) bool {
 
 // resolveTargetSessionRecord resolves the session record for targetKey, clearing stale isolated session state.
 func (p *UnifiedProcessPool) resolveTargetSessionRecord(ctx context.Context, targetKey string) SessionRecord {
-	if p == nil {
-		return SessionRecord{}
-	}
 	trimmedKey := strings.TrimSpace(targetKey)
 	if trimmedKey == "" {
 		return SessionRecord{}

@@ -276,9 +276,6 @@ func makeVoiceSessionCallbacks(store db.Store) (func(context.Context, string) (r
 }
 
 func wireVoicePoolSessionDependencies(voicePool runner.AgentPool, pools map[PoolKey]runner.AgentPool, sessionMgr *session.Manager, store db.Store) {
-	if voicePool == nil {
-		return
-	}
 	if sessionMgr != nil {
 		if tr, ok := voicePool.(interface {
 			SetTranscriptRescuer(fn func(context.Context, string, time.Time) string)

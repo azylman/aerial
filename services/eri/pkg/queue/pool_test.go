@@ -340,7 +340,6 @@ func TestWireVoicePoolSessionDependencies(t *testing.T) {
 
 	tests := []struct {
 		name             string
-		nilVoicePool     bool
 		inDiscordPools   bool
 		withSessionMgr   bool
 		withStore        bool
@@ -348,10 +347,6 @@ func TestWireVoicePoolSessionDependencies(t *testing.T) {
 		wantManagerSet   bool
 		wantCallbacksSet bool
 	}{
-		{
-			name:         "nil voice pool is no-op",
-			nilVoicePool: true,
-		},
 		{
 			name:             "standalone voice pool receives rescuer, manager, and callbacks",
 			withSessionMgr:   true,
@@ -382,11 +377,6 @@ func TestWireVoicePoolSessionDependencies(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			if tc.nilVoicePool {
-				wireVoicePoolSessionDependencies(nil, nil, nil, nil)
-				return
-			}
-
 			voiceMock := &mockFullVoicePool{}
 			discordPools := make(map[PoolKey]runner.AgentPool)
 			if tc.inDiscordPools {
@@ -450,7 +440,7 @@ func TestReconcilePoolModelsAndVoiceTargets_Engine(t *testing.T) {
 	}
 }
 
-func assertPersistedVoiceTurn(t *testing.T, pool *WorkerPool, store db.Store, threadID, convID, key string) {
+func assertPersistedVoiceTurn(t *testing.T, pool *WorkerPool, store db.Store, deviceKey, convID, key string) {
 	t.Helper()
 	gotSess, getErr := store.GetSessionID(context.Background(), key)
 	if getErr != nil {
@@ -466,7 +456,7 @@ func assertPersistedVoiceTurn(t *testing.T, pool *WorkerPool, store db.Store, th
 	if turns != 1 {
 		t.Fatalf("turn count = %d, want 1", turns)
 	}
-	pool.persistVoiceTurnSession(context.Background(), threadID, convID)
+	pool.persistVoiceTurnSession(context.Background(), deviceKey, convID)
 	turns2, turnErr2 := store.GetSessionTurnCount(context.Background(), key)
 	if turnErr2 != nil {
 		t.Fatalf("unexpected GetSessionTurnCount error: %v", turnErr2)
@@ -492,20 +482,26 @@ func TestWorkerPool_PersistVoiceTurnSession(t *testing.T) {
 
 	tests := []struct {
 		name          string
-		threadID      string
+		deviceKey     string
 		convID        string
 		wantPersisted bool
 	}{
 		{
 			name:          "empty conv id is no-op",
-			threadID:      "kiosk-living",
+			deviceKey:     "kiosk-living",
 			convID:        "",
 			wantPersisted: false,
 		},
 		{
-			name:          "saves session and increments turn count",
-			threadID:      "kiosk-kitchen",
+			name:          "saves session and increments turn count for bare device key",
+			deviceKey:     "kiosk-kitchen",
 			convID:        "conv-kitchen-1",
+			wantPersisted: true,
+		},
+		{
+			name:          "saves session and increments turn count for already-prefixed device key",
+			deviceKey:     "voice-kiosk-bedroom",
+			convID:        "conv-bedroom-1",
 			wantPersisted: true,
 		},
 	}
@@ -522,10 +518,10 @@ func TestWorkerPool_PersistVoiceTurnSession(t *testing.T) {
 					Store: sqlStore,
 				},
 			}
-			pool.persistVoiceTurnSession(context.Background(), tc.threadID, tc.convID)
-			key := voiceSessionKey(tc.threadID)
+			pool.persistVoiceTurnSession(context.Background(), tc.deviceKey, tc.convID)
+			key := voiceSessionKey(tc.deviceKey)
 			if tc.wantPersisted {
-				assertPersistedVoiceTurn(t, pool, sqlStore, tc.threadID, tc.convID, key)
+				assertPersistedVoiceTurn(t, pool, sqlStore, tc.deviceKey, tc.convID, key)
 				return
 			}
 			assertUnpersistedVoiceTurn(t, sqlStore, key)

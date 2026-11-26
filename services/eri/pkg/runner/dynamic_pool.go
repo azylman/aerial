@@ -56,9 +56,6 @@ func NewDynamicVoicePoolWithInitial(initialPool AgentPool, initialKey string, fa
 
 // Underlying returns the wrapped UnifiedProcessPool, or nil.
 func (p *DynamicVoicePool) Underlying() *UnifiedProcessPool {
-	if p == nil {
-		return nil
-	}
 	p.mu.RLock()
 	defer p.mu.RUnlock()
 	if p.currentPool == nil {
@@ -100,9 +97,6 @@ func (p *DynamicVoicePool) applyDependenciesToPool(target AgentPool) {
 
 // SetTranscriptRescuer configures a transcript rescuer callback and applies it to the active pool.
 func (p *DynamicVoicePool) SetTranscriptRescuer(r func(context.Context, string, time.Time) string) {
-	if p == nil {
-		return
-	}
 	p.mu.Lock()
 	p.transcriptRescuer = r
 	pool := p.currentPool
@@ -118,9 +112,6 @@ func (p *DynamicVoicePool) SetTranscriptRescuer(r func(context.Context, string, 
 
 // SetSessionManager updates the session manager for rotation guardrail checks.
 func (p *DynamicVoicePool) SetSessionManager(sm *session.Manager) {
-	if p == nil {
-		return
-	}
 	p.mu.Lock()
 	p.sessionManager = sm
 	pool := p.currentPool
@@ -134,9 +125,6 @@ func (p *DynamicVoicePool) SetSessionManager(sm *session.Manager) {
 
 // SetSessionCallbacks updates the session record lookup and rotation callbacks.
 func (p *DynamicVoicePool) SetSessionCallbacks(getRec func(ctx context.Context, targetKey string) (SessionRecord, error), onRot func(ctx context.Context, targetKey, oldSessionID, newSessionID string) error) {
-	if p == nil {
-		return
-	}
 	p.mu.Lock()
 	p.getSessionRecord = getRec
 	p.onSessionRotated = onRot
@@ -153,9 +141,6 @@ func (p *DynamicVoicePool) SetSessionCallbacks(getRec func(ctx context.Context, 
 
 // UpdateModel updates the model used for newly spawned or rotated daemons in the pool.
 func (p *DynamicVoicePool) UpdateModel(model string) {
-	if p == nil {
-		return
-	}
 	p.mu.RLock()
 	pool := p.currentPool
 	p.mu.RUnlock()
@@ -168,9 +153,6 @@ func (p *DynamicVoicePool) UpdateModel(model string) {
 
 // UpdateEngine updates the engine and CLI binaries used for newly spawned or rotated daemons in the pool.
 func (p *DynamicVoicePool) UpdateEngine(engine, claudeBin string, extraBins ...string) {
-	if p == nil {
-		return
-	}
 	p.mu.RLock()
 	pool := p.currentPool
 	p.mu.RUnlock()

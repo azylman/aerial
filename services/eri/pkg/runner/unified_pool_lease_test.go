@@ -1037,16 +1037,8 @@ func TestIsStaleIsolatedSession(t *testing.T) {
 func TestUnifiedProcessPool_ResolveTargetSessionRecord(t *testing.T) {
 	t.Parallel()
 
-	tmpDir := t.TempDir()
-	isolatedHome := filepath.Join(tmpDir, "voice-home")
-	convDir := filepath.Join(isolatedHome, ".gemini", "antigravity-cli", "conversations")
-	if err := os.MkdirAll(convDir, 0o755); err != nil {
-		t.Fatal(err)
-	}
-
 	testCases := []struct {
 		name          string
-		nilPool       bool
 		targetKey     string
 		recordSession string
 		recordTurns   int
@@ -1054,13 +1046,6 @@ func TestUnifiedProcessPool_ResolveTargetSessionRecord(t *testing.T) {
 		wantSession   string
 		wantTurns     int
 	}{
-		{
-			name:        "nil pool returns empty record",
-			nilPool:     true,
-			targetKey:   "kiosk",
-			wantSession: "",
-			wantTurns:   0,
-		},
 		{
 			name:        "empty targetKey returns empty record",
 			targetKey:   "  ",
@@ -1098,15 +1083,6 @@ func TestUnifiedProcessPool_ResolveTargetSessionRecord(t *testing.T) {
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			if tc.nilPool {
-				var nilPool *UnifiedProcessPool
-				got := nilPool.resolveTargetSessionRecord(context.Background(), tc.targetKey)
-				if got.ActiveSessionID != tc.wantSession || got.TurnCount != tc.wantTurns {
-					t.Fatalf("expected session=%q turns=%d, got session=%q turns=%d", tc.wantSession, tc.wantTurns, got.ActiveSessionID, got.TurnCount)
-				}
-				return
-			}
-
 			subTmp := t.TempDir()
 			isolatedHome := filepath.Join(subTmp, "voice-home")
 			convDir := filepath.Join(isolatedHome, ".gemini", "antigravity-cli", "conversations")
