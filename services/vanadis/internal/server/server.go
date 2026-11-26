@@ -234,6 +234,7 @@ func SetupMux(server *VanadisServer) http.Handler {
 		"POST /builds": server.handleCreateBuild, "POST /runs": server.handleCreateBuild,
 		"/builds/": server.handleBuildByID, "/runs/": server.handleBuildByID,
 		"POST /chunks/active-step": server.handleChunksActiveStep,
+		"POST /chunks/steer":       server.handleSteerChunk,
 		"/chunks/attach-pr":        server.handleAttachChunkPR,
 		"/chunks/":                 server.handleChunkByID,
 		"/mcp":                     mcpHandler, "/sse": mcpHandler,
@@ -413,6 +414,12 @@ func (s *VanadisServer) handleBuildByID(w http.ResponseWriter, r *http.Request) 
 		default:
 			writeErr(w, http.StatusNotFound, "not found")
 		}
+	case 4:
+		if parts[1] == "chunks" && parts[3] == "steer" {
+			s.handleBuildChunkSteer(w, r, parts[0], parts[2])
+			return
+		}
+		writeErr(w, http.StatusNotFound, "not found")
 	default:
 		writeErr(w, http.StatusNotFound, "not found")
 	}

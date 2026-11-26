@@ -572,6 +572,34 @@ var routeCases = []routeCase{
 	{name: "builds active step empty agent fallback", method: http.MethodPost, path: "/builds/b-empty/active-step", body: `{"chunk_id":"c-empty"}`, store: routesSeeded, auth: routesAllow, token: routesToken, wantStatus: http.StatusOK},
 	{name: "builds active step restate error", method: http.MethodPost, path: "/builds/b-fail/active-step", body: `{"chunk_id":"c-fail"}`, store: routesSeeded, auth: routesAllow, token: routesToken, wantStatus: http.StatusInternalServerError},
 	{name: "builds active step routes to runner build", method: http.MethodPost, path: "/builds/b-runner-alpha/active-step", body: `{"chunk_id":"c-alpha-1"}`, store: routesSeeded, wantStatus: http.StatusOK},
+
+	// Steer chunk via /builds/{id}/chunks/{chunk_ref}/steer.
+	{name: "builds chunk steer nil store", method: http.MethodPost, path: "/builds/b1/chunks/c1/steer", wantStatus: http.StatusInternalServerError},
+	{name: "builds chunk steer method not allowed", method: http.MethodGet, path: "/builds/b1/chunks/c1/steer", store: routesSeeded, wantStatus: http.StatusMethodNotAllowed},
+	{name: "builds chunk steer running chunk", method: http.MethodPost, path: "/builds/b1/chunks/c1/steer", body: `{"prompt":"steer running"}`, store: routesSeeded, wantStatus: http.StatusOK, wantSubstr: `"status":"steered"`},
+	{name: "builds chunk steer pending chunk", method: http.MethodPost, path: "/builds/b1/chunks/c2/steer", body: `{"prompt":"steer pending"}`, store: routesSeeded, wantStatus: http.StatusOK, wantSubstr: `"status":"steered"`},
+	{name: "builds chunk steer missing prompt", method: http.MethodPost, path: "/builds/b1/chunks/c1/steer", body: `{"prompt":""}`, store: routesSeeded, wantStatus: http.StatusBadRequest, wantSubstr: "prompt is required"},
+	{name: "builds chunk steer invalid json", method: http.MethodPost, path: "/builds/b1/chunks/c1/steer", body: `{invalid`, store: routesSeeded, wantStatus: http.StatusBadRequest, wantSubstr: "invalid json payload"},
+	{name: "builds chunk steer build not found", method: http.MethodPost, path: "/builds/b-missing/chunks/c1/steer", body: `{"prompt":"steer"}`, store: routesSeeded, wantStatus: http.StatusNotFound},
+	{name: "builds chunk steer conflict", method: http.MethodPost, path: "/builds/b-done/chunks/c1/steer", body: `{"prompt":"steer"}`, store: routesSeeded, wantStatus: http.StatusConflict},
+	{name: "builds chunk steer forbidden", method: http.MethodPost, path: "/builds/b1/chunks/c1/steer", body: `{"prompt":"steer"}`, store: routesSeeded, auth: routesDeny, token: routesToken, wantStatus: http.StatusForbidden},
+	{name: "builds chunk steer unauthenticated", method: http.MethodPost, path: "/builds/b1/chunks/c1/steer", body: `{"prompt":"steer"}`, store: routesSeeded, auth: routesUnauth, token: routesToken, wantStatus: http.StatusUnauthorized},
+	{name: "builds chunk steer allowed", method: http.MethodPost, path: "/builds/b1/chunks/c1/steer", body: `{"prompt":"steer"}`, store: routesSeeded, auth: routesAllow, token: routesToken, wantStatus: http.StatusOK, wantSubstr: `"status":"steered"`},
+
+	// Steer chunk via /chunks/steer.
+	{name: "chunks steer nil store", method: http.MethodPost, path: "/chunks/steer", wantStatus: http.StatusInternalServerError},
+	{name: "chunks steer running chunk", method: http.MethodPost, path: "/chunks/steer", body: `{"build_id":"b1","chunk_ref":"c1","prompt":"steer running"}`, store: routesSeeded, wantStatus: http.StatusOK, wantSubstr: `"status":"steered"`},
+	{name: "chunks steer pending chunk", method: http.MethodPost, path: "/chunks/steer", body: `{"build_id":"b1","chunk_ref":"c2","prompt":"steer pending"}`, store: routesSeeded, wantStatus: http.StatusOK, wantSubstr: `"status":"steered"`},
+	{name: "chunks steer resolves parent from chunk_id", method: http.MethodPost, path: "/chunks/steer", body: `{"chunk_id":"c1","prompt":"steer resolve"}`, store: routesSeeded, wantStatus: http.StatusOK, wantSubstr: `"status":"steered"`},
+	{name: "chunks steer chunk not found", method: http.MethodPost, path: "/chunks/steer", body: `{"chunk_id":"c-missing","prompt":"steer"}`, store: routesSeeded, wantStatus: http.StatusNotFound},
+	{name: "chunks steer missing prompt", method: http.MethodPost, path: "/chunks/steer", body: `{"build_id":"b1","chunk_ref":"c1","prompt":""}`, store: routesSeeded, wantStatus: http.StatusBadRequest, wantSubstr: "prompt is required"},
+	{name: "chunks steer missing chunk_ref", method: http.MethodPost, path: "/chunks/steer", body: `{"build_id":"b1","prompt":"steer"}`, store: routesSeeded, wantStatus: http.StatusBadRequest, wantSubstr: "chunk ref is required"},
+	{name: "chunks steer missing build_id", method: http.MethodPost, path: "/chunks/steer", body: `{"prompt":"steer"}`, store: routesSeeded, wantStatus: http.StatusBadRequest, wantSubstr: "build id is required"},
+	{name: "chunks steer invalid json", method: http.MethodPost, path: "/chunks/steer", body: `{invalid`, store: routesSeeded, wantStatus: http.StatusBadRequest, wantSubstr: "invalid json payload"},
+	{name: "chunks steer conflict", method: http.MethodPost, path: "/chunks/steer", body: `{"build_id":"b-done","chunk_ref":"c1","prompt":"steer"}`, store: routesSeeded, wantStatus: http.StatusConflict},
+	{name: "chunks steer forbidden", method: http.MethodPost, path: "/chunks/steer", body: `{"build_id":"b1","chunk_ref":"c1","prompt":"steer"}`, store: routesSeeded, auth: routesDeny, token: routesToken, wantStatus: http.StatusForbidden},
+	{name: "chunks steer unauthenticated", method: http.MethodPost, path: "/chunks/steer", body: `{"build_id":"b1","chunk_ref":"c1","prompt":"steer"}`, store: routesSeeded, auth: routesUnauth, token: routesToken, wantStatus: http.StatusUnauthorized},
+	{name: "chunks steer allowed", method: http.MethodPost, path: "/chunks/steer", body: `{"build_id":"b1","chunk_ref":"c1","prompt":"steer"}`, store: routesSeeded, auth: routesAllow, token: routesToken, wantStatus: http.StatusOK, wantSubstr: `"status":"steered"`},
 }
 
 // TestRoutes drives every HTTP route through SetupMux against the shared

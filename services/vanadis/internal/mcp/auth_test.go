@@ -75,6 +75,10 @@ func TestMCP_AuthRBAC(t *testing.T) {
 		{"cancel build not found", "cancel_build", `{"build_id":"b-missing"}`, true, true, true, "not found"},
 		{"cancel build forbidden", "cancel_build", cancelArgs, true, false, true, "access denied"},
 		{"cancel build allowed", "cancel_build", cancelArgs, true, true, false, `"status":"cancelled"`},
+		{"steer chunk missing caller", "steer_chunk", `{"build_id":"build-mcp-1","chunk_ref":"0","prompt":"steer"}`, false, true, true, "unauthorized"},
+		{"steer chunk not found", "steer_chunk", `{"build_id":"b-missing","chunk_ref":"0","prompt":"steer"}`, true, true, true, "not found"},
+		{"steer chunk forbidden", "steer_chunk", `{"build_id":"build-mcp-1","chunk_ref":"0","prompt":"steer"}`, true, false, true, "access denied"},
+		{"steer chunk allowed", "steer_chunk", `{"build_id":"build-mcp-1","chunk_ref":"0","prompt":"steer"}`, true, true, false, `"status":"steered"`},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {

@@ -16,6 +16,7 @@ import (
 	"github.com/azylman/aerial/pkg/httpkit"
 	"github.com/azylman/aerial/pkg/k8sauth"
 	"github.com/azylman/aerial/pkg/strutil"
+	"github.com/azylman/aerial/services/vanadis/internal/model"
 )
 
 const (
@@ -24,6 +25,7 @@ const (
 	fieldBuild               = "build"
 	fieldStatus              = "status"
 	fieldBuildID             = "build_id"
+	fieldChunkID             = "chunk_id"
 	fieldChunks              = "chunks"
 	fieldChunk               = "chunk"
 	statusRunning            = "running"
@@ -436,7 +438,7 @@ func (s *VanadisServer) handleAttachChunkPR(w http.ResponseWriter, r *http.Reque
 	httpkit.WriteJSON(w, http.StatusOK, map[string]string{
 		fieldStatus:  "attached",
 		fieldBuildID: resp.BuildID,
-		"chunk_id":   resp.ChunkID,
+		fieldChunkID: resp.ChunkID,
 		"thread_id":  resp.ThreadID,
 	})
 }
@@ -477,4 +479,125 @@ func (s *VanadisServer) decodeJSONBody(w http.ResponseWriter, r *http.Request, t
 		return false
 	}
 	return true
+}
+
+type steerRequestBody struct {
+	BuildID  string `json:"build_id"`
+	ChunkRef string `json:"chunk_ref"`
+	ChunkID  string `json:"chunk_id"`
+	Prompt   string `json:"prompt"`
+}
+
+func (s *VanadisServer) handleBuildChunkSteer(w http.ResponseWriter, r *http.Request, buildID, chunkRef string) {
+	if r.Method != http.MethodPost {
+		writeErr(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+
+	build, ok := s.authorizeBuildMutation(w, r, strings.TrimSpace(buildID))
+	if !ok {
+		return
+	}
+
+	var req steerRequestBody
+	if !s.decodeJSONBody(w, r, &req) {
+		return
+	}
+
+	cleanChunkRef := strings.TrimSpace(chunkRef)
+	prompt := strings.TrimSpace(req.Prompt)
+	if err := model.ValidateSteerChunkInput(build.ID, cleanChunkRef, prompt); err != nil {
+		writeStoreErr(r.Context(), w, fmt.Errorf("%w: %w", ErrInvalidBuildInput, err))
+		return
+	}
+
+	steerReq := model.SteerChunkRequest{
+		BuildID:  build.ID,
+		ChunkRef: cleanChunkRef,
+		Prompt:   prompt,
+	}
+	var res model.SteerChunkResult
+	path := s.restateObjectPath(build.Agent, build.ID, "SteerChunk")
+	if err := s.callRestateIngress(r.Context(), path, steerReq, &res); err != nil {
+		writeStoreErr(r.Context(), w, err)
+		return
+	}
+
+	resp := map[string]any{
+		fieldStatus:    "steered",
+		fieldBuildID:   res.BuildID,
+		fieldChunkID:   res.ChunkID,
+		"chunk_status": res.ChunkStatus,
+		"instructions": res.Instructions,
+	}
+	if res.DispatchID != "" {
+		resp["dispatch_id"] = res.DispatchID
+	}
+	httpkit.WriteJSON(w, http.StatusOK, resp)
+}
+
+func (s *VanadisServer) handleSteerChunk(w http.ResponseWriter, r *http.Request) {
+	if s.store == nil {
+		writeErr(w, http.StatusInternalServerError, "vanadis store not configured")
+		return
+	}
+
+	var req steerRequestBody
+	if !s.decodeJSONBody(w, r, &req) {
+		return
+	}
+
+	targetBuildID := strings.TrimSpace(req.BuildID)
+	chunkRef := strutil.FirstNonEmpty(strings.TrimSpace(req.ChunkRef), strings.TrimSpace(req.ChunkID))
+	prompt := strings.TrimSpace(req.Prompt)
+
+	if targetBuildID == "" && chunkRef != "" {
+		_, parentBuild, err := s.store.GetChunk(r.Context(), chunkRef)
+		if err != nil {
+			writeStoreErr(r.Context(), w, err)
+			return
+		}
+		if parentBuild != nil {
+			targetBuildID = parentBuild.ID
+		}
+	}
+
+	if targetBuildID == "" {
+		writeStoreErr(r.Context(), w, fmt.Errorf("%w: build id is required", ErrInvalidBuildInput))
+		return
+	}
+
+	build, ok := s.authorizeBuildMutation(w, r, targetBuildID)
+	if !ok {
+		return
+	}
+
+	if err := model.ValidateSteerChunkInput(targetBuildID, chunkRef, prompt); err != nil {
+		writeStoreErr(r.Context(), w, fmt.Errorf("%w: %w", ErrInvalidBuildInput, err))
+		return
+	}
+
+	steerReq := model.SteerChunkRequest{
+		BuildID:  build.ID,
+		ChunkRef: chunkRef,
+		Prompt:   prompt,
+	}
+	var res model.SteerChunkResult
+	path := s.restateObjectPath(build.Agent, build.ID, "SteerChunk")
+	if err := s.callRestateIngress(r.Context(), path, steerReq, &res); err != nil {
+		writeStoreErr(r.Context(), w, err)
+		return
+	}
+
+	resp := map[string]any{
+		fieldStatus:    "steered",
+		fieldBuildID:   res.BuildID,
+		fieldChunkID:   res.ChunkID,
+		"chunk_status": res.ChunkStatus,
+		"instructions": res.Instructions,
+	}
+	if res.DispatchID != "" {
+		resp["dispatch_id"] = res.DispatchID
+	}
+	httpkit.WriteJSON(w, http.StatusOK, resp)
 }
