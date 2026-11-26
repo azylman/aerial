@@ -90,8 +90,5 @@ func (s *HTTPTurnSteerer) DrainPending(ctx context.Context, payload Payload) []s
 			prompts = append(prompts, trimmed)
 		}
 	}
-	if len(prompts) == 0 {
-		return nil
-	}
 	return prompts
 }

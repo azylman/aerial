@@ -189,7 +189,7 @@ func ProcessWithOptions(r io.Reader, w io.Writer, mode string, opts Options) (er
 			return json.NewEncoder(w).Encode(FormatClaudeResponse(&Decision{Decision: DecisionAllow}, nil))
 		}
 		if IsInvocationMode(mode) {
-			return json.NewEncoder(w).Encode(InvocationResponse{Decision: DecisionAllow})
+			return json.NewEncoder(w).Encode(InvocationResponse{})
 		}
 		return json.NewEncoder(w).Encode(Decision{Decision: DecisionAllow})
 	}
@@ -241,13 +241,7 @@ func ProcessWithOptions(r io.Reader, w io.Writer, mode string, opts Options) (er
 
 func handleInvocationPreMode(w io.Writer, payload Payload, opts Options) error {
 	resp := RecordPreInvocationWithDir(payload, opts.BatchDir, time.Now())
-	if resp == nil {
-		resp = &InvocationResponse{}
-	}
-	if resp.Decision == "" {
-		resp.Decision = DecisionAllow
-	}
-	if resp.Decision == DecisionAllow && payload.InvocationNum > 1 && opts.Steerer != nil {
+	if payload.InvocationNum > 1 && opts.Steerer != nil {
 		prompts := opts.Steerer.DrainPending(context.Background(), payload)
 		for _, p := range prompts {
 			if trimmed := strings.TrimSpace(p); trimmed != "" {
@@ -260,7 +254,7 @@ func handleInvocationPreMode(w io.Writer, payload Payload, opts Options) error {
 
 func formatClaudeDecision(decision *Decision, payload Payload, opts Options) ClaudeHookResponse {
 	claudeResp := FormatClaudeResponse(decision, payload.ToolInput)
-	if decision.Decision != DecisionAllow || opts.Steerer == nil {
+	if decision == nil || decision.Decision != DecisionAllow || opts.Steerer == nil || strings.TrimSpace(payload.AgentID) != "" {
 		return claudeResp
 	}
 	prompts := opts.Steerer.DrainPending(context.Background(), payload)

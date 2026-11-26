@@ -43,7 +43,6 @@ type InvocationStep struct {
 
 // InvocationResponse is the JSON payload returned for PreInvocation and PostToolUse hooks.
 type InvocationResponse struct {
-	Decision    DecisionType     `json:"-"`
 	InjectSteps []InvocationStep `json:"injectSteps,omitempty"`
 }
 
@@ -75,6 +74,7 @@ type Payload struct {
 	Error          string          `json:"error,omitempty"`
 	ConversationID string          `json:"conversationId"`
 	SessionID      string          `json:"session_id,omitempty"`
+	AgentID        string          `json:"agent_id,omitempty"`
 	HookEventName  string          `json:"hook_event_name,omitempty"`
 	ToolName       string          `json:"tool_name,omitempty"`
 	ToolInput      json.RawMessage `json:"tool_input,omitempty"`

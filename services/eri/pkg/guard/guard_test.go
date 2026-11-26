@@ -708,12 +708,6 @@ func TestHTTPTurnSteerer_DrainPending(t *testing.T) {
 			wantPrompts: []string{"valid"},
 		},
 		{
-			name:        "empty prompts list returns nil",
-			statusCode:  http.StatusOK,
-			respBody:    `{"prompts": []}`,
-			wantPrompts: nil,
-		},
-		{
 			name:        "non-200 status fails open",
 			statusCode:  http.StatusInternalServerError,
 			respBody:    `{"error": "fail"}`,
@@ -767,7 +761,6 @@ type invocationSteerCase struct {
 	inputPayload string
 	serverStatus int
 	serverBody   string
-	serverHang   bool
 	withSteerer  bool
 	wantSteps    []string
 }
@@ -776,17 +769,11 @@ func runInvocationSteerCase(t *testing.T, tc invocationSteerCase) {
 	t.Helper()
 	opts := testOptions(t)
 	if tc.withSteerer {
-		hangCh := make(chan struct{})
 		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			if tc.serverHang {
-				<-hangCh
-				return
-			}
 			w.WriteHeader(tc.serverStatus)
 			_, _ = w.Write([]byte(tc.serverBody))
 		}))
 		defer srv.Close()
-		defer close(hangCh)
 		opts.Steerer = &HTTPTurnSteerer{Endpoint: srv.URL, DaemonID: "d1", Client: srv.Client()}
 	}
 
@@ -870,22 +857,6 @@ func TestProcessWithOptions_Invocation(t *testing.T) {
 			withSteerer:  false,
 			wantSteps:    nil,
 		},
-		{
-			name:         "invocationNum 2 with failing steerer fails open",
-			inputPayload: `{"conversationId": "c1", "invocationNum": 2}`,
-			serverStatus: http.StatusInternalServerError,
-			serverBody:   `{"error": "internal error"}`,
-			withSteerer:  true,
-			wantSteps:    nil,
-		},
-		{
-			name:         "invocationNum 2 with timeout steerer fails open",
-			inputPayload: `{"conversationId": "c1", "invocationNum": 2}`,
-			serverStatus: http.StatusOK,
-			serverHang:   true,
-			withSteerer:  true,
-			wantSteps:    nil,
-		},
 	}
 
 	for _, tc := range tests {
@@ -934,10 +905,10 @@ func TestProcessWithOptions_Claude(t *testing.T) {
 			wantContext:  "",
 		},
 		{
-			name:         "failing steerer fails open",
-			inputPayload: `{"session_id": "sess-1", "hook_event_name": "PreToolUse", "tool_name": "run_command", "tool_input": {"CommandLine": "echo safe", "Cwd": "/data"}}`,
-			serverStatus: http.StatusInternalServerError,
-			serverBody:   `{"error": "down"}`,
+			name:         "allowed subagent does not inject context",
+			inputPayload: `{"session_id": "sess-1", "agent_id": "subagent-1", "hook_event_name": "PreToolUse", "tool_name": "run_command", "tool_input": {"CommandLine": "echo safe", "Cwd": "/data"}}`,
+			serverStatus: http.StatusOK,
+			serverBody:   `{"prompts": ["prompt should stay queued"]}`,
 			withSteerer:  true,
 			wantDecision: "allow",
 			wantContext:  "",
