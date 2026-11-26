@@ -46,6 +46,7 @@ type Config struct {
 	PostgresURL        string
 	PostgresSocketPath string
 	AgentName          string
+	TraceContent       bool
 }
 
 // LoadConfigFromEnv loads configuration from environment variables with defaults.
@@ -452,6 +453,7 @@ func RunApp(ctx context.Context, cfg Config, opts ...AppOption) error {
 		LLMFunc:                llmFn,
 		NATSURL:                cur.NATSURL,
 		AgentName:              cfg.AgentName,
+		TraceContent:           cfg.TraceContent,
 		ActiveTurns:            activeTurns,
 		ChunkStepFlushInterval: queue.DefaultChunkStepFlushInterval,
 		AmbientResolver:        ambientResolver.Resolve,

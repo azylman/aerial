@@ -450,9 +450,10 @@ func TestRunApp_CanceledContext(t *testing.T) {
 	fakeStore := newTestStore(t)
 
 	cfg := Config{
-		RestatePort: "19080",
-		HealthPort:  "14028",
-		AgentName:   "aerial-test",
+		RestatePort:  "19080",
+		HealthPort:   "14028",
+		AgentName:    "aerial-test",
+		TraceContent: true,
 	}
 
 	err := RunApp(ctx, cfg,
