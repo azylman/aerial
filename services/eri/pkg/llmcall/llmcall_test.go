@@ -241,6 +241,7 @@ func completeContext(rcCtx context.Context, t *testing.T, rec *stepRecord) resta
 	t.Helper()
 	mc := mocks.NewMockContext(t)
 	mc.EXPECT().Value(mock.Anything).Return(nil).Maybe()
+	mc.EXPECT().Request().Return(&restate.Request{ID: "inv-llm-1"}).Maybe()
 	mc.EXPECT().Run(mock.Anything, mock.Anything, mock.Anything).RunAndReturn(func(fn func(restate.RunContext) (any, error), output any, opts ...restate.RunOption) restate.TerminalError {
 		rec.ran = true
 		rec.name, rec.retryOpts = runOptionFields(opts)

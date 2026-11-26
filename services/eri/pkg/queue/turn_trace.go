@@ -184,6 +184,10 @@ func finishTurnSpan(span trace.Span, model string, usage runner.AgyUsage, status
 func (te *turnExecution) startChildSpan(base context.Context, name string) (context.Context, trace.Span) {
 	if te.turnSpan != nil {
 		base = trace.ContextWithSpan(base, te.turnSpan)
+	} else if !trace.SpanContextFromContext(base).IsValid() {
+		if sc := trace.SpanContextFromContext(te.turnCtxValue()); sc.IsValid() {
+			base = trace.ContextWithSpanContext(base, sc)
+		}
 	}
 	return te.pool.tracer().Start(base, name) //nolint:spancheck // the caller owns and ends the span
 }

@@ -270,8 +270,8 @@ func (s *HaroSchedule) Arm(ctx restate.ObjectContext, req ArmRequest) (restate.V
 		return restate.Void{}, err
 	}
 
-	loaded, err := restate.Run(ctx, func(rc restate.RunContext) (ScheduleRow, error) {
-		return withStoreTimeout(rc, func(c context.Context) (ScheduleRow, error) {
+	loaded, err := restateingress.RunInSpan(ctx, "haro.schedule.arm", func(stepCtx context.Context, rc restate.RunContext) (ScheduleRow, error) {
+		return withStoreTimeout(stepCtx, func(c context.Context) (ScheduleRow, error) {
 			return s.loadScheduleRow(c, scheduleID, req.ScheduleType)
 		})
 	}, restate.WithName("load-schedule"))
@@ -334,7 +334,7 @@ func (s *HaroSchedule) Fire(ctx restate.ObjectContext, req FireRequest) (restate
 	runID := deterministicScheduleRunID(schedType, scheduleID, dueAt)
 
 	// Step 2: dispatch-turn
-	dispatchRes, err := restate.Run(ctx, func(rc restate.RunContext) (DispatchStepResult, error) {
+	dispatchRes, err := restateingress.RunInSpan(ctx, "haro.schedule.fire", func(stepCtx context.Context, rc restate.RunContext) (DispatchStepResult, error) {
 		now := s.now()
 		if model.IsScheduleStale(dueAt, now, 24*time.Hour) {
 			log.Printf("[Haro Schedule] Schedule %s (%s) is stale (>24h overdue: due %s, now %s). Skipping dispatch.",
@@ -349,9 +349,9 @@ func (s *HaroSchedule) Fire(ctx restate.ObjectContext, req FireRequest) (restate
 		}
 
 		if schedType == model.ScheduleTypeHeartbeat {
-			return s.dispatchHeartbeatStep(rc, loaded, scheduleID, idempotencyKey, runID, now)
+			return s.dispatchHeartbeatStep(stepCtx, loaded, scheduleID, idempotencyKey, runID, now)
 		}
-		return s.dispatchPromptStep(rc, loaded, schedType, scheduleID, idempotencyKey, runID, now)
+		return s.dispatchPromptStep(stepCtx, loaded, schedType, scheduleID, idempotencyKey, runID, now)
 	}, restate.WithName("dispatch-turn"))
 	if err != nil {
 		return restate.Void{}, err
@@ -396,9 +396,9 @@ func permanentDispatchFailure(schedType string, err error, now time.Time) (Dispa
 	}, nil
 }
 
-func (s *HaroSchedule) dispatchHeartbeatStep(rc restate.RunContext, loaded ScheduleRow, scheduleID, idempotencyKey, runID string, now time.Time) (DispatchStepResult, error) {
+func (s *HaroSchedule) dispatchHeartbeatStep(ctx context.Context, loaded ScheduleRow, scheduleID, idempotencyKey, runID string, now time.Time) (DispatchStepResult, error) {
 	sessionKey := "heartbeat-" + scheduleID
-	active, activeErr := withStoreTimeout(rc, func(c context.Context) (bool, error) {
+	active, activeErr := withStoreTimeout(ctx, func(c context.Context) (bool, error) {
 		return store.HasRunningHeartbeatRun(c, s.db, scheduleID, now.Add(-2*time.Hour))
 	})
 	if activeErr == nil && active {
@@ -439,7 +439,7 @@ func (s *HaroSchedule) dispatchHeartbeatStep(rc restate.RunContext, loaded Sched
 		Agent:        loaded.Agent,
 	}
 	dispatchStart := time.Now()
-	resp, dispatchErr := dispatch.TraceFire(rc, model.ScheduleTypeHeartbeat, scheduleID, func(dispCtx context.Context) (eriwire.DispatchEnqueueResponse, error) {
+	resp, dispatchErr := dispatch.TraceFire(ctx, model.ScheduleTypeHeartbeat, scheduleID, func(dispCtx context.Context) (eriwire.DispatchEnqueueResponse, error) {
 		return s.dispatcher.Dispatch(dispCtx, dispReq)
 	})
 	metrics.RecordScheduleDispatchDuration(model.ScheduleTypeHeartbeat, time.Since(dispatchStart).Seconds())
@@ -464,7 +464,7 @@ func (s *HaroSchedule) dispatchHeartbeatStep(rc restate.RunContext, loaded Sched
 	}, nil
 }
 
-func (s *HaroSchedule) dispatchPromptStep(rc restate.RunContext, loaded ScheduleRow, schedType, scheduleID, idempotencyKey, runID string, now time.Time) (DispatchStepResult, error) {
+func (s *HaroSchedule) dispatchPromptStep(ctx context.Context, loaded ScheduleRow, schedType, scheduleID, idempotencyKey, runID string, now time.Time) (DispatchStepResult, error) {
 	if s.dispatcher == nil {
 		return DispatchStepResult{}, errors.New("dispatcher not initialized")
 	}
@@ -478,7 +478,7 @@ func (s *HaroSchedule) dispatchPromptStep(rc restate.RunContext, loaded Schedule
 		Agent:     loaded.Agent,
 	}
 	dispatchStart := time.Now()
-	resp, dispatchErr := dispatch.TraceFire(rc, schedType, scheduleID, func(dispCtx context.Context) (dispatch.PromptDispatchResponse, error) {
+	resp, dispatchErr := dispatch.TraceFire(ctx, schedType, scheduleID, func(dispCtx context.Context) (dispatch.PromptDispatchResponse, error) {
 		return s.dispatcher.DispatchPrompt(dispCtx, dispReq)
 	})
 	metrics.RecordScheduleDispatchDuration(schedType, time.Since(dispatchStart).Seconds())

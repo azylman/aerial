@@ -378,7 +378,7 @@ func buildCallSummary(call *model.VoiceCall, summary string) string {
 
 // postSummary posts the Call Summary with the call recording attached. The
 // recording is read without consuming it so a retried post still carries audio.
-func (p *ProsperaReport) postSummary(rc restate.RunContext, call *model.VoiceCall, summary string) error {
+func (p *ProsperaReport) postSummary(ctx context.Context, call *model.VoiceCall, summary string) error {
 	cfg := p.reporter.cfgSrc.Current()
 	var attachments []discordAttachmentPayload
 	if p.reporter.recordingProvider != nil {
@@ -391,13 +391,13 @@ func (p *ProsperaReport) postSummary(rc restate.RunContext, call *model.VoiceCal
 		}
 	}
 	channel := ResolveDiscordChannel(cfg, call.DiscordChannelID)
-	return p.reporter.postDiscordMessage(rc, cfg, channel, call.DiscordThreadID, buildCallSummary(call, summary), attachments)
+	return p.reporter.postDiscordMessage(ctx, cfg, channel, call.DiscordThreadID, buildCallSummary(call, summary), attachments)
 }
 
-func (p *ProsperaReport) markDelivered(rc restate.RunContext, callID, summary string) error {
+func (p *ProsperaReport) markDelivered(ctx context.Context, callID, summary string) error {
 	st := p.reporter.store
-	_, err := withStoreTimeout(rc, func(ctx context.Context) (bool, error) {
-		return st.TransitionReportStatus(ctx, callID, []string{reportStatusProcessing, reportStatusFailed, reportStatusPending}, reportStatusDelivered, summary)
+	_, err := withStoreTimeout(ctx, func(c context.Context) (bool, error) {
+		return st.TransitionReportStatus(c, callID, []string{reportStatusProcessing, reportStatusFailed, reportStatusPending}, reportStatusDelivered, summary)
 	})
 	return err
 }
@@ -435,20 +435,20 @@ func (p *ProsperaReport) DeliverReport(ctx restate.ObjectContext, req DeliverRep
 		return err
 	}
 	if batch.Content != "" {
-		if err := runStep(ctx, "post-live-transcript", func(rc restate.RunContext) error {
-			return p.reporter.postTranscriptBatch(rc, batch)
-		}); err != nil {
-			return err
+		if _, stepErr := runStep(ctx, "post-live-transcript", func(c context.Context) (struct{}, error) {
+			return struct{}{}, p.reporter.postTranscriptBatch(c, batch)
+		}); stepErr != nil {
+			return stepErr
 		}
 	}
 	if batch.To > batch.From {
-		if err := runStep(ctx, "advance-transcript-cursor", func(rc restate.RunContext) error {
-			_, advErr := withStoreTimeout(rc, func(c context.Context) (bool, error) {
+		if _, stepErr := runStep(ctx, "advance-transcript-cursor", func(c context.Context) (struct{}, error) {
+			_, advErr := withStoreTimeout(c, func(c context.Context) (bool, error) {
 				return p.reporter.store.AdvanceLiveTranscriptCursor(c, callID, batch.From, batch.To)
 			})
-			return advErr
-		}); err != nil {
-			return err
+			return struct{}{}, advErr
+		}); stepErr != nil {
+			return stepErr
 		}
 	}
 
@@ -468,28 +468,28 @@ func (p *ProsperaReport) DeliverReport(ctx restate.ObjectContext, req DeliverRep
 	// Post first, record delivery second, drop the recording last: a failed
 	// mark replays the journaled post instead of posting again, and a failed
 	// post retries with the recording still available.
-	if err := runStep(ctx, "post-call-summary", func(rc restate.RunContext) error {
-		return p.postSummary(rc, call, summary)
-	}); err != nil {
-		return err
+	if _, stepErr := runStep(ctx, "post-call-summary", func(c context.Context) (struct{}, error) {
+		return struct{}{}, p.postSummary(c, call, summary)
+	}); stepErr != nil {
+		return stepErr
 	}
-	if err := runStep(ctx, "mark-delivered", func(rc restate.RunContext) error {
-		return p.markDelivered(rc, callID, summary)
-	}); err != nil {
-		return err
+	if _, stepErr := restateingress.RunInSpan(ctx, "prospera.report.mark_reported", func(stepCtx context.Context, _ restate.RunContext) (restate.Void, error) {
+		return restate.Void{}, p.markDelivered(stepCtx, callID, summary)
+	}, restate.WithName("mark-delivered")); stepErr != nil {
+		return stepErr
 	}
-	return runStep(ctx, "delete-recording", func(restate.RunContext) error {
+	_, err = runStep(ctx, "delete-recording", func(context.Context) (struct{}, error) {
 		p.reporter.deleteRecording(callID)
-		return nil
+		return struct{}{}, nil
 	})
+	return err
 }
 
 // runStep journals one side-effecting step that has no result.
-func runStep(ctx restate.Context, name string, fn func(restate.RunContext) error) error {
-	_, err := restate.Run(ctx, func(rc restate.RunContext) (restate.Void, error) {
-		return restate.Void{}, fn(rc)
-	}, restate.WithName(name))
-	return err
+func runStep[T any](rc restate.ObjectContext, spanName string, fn func(context.Context) (T, error)) (T, restate.TerminalError) {
+	return restateingress.RunInSpan(rc, spanName, func(ctx context.Context, _ restate.RunContext) (T, error) {
+		return fn(ctx)
+	}, restate.WithName(spanName))
 }
 
 func (r *Reporter) deleteRecording(callID string) {

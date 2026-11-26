@@ -16,6 +16,7 @@ import (
 
 	"github.com/azylman/aerial/pkg/pubsub"
 	"github.com/azylman/aerial/pkg/restateingress"
+	"github.com/azylman/aerial/pkg/tracing"
 	"github.com/azylman/aerial/services/haro/internal/dispatch"
 	"github.com/azylman/aerial/services/haro/internal/metrics"
 	"github.com/azylman/aerial/services/haro/internal/model"
@@ -104,14 +105,14 @@ func (w *HaroEventWatch) Fire(ctx restate.ObjectContext, req EventWatchFireReque
 	}
 
 	// Step 2: dispatch-event
-	if _, err = restate.Run(ctx, func(rc restate.RunContext) (restate.Void, error) {
+	if _, err = restateingress.RunInSpan(ctx, "haro.eventwatch.handle", func(stepCtx context.Context, rc restate.RunContext) (restate.Void, error) {
 		if w.dispatcher == nil {
 			return restate.Void{}, errors.New("dispatcher not initialized")
 		}
 		prompt := model.FormatEventTriggerPrompt(req.ContextHeader, loaded.Prompt)
 		msgID := uuid.NewSHA1(uuid.NameSpaceOID, []byte("event_watch:"+strings.TrimSpace(loaded.ID)+":"+strings.TrimSpace(req.EventID))).String()
 		start := time.Now()
-		_, dispErr := dispatch.TraceFire(rc, model.ScheduleTypeEventWatch, loaded.ID, func(dispCtx context.Context) (dispatch.PromptDispatchResponse, error) {
+		_, dispErr := dispatch.TraceFire(stepCtx, model.ScheduleTypeEventWatch, loaded.ID, func(dispCtx context.Context) (dispatch.PromptDispatchResponse, error) {
 			return w.dispatcher.DispatchPrompt(dispCtx, dispatch.PromptDispatchRequest{
 				ChannelID: loaded.ChannelID,
 				MessageID: msgID,
@@ -150,7 +151,7 @@ func (w *HaroEventWatch) Fire(ctx restate.ObjectContext, req EventWatchFireReque
 
 // eventIngressClient bounds the one-way /send posts the external-event
 // consumer makes; Restate acknowledges a send without running the handler.
-var eventIngressClient = &http.Client{Timeout: 10 * time.Second}
+var eventIngressClient = tracing.Client(&http.Client{Timeout: 10 * time.Second})
 
 // HandleExternalEvent queries matching triggers and enqueues HaroEventWatch/<triggerID>/Fire
 // one-way via Restate ingress /send, keyed by trigger ID + event ID, so the single
