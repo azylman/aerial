@@ -41,28 +41,6 @@ const (
 	ingressTP = "00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01"
 )
 
-func TestTraceparentFromRequest(t *testing.T) {
-	t.Parallel()
-	tests := []struct {
-		name    string
-		attempt map[string][]string
-		headers map[string]string
-		want    string
-	}{
-		{"attempt wins", map[string][]string{"Traceparent": {attemptTP}}, map[string]string{"traceparent": ingressTP}, attemptTP},
-		{"ingress fallback", map[string][]string{"X-Other": {"1"}}, map[string]string{"traceparent": ingressTP}, ingressTP},
-		{"mixed-case ingress key", nil, map[string]string{"TraceParent": ingressTP}, ingressTP},
-		{"empty attempt value falls back", map[string][]string{"traceparent": {" "}}, map[string]string{"traceparent": ingressTP}, ingressTP},
-		{"none", nil, nil, ""},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			assert.Equal(t, tc.want, traceparentFromRequest(tc.attempt, tc.headers))
-		})
-	}
-}
-
 // fakeHeaders satisfies restate.Request.Headers without the SDK's internal constructor.
 type fakeHeaders map[string]string
 

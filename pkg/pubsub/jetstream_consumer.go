@@ -56,7 +56,7 @@ func (*JetStreamBus) dispatchCore(subCtx context.Context, m *nats.Msg, handler H
 	if h := msg.Header(); len(h) > 0 {
 		ctx = otel.GetTextMapPropagator().Extract(ctx, propagation.HeaderCarrier(http.Header(h)))
 	}
-	ctx, span := tracing.Tracer().Start(ctx, msg.Subject()+" process", processSpanOptions(msg.Subject(), "", 1, msg.Header().Get(HeaderMsgID))...)
+	ctx, span := tracing.Tracer().Start(ctx, SpanSubject(msg.Subject())+" process", processSpanOptions(msg.Subject(), "", 1, msg.Header().Get(HeaderMsgID))...)
 	var err error
 	defer func() {
 		failSpan(span, err)
@@ -493,7 +493,7 @@ func (b *JetStreamBus) dispatch(subCtx context.Context, m jetstream.Msg, group s
 		wrapped.meta = meta
 	}
 
-	ctx, span := tracing.Tracer().Start(ctx, m.Subject()+" process", processSpanOptions(m.Subject(), group, wrapped.NumDelivered(), m.Headers().Get(HeaderMsgID))...)
+	ctx, span := tracing.Tracer().Start(ctx, SpanSubject(m.Subject())+" process", processSpanOptions(m.Subject(), group, wrapped.NumDelivered(), m.Headers().Get(HeaderMsgID))...)
 	wrapped.spanCtx = span.SpanContext()
 	var handlerErr error
 	defer func() {
