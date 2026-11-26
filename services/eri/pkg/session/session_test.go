@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -50,10 +51,32 @@ func writeConversationFile(t *testing.T, dir, sessionID, ext string, size int) s
 
 func TestManager_Init(t *testing.T) {
 	tmp := t.TempDir()
-	m := New(filepath.Join(tmp, "home"), filepath.Join(tmp, "data"))
+	homeDir := filepath.Join(tmp, "home")
+	dataDir := filepath.Join(tmp, "data")
+	m := New(homeDir, dataDir)
 	if m == nil || m.homeDir == "" || m.dataDir == "" || len(m.Roots()) == 0 {
 		t.Fatalf("unexpected Manager initialization: %+v", m)
 	}
+	wantRoots := []string{
+		filepath.Join(dataDir, "brain"),
+		filepath.Join(dataDir, "runtimes", runtimeVoice, ".gemini", "antigravity-cli", "brain"),
+		filepath.Join(dataDir, "runtimes", runtimeVoice, ".gemini", "antigravity", "brain"),
+		filepath.Join(homeDir, ".gemini", "antigravity-cli", "brain"),
+		filepath.Join(homeDir, ".gemini", "antigravity", "brain"),
+	}
+	if !reflect.DeepEqual(m.Roots(), wantRoots) {
+		t.Fatalf("m.Roots() = %v, want %v", m.Roots(), wantRoots)
+	}
+
+	mNoData := New(homeDir, "")
+	wantNoDataRoots := []string{
+		filepath.Join(homeDir, ".gemini", "antigravity-cli", "brain"),
+		filepath.Join(homeDir, ".gemini", "antigravity", "brain"),
+	}
+	if !reflect.DeepEqual(mNoData.Roots(), wantNoDataRoots) {
+		t.Fatalf("mNoData.Roots() = %v, want %v", mNoData.Roots(), wantNoDataRoots)
+	}
+
 	var nilMgr *Manager
 	if len(nilMgr.Roots()) != 0 {
 		t.Fatalf("nil Manager should return nil roots")

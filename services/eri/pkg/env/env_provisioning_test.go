@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -28,27 +29,29 @@ type sharedAssetsCase struct {
 func assertIsolatedEphemeralStorage(t *testing.T, p *Provisioner, tmpData string) {
 	t.Helper()
 	p.linkSharedSessionStorage(tmpData, filepath.Join(tmpData, "brain"), filepath.Join(tmpData, "conversations"))
-	ephHome := p.runtimeHomeDir(TargetEphemeral)
-	ephCliBrain := filepath.Join(ephHome, ".gemini", "antigravity-cli", "brain")
-	if err := os.MkdirAll(filepath.Dir(ephCliBrain), 0o755); err != nil {
-		t.Fatalf("MkdirAll: %v", err)
-	}
-	if err := os.Symlink(filepath.Join(tmpData, "brain"), ephCliBrain); err != nil {
-		t.Fatalf("Symlink: %v", err)
-	}
-	ephCodexSessions := filepath.Join(ephHome, ".codex", "sessions")
-	if err := os.MkdirAll(filepath.Dir(ephCodexSessions), 0o755); err != nil {
-		t.Fatalf("MkdirAll: %v", err)
-	}
-	if err := os.Symlink(filepath.Join(tmpData, "codex", "sessions"), ephCodexSessions); err != nil {
-		t.Fatalf("Symlink: %v", err)
-	}
-	p.provisionRuntimeSharedAssets(ephHome)
-	if fi, err := os.Lstat(ephCliBrain); err != nil || fi.Mode()&os.ModeSymlink != 0 || !fi.IsDir() {
-		t.Fatalf("expected ephemeral brain to be isolated directory, got fi=%v err=%v", fi, err)
-	}
-	if fi, err := os.Lstat(ephCodexSessions); err != nil || fi.Mode()&os.ModeSymlink != 0 || !fi.IsDir() {
-		t.Fatalf("expected ephemeral codex sessions to be isolated directory, got fi=%v err=%v", fi, err)
+	for _, target := range []RuleTarget{TargetEphemeral, TargetVoice} {
+		rtHome := p.runtimeHomeDir(target)
+		rtCliBrain := filepath.Join(rtHome, ".gemini", "antigravity-cli", "brain")
+		if err := os.MkdirAll(filepath.Dir(rtCliBrain), 0o755); err != nil {
+			t.Fatalf("MkdirAll: %v", err)
+		}
+		if err := os.Symlink(filepath.Join(tmpData, "brain"), rtCliBrain); err != nil {
+			t.Fatalf("Symlink: %v", err)
+		}
+		rtCodexSessions := filepath.Join(rtHome, ".codex", "sessions")
+		if err := os.MkdirAll(filepath.Dir(rtCodexSessions), 0o755); err != nil {
+			t.Fatalf("MkdirAll: %v", err)
+		}
+		if err := os.Symlink(filepath.Join(tmpData, "codex", "sessions"), rtCodexSessions); err != nil {
+			t.Fatalf("Symlink: %v", err)
+		}
+		p.provisionRuntimeSharedAssets(rtHome)
+		if fi, err := os.Lstat(rtCliBrain); err != nil || fi.Mode()&os.ModeSymlink != 0 || !fi.IsDir() {
+			t.Fatalf("expected %s brain to be isolated directory, got fi=%v err=%v", target, fi, err)
+		}
+		if fi, err := os.Lstat(rtCodexSessions); err != nil || fi.Mode()&os.ModeSymlink != 0 || !fi.IsDir() {
+			t.Fatalf("expected %s codex sessions to be isolated directory, got fi=%v err=%v", target, fi, err)
+		}
 	}
 }
 
@@ -186,10 +189,13 @@ type mcpProvisioningCase struct {
 	target        RuleTarget
 	withPAT       bool
 	servers       config.TargetMcpConfig // merged over the defaults
+	voiceTools    []string               // voice.allowed_tools
+	setVoiceTools bool                   // true if Voice.AllowedTools should be explicitly set
 	wantScheduler bool
 	wantDiscord   bool
 	wantGitHub    bool
 	wantPresent   []string
+	wantAbsent    []string
 	wantURL       map[string]string
 	wantHeaders   map[string]map[string]any
 }
@@ -220,7 +226,7 @@ func mcpRaw(kv ...string) map[string]json.RawMessage {
 	return m
 }
 
-func newMCPTestConfig(withPAT, noDefaults bool, mcpConfig string, extra config.TargetMcpConfig) *config.Config {
+func newMCPTestConfig(withPAT, noDefaults bool, mcpConfig string, extra config.TargetMcpConfig, voiceTools ...[]string) *config.Config {
 	return newTestConfig(func(c *config.ConfigData) {
 		if !noDefaults {
 			c.McpServers.Common = mcpRaw("scheduler", `{"serverUrl":"http://haro.aerial/mcp"}`, "memory", `{"serverUrl":"http://coven.aerial/mcp"}`,
@@ -247,6 +253,9 @@ func newMCPTestConfig(withPAT, noDefaults bool, mcpConfig string, extra config.T
 			c.GitHubPAT = "ghp_" + "12345678901234567890"
 		}
 		c.MCPConfig = mcpConfig
+		if len(voiceTools) > 0 {
+			c.Voice.AllowedTools = voiceTools[0]
+		}
 	})
 }
 
@@ -343,6 +352,11 @@ func assertTargetCustomServers(t *testing.T, tc mcpProvisioningCase, servers map
 			t.Errorf("expected server %q in %s config: %+v", name, tc.target, servers)
 		}
 	}
+	for _, name := range tc.wantAbsent {
+		if servers[name] != nil {
+			t.Errorf("expected server %q to be absent in %s config: %+v", name, tc.target, servers)
+		}
+	}
 }
 
 func assertTargetMCPServers(t *testing.T, tc mcpProvisioningCase, servers map[string]any) {
@@ -381,6 +395,11 @@ func assertClaudeMCPServers(t *testing.T, tc mcpProvisioningCase, p *Provisioner
 		}
 		assertMCPHeaders(t, "claude "+name, srv, tc.wantHeaders[name])
 	}
+	for _, name := range tc.wantAbsent {
+		if cServers[name] != nil {
+			t.Errorf("expected server %q to be absent in claude %s config: %+v", name, tc.target, cServers)
+		}
+	}
 }
 
 func runMCPProvisioningCase(t *testing.T, tc mcpProvisioningCase) {
@@ -389,7 +408,12 @@ func runMCPProvisioningCase(t *testing.T, tc mcpProvisioningCase) {
 	tmpData := t.TempDir()
 	p := newDisabledProvisioner(t, tmpHome, tmpData)
 
-	cfg := newMCPTestConfig(tc.withPAT, false, "", tc.servers)
+	var cfg *config.Config
+	if tc.setVoiceTools {
+		cfg = newMCPTestConfig(tc.withPAT, false, "", tc.servers, tc.voiceTools)
+	} else {
+		cfg = newMCPTestConfig(tc.withPAT, false, "", tc.servers)
+	}
 
 	raw := p.LoadTargetMCPConfig(cfg, tc.target)
 	var parsed map[string]map[string]any
@@ -487,11 +511,137 @@ func TestMCPProvisioning(t *testing.T) {
 			name: "overlay custom mcp server with raw non-obj value", target: TargetDiscord, wantScheduler: true, wantDiscord: true, wantGitHub: true,
 			servers: config.TargetMcpConfig{Discord: mcpRaw("raw_srv", `"string_only_value"`)},
 		},
+		{
+			name: "voice target with allowed tools filters and prunes servers", target: TargetVoice, withPAT: true,
+			setVoiceTools: true, voiceTools: []string{"read_tool", "WRITE_TOOL"},
+			servers: config.TargetMcpConfig{
+				Common: mcpRaw(
+					"keep_server", `{"serverUrl":"http://keep:8080","enabled_tools":["read_tool","other_tool"]}`,
+					"prune_server", `{"serverUrl":"http://prune:8080","enabledTools":["other_tool"]}`,
+				),
+				Voice: mcpRaw(
+					"unconstrained_server", `{"serverUrl":"http://unconstrained:8080"}`,
+				),
+			},
+			wantScheduler: true, wantGitHub: true,
+			wantPresent: []string{"keep_server", "unconstrained_server"},
+			wantAbsent:  []string{"prune_server"},
+		},
+		{
+			name: "voice target with empty allowed tools clears all servers", target: TargetVoice, withPAT: true,
+			setVoiceTools: true, voiceTools: []string{},
+			wantScheduler: false, wantDiscord: false, wantGitHub: false,
+			wantAbsent: []string{"scheduler", "memory", "github"},
+		},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			runMCPProvisioningCase(t, tc)
+		})
+	}
+}
+
+func cloneServersMap(src map[string]any) map[string]any {
+	dst := make(map[string]any, len(src))
+	for k, v := range src {
+		if m, ok := v.(map[string]any); ok {
+			dst[k] = maps.Clone(m)
+		} else {
+			dst[k] = v
+		}
+	}
+	return dst
+}
+
+func assertVoiceAllowedPresent(t *testing.T, servers map[string]any, wantPresent []string, wantTools map[string][]string) {
+	t.Helper()
+	for _, name := range wantPresent {
+		entry, ok := servers[name].(map[string]any)
+		if !ok {
+			t.Fatalf("expected server %q to be present", name)
+		}
+		if want, ok := wantTools[name]; ok {
+			got, _ := entry["enabledTools"].([]string)
+			if !reflect.DeepEqual(got, want) {
+				t.Errorf("server %q enabledTools = %v, want %v", name, entry["enabledTools"], want)
+			}
+		}
+		if _, has := entry["enabled_tools"]; has {
+			t.Errorf("server %q retained enabled_tools key", name)
+		}
+	}
+}
+
+func assertVoiceAllowedAbsent(t *testing.T, servers map[string]any, wantAbsent []string) {
+	t.Helper()
+	for _, name := range wantAbsent {
+		if servers[name] != nil {
+			t.Errorf("expected server %q to be absent, got %v", name, servers[name])
+		}
+	}
+}
+
+func TestApplyVoiceAllowedTools(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name         string
+		allowedTools []string
+		servers      map[string]any
+		wantPresent  []string
+		wantAbsent   []string
+		wantTools    map[string][]string
+	}{
+		{
+			name:         "nil allowed tools leaves servers untouched",
+			allowedTools: nil,
+			servers: map[string]any{
+				"s1": map[string]any{"enabledTools": []string{"t1"}},
+			},
+			wantPresent: []string{"s1"},
+			wantTools:   map[string][]string{"s1": {"t1"}},
+		},
+		{
+			name:         "empty allowed tools clears all servers",
+			allowedTools: []string{},
+			servers: map[string]any{
+				"s1": map[string]any{"enabledTools": []string{"t1"}},
+				"s2": map[string]any{"serverUrl": "http://s2"},
+			},
+			wantAbsent: []string{"s1", "s2"},
+		},
+		{
+			name:         "only whitespace tool names clears all servers",
+			allowedTools: []string{"  ", ""},
+			servers: map[string]any{
+				"s1": map[string]any{"serverUrl": "http://s1"},
+			},
+			wantAbsent: []string{"s1"},
+		},
+		{
+			name:         "normalizes lowercase trims and deduplicates allowed tools",
+			allowedTools: []string{"  TOOL_A ", "tool_a", "Tool_B"},
+			servers: map[string]any{
+				"unconstrained": map[string]any{"serverUrl": "http://u"},
+				"intersected":   map[string]any{"enabled_tools": []string{"tool_b", "tool_c"}},
+				"disjoint":      map[string]any{"enabledTools": []string{"tool_c"}},
+			},
+			wantPresent: []string{"unconstrained", "intersected"},
+			wantAbsent:  []string{"disjoint"},
+			wantTools: map[string][]string{
+				"unconstrained": {"tool_a", "tool_b"},
+				"intersected":   {"tool_b"},
+			},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			servers := cloneServersMap(tc.servers)
+			applyVoiceAllowedTools(servers, tc.allowedTools)
+			assertVoiceAllowedPresent(t, servers, tc.wantPresent, tc.wantTools)
+			assertVoiceAllowedAbsent(t, servers, tc.wantAbsent)
 		})
 	}
 }

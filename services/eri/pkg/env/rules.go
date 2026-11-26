@@ -419,7 +419,7 @@ func (p *Provisioner) provisionRuntimeSharedAssets(runtimeHome string) {
 		filepath.Join(runtimeGemini, "mcp_oauth_tokens.json"),
 	)
 
-	if p.dataDir != "" && filepath.Clean(runtimeHome) == filepath.Clean(p.runtimeHomeDir(TargetEphemeral)) {
+	if p.dataDir != "" && (filepath.Clean(runtimeHome) == filepath.Clean(p.runtimeHomeDir(TargetEphemeral)) || filepath.Clean(runtimeHome) == filepath.Clean(p.runtimeHomeDir(TargetVoice))) {
 		isolateEphemeralSessionStorage(runtimeHome, runtimeGemini)
 		return
 	}

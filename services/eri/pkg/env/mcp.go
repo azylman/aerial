@@ -127,6 +127,54 @@ func StripProxyPolicyFields(servers map[string]any) {
 	}
 }
 
+func applyVoiceAllowedTools(mergedServers map[string]any, allowedTools []string) {
+	if allowedTools == nil {
+		return
+	}
+
+	allowedSet := make(map[string]bool)
+	var normalized []string
+	for _, t := range allowedTools {
+		if clean := strings.ToLower(strings.TrimSpace(t)); clean != "" && !allowedSet[clean] {
+			allowedSet[clean] = true
+			normalized = append(normalized, clean)
+		}
+	}
+	if len(normalized) == 0 {
+		clear(mergedServers)
+		return
+	}
+	sort.Strings(normalized)
+
+	for name, v := range mergedServers {
+		entry, ok := v.(map[string]any)
+		if !ok {
+			continue
+		}
+		entry = maps.Clone(entry)
+		existing := extractToolSet(entry, "enabledTools", "enabled_tools")
+		delete(entry, "enabled_tools")
+
+		if len(existing) > 0 {
+			var intersected []string
+			for tool := range existing {
+				if allowedSet[tool] {
+					intersected = append(intersected, tool)
+				}
+			}
+			if len(intersected) == 0 {
+				delete(mergedServers, name)
+				continue
+			}
+			sort.Strings(intersected)
+			entry["enabledTools"] = intersected
+		} else {
+			entry["enabledTools"] = append([]string(nil), normalized...)
+		}
+		mergedServers[name] = entry
+	}
+}
+
 // LoadTargetMCPConfig constructs the merged MCP configuration partitioned for target runtime.
 // Headers are emitted verbatim with the credentials declared in config. Server URLs are too,
 // unless MCP tracing is enabled (WithMCPProxy): then HTTP servers point at eri's loopback
@@ -140,6 +188,9 @@ func (p *Provisioner) LoadTargetMCPConfig(cfg *config.Config, target RuleTarget)
 
 	// Overlay custom MCP servers from config.yaml
 	overlayConfigMCPServers(cfg, target, mergedServers)
+	if target == TargetVoice && cfg != nil && cfg.Current() != nil {
+		applyVoiceAllowedTools(mergedServers, cfg.Current().VoiceAllowedTools())
+	}
 	if p != nil {
 		p.mcpProxy.rewrite(target, mergedServers)
 	}
