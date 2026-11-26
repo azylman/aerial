@@ -26,7 +26,7 @@ export const USE_CASE_SCENARIOS: readonly UseCaseScenario[] = [
       'Automated code review passes, all continuous integration jobs succeed, and pull request merges without manual intervention.',
     stackBadges: [
       'Restate',
-      'GitHub Actions ARC',
+      'GitHub Actions CI',
       'Ephemeral Scratch Git',
       'Discord REST API',
     ],
