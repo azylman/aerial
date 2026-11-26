@@ -13,6 +13,11 @@ import (
 	"testing"
 	"time"
 
+	"go.opentelemetry.io/otel"
+	sdktrace "go.opentelemetry.io/otel/sdk/trace"
+	"go.opentelemetry.io/otel/sdk/trace/tracetest"
+	"go.opentelemetry.io/otel/trace"
+
 	"github.com/azylman/aerial/pkg/httpkit"
 	"github.com/azylman/aerial/pkg/k8sauth"
 	"github.com/azylman/aerial/pkg/pgtest"
@@ -143,6 +148,54 @@ func TestServerRoutes(t *testing.T) {
 				t.Errorf("GET %s body = %s, want fragment %q", tc.path, rec.Body.String(), tc.wantFrag)
 			}
 		})
+	}
+}
+
+func TestServerRoutes_TracingMiddleware(t *testing.T) {
+	prev := otel.GetTracerProvider()
+	defer otel.SetTracerProvider(prev)
+
+	rec := tracetest.NewSpanRecorder()
+	tp := sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(rec))
+	otel.SetTracerProvider(tp)
+
+	srv := newSeededServer(t)
+
+	// Test traced routes: /stats and /search
+	reqStats := httptest.NewRequest(http.MethodGet, "/stats", http.NoBody)
+	wStats := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(wStats, reqStats)
+	if wStats.Code != http.StatusOK {
+		t.Fatalf("GET /stats status = %d, want %d", wStats.Code, http.StatusOK)
+	}
+
+	reqSearch := httptest.NewRequest(http.MethodGet, "/search?q=content", http.NoBody)
+	wSearch := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(wSearch, reqSearch)
+	if wSearch.Code != http.StatusOK {
+		t.Fatalf("GET /search status = %d, want %d", wSearch.Code, http.StatusOK)
+	}
+
+	// Verify ended spans
+	spans := rec.Ended()
+	var serverSpans []sdktrace.ReadOnlySpan
+	for _, s := range spans {
+		if s.SpanKind() == trace.SpanKindServer {
+			serverSpans = append(serverSpans, s)
+		}
+	}
+
+	if len(serverSpans) != 2 {
+		t.Fatalf("expected 2 server spans, got %d", len(serverSpans))
+	}
+
+	// First span should be GET /stats
+	if serverSpans[0].Name() != "GET /stats" {
+		t.Errorf("span 0 name = %q, want 'GET /stats'", serverSpans[0].Name())
+	}
+	// Second span should be GET /search
+	if serverSpans[1].Name() != "GET /search" {
+		t.Errorf("span 1 name = %q, want 'GET /search'", serverSpans[1].Name())
 	}
 }
 
