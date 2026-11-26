@@ -2985,11 +2985,12 @@ spec:
                   throw new Error('Network error reading Secret/aerial-bootstrap-secrets: ' + (e.message || 'unknown error'));
                 }
 
-                if (secRes.statusCode === 200 && secRes.json && secRes.json.data) {
+                if (secRes.statusCode === 200 && secRes.json) {
                   console.log('Secret/aerial-bootstrap-secrets found, importing secrets...');
-                  await importSecrets(secRes.json.data, infisicalToken, projectSlug);
+                  const data = secRes.json.data || {};
+                  await importSecrets(data, infisicalToken, projectSlug);
                   const delRes = await k8sRequest('DELETE', '/api/v1/namespaces/default/secrets/aerial-bootstrap-secrets');
-                  if (delRes.statusCode >= 200 && delRes.statusCode < 300) {
+                  if ((delRes.statusCode >= 200 && delRes.statusCode < 300) || delRes.statusCode === 404) {
                     console.log('Deleted Secret/aerial-bootstrap-secrets');
                   } else {
                     throw new Error('Failed to delete Secret/aerial-bootstrap-secrets: status ' + delRes.statusCode);
@@ -3007,26 +3008,27 @@ spec:
                   for (let attempt = 1; attempt <= 180; attempt++) {
                     await sleep(5000);
 
-                    if (await checkRequiredSecrets(infisicalToken, projectSlug)) {
-                      console.log('Required secrets now present in Infisical.');
-                      seeded = true;
-                      break;
-                    }
-
                     try {
                       const pollRes = await k8sRequest('GET', '/api/v1/namespaces/default/secrets/aerial-bootstrap-secrets');
-                      if (pollRes.statusCode === 200 && pollRes.json && pollRes.json.data) {
+                      if (pollRes.statusCode === 200 && pollRes.json) {
                         console.log('Found Secret/aerial-bootstrap-secrets on attempt ' + attempt);
-                        await importSecrets(pollRes.json.data, infisicalToken, projectSlug);
+                        const data = pollRes.json.data || {};
+                        await importSecrets(data, infisicalToken, projectSlug);
                         const delRes = await k8sRequest('DELETE', '/api/v1/namespaces/default/secrets/aerial-bootstrap-secrets');
-                        if (delRes.statusCode >= 200 && delRes.statusCode < 300) {
+                        if ((delRes.statusCode >= 200 && delRes.statusCode < 300) || delRes.statusCode === 404) {
                           console.log('Deleted Secret/aerial-bootstrap-secrets');
+                          seeded = true;
+                          break;
                         } else {
                           throw new Error('Failed to delete Secret/aerial-bootstrap-secrets: status ' + delRes.statusCode);
                         }
-                        seeded = true;
-                        break;
-                      } else if (pollRes.statusCode !== 404) {
+                      } else if (pollRes.statusCode === 404) {
+                        if (await checkRequiredSecrets(infisicalToken, projectSlug)) {
+                          console.log('Required secrets now present in Infisical.');
+                          seeded = true;
+                          break;
+                        }
+                      } else {
                         throw new Error('Unexpected status reading Secret/aerial-bootstrap-secrets: ' + pollRes.statusCode);
                       }
                     } catch (err) {
