@@ -73,11 +73,10 @@ func assertVoiceStorageIsolated(t *testing.T, p *Provisioner, tmpData string) {
 	targets := []struct {
 		symlinkPath string
 		wantDst     string
-		sharedDst   string
 		label       string
 	}{
-		{voiceCliBrain, filepath.Join(wantVoiceData, ".gemini", "antigravity-cli", "brain"), filepath.Join(tmpData, "brain"), "brain"},
-		{voiceCodexSessions, filepath.Join(wantVoiceData, "codex", "sessions"), filepath.Join(tmpData, "codex", "sessions"), "codex sessions"},
+		{voiceCliBrain, filepath.Join(wantVoiceData, ".gemini", "antigravity-cli", "brain"), "brain"},
+		{voiceCodexSessions, filepath.Join(wantVoiceData, "codex", "sessions"), "codex sessions"},
 	}
 	for _, tc := range targets {
 		fi, err := os.Lstat(tc.symlinkPath)
@@ -87,9 +86,6 @@ func assertVoiceStorageIsolated(t *testing.T, p *Provisioner, tmpData string) {
 		linkTarget, err := os.Readlink(tc.symlinkPath)
 		if err != nil || filepath.Clean(linkTarget) != filepath.Clean(tc.wantDst) {
 			t.Fatalf("expected %s %s to link to %s, got %s (err=%v)", TargetVoice, tc.label, tc.wantDst, linkTarget, err)
-		}
-		if filepath.Clean(linkTarget) == filepath.Clean(tc.sharedDst) {
-			t.Fatalf("expected %s %s to be distinct from shared storage", TargetVoice, tc.label)
 		}
 	}
 }

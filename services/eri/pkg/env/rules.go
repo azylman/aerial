@@ -483,6 +483,10 @@ func (p *Provisioner) provisionRuntimeSharedAssets(runtimeHome string) {
 	}
 }
 
+// provisionVoiceSessionStorage links voice runtime session storage to persistent /data/voice-sessions/...
+// on the shared volume, keeping voice sessions isolated from /data/brain while persisting across pod restarts.
+// Session discovery by agentsview-sync is configured downstream in aerial-config (k8s/agentsview-session-sources.yaml)
+// as part of chunk 3 per the Two-Step Feature Rule.
 func (p *Provisioner) provisionVoiceSessionStorage(runtimeHome, runtimeGemini string) {
 	voiceData := filepath.Join(p.dataDir, "voice-sessions")
 	voiceBrain := filepath.Join(voiceData, ".gemini", "antigravity-cli", "brain")

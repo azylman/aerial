@@ -593,10 +593,6 @@ func assertRuntimeRulesMD(t *testing.T, p *Provisioner) {
 				if filepath.Clean(dst) != filepath.Clean(check.wantDst) {
 					t.Errorf("symlink %s points to %s; want %s", check.linkPath, dst, check.wantDst)
 				}
-				if filepath.Clean(dst) == filepath.Clean(filepath.Join(p.dataDir, "brain")) ||
-					filepath.Clean(dst) == filepath.Clean(filepath.Join(p.dataDir, "conversations")) {
-					t.Errorf("voice session link %s points to shared storage %s", check.linkPath, dst)
-				}
 			}
 		}
 	}
