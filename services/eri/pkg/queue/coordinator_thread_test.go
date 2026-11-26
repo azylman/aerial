@@ -255,6 +255,21 @@ func TestThreadCoordinator_Append_IngressWakeGating(t *testing.T) {
 			wantRows:  map[string]rowWant{"m-wake": {status: db.StatusPending}},
 			wantState: st(nil, startedTurn("m-wake")),
 		},
+		{
+			name:     "TerminalFailedAndCompletedRowsSkippedWithoutModifyingStatusOrError",
+			resolver: fakeIngressWakeResolver{shouldEnqueue: false, completedReason: "[IGNORED]"},
+			rows: []db.Message{
+				{ID: "m-fail", ThreadID: tcKey, Status: db.StatusFailed, ErrorMessage: "original fail reason"},
+				{ID: "m-done", ThreadID: tcKey, Status: db.StatusCompleted, ErrorMessage: "original done reason"},
+			},
+			req:       AppendRequest{IDs: []string{"m-fail", "m-done"}},
+			wantSends: nil,
+			wantRows: map[string]rowWant{
+				"m-fail": {status: db.StatusFailed, errText: "original fail reason"},
+				"m-done": {status: db.StatusCompleted, errText: "original done reason"},
+			},
+			wantState: coordinatorState{},
+		},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {

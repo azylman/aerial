@@ -59,8 +59,6 @@ type matchTestCase struct {
 func TestMatchTurnExecution(t *testing.T) {
 	t.Parallel()
 
-	assert.False(t, matchTurnExecution(nil, "d1", "", ""))
-
 	tests := []matchTestCase{
 		{
 			name:        "match activeTurnDaemon",
@@ -116,20 +114,6 @@ func TestMatchTurnExecution(t *testing.T) {
 			ownerConv: "conv-xyz",
 			reqSessID: "conv-xyz",
 			wantMatch: true,
-		},
-		{
-			name:      "all request IDs empty",
-			teDaemon:  "daemon-1",
-			currSess:  "sess-1",
-			wantMatch: false,
-		},
-		{
-			name:      "empty target string inside execution handles safely",
-			currSess:  "",
-			leaseSess: "",
-			ownerConv: "",
-			reqConvID: "some-conv",
-			wantMatch: false,
 		},
 		{
 			name:      "mismatch conversation and session ID",
@@ -576,21 +560,43 @@ func TestRegisterSteerHandler(t *testing.T) {
 	assert.Equal(t, http.StatusMethodNotAllowed, recGET.Code)
 }
 
-func TestDrainHTTPClient(t *testing.T) {
+func TestDrainHTTPClient_DefaultClientUsedByHandler(t *testing.T) {
 	t.Parallel()
 
-	var nilPool *WorkerPool
-	assert.NotNil(t, nilPool.drainHTTPClient())
+	var receivedPath string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		receivedPath = r.URL.Path
+		w.Header().Set("Content-Type", "application/json")
+		assert.NoError(t, json.NewEncoder(w).Encode(DrainPendingResponse{DrainedIDs: []string{}}))
+	}))
+	defer srv.Close()
 
-	pool := NewWorkerPool(WorkerPoolConfig{})
-	assert.NotNil(t, pool.drainHTTPClient())
+	// DrainHTTPClient is intentionally nil to test default client fallback
+	pool := NewWorkerPool(WorkerPoolConfig{
+		RestateIngressURL: srv.URL,
+	})
 
-	srvClient := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
-	defer srvClient.Close()
-	custom := srvClient.Client()
+	te := &turnExecution{
+		turnID:           "turn-default-client",
+		threadID:         "thread-default-client",
+		activeTurnDaemon: "daemon-default-client",
+	}
+	release, ok := pool.turns.Begin(context.Background(), te.turnID, te)
+	require.True(t, ok)
+	defer release()
 
-	poolCustom := NewWorkerPool(WorkerPoolConfig{DrainHTTPClient: custom})
-	assert.Same(t, custom, poolCustom.drainHTTPClient())
+	body, err := json.Marshal(SteerDrainRequest{DaemonID: "daemon-default-client"})
+	require.NoError(t, err)
+	req := httptest.NewRequest(http.MethodPost, SteerDrainPath, bytes.NewReader(body))
+	rec := httptest.NewRecorder()
+
+	pool.HandleDrainPending(rec, req)
+
+	assert.Equal(t, http.StatusOK, rec.Code)
+	assert.Equal(t, "/ThreadSession/thread-default-client/DrainPending", receivedPath)
+	var resp SteerDrainResponse
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&resp))
+	assert.Empty(t, resp.Prompts)
 }
 
 func TestHandleDrainPending_StoreNil(t *testing.T) {

@@ -52,6 +52,7 @@ type MessageStore interface {
 	FailMessagesIfActive(ctx context.Context, ids []string, reason string) ([]string, error)
 	FailMessagesIfPending(ctx context.Context, ids []string, reason string) ([]string, error)
 	SkipMessagesIfActive(ctx context.Context, ids []string, reason string) ([]string, error)
+	SkipMessagesIfPending(ctx context.Context, ids []string, reason string) ([]string, error)
 	RequeueProcessingMessages(ctx context.Context, ids []string, reason string) ([]string, error)
 	BeginMessageAttempt(ctx context.Context, id string, ordinal int) (AttemptStart, error)
 }

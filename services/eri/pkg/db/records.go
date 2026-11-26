@@ -188,6 +188,12 @@ func (s *SQLStore) SkipMessagesIfActive(ctx context.Context, ids []string, reaso
 	return s.skipRecords(ctx, messagesTable, ids, reason)
 }
 
+// SkipMessagesIfPending records PENDING messages COMPLETED with reason and returns the IDs changed;
+// rows already terminal or processing are left untouched.
+func (s *SQLStore) SkipMessagesIfPending(ctx context.Context, ids []string, reason string) ([]string, error) {
+	return s.updateRecordsByID(ctx, messagesTable, "status = 'COMPLETED', error_message = $1, updated_at = $2", pendingStatusesSQL, ids, reason, time.Now().UTC())
+}
+
 // SkipDispatchesIfActive records PENDING/PROCESSING dispatches COMPLETED with reason (a skipped
 // turn) and returns the IDs changed; rows already terminal are left untouched.
 func (s *SQLStore) SkipDispatchesIfActive(ctx context.Context, ids []string, reason string) ([]string, error) {

@@ -266,7 +266,7 @@ func (t *ThreadCoordinator) gatePendingMessages(ctx restate.ObjectContext, fresh
 			}); sErr != nil {
 				return nil, sErr
 			}
-			if msg == nil {
+			if msg == nil || msg.Status != db.StatusPending {
 				continue
 			}
 			shouldEnqueue, completedReason := eval.EvaluateIngressWake(rc, threadKey, *msg)
@@ -274,7 +274,8 @@ func (t *ThreadCoordinator) gatePendingMessages(ctx restate.ObjectContext, fresh
 				allowed = append(allowed, id)
 			} else {
 				if _, sErr := storeCall(rc, func(sc context.Context) (struct{}, error) {
-					return struct{}{}, t.store.UpdateMessageStatus(sc, id, db.StatusCompleted, completedReason)
+					_, skipErr := t.store.SkipMessagesIfPending(sc, []string{id}, completedReason)
+					return struct{}{}, skipErr
 				}); sErr != nil {
 					return nil, sErr
 				}

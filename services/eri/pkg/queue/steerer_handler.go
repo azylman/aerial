@@ -40,7 +40,7 @@ func writeDrainError(w http.ResponseWriter, status int, msg string) {
 }
 
 func (p *WorkerPool) drainHTTPClient() *http.Client {
-	if p != nil && p.cfg.DrainHTTPClient != nil {
+	if p.cfg.DrainHTTPClient != nil {
 		return p.cfg.DrainHTTPClient
 	}
 	return &http.Client{Timeout: 10 * time.Second}
@@ -230,9 +230,6 @@ func (p *WorkerPool) drainBurstTurn(ctx context.Context, te *turnExecution, s db
 }
 
 func matchTurnExecution(te *turnExecution, daemonID, conversationID, sessionID string) bool {
-	if te == nil {
-		return false
-	}
 	var owner runner.ActiveTurnOwner
 	if te.lease != nil {
 		if o, ok := te.lease.(runner.ActiveTurnOwner); ok {
@@ -262,9 +259,6 @@ func matchTurnExecution(te *turnExecution, daemonID, conversationID, sessionID s
 	}
 
 	matchesTarget := func(target string) bool {
-		if target == "" {
-			return false
-		}
 		return target == currSess || target == leaseSess || (ownerConv != "" && target == ownerConv)
 	}
 

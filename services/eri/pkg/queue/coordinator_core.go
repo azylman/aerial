@@ -32,6 +32,7 @@ type coordinatorStore interface {
 	FailDispatchesIfActive(ctx context.Context, ids []string, reason string) ([]string, error)
 	FailDispatchesIfPending(ctx context.Context, ids []string, reason string) ([]string, error)
 	SkipMessagesIfActive(ctx context.Context, ids []string, reason string) ([]string, error)
+	SkipMessagesIfPending(ctx context.Context, ids []string, reason string) ([]string, error)
 	SkipDispatchesIfActive(ctx context.Context, ids []string, reason string) ([]string, error)
 	UpdateMessageStatus(ctx context.Context, id, status, errorMsg string, telemetry ...db.TurnTelemetry) error
 	UpdateDispatchStatus(ctx context.Context, id, status, errorMsg string, telemetry ...db.TurnTelemetry) error

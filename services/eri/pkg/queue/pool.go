@@ -149,6 +149,7 @@ type WorkerPool struct {
 	eventBus          pubsub.Bus
 	createThreadFn    func(channelID, title string) (string, error)
 	agentName         string
+	ingressGated      sync.Map
 
 	TranscriptStore         db.TranscriptStore
 	TranscriptsIndexerURL   string
