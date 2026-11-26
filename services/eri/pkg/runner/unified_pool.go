@@ -1411,8 +1411,12 @@ func (l *unifiedSessionLease) Release() error {
 		l.mu.RLock()
 		targetKey := l.targetKey
 		oldSessionID := l.sessionID
-		oldTurns := l.turnCount
 		l.mu.RUnlock()
+
+		baselineRec := l.pool.resolveTargetSessionRecord(l.pool.ctx, targetKey)
+		if baselineRec.ActiveSessionID == "" && oldSessionID != "" {
+			baselineRec.ActiveSessionID = oldSessionID
+		}
 
 		l.pool.mu.RLock()
 		if l.pool.closed {
@@ -1427,19 +1431,24 @@ func (l *unifiedSessionLease) Release() error {
 		log.Printf("[UnifiedProcessPool] Session rotation triggered for %s (reason: %s)", targetKey, reason)
 		metrics.RecordSessionRotation("turn_end", "pool", reason)
 
-		go l.pool.rotateReleasedTarget(targetKey, oldSessionID, oldTurns, l.lock)
+		go l.pool.rotateReleasedTarget(targetKey, oldSessionID, baselineRec, l.lock)
 	})
 	return releaseErr
 }
 
-func (p *UnifiedProcessPool) rotateReleasedTarget(targetKey, oldSessionID string, oldTurns int, lock *targetLock) {
+func (p *UnifiedProcessPool) rotateReleasedTarget(targetKey, oldSessionID string, baselineRec SessionRecord, lock *targetLock) {
 	defer p.bgWg.Done()
 	defer p.releaseTargetLock(targetKey, lock)
 
-	if p.Draining() {
+	evict := func(format string, args ...any) {
+		log.Printf(format, args...)
 		if evictErr := p.EvictSession(targetKey); evictErr != nil {
-			log.Printf("[UnifiedProcessPool] Warning evicting session for %s during drain: %v", targetKey, evictErr)
+			log.Printf("[UnifiedProcessPool] Warning evicting session for %s: %v", targetKey, evictErr)
 		}
+	}
+
+	if p.Draining() {
+		evict("[UnifiedProcessPool] Warning evicting session for %s during drain", targetKey)
 		return
 	}
 
@@ -1448,45 +1457,41 @@ func (p *UnifiedProcessPool) rotateReleasedTarget(targetKey, oldSessionID string
 
 	newDaemon, rotErr := p.RotateDaemon(rotCtx, targetKey, "")
 	if rotErr != nil {
-		log.Printf("[UnifiedProcessPool] Warning rotating daemon for %s: %v", targetKey, rotErr)
-		if evictErr := p.EvictSession(targetKey); evictErr != nil {
-			log.Printf("[UnifiedProcessPool] Warning evicting session for %s: %v", targetKey, evictErr)
-		}
+		evict("[UnifiedProcessPool] Warning rotating daemon for %s: %v", targetKey, rotErr)
 		return
 	}
 
 	if p.Draining() {
-		if evictErr := p.EvictSession(targetKey); evictErr != nil {
-			log.Printf("[UnifiedProcessPool] Warning evicting session for %s during drain: %v", targetKey, evictErr)
-		}
+		evict("[UnifiedProcessPool] Warning evicting session for %s during drain", targetKey)
 		return
 	}
 
-	if p.isSessionRecordSuperseded(rotCtx, targetKey, oldSessionID, oldTurns) {
-		log.Printf("[UnifiedProcessPool] Session for %s was superseded in store; aborting rotation save and evicting daemon", targetKey)
-		if evictErr := p.EvictSession(targetKey); evictErr != nil {
-			log.Printf("[UnifiedProcessPool] Warning evicting session for %s: %v", targetKey, evictErr)
-		}
+	superseded, checkErr := p.isSessionRecordSuperseded(rotCtx, targetKey, oldSessionID, baselineRec)
+	if checkErr != nil {
+		evict("[UnifiedProcessPool] Warning: could not verify session record for %s: %v; aborting rotation save and evicting daemon", targetKey, checkErr)
+		return
+	}
+	if superseded {
+		evict("[UnifiedProcessPool] Session for %s was superseded in store; aborting rotation save and evicting daemon", targetKey)
 		return
 	}
 
 	if newSessionID := newDaemon.SessionID(); p.cfg.OnSessionRotated != nil && newSessionID != "" {
 		if rotErr := p.cfg.OnSessionRotated(rotCtx, targetKey, oldSessionID, newSessionID); rotErr != nil {
-			log.Printf("[UnifiedProcessPool] Persistence callback failed during rotation for %s: %v. Evicting daemon to maintain DB truth.", targetKey, rotErr)
-			if evictErr := p.EvictSession(targetKey); evictErr != nil {
-				log.Printf("[UnifiedProcessPool] Warning evicting session for %s: %v", targetKey, evictErr)
-			}
+			evict("[UnifiedProcessPool] Persistence callback failed during rotation for %s: %v. Evicting daemon to maintain DB truth.", targetKey, rotErr)
 		}
 	}
 }
 
-func (p *UnifiedProcessPool) isSessionRecordSuperseded(ctx context.Context, targetKey, oldSessionID string, oldTurns int) bool {
+func (p *UnifiedProcessPool) isSessionRecordSuperseded(ctx context.Context, targetKey, oldSessionID string, baseline SessionRecord) (bool, error) {
 	if p.cfg.GetSessionRecord == nil {
-		return false
+		return false, nil
 	}
 	rec, err := p.cfg.GetSessionRecord(ctx, targetKey)
-	if err != nil || rec.ActiveSessionID == "" {
-		return false
+	if err != nil {
+		return false, fmt.Errorf("failed retrieving session record for %s: %w", targetKey, err)
 	}
-	return (oldSessionID != "" && rec.ActiveSessionID != oldSessionID) || rec.TurnCount > oldTurns
+	hasActiveMismatch := (oldSessionID != "" && rec.ActiveSessionID != oldSessionID) || (baseline.ActiveSessionID != "" && rec.ActiveSessionID != baseline.ActiveSessionID)
+	hasTurnMismatch := rec.TurnCount != baseline.TurnCount
+	return (rec.ActiveSessionID != "" || baseline.ActiveSessionID != "") && (hasActiveMismatch || hasTurnMismatch), nil
 }

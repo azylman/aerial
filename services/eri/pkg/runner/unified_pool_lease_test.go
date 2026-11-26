@@ -1178,9 +1178,11 @@ func TestUnifiedProcessPool_ResolveTargetSessionRecord(t *testing.T) {
 }
 
 type supersededSessionCase struct {
-	name        string
-	storeSessID string
-	storeTurns  int
+	name             string
+	storeSessID      string
+	storeTurns       int
+	simulateReadErr  bool
+	newerLeaseInSave bool
 }
 
 func runSupersededSessionCase(t *testing.T, tc supersededSessionCase) {
@@ -1205,19 +1207,22 @@ func runSupersededSessionCase(t *testing.T, tc supersededSessionCase) {
 		},
 	})
 
+	var readErrActive atomic.Bool
 	pool := NewUnifiedProcessPool(PoolConfig{
 		MaxSessionTurns: 1,
 		GetSessionRecord: func(ctx context.Context, targetKey string) (SessionRecord, error) {
+			if readErrActive.Load() {
+				return SessionRecord{}, errors.New("simulated store read error")
+			}
 			mu.Lock()
 			defer mu.Unlock()
 			return storeRecord, nil
 		},
 		OnSessionRotated: func(ctx context.Context, targetKey, oldSessionID, newSessionID string) error {
 			onRotatedCalled.Store(true)
-			mu.Lock()
-			defer mu.Unlock()
-			storeRecord.ActiveSessionID = newSessionID
-			storeRecord.TurnCount = 0
+			if tc.newerLeaseInSave {
+				return errors.New("superseded: newer lease active in store")
+			}
 			return nil
 		},
 	}, mock)
@@ -1235,6 +1240,9 @@ func runSupersededSessionCase(t *testing.T, tc supersededSessionCase) {
 	}
 
 	<-spawnStarted
+	if tc.simulateReadErr {
+		readErrActive.Store(true)
+	}
 	mu.Lock()
 	if tc.storeSessID != "" {
 		storeRecord.ActiveSessionID = tc.storeSessID
@@ -1242,20 +1250,13 @@ func runSupersededSessionCase(t *testing.T, tc supersededSessionCase) {
 	if tc.storeTurns > 0 {
 		storeRecord.TurnCount = tc.storeTurns
 	}
-	savedRecord := storeRecord
 	mu.Unlock()
 
 	close(proceedSpawn)
 	waitPoolBackground(pool)
 
-	if onRotatedCalled.Load() {
+	if !tc.newerLeaseInSave && onRotatedCalled.Load() {
 		t.Errorf("expected OnSessionRotated NOT to be called when session record is superseded")
-	}
-	mu.Lock()
-	currentRecord := storeRecord
-	mu.Unlock()
-	if currentRecord != savedRecord {
-		t.Errorf("expected store record to remain %v, got %v", savedRecord, currentRecord)
 	}
 	if poolHasDaemon(pool, targetKey) {
 		t.Errorf("expected daemon to be evicted when session was superseded")
@@ -1266,12 +1267,20 @@ func TestUnifiedProcessPool_SupersededSessionDuringBackgroundRotation(t *testing
 	t.Parallel()
 	tests := []supersededSessionCase{
 		{
-			name:       "newer turn resumed same session",
-			storeTurns: 5,
+			name:       "single Discord-style increment from real stored baseline",
+			storeTurns: 3,
 		},
 		{
 			name:        "different session rotated by other pod",
 			storeSessID: "00000000-0000-0000-0000-000000000099",
+		},
+		{
+			name:            "store read error prevents rotation save",
+			simulateReadErr: true,
+		},
+		{
+			name:             "newer lease taken between check and save",
+			newerLeaseInSave: true,
 		},
 	}
 
@@ -1280,5 +1289,68 @@ func TestUnifiedProcessPool_SupersededSessionDuringBackgroundRotation(t *testing
 			t.Parallel()
 			runSupersededSessionCase(t, tc)
 		})
+	}
+}
+
+func TestUnifiedProcessPool_ColdLease_RotationSucceedsWithTurnIncrement(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	var mu sync.Mutex
+	storeRecord := SessionRecord{ActiveSessionID: "00000000-0000-0000-0000-000000000001", TurnCount: 1}
+	var onRotatedCalled atomic.Bool
+	var rotatedOld, rotatedNew string
+
+	mock := newPipeMockSpawner(pipeMockSpawnerOpts{
+		pid:        451,
+		initSessID: "00000000-0000-0000-0000-000000000001",
+		echoRes:    "ok",
+	})
+
+	pool := NewUnifiedProcessPool(PoolConfig{
+		MaxSessionTurns: 1,
+		GetSessionRecord: func(ctx context.Context, targetKey string) (SessionRecord, error) {
+			mu.Lock()
+			defer mu.Unlock()
+			return storeRecord, nil
+		},
+		OnSessionRotated: func(ctx context.Context, targetKey, oldSessionID, newSessionID string) error {
+			onRotatedCalled.Store(true)
+			mu.Lock()
+			defer mu.Unlock()
+			rotatedOld, rotatedNew = oldSessionID, newSessionID
+			return nil
+		},
+	}, mock)
+	defer pool.Close()
+
+	const targetKey = "target-cold-lease-rot"
+	lease, err := pool.AcquireLease(ctx, targetKey)
+	if err != nil {
+		t.Fatalf("AcquireLease failed: %v", err)
+	}
+	if !lease.IsCold() {
+		t.Fatalf("expected lease to be cold when store has TurnCount=1")
+	}
+
+	// Simulate turn execution: store turn count is incremented once by its own turn before release
+	mu.Lock()
+	storeRecord.TurnCount = 2
+	mu.Unlock()
+	lease.MarkDirty()
+
+	if err := lease.Release(); err != nil {
+		t.Fatalf("Release failed: %v", err)
+	}
+
+	waitPoolBackground(pool)
+
+	if !onRotatedCalled.Load() {
+		t.Errorf("expected OnSessionRotated to be called for cold lease with no later use")
+	}
+	if rotatedOld != "00000000-0000-0000-0000-000000000001" || rotatedNew == "" {
+		t.Errorf("expected rotation from old to new session ID, got old=%q new=%q", rotatedOld, rotatedNew)
+	}
+	if !poolHasDaemon(pool, targetKey) {
+		t.Errorf("expected newly rotated daemon to be retained in pool")
 	}
 }
