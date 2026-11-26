@@ -241,6 +241,29 @@ func assertSessionTurnCountAndRotation(ctx context.Context, t *testing.T, store 
 		t.Errorf("post-clear: cleared=%q, prevAfterClear=%q", cleared, prevAfterClear)
 	}
 	mustOK(t, store.SaveSessionID(ctx, "th-1", "sess-2"), "SaveSessionID restore sess-2")
+	assertSessionCASRotation(ctx, t, store)
+}
+
+func assertSessionCASRotation(ctx context.Context, t *testing.T, store Store) {
+	t.Helper()
+	// CAS rotation with matching expectedOldSessionID succeeds
+	mustOK(t, store.RotateSessionID(ctx, "th-1", "sess-3", "sess-2"), "RotateSessionID CAS match")
+	currCAS, errCurrCAS := store.GetSessionID(ctx, "th-1")
+	mustOK(t, errCurrCAS, "GetSessionID CAS")
+	if currCAS != "sess-3" {
+		t.Errorf("expected sess-3 after CAS rotation, got %q", currCAS)
+	}
+
+	// CAS rotation with mismatching expectedOldSessionID fails with ErrSessionSuperseded and leaves record untouched
+	errMismatch := store.RotateSessionID(ctx, "th-1", "sess-4", "sess-stale")
+	if !errors.Is(errMismatch, ErrSessionSuperseded) {
+		t.Errorf("expected ErrSessionSuperseded, got %v", errMismatch)
+	}
+	currAfterMismatch, errCurrMismatch := store.GetSessionID(ctx, "th-1")
+	mustOK(t, errCurrMismatch, "GetSessionID after mismatch")
+	if currAfterMismatch != "sess-3" {
+		t.Errorf("expected sess-3 unchanged after mismatch CAS rotation, got %q", currAfterMismatch)
+	}
 }
 
 func assertSessionEmptyKeyGuards(ctx context.Context, t *testing.T, store Store) {

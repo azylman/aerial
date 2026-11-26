@@ -1492,6 +1492,5 @@ func (p *UnifiedProcessPool) isSessionRecordSuperseded(ctx context.Context, targ
 		return false, fmt.Errorf("failed retrieving session record for %s: %w", targetKey, err)
 	}
 	hasActiveMismatch := (oldSessionID != "" && rec.ActiveSessionID != oldSessionID) || (baseline.ActiveSessionID != "" && rec.ActiveSessionID != baseline.ActiveSessionID)
-	hasTurnMismatch := rec.TurnCount != baseline.TurnCount
-	return (rec.ActiveSessionID != "" || baseline.ActiveSessionID != "") && (hasActiveMismatch || hasTurnMismatch), nil
+	return (rec.ActiveSessionID != "" || baseline.ActiveSessionID != "") && hasActiveMismatch, nil
 }

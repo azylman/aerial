@@ -1178,11 +1178,9 @@ func TestUnifiedProcessPool_ResolveTargetSessionRecord(t *testing.T) {
 }
 
 type supersededSessionCase struct {
-	name             string
-	storeSessID      string
-	storeTurns       int
-	simulateReadErr  bool
-	newerLeaseInSave bool
+	name            string
+	storeSessID     string
+	simulateReadErr bool
 }
 
 func runSupersededSessionCase(t *testing.T, tc supersededSessionCase) {
@@ -1220,9 +1218,6 @@ func runSupersededSessionCase(t *testing.T, tc supersededSessionCase) {
 		},
 		OnSessionRotated: func(ctx context.Context, targetKey, oldSessionID, newSessionID string) error {
 			onRotatedCalled.Store(true)
-			if tc.newerLeaseInSave {
-				return errors.New("superseded: newer lease active in store")
-			}
 			return nil
 		},
 	}, mock)
@@ -1247,15 +1242,12 @@ func runSupersededSessionCase(t *testing.T, tc supersededSessionCase) {
 	if tc.storeSessID != "" {
 		storeRecord.ActiveSessionID = tc.storeSessID
 	}
-	if tc.storeTurns > 0 {
-		storeRecord.TurnCount = tc.storeTurns
-	}
 	mu.Unlock()
 
 	close(proceedSpawn)
 	waitPoolBackground(pool)
 
-	if !tc.newerLeaseInSave && onRotatedCalled.Load() {
+	if onRotatedCalled.Load() {
 		t.Errorf("expected OnSessionRotated NOT to be called when session record is superseded")
 	}
 	if poolHasDaemon(pool, targetKey) {
@@ -1267,20 +1259,12 @@ func TestUnifiedProcessPool_SupersededSessionDuringBackgroundRotation(t *testing
 	t.Parallel()
 	tests := []supersededSessionCase{
 		{
-			name:       "single Discord-style increment from real stored baseline",
-			storeTurns: 3,
-		},
-		{
 			name:        "different session rotated by other pod",
 			storeSessID: "00000000-0000-0000-0000-000000000099",
 		},
 		{
 			name:            "store read error prevents rotation save",
 			simulateReadErr: true,
-		},
-		{
-			name:             "newer lease taken between check and save",
-			newerLeaseInSave: true,
 		},
 	}
 
@@ -1289,6 +1273,98 @@ func TestUnifiedProcessPool_SupersededSessionDuringBackgroundRotation(t *testing
 			t.Parallel()
 			runSupersededSessionCase(t, tc)
 		})
+	}
+}
+
+func TestUnifiedProcessPool_WaitingTurnDuringBackgroundRotationGetsNewSession(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	var mu sync.Mutex
+	storeRecord := SessionRecord{ActiveSessionID: "00000000-0000-0000-0000-000000000001", TurnCount: 2}
+	var onRotatedCalled atomic.Bool
+	spawnStarted := make(chan struct{})
+	proceedSpawn := make(chan struct{})
+	var spawnCount atomic.Int32
+
+	mock := newPipeMockSpawner(pipeMockSpawnerOpts{
+		pid:        452,
+		initSessID: "00000000-0000-0000-0000-000000000001",
+		echoRes:    "ok",
+		onSpawn: func(cfg DaemonConfig) {
+			if spawnCount.Add(1) == 2 {
+				close(spawnStarted)
+				<-proceedSpawn
+			}
+		},
+	})
+
+	pool := NewUnifiedProcessPool(PoolConfig{
+		MaxSessionTurns: 2,
+		GetSessionRecord: func(ctx context.Context, targetKey string) (SessionRecord, error) {
+			mu.Lock()
+			defer mu.Unlock()
+			return storeRecord, nil
+		},
+		OnSessionRotated: func(ctx context.Context, targetKey, oldSessionID, newSessionID string) error {
+			onRotatedCalled.Store(true)
+			mu.Lock()
+			defer mu.Unlock()
+			storeRecord.ActiveSessionID = newSessionID
+			storeRecord.PreviousSessionID = oldSessionID
+			storeRecord.TurnCount = 0
+			return nil
+		},
+	}, mock)
+	defer pool.Close()
+
+	const targetKey = "target-waiting-turn"
+	lease1, err := pool.AcquireLease(ctx, targetKey)
+	if err != nil {
+		t.Fatalf("AcquireLease 1 failed: %v", err)
+	}
+	requireType[*unifiedSessionLease](t, lease1).turnCount = 2
+
+	if err := lease1.Release(); err != nil {
+		t.Fatalf("Release failed: %v", err)
+	}
+
+	<-spawnStarted
+
+	// Simulate incoming Discord message: PrepareTurn increments turn_count in store before acquiring lease
+	mu.Lock()
+	storeRecord.TurnCount = 3
+	mu.Unlock()
+
+	// Launch second AcquireLease in goroutine; it must block waiting for targetLock held by background rotation
+	lease2Chan := make(chan SessionLease, 1)
+	errChan := make(chan error, 1)
+	go func() {
+		l2, l2Err := pool.AcquireLease(ctx, targetKey)
+		if l2Err != nil {
+			errChan <- l2Err
+			return
+		}
+		lease2Chan <- l2
+	}()
+
+	// Unblock spawn and allow rotation to finish
+	close(proceedSpawn)
+	waitPoolBackground(pool)
+
+	if !onRotatedCalled.Load() {
+		t.Errorf("expected OnSessionRotated to be called when turn count was incremented by waiting turn")
+	}
+
+	select {
+	case l2Err := <-errChan:
+		t.Fatalf("waiting AcquireLease failed: %v", l2Err)
+	case l2 := <-lease2Chan:
+		defer l2.Release()
+		if l2.SessionID() != "00000000-0000-0000-0000-000000000002" {
+			t.Errorf("expected waiting lease to get new session %q, got %q", "00000000-0000-0000-0000-000000000002", l2.SessionID())
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for lease2 to unblock")
 	}
 }
 

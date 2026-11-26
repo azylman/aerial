@@ -451,6 +451,54 @@ func assertWiredVoiceSessionCallbacks(t *testing.T, voiceMock *mockFullVoicePool
 	if recAfter.ActiveSessionID != "sess-rotated" || recAfter.PreviousSessionID != "sess-active" || recAfter.TurnCount != 0 {
 		t.Fatalf("getFn after rot returned unexpected record: %+v", recAfter)
 	}
+
+	// Attempting to rotate from stale oldSessionID must fail and preserve active session
+	staleErr := voiceMock.saveFn(ctx, "kiosk-1", "sess-active", "sess-stale-attempt")
+	if staleErr == nil {
+		t.Fatal("expected saveFn to fail with stale oldSessionID")
+	}
+	recStillRotated, err := voiceMock.getFn(ctx, "kiosk-1")
+	if err != nil {
+		t.Fatalf("getFn after stale rot err: %v", err)
+	}
+	if recStillRotated.ActiveSessionID != "sess-rotated" {
+		t.Fatalf("expected active session to stay sess-rotated, got %s", recStillRotated.ActiveSessionID)
+	}
+}
+
+func TestMakeSessionCallbacks_GuardsSupersededRotation(t *testing.T) {
+	t.Parallel()
+	sqlStore, testDB := newTestStore(t)
+	if testDB == nil {
+		t.Fatal("expected testDB not nil")
+	}
+	getRec, onRot := makeSessionCallbacks(sqlStore)
+	ctx := context.Background()
+
+	if err := sqlStore.SaveSessionID(ctx, "thread-1", "sess-1"); err != nil {
+		t.Fatalf("SaveSessionID failed: %v", err)
+	}
+
+	rec, err := getRec(ctx, "thread-1")
+	if err != nil || rec.ActiveSessionID != "sess-1" {
+		t.Fatalf("getRec = %+v, err = %v", rec, err)
+	}
+
+	// First rotation from sess-1 to sess-2 succeeds
+	if rotErr := onRot(ctx, "thread-1", "sess-1", "sess-2"); rotErr != nil {
+		t.Fatalf("onRot failed: %v", rotErr)
+	}
+
+	// Second rotation from stale sess-1 must fail and leave sess-2 intact
+	staleErr := onRot(ctx, "thread-1", "sess-1", "sess-3")
+	if staleErr == nil {
+		t.Fatal("expected onRot to fail for superseded oldSessionID")
+	}
+
+	recAfter, errAfter := getRec(ctx, "thread-1")
+	if errAfter != nil || recAfter.ActiveSessionID != "sess-2" {
+		t.Fatalf("expected sess-2 intact, got %+v, err = %v", recAfter, errAfter)
+	}
 }
 
 func TestReconcilePoolModelsAndVoiceTargets_Engine(t *testing.T) {

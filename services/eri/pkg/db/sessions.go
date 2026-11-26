@@ -94,14 +94,33 @@ func (s *SQLStore) IncrementSessionTurnCount(ctx context.Context, sessionKey str
 }
 
 // RotateSessionID updates the internal session ID, stores the previous session ID, and resets turn count to zero.
-func (s *SQLStore) RotateSessionID(ctx context.Context, sessionKey, newSessionID string) error {
+// If expectedOldSessionID is provided and non-empty, the rotation only applies if the current conversation_id matches it.
+func (s *SQLStore) RotateSessionID(ctx context.Context, sessionKey, newSessionID string, expectedOldSessionID ...string) error {
 	sessionKey = DiscordSessionID(sessionKey)
 	if sessionKey == "" {
 		return fmt.Errorf("session key cannot be empty")
 	}
 	agent := s.effectiveAgent()
-	query := `INSERT INTO sessions (agent, session_id, conversation_id, previous_conversation_id, turn_count, created_at, updated_at) VALUES ($1, $2, $3, '', 0, $4, $5) ON CONFLICT(agent, session_id) DO UPDATE SET previous_conversation_id = CASE WHEN sessions.conversation_id != '' AND sessions.conversation_id != EXCLUDED.conversation_id THEN sessions.conversation_id ELSE sessions.previous_conversation_id END, conversation_id = EXCLUDED.conversation_id, turn_count = 0, created_at = EXCLUDED.created_at, updated_at = EXCLUDED.updated_at;`
-	return s.execWithTimeout(ctx, query, agent, sessionKey, newSessionID, time.Now().UTC(), time.Now().UTC())
+	now := time.Now().UTC()
+
+	var expectedOld string
+	if len(expectedOldSessionID) > 0 {
+		expectedOld = strings.TrimSpace(expectedOldSessionID[0])
+	}
+
+	query := `INSERT INTO sessions (agent, session_id, conversation_id, previous_conversation_id, turn_count, created_at, updated_at) VALUES ($1, $2, $3, '', 0, $4, $5) ON CONFLICT(agent, session_id) DO UPDATE SET previous_conversation_id = CASE WHEN sessions.conversation_id != '' AND sessions.conversation_id != EXCLUDED.conversation_id THEN sessions.conversation_id ELSE sessions.previous_conversation_id END, conversation_id = EXCLUDED.conversation_id, turn_count = 0, created_at = EXCLUDED.created_at, updated_at = EXCLUDED.updated_at WHERE ($6 = '' OR sessions.conversation_id = '' OR sessions.conversation_id = $6);`
+	res, err := s.execResultWithTimeout(ctx, query, agent, sessionKey, newSessionID, now, now, expectedOld)
+	if err != nil {
+		return err
+	}
+	rows, err := res.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if expectedOld != "" && rows == 0 {
+		return fmt.Errorf("%w: session key %s has changed from %s", ErrSessionSuperseded, sessionKey, expectedOld)
+	}
+	return nil
 }
 
 // GetSessionTurnCount returns the current turn count for a session.

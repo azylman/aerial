@@ -247,7 +247,7 @@ func makeSessionCallbacks(store db.Store) (func(context.Context, string) (runner
 		return runner.SessionRecord{ActiveSessionID: sessID, PreviousSessionID: prevID, TurnCount: turns}, nil
 	}
 	onRot := func(ctx context.Context, targetKey, oldSessionID, newSessionID string) error {
-		return store.RotateSessionID(ctx, targetKey, newSessionID)
+		return store.RotateSessionID(ctx, targetKey, newSessionID, oldSessionID)
 	}
 	return getRec, onRot
 }
@@ -270,7 +270,7 @@ func makeVoiceSessionCallbacks(store db.Store) (func(context.Context, string) (r
 		return runner.SessionRecord{ActiveSessionID: sessID, PreviousSessionID: prevID, TurnCount: turns}, nil
 	}
 	onRot := func(ctx context.Context, targetKey, oldSessionID, newSessionID string) error {
-		return store.RotateSessionID(ctx, voiceSessionKey(targetKey), newSessionID)
+		return store.RotateSessionID(ctx, voiceSessionKey(targetKey), newSessionID, oldSessionID)
 	}
 	return getRec, onRot
 }
