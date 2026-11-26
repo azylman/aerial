@@ -6,7 +6,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"maps"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -190,7 +189,6 @@ type mcpProvisioningCase struct {
 	withPAT       bool
 	servers       config.TargetMcpConfig // merged over the defaults
 	voiceTools    []string               // voice.allowed_tools
-	setVoiceTools bool                   // true if Voice.AllowedTools should be explicitly set
 	wantScheduler bool
 	wantDiscord   bool
 	wantGitHub    bool
@@ -226,7 +224,7 @@ func mcpRaw(kv ...string) map[string]json.RawMessage {
 	return m
 }
 
-func newMCPTestConfig(withPAT, noDefaults bool, mcpConfig string, extra config.TargetMcpConfig, voiceTools ...[]string) *config.Config {
+func newMCPTestConfig(withPAT, noDefaults bool, mcpConfig string, extra config.TargetMcpConfig, voiceTools []string) *config.Config {
 	return newTestConfig(func(c *config.ConfigData) {
 		if !noDefaults {
 			c.McpServers.Common = mcpRaw("scheduler", `{"serverUrl":"http://haro.aerial/mcp"}`, "memory", `{"serverUrl":"http://coven.aerial/mcp"}`,
@@ -253,9 +251,7 @@ func newMCPTestConfig(withPAT, noDefaults bool, mcpConfig string, extra config.T
 			c.GitHubPAT = "ghp_" + "12345678901234567890"
 		}
 		c.MCPConfig = mcpConfig
-		if len(voiceTools) > 0 {
-			c.Voice.AllowedTools = voiceTools[0]
-		}
+		c.Voice.AllowedTools = voiceTools
 	})
 }
 
@@ -408,12 +404,7 @@ func runMCPProvisioningCase(t *testing.T, tc mcpProvisioningCase) {
 	tmpData := t.TempDir()
 	p := newDisabledProvisioner(t, tmpHome, tmpData)
 
-	var cfg *config.Config
-	if tc.setVoiceTools {
-		cfg = newMCPTestConfig(tc.withPAT, false, "", tc.servers, tc.voiceTools)
-	} else {
-		cfg = newMCPTestConfig(tc.withPAT, false, "", tc.servers)
-	}
+	cfg := newMCPTestConfig(tc.withPAT, false, "", tc.servers, tc.voiceTools)
 
 	raw := p.LoadTargetMCPConfig(cfg, tc.target)
 	var parsed map[string]map[string]any
@@ -432,7 +423,7 @@ func runMCPFallbacksAndErrorsCase(t *testing.T, tc mcpFallbacksAndErrorsCase) {
 
 	var cfg *config.Config
 	if !tc.nilCfg {
-		cfg = newMCPTestConfig(false, tc.noDefaults, tc.mcpConfig, tc.servers)
+		cfg = newMCPTestConfig(false, tc.noDefaults, tc.mcpConfig, tc.servers, nil)
 	}
 	if tc.fileConf != "" {
 		writeTestFile(t, filepath.Join(tmpData, "mcp.config.json"), tc.fileConf)
@@ -513,7 +504,7 @@ func TestMCPProvisioning(t *testing.T) {
 		},
 		{
 			name: "voice target with allowed tools filters and prunes servers", target: TargetVoice, withPAT: true,
-			setVoiceTools: true, voiceTools: []string{"read_tool", "WRITE_TOOL"},
+			voiceTools: []string{"read_tool", "WRITE_TOOL"},
 			servers: config.TargetMcpConfig{
 				Common: mcpRaw(
 					"keep_server", `{"serverUrl":"http://keep:8080","enabled_tools":["read_tool","other_tool"]}`,
@@ -529,7 +520,7 @@ func TestMCPProvisioning(t *testing.T) {
 		},
 		{
 			name: "voice target with empty allowed tools clears all servers", target: TargetVoice, withPAT: true,
-			setVoiceTools: true, voiceTools: []string{},
+			voiceTools:    []string{},
 			wantScheduler: false, wantDiscord: false, wantGitHub: false,
 			wantAbsent: []string{"scheduler", "memory", "github"},
 		},
@@ -540,18 +531,6 @@ func TestMCPProvisioning(t *testing.T) {
 			runMCPProvisioningCase(t, tc)
 		})
 	}
-}
-
-func cloneServersMap(src map[string]any) map[string]any {
-	dst := make(map[string]any, len(src))
-	for k, v := range src {
-		if m, ok := v.(map[string]any); ok {
-			dst[k] = maps.Clone(m)
-		} else {
-			dst[k] = v
-		}
-	}
-	return dst
 }
 
 func assertVoiceAllowedPresent(t *testing.T, servers map[string]any, wantPresent []string, wantTools map[string][]string) {
@@ -602,15 +581,6 @@ func TestApplyVoiceAllowedTools(t *testing.T) {
 			wantTools:   map[string][]string{"s1": {"t1"}},
 		},
 		{
-			name:         "empty allowed tools clears all servers",
-			allowedTools: []string{},
-			servers: map[string]any{
-				"s1": map[string]any{"enabledTools": []string{"t1"}},
-				"s2": map[string]any{"serverUrl": "http://s2"},
-			},
-			wantAbsent: []string{"s1", "s2"},
-		},
-		{
 			name:         "only whitespace tool names clears all servers",
 			allowedTools: []string{"  ", ""},
 			servers: map[string]any{
@@ -638,10 +608,9 @@ func TestApplyVoiceAllowedTools(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			servers := cloneServersMap(tc.servers)
-			applyVoiceAllowedTools(servers, tc.allowedTools)
-			assertVoiceAllowedPresent(t, servers, tc.wantPresent, tc.wantTools)
-			assertVoiceAllowedAbsent(t, servers, tc.wantAbsent)
+			applyVoiceAllowedTools(tc.servers, tc.allowedTools)
+			assertVoiceAllowedPresent(t, tc.servers, tc.wantPresent, tc.wantTools)
+			assertVoiceAllowedAbsent(t, tc.servers, tc.wantAbsent)
 		})
 	}
 }

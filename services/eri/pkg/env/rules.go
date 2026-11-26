@@ -421,6 +421,11 @@ func (p *Provisioner) provisionRuntimeSharedAssets(runtimeHome string) {
 
 	if p.dataDir != "" && (filepath.Clean(runtimeHome) == filepath.Clean(p.runtimeHomeDir(TargetEphemeral)) || filepath.Clean(runtimeHome) == filepath.Clean(p.runtimeHomeDir(TargetVoice))) {
 		isolateEphemeralSessionStorage(runtimeHome, runtimeGemini)
+		if filepath.Clean(runtimeHome) == filepath.Clean(p.runtimeHomeDir(TargetVoice)) {
+			if err := p.EnsureEngineHome(runtimeHome); err != nil {
+				log.Printf("[Env] Warning: failed to ensure engine home for %s: %v", runtimeHome, err)
+			}
+		}
 		return
 	}
 

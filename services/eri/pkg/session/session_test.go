@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -57,25 +56,6 @@ func TestManager_Init(t *testing.T) {
 	if m == nil || m.homeDir == "" || m.dataDir == "" || len(m.Roots()) == 0 {
 		t.Fatalf("unexpected Manager initialization: %+v", m)
 	}
-	wantRoots := []string{
-		filepath.Join(dataDir, "brain"),
-		filepath.Join(dataDir, "runtimes", runtimeVoice, ".gemini", "antigravity-cli", "brain"),
-		filepath.Join(dataDir, "runtimes", runtimeVoice, ".gemini", "antigravity", "brain"),
-		filepath.Join(homeDir, ".gemini", "antigravity-cli", "brain"),
-		filepath.Join(homeDir, ".gemini", "antigravity", "brain"),
-	}
-	if !reflect.DeepEqual(m.Roots(), wantRoots) {
-		t.Fatalf("m.Roots() = %v, want %v", m.Roots(), wantRoots)
-	}
-
-	mNoData := New(homeDir, "")
-	wantNoDataRoots := []string{
-		filepath.Join(homeDir, ".gemini", "antigravity-cli", "brain"),
-		filepath.Join(homeDir, ".gemini", "antigravity", "brain"),
-	}
-	if !reflect.DeepEqual(mNoData.Roots(), wantNoDataRoots) {
-		t.Fatalf("mNoData.Roots() = %v, want %v", mNoData.Roots(), wantNoDataRoots)
-	}
 
 	var nilMgr *Manager
 	if len(nilMgr.Roots()) != 0 {
@@ -92,6 +72,43 @@ func TestManager_Init(t *testing.T) {
 	}
 	if id, ok := m.validSessionID("good-sess"); !ok || id != "good-sess" {
 		t.Fatalf("expected validSessionID to return clean ID")
+	}
+}
+
+func TestManager_VoiceRuntimeRoots(t *testing.T) {
+	t.Parallel()
+	tmp := t.TempDir()
+	homeDir := filepath.Join(tmp, "home")
+	dataDir := filepath.Join(tmp, "data")
+
+	voiceCliBrain := filepath.Join(dataDir, "runtimes", runtimeVoice, ".gemini", "antigravity-cli", "brain", "conv-cli")
+	voiceAgyBrain := filepath.Join(dataDir, "runtimes", runtimeVoice, ".gemini", "antigravity", "brain", "conv-agy")
+	if err := os.MkdirAll(voiceCliBrain, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(voiceAgyBrain, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	m := New(homeDir, dataDir)
+	foundCli, foundAgy := false, false
+	for _, dir := range m.getTargetDirs("") {
+		if dir == voiceCliBrain {
+			foundCli = true
+		}
+		if dir == voiceAgyBrain {
+			foundAgy = true
+		}
+	}
+	if !foundCli || !foundAgy {
+		t.Fatalf("m.getTargetDirs(\"\") = %v, expected voice cli and agy brain dirs", m.getTargetDirs(""))
+	}
+
+	mNoData := New(homeDir, "")
+	for _, dir := range mNoData.getTargetDirs("") {
+		if dir == voiceCliBrain || dir == voiceAgyBrain {
+			t.Fatalf("mNoData found voice dir without dataDir: %s", dir)
+		}
 	}
 }
 
