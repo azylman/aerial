@@ -221,6 +221,16 @@ func (t *ThreadCoordinator) enqueueGatedMessage(ctx restate.ObjectSharedContext,
 	}
 	shouldEnqueue, gErr := t.evaluateGatedIngress(ctx, eval, final, msgID, req.Message)
 	if gErr != nil {
+		failReason := gErr.Error()
+		if termErr := restate.AsTerminalError(gErr); termErr != nil {
+			failReason = termErr.Message()
+		}
+		_, _ = restate.Run(ctx, func(rc restate.RunContext) (struct{}, error) {
+			_, err := storeCall(rc, func(sc context.Context) ([]string, error) {
+				return t.store.FailMessagesIfPending(sc, []string{msgID}, failReason)
+			})
+			return struct{}{}, err
+		}, restate.WithName(StepRecordCancelled))
 		restate.ObjectSend(ctx, t.ServiceName(), final, HandlerAppend).Send(AppendRequest{DropID: msgID})
 		return ThreadEnqueueResponse{}, coordinatorError(gErr)
 	}

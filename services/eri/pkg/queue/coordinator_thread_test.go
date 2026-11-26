@@ -431,6 +431,9 @@ func TestThreadCoordinator_Enqueue_TerminalFailuresAndCancelReleaseReservation(t
 		})
 		assertCoordinatorErr(t, err, CodeQueueConflict)
 		assert.Empty(t, h.snapshot(t).ingress, "expired and gate-cancelled reservations must be cleared")
+		assertMessageRows(t, store, map[string]rowWant{
+			"m-gate-cancelled": {status: db.StatusFailed, errText: "cancelled"},
+		})
 
 		h.cancelStep = ""
 		resp, err := coord.Enqueue(h.sharedCtx(), ThreadEnqueueRequest{

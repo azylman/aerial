@@ -69,6 +69,8 @@ type turnExecution struct {
 	pendingDrainIDs                                                                             []string
 	drainedIDs                                                                                  []string
 	drainedPrompts                                                                              []string
+	drainedItems                                                                                []DrainedPrompt
+	promptDrainedIDs                                                                            []string
 	steeredMessages                                                                             []db.Message
 	steeredDispatches                                                                           []db.Dispatch
 	ingressGated                                                                                bool

@@ -696,6 +696,60 @@ func TestTurnRunner_DrainFollowedBySessionCorruptionRetry_ReplaysDrainedPrompt(t
 	assert.Equal(t, 1, strings.Count(steps.attemptPrompts[2], "steered input text"))
 }
 
+func TestTurnRunner_DrainSubstringPrompt_AppendedAndNotDuplicatedOnRetry(t *testing.T) {
+	t.Parallel()
+
+	steps := &fakeTurnSteps{
+		started: claimed(0, "m1"),
+		prep:    TurnPrep{Decision: TurnDecisionRun, Prompt: "Please run tests now and report"},
+		attempts: []fakeAttempt{
+			{
+				res: AttemptResult{
+					Kind:         AttemptKindRetry,
+					DrainedIDs:   []string{"m2"},
+					DrainedItems: []DrainedPrompt{{ID: "m2", Prompt: "run tests"}},
+					Reason:       "session corrupt reset",
+				},
+			},
+			{
+				res: AttemptResult{
+					Kind:         AttemptKindRetry,
+					DrainedIDs:   []string{"m2"},
+					DrainedItems: []DrainedPrompt{{ID: "m2", Prompt: "run tests"}},
+					Reason:       "transient blip",
+				},
+			},
+			{
+				res: AttemptResult{
+					Kind: AttemptKindSuccess,
+				},
+			},
+		},
+	}
+	j := &runnerJournal{t: t}
+	svc := NewTurnRunnerService(steps, "")
+	res, err := svc.RunBurst(j.context(t), BurstTurnRequest{ThreadID: "thread-1", TurnID: "turn-1", MessageIDs: []string{"m1"}})
+	require.NoError(t, err)
+	assert.Equal(t, OutcomeCompleted, res.Outcome)
+
+	require.Len(t, steps.attemptPrompts, 3)
+	assert.Equal(t, "Please run tests now and report", steps.attemptPrompts[0])
+	// "run tests" was a substring of the initial prompt, and when drained with ID m2, it is appended once to the prompt
+	assert.Equal(t, 2, strings.Count(steps.attemptPrompts[1], "run tests"))
+	assert.True(t, strings.HasSuffix(steps.attemptPrompts[1], "run tests"))
+	// On retry, "run tests" with ID m2 is not duplicated again
+	assert.Equal(t, 2, strings.Count(steps.attemptPrompts[2], "run tests"))
+	assert.Equal(t, steps.attemptPrompts[1], steps.attemptPrompts[2])
+}
+
+func TestIsRestateCancel(t *testing.T) {
+	t.Parallel()
+	assert.False(t, isRestateCancel(nil))
+	assert.False(t, isRestateCancel(errors.New("plain error")))
+	assert.False(t, isRestateCancel(restate.ToTerminalError(errors.New("500"), restate.WithErrorCode(500))))
+	assert.True(t, isRestateCancel(restate.ToTerminalError(errors.New("cancelled"), restate.WithErrorCode(CodeRestateCancelled))))
+}
+
 // runStepName reads the restate.WithName option of a Run call.
 func runStepName(opts []restate.RunOption) string {
 	for _, opt := range opts {

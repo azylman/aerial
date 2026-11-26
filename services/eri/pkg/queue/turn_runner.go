@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"slices"
 	"strings"
 	"time"
 
@@ -132,6 +133,7 @@ type namedStep struct {
 // turnProgress is what the handler knows about the turn so far.
 type turnProgress struct {
 	ids          []string
+	promptIDs    []string
 	attempted    bool
 	outcome      TurnOutcome
 	delayMs      int64
@@ -396,17 +398,7 @@ func (s *TurnRunnerService) runAttempts(ctx restate.Context, subj runnerSubject,
 		}
 		t.attempted = true
 		t.last = res
-		if len(res.DrainedIDs) > 0 {
-			t.ids = normalizeStepIDs(append(t.ids, res.DrainedIDs...))
-			runIn.IDs = normalizeStepIDs(append(runIn.IDs, res.DrainedIDs...))
-		}
-		if len(res.DrainedPrompts) > 0 {
-			for _, p := range res.DrainedPrompts {
-				if p = strings.TrimSpace(p); p != "" && !strings.Contains(runIn.Prep.Prompt, p) {
-					runIn.Prep.Prompt += "\n\n" + p
-				}
-			}
-		}
+		t.mergeDrained(res, &runIn)
 		type step struct {
 			action  attemptAction
 			next    AttemptInput
@@ -430,6 +422,44 @@ func (s *TurnRunnerService) runAttempts(ctx restate.Context, subj runnerSubject,
 		case actionResume:
 		}
 		in = st.next
+	}
+}
+
+func (t *turnProgress) mergeDrained(res AttemptResult, runIn *AttemptInput) {
+	if len(res.DrainedIDs) > 0 {
+		t.ids = normalizeStepIDs(append(t.ids, res.DrainedIDs...))
+		runIn.IDs = normalizeStepIDs(append(runIn.IDs, res.DrainedIDs...))
+	}
+	if len(res.DrainedItems) > 0 {
+		for _, item := range res.DrainedItems {
+			if item.ID != "" && !slices.Contains(t.promptIDs, item.ID) {
+				t.promptIDs = append(t.promptIDs, item.ID)
+				if p := strings.TrimSpace(item.Prompt); p != "" {
+					runIn.Prep.Prompt += "\n\n" + p
+				}
+			}
+		}
+		return
+	}
+	mergeLegacyDrainedPrompts(res, t, runIn)
+}
+
+func mergeLegacyDrainedPrompts(res AttemptResult, t *turnProgress, runIn *AttemptInput) {
+	for i, p := range res.DrainedPrompts {
+		id := ""
+		if i < len(res.DrainedIDs) {
+			id = res.DrainedIDs[i]
+		}
+		if id != "" && !slices.Contains(t.promptIDs, id) {
+			t.promptIDs = append(t.promptIDs, id)
+			if p = strings.TrimSpace(p); p != "" {
+				runIn.Prep.Prompt += "\n\n" + p
+			}
+		} else if id == "" {
+			if p = strings.TrimSpace(p); p != "" && !strings.Contains(runIn.Prep.Prompt, p) {
+				runIn.Prep.Prompt += "\n\n" + p
+			}
+		}
 	}
 }
 

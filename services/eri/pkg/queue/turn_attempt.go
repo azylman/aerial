@@ -72,6 +72,7 @@ type AttemptResult struct {
 	AutoResumes    int              `json:"auto_resumes"`
 	DrainedIDs     []string         `json:"drained_ids,omitempty"`
 	DrainedPrompts []string         `json:"drained_prompts,omitempty"`
+	DrainedItems   []DrainedPrompt  `json:"drained_items,omitempty"`
 	Telemetry      AttemptTelemetry `json:"telemetry"`
 }
 
@@ -363,12 +364,38 @@ type attemptRun struct {
 func (te *turnExecution) initTurnPrompt(basePrompt string) {
 	te.turnPrompt = basePrompt
 	te.steerMu.Lock()
-	for _, dp := range te.drainedPrompts {
-		if dp = strings.TrimSpace(dp); dp != "" && !strings.Contains(te.turnPrompt, dp) {
-			te.turnPrompt += "\n\n" + dp
+	defer te.steerMu.Unlock()
+	for _, item := range te.drainedItems {
+		if item.ID != "" && !slices.Contains(te.promptDrainedIDs, item.ID) {
+			te.promptDrainedIDs = append(te.promptDrainedIDs, item.ID)
+			if p := strings.TrimSpace(item.Prompt); p != "" {
+				te.turnPrompt += "\n\n" + p
+			}
 		}
 	}
-	te.steerMu.Unlock()
+	if len(te.drainedItems) == 0 {
+		te.turnPrompt = appendLegacyDrainedPrompts(te.turnPrompt, te.drainedIDs, te.drainedPrompts, &te.promptDrainedIDs)
+	}
+}
+
+func appendLegacyDrainedPrompts(prompt string, drainedIDs, drainedPrompts []string, promptDrainedIDs *[]string) string {
+	for i, dp := range drainedPrompts {
+		id := ""
+		if i < len(drainedIDs) {
+			id = drainedIDs[i]
+		}
+		if id != "" && !slices.Contains(*promptDrainedIDs, id) {
+			*promptDrainedIDs = append(*promptDrainedIDs, id)
+			if dp = strings.TrimSpace(dp); dp != "" {
+				prompt += "\n\n" + dp
+			}
+		} else if id == "" {
+			if dp = strings.TrimSpace(dp); dp != "" && !strings.Contains(prompt, dp) {
+				prompt += "\n\n" + dp
+			}
+		}
+	}
+	return prompt
 }
 
 //nolint:contextcheck,nolintlint // the reused turn helpers own their contexts; store calls take ctx.
@@ -458,12 +485,14 @@ func (p *WorkerPool) executeAttempt(ctx context.Context, s db.Store, te *turnExe
 	}
 	drainedIDsClone := slices.Clone(te.drainedIDs)
 	drainedPromptsClone := slices.Clone(te.drainedPrompts)
+	drainedItemsClone := slices.Clone(te.drainedItems)
 	te.steerMu.Unlock()
 
 	base := AttemptResult{
 		AutoResumes:    in.AutoResumes,
 		DrainedIDs:     drainedIDsClone,
 		DrainedPrompts: drainedPromptsClone,
+		DrainedItems:   drainedItemsClone,
 		Telemetry:      AttemptTelemetry{DurationMs: te.turnDurationMs, Usage: usage},
 	}
 	switch class {
@@ -829,6 +858,9 @@ func (b burstSubject) load(ctx context.Context, s db.Store, te *turnExecution) (
 		}
 		if coalesced := strings.TrimSpace(CoalesceBurstPrompt(extraRows, b.pool.currentTimezone())); coalesced != "" {
 			te.drainedPrompts = append(te.drainedPrompts, coalesced)
+			for _, row := range extraRows {
+				te.drainedItems = append(te.drainedItems, DrainedPrompt{ID: row.ID, Prompt: coalesced})
+			}
 		}
 		te.steerMu.Unlock()
 	}
@@ -948,7 +980,9 @@ func loadExtraDispatches(ctx context.Context, s db.Store, te *turnExecution, kno
 		te.steeredDispatches = append(te.steeredDispatches, *extraRow)
 		if !slices.Contains(knownIDs, extraID) {
 			te.drainedIDs = normalizeStepIDs(append(te.drainedIDs, extraID))
-			if pText := strings.TrimSpace(extraRow.Prompt); pText != "" {
+			pText := strings.TrimSpace(extraRow.Prompt)
+			te.drainedItems = append(te.drainedItems, DrainedPrompt{ID: extraID, Prompt: pText})
+			if pText != "" {
 				te.drainedPrompts = append(te.drainedPrompts, pText)
 			}
 		}

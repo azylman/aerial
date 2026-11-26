@@ -137,6 +137,12 @@ type DrainPendingResponse struct {
 	DrainedIDs []string `json:"drained_ids,omitempty"`
 }
 
+// DrainedPrompt pairs a drained row ID with its prompt text.
+type DrainedPrompt struct {
+	ID     string `json:"id"`
+	Prompt string `json:"prompt"`
+}
+
 type ClearPendingRequest struct {
 	IDs          []string `json:"ids"`
 	CancelActive bool     `json:"cancel_active"`

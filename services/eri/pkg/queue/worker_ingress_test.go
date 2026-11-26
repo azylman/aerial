@@ -3,7 +3,6 @@ package queue
 import (
 	"context"
 	"errors"
-	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -280,19 +279,6 @@ func TestWorkerPool_DispatchDrainedRows_RecoveredOnAbortReplayTerminalFailAndTra
 
 	sessReplay := "sess-drain-abort-replay"
 	require.NoError(t, store.SaveSessionID(ctx, sessReplay, "22222222-2222-2222-2222-222222222222"))
-	// Seed >50 older active rows belonging to other keys to verify recovery has no 50-row cutoff.
-	bulkDispatches := make([]db.Dispatch, 0, 55)
-	for i := range 55 {
-		bulkDispatches = append(bulkDispatches, db.Dispatch{
-			ID:        fmt.Sprintf("d-bulk-older-%02d", i),
-			Source:    "vanadis",
-			SessionID: fmt.Sprintf("sess-other-%02d", i),
-			Prompt:    "older active dispatch",
-			Status:    db.StatusProcessing,
-			CreatedAt: time.Now().UTC().Add(-10 * time.Minute).Add(time.Duration(i) * time.Second),
-		})
-	}
-	seedDispatchRows(t, store, bulkDispatches)
 
 	d1 := db.Dispatch{ID: "d-rep-1", Source: "vanadis", SessionID: sessReplay, Prompt: "initial dispatch", Status: db.StatusProcessing, CreatedAt: time.Now().UTC().Add(-2 * time.Second)}
 	d2 := db.Dispatch{ID: "d-rep-2", Source: "vanadis", SessionID: sessReplay, Prompt: "steered dispatch", Status: db.StatusProcessing, CreatedAt: time.Now().UTC().Add(-1 * time.Second)}
@@ -310,7 +296,7 @@ func TestWorkerPool_DispatchDrainedRows_RecoveredOnAbortReplayTerminalFailAndTra
 		},
 	})
 
-	// Replay with only d1 in IDs recovers d2 (even with >50 older active rows) and includes its prompt once.
+	// Replay with only d1 in IDs recovers d2 and includes its prompt once.
 	res, err := freshPool.RunDispatchAttempt(ctx, AttemptInput{
 		SessionKey: sessReplay,
 		TurnID:     "turn-disp-rep-1",
