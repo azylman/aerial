@@ -58,8 +58,82 @@ type SessionInfo struct {
 	InternalSessionID string
 	PreviousSessionID string
 	TurnCount         int
+	LeaseGeneration   int64
 	CreatedAt         time.Time
 	UpdatedAt         time.Time
+}
+
+// AcquireSession atomically increments lease_generation and returns the active session state.
+func (s *SQLStore) AcquireSession(ctx context.Context, sessionKey string) (SessionInfo, error) {
+	if err := s.checkDB(); err != nil {
+		return SessionInfo{}, err
+	}
+	sessionKey = DiscordSessionID(sessionKey)
+	if sessionKey == "" {
+		return SessionInfo{}, fmt.Errorf("session key cannot be empty")
+	}
+	queryCtx, cancel := withTimeout(ctx, 5*time.Second)
+	defer cancel()
+
+	agent := s.effectiveAgent()
+	now := time.Now().UTC()
+	query := `INSERT INTO sessions (agent, session_id, conversation_id, lease_generation, created_at, updated_at)
+VALUES ($1, $2, '', 1, $3, $3)
+ON CONFLICT(agent, session_id) DO UPDATE SET
+    lease_generation = sessions.lease_generation + 1,
+    updated_at = EXCLUDED.updated_at
+RETURNING conversation_id, previous_conversation_id, turn_count, lease_generation, created_at, updated_at;`
+
+	var info SessionInfo
+	info.ThreadID = sessionKey
+	err := s.db.QueryRowContext(queryCtx, query, agent, sessionKey, now).Scan(
+		&info.InternalSessionID,
+		&info.PreviousSessionID,
+		&info.TurnCount,
+		&info.LeaseGeneration,
+		&info.CreatedAt,
+		&info.UpdatedAt,
+	)
+	if err != nil {
+		return SessionInfo{}, err
+	}
+	return info, nil
+}
+
+// GetSessionInfo retrieves the active session state without modifying turn counts or lease generation.
+func (s *SQLStore) GetSessionInfo(ctx context.Context, sessionKey string) (SessionInfo, error) {
+	if err := s.checkDB(); err != nil {
+		return SessionInfo{}, err
+	}
+	sessionKey = DiscordSessionID(sessionKey)
+	if sessionKey == "" {
+		return SessionInfo{}, nil
+	}
+	queryCtx, cancel := withTimeout(ctx, 5*time.Second)
+	defer cancel()
+
+	agent := s.effectiveAgent()
+	query := `SELECT conversation_id, previous_conversation_id, turn_count, lease_generation, created_at, updated_at
+FROM sessions
+WHERE agent = $1 AND session_id = $2;`
+
+	var info SessionInfo
+	info.ThreadID = sessionKey
+	err := s.db.QueryRowContext(queryCtx, query, agent, sessionKey).Scan(
+		&info.InternalSessionID,
+		&info.PreviousSessionID,
+		&info.TurnCount,
+		&info.LeaseGeneration,
+		&info.CreatedAt,
+		&info.UpdatedAt,
+	)
+	if errors.Is(err, sql.ErrNoRows) {
+		return SessionInfo{ThreadID: sessionKey}, nil
+	}
+	if err != nil {
+		return SessionInfo{}, err
+	}
+	return info, nil
 }
 
 // SaveSessionID associates an internal session ID with a thread ID.
@@ -93,23 +167,29 @@ func (s *SQLStore) IncrementSessionTurnCount(ctx context.Context, sessionKey str
 	return turnCount, err
 }
 
-// RotateSessionID updates the internal session ID, stores the previous session ID, and resets turn count to zero.
-// If expectedOldSessionID is provided and non-empty, the rotation only applies if the current conversation_id matches it.
-func (s *SQLStore) RotateSessionID(ctx context.Context, sessionKey, newSessionID string, expectedOldSessionID ...string) error {
+// RotateSessionIDCAS updates the internal session ID, stores the previous session ID, and resets turn count to zero.
+// If expectedOldSessionID is non-empty, conversation_id must match it.
+// If expectedGeneration is > 0, lease_generation must match it.
+func (s *SQLStore) RotateSessionIDCAS(ctx context.Context, sessionKey, newSessionID, expectedOldSessionID string, expectedGeneration int64) error {
 	sessionKey = DiscordSessionID(sessionKey)
 	if sessionKey == "" {
 		return fmt.Errorf("session key cannot be empty")
 	}
 	agent := s.effectiveAgent()
 	now := time.Now().UTC()
+	expectedOld := strings.TrimSpace(expectedOldSessionID)
 
-	var expectedOld string
-	if len(expectedOldSessionID) > 0 {
-		expectedOld = strings.TrimSpace(expectedOldSessionID[0])
-	}
-
-	query := `INSERT INTO sessions (agent, session_id, conversation_id, previous_conversation_id, turn_count, created_at, updated_at) VALUES ($1, $2, $3, '', 0, $4, $5) ON CONFLICT(agent, session_id) DO UPDATE SET previous_conversation_id = CASE WHEN sessions.conversation_id != '' AND sessions.conversation_id != EXCLUDED.conversation_id THEN sessions.conversation_id ELSE sessions.previous_conversation_id END, conversation_id = EXCLUDED.conversation_id, turn_count = 0, created_at = EXCLUDED.created_at, updated_at = EXCLUDED.updated_at WHERE ($6 = '' OR sessions.conversation_id = '' OR sessions.conversation_id = $6);`
-	res, err := s.execResultWithTimeout(ctx, query, agent, sessionKey, newSessionID, now, now, expectedOld)
+	query := `INSERT INTO sessions (agent, session_id, conversation_id, previous_conversation_id, turn_count, lease_generation, created_at, updated_at)
+VALUES ($1, $2, $3, '', 0, $6, $4, $5)
+ON CONFLICT(agent, session_id) DO UPDATE SET
+    previous_conversation_id = CASE WHEN sessions.conversation_id != '' AND sessions.conversation_id != EXCLUDED.conversation_id THEN sessions.conversation_id ELSE sessions.previous_conversation_id END,
+    conversation_id = EXCLUDED.conversation_id,
+    turn_count = 0,
+    created_at = EXCLUDED.created_at,
+    updated_at = EXCLUDED.updated_at
+WHERE ($7 = '' OR sessions.conversation_id = '' OR sessions.conversation_id = $7)
+  AND ($6 = 0 OR sessions.lease_generation = $6);`
+	res, err := s.execResultWithTimeout(ctx, query, agent, sessionKey, newSessionID, now, now, expectedGeneration, expectedOld)
 	if err != nil {
 		return err
 	}
@@ -117,10 +197,20 @@ func (s *SQLStore) RotateSessionID(ctx context.Context, sessionKey, newSessionID
 	if err != nil {
 		return err
 	}
-	if expectedOld != "" && rows == 0 {
-		return fmt.Errorf("%w: session key %s has changed from %s", ErrSessionSuperseded, sessionKey, expectedOld)
+	if (expectedOld != "" || expectedGeneration > 0) && rows == 0 {
+		return fmt.Errorf("%w: session key %s has changed from session=%q gen=%d", ErrSessionSuperseded, sessionKey, expectedOld, expectedGeneration)
 	}
 	return nil
+}
+
+// RotateSessionID updates the internal session ID, stores the previous session ID, and resets turn count to zero.
+// If expectedOldSessionID is provided and non-empty, the rotation only applies if the current conversation_id matches it.
+func (s *SQLStore) RotateSessionID(ctx context.Context, sessionKey, newSessionID string, expectedOldSessionID ...string) error {
+	var expectedOld string
+	if len(expectedOldSessionID) > 0 {
+		expectedOld = strings.TrimSpace(expectedOldSessionID[0])
+	}
+	return s.RotateSessionIDCAS(ctx, sessionKey, newSessionID, expectedOld, 0)
 }
 
 // GetSessionTurnCount returns the current turn count for a session.

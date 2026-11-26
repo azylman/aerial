@@ -31,15 +31,14 @@ type PoolConfig struct {
 	TargetModels                                                  map[string]string // Deprecated: pools are now model-bound. Ignored.
 	Env, PrewarmedTargets                                         []string
 	MaxIdle, TargetLockTimeout, HandshakeTimeout                  time.Duration
-	TranscriptRescuer                                             func(ctx context.Context, convID string, since time.Time) string
-	TerminalTurnRescuer                                           func(ctx context.Context, convID string, since time.Time) string
-	WatchdogInterval                                              time.Duration
-	WatchdogIdleTimeout                                           time.Duration
+	TranscriptRescuer, TerminalTurnRescuer                        func(ctx context.Context, convID string, since time.Time) string
+	WatchdogInterval, WatchdogIdleTimeout                         time.Duration
 	MemoryRetriever                                               MemoryRetriever
 	AmbientContextRetriever                                       AmbientContextRetriever
 	SessionManager                                                *session.Manager
 	OnSessionRotated                                              func(ctx context.Context, targetKey, oldSessionID, newSessionID string) error
-	GetSessionRecord                                              func(ctx context.Context, targetKey string) (SessionRecord, error)
+	OnSessionRotatedCAS                                           func(ctx context.Context, targetKey, oldSessionID, newSessionID string, leaseGen int64) error
+	GetSessionRecord, AcquireSessionRecord                        func(ctx context.Context, targetKey string) (SessionRecord, error)
 	MaxSessionTurns, MinSessionTurns, EmergencyRotationMultiplier int
 	// MCPProxyPort is eri's HTTP port when MCP tracing is enabled ("" when disabled); daemons
 	// then get ERI_DAEMON_ID and ERI_HOOK_ENDPOINT so the loopback MCP proxy can find their turn.
@@ -51,24 +50,22 @@ var poolSeq atomic.Int64
 
 // UnifiedProcessPool manages pinned daemons and singleflight pre-warming.
 type UnifiedProcessPool struct {
-	cfg            PoolConfig
-	spawner        DaemonSpawner
-	daemons        map[string]*StreamingDaemon
-	prewarming     map[string]bool
-	targetLocks    map[string]*targetLock
-	draining       atomic.Bool
-	mu             sync.RWMutex
-	targetMu       sync.Mutex
-	sf             singleflight.Group
-	bgWg           sync.WaitGroup
-	watchdogWg     sync.WaitGroup
-	watchdogOnce   sync.Once
-	closed         bool
-	closeOnce      sync.Once
-	closeErr       error
-	ctx            context.Context
-	cancel         context.CancelFunc
-	daemonIDPrefix string
+	cfg                     PoolConfig
+	spawner                 DaemonSpawner
+	daemons                 map[string]*StreamingDaemon
+	prewarming              map[string]bool
+	targetLocks             map[string]*targetLock
+	draining                atomic.Bool
+	mu                      sync.RWMutex
+	targetMu                sync.Mutex
+	sf                      singleflight.Group
+	bgWg, watchdogWg        sync.WaitGroup
+	watchdogOnce, closeOnce sync.Once
+	closed                  bool
+	closeErr                error
+	ctx                     context.Context
+	cancel                  context.CancelFunc
+	daemonIDPrefix          string
 }
 
 var (
@@ -131,11 +128,10 @@ func NewUnifiedProcessPool(cfg PoolConfig, spawner DaemonSpawner) *UnifiedProces
 		cfg.WatchdogIdleTimeout = DefaultWatchdogIdleTimeout
 	}
 	ctx, cancel := context.WithCancel(context.Background())
-	resolvedModel := cfg.Model
-	if resolvedModel == "" {
-		resolvedModel = cfg.DefaultModel
+	if cfg.Model == "" {
+		cfg.Model = cfg.DefaultModel
 	}
-	cfg.Model, cfg.DefaultModel = resolvedModel, resolvedModel
+	cfg.DefaultModel = cfg.Model
 	pool := &UnifiedProcessPool{
 		cfg:            cfg,
 		spawner:        spawner,
@@ -177,15 +173,11 @@ func (p *UnifiedProcessPool) reapIdlePrewarmedDaemons() {
 		p.mu.Unlock()
 		return
 	}
-	maxIdle := p.cfg.MaxIdle
-	now := time.Now()
+	maxIdle, now := p.cfg.MaxIdle, time.Now()
 	var toEvict []evictedEntry
 	for target, d := range p.daemons {
-		// A daemon is eligible for idle eviction only if it has zero in-flight turns,
-		// is not locked by an active session lease, and its last used time exceeds maxIdle.
 		if d != nil && d.InflightCount() == 0 && !p.isTargetLocked(target) {
-			lastUsed := d.LastUsed()
-			if !lastUsed.IsZero() && now.Sub(lastUsed) > maxIdle {
+			if lastUsed := d.LastUsed(); !lastUsed.IsZero() && now.Sub(lastUsed) > maxIdle {
 				delete(p.daemons, target)
 				toEvict = append(toEvict, evictedEntry{targetKey: target, daemon: d})
 			}
@@ -193,7 +185,6 @@ func (p *UnifiedProcessPool) reapIdlePrewarmedDaemons() {
 	}
 	p.bgWg.Add(len(toEvict))
 	p.mu.Unlock()
-
 	p.closeEvictedEntries(toEvict)
 }
 
@@ -250,15 +241,22 @@ func (p *UnifiedProcessPool) SetSessionCallbacks(getRec func(ctx context.Context
 	p.mu.Unlock()
 }
 
-// UpdateModel updates the model used for newly spawned or rotated daemons in the pool.
-func (p *UnifiedProcessPool) UpdateModel(model string) {
+// SetSessionCallbacksCAS updates the session record lookup and CAS rotation callbacks.
+func (p *UnifiedProcessPool) SetSessionCallbacksCAS(acqRec, getRec func(ctx context.Context, targetKey string) (SessionRecord, error), onRotCAS func(ctx context.Context, targetKey, oldSessionID, newSessionID string, leaseGen int64) error) {
 	if p == nil {
 		return
 	}
-	trimmed := strings.TrimSpace(model)
-	if trimmed == "" {
+	p.mu.Lock()
+	p.cfg.AcquireSessionRecord, p.cfg.GetSessionRecord, p.cfg.OnSessionRotatedCAS = acqRec, getRec, onRotCAS
+	p.mu.Unlock()
+}
+
+// UpdateModel updates the model used for newly spawned or rotated daemons in the pool.
+func (p *UnifiedProcessPool) UpdateModel(model string) {
+	if p == nil || strings.TrimSpace(model) == "" {
 		return
 	}
+	trimmed := strings.TrimSpace(model)
 	p.mu.Lock()
 	p.cfg.Model, p.cfg.DefaultModel = trimmed, trimmed
 	p.mu.Unlock()
@@ -270,15 +268,14 @@ func (p *UnifiedProcessPool) UpdateEngine(engine, claudeBin string, extraBins ..
 		return
 	}
 	p.mu.Lock()
-	p.cfg.Engine = strings.TrimSpace(engine)
-	p.cfg.ClaudeBin = strings.TrimSpace(claudeBin)
+	defer p.mu.Unlock()
+	p.cfg.Engine, p.cfg.ClaudeBin = strings.TrimSpace(engine), strings.TrimSpace(claudeBin)
 	if len(extraBins) > 0 {
 		p.cfg.CodexBin = strings.TrimSpace(extraBins[0])
 	}
 	if len(extraBins) > 1 {
 		p.cfg.MuseBin = strings.TrimSpace(extraBins[1])
 	}
-	p.mu.Unlock()
 }
 
 // Initialize pre-warms configured target daemons sequentially in the caller's context.
@@ -376,6 +373,19 @@ func (p *UnifiedProcessPool) resolveTargetSessionRecord(ctx context.Context, tar
 		}
 	}
 	return rec
+}
+
+// acquireTargetSessionRecord resolves session state with atomic lease acquisition if configured.
+func (p *UnifiedProcessPool) acquireTargetSessionRecord(ctx context.Context, targetKey string) SessionRecord {
+	p.mu.RLock()
+	acqRec := p.cfg.AcquireSessionRecord
+	p.mu.RUnlock()
+	if acqRec != nil && !strings.Contains(targetKey, ":") {
+		if r, err := acqRec(ctx, targetKey); err == nil {
+			return r
+		}
+	}
+	return p.resolveTargetSessionRecord(ctx, targetKey)
 }
 
 func (p *UnifiedProcessPool) prewarmTarget(ctx context.Context, targetKey string) error {
@@ -514,11 +524,10 @@ func (p *UnifiedProcessPool) buildDaemonConfig(targetKey, trimmedSess string, in
 		initTurnCount = initialTurns[0]
 	}
 
-	watchdogInterval := cfg.WatchdogInterval
+	watchdogInterval, watchdogIdleTimeout := cfg.WatchdogInterval, cfg.WatchdogIdleTimeout
 	if watchdogInterval <= 0 {
 		watchdogInterval = DefaultWatchdogInterval
 	}
-	watchdogIdleTimeout := cfg.WatchdogIdleTimeout
 	if watchdogIdleTimeout <= 0 {
 		watchdogIdleTimeout = DefaultWatchdogIdleTimeout
 	}
@@ -663,10 +672,7 @@ func isDaemonMatch(d *StreamingDaemon, trimmedSess string) bool {
 	if d == nil || d.State() == StateClosed || d.IsDirty() {
 		return false
 	}
-	if trimmedSess == "" {
-		return true
-	}
-	return d.SessionID() == "" || d.SessionID() == trimmedSess
+	return trimmedSess == "" || d.SessionID() == "" || d.SessionID() == trimmedSess
 }
 
 // Close gracefully terminates all daemons tracked by the pool.
@@ -686,9 +692,11 @@ func (p *UnifiedProcessPool) Close() error {
 		p.watchdogWg.Wait()
 		p.bgWg.Wait()
 
-		var wg sync.WaitGroup
-		var errMu sync.Mutex
-		var errs []error
+		var (
+			wg    sync.WaitGroup
+			errMu sync.Mutex
+			errs  []error
+		)
 		for target, d := range toClose {
 			if d != nil {
 				wg.Add(1)
@@ -729,9 +737,7 @@ func (p *UnifiedProcessPool) PrewarmedTargets() []string {
 	if p.cfg.PrewarmedTargets == nil {
 		return nil
 	}
-	targets := make([]string, len(p.cfg.PrewarmedTargets))
-	copy(targets, p.cfg.PrewarmedTargets)
-	return targets
+	return append([]string(nil), p.cfg.PrewarmedTargets...)
 }
 
 func (p *UnifiedProcessPool) UpdatePrewarmedTargets(targets []string) {
@@ -764,10 +770,7 @@ type evictedEntry struct {
 }
 
 func (p *UnifiedProcessPool) shouldPrewarmTargetLocked(target string) bool {
-	if p.draining.Load() {
-		return false
-	}
-	if p.prewarming[target] || p.isTargetLocked(target) {
+	if p.draining.Load() || p.prewarming[target] || p.isTargetLocked(target) {
 		return false
 	}
 	d, exists := p.daemons[target]
@@ -801,8 +804,7 @@ func (p *UnifiedProcessPool) collectDirtyEvictionsAndPrewarmsLocked() ([]evicted
 	}
 
 	for _, rawTarget := range p.cfg.PrewarmedTargets {
-		target := strings.TrimSpace(rawTarget)
-		if target != "" && p.shouldPrewarmTargetLocked(target) {
+		if target := strings.TrimSpace(rawTarget); target != "" && p.shouldPrewarmTargetLocked(target) {
 			p.prewarming[target] = true
 			toPrewarm = append(toPrewarm, target)
 		}
@@ -866,7 +868,6 @@ const (
 	DefaultEmergencyRotationMultiplier = session.DefaultEmergencyRotationMultiplier
 	DefaultMaxSessionTurns             = session.DefaultMaxSessionTurns
 	DefaultMaxSessionSteps             = session.DefaultMaxSessionSteps
-	DefaultMaxTranscriptByte           = session.DefaultMaxTranscriptBytes
 	DefaultMaxTranscriptBytes          = session.DefaultMaxTranscriptBytes
 	DefaultMaxSessionDBBytes           = session.DefaultMaxSessionDBBytes
 )
@@ -1103,15 +1104,14 @@ func releasePoolTargetLock(mu *sync.Mutex, locks map[string]*targetLock, targetK
 		default:
 		}
 	}
-	if mu == nil {
-		return
+	if mu != nil {
+		mu.Lock()
+		tl.refs--
+		if tl.refs <= 0 && locks != nil {
+			delete(locks, targetKey)
+		}
+		mu.Unlock()
 	}
-	mu.Lock()
-	tl.refs--
-	if tl.refs <= 0 && locks != nil {
-		delete(locks, targetKey)
-	}
-	mu.Unlock()
 }
 
 func (p *UnifiedProcessPool) acquireTargetLock(ctx context.Context, targetKey string) (*targetLock, error) {
@@ -1133,14 +1133,12 @@ func (p *UnifiedProcessPool) releaseTargetLock(targetKey string, tl *targetLock)
 // session differs from the record's active session (e.g. resume fell back to a
 // fresh session), so the new primary resumes rather than continues.
 func isLeaseCold(recTurnCount int, recActiveSessionID, daemonSessionID string) bool {
-	if recTurnCount <= 1 || strings.TrimSpace(recActiveSessionID) == "" {
+	recSess := strings.TrimSpace(recActiveSessionID)
+	if recTurnCount <= 1 || recSess == "" {
 		return true
 	}
 	sess := strings.TrimSpace(daemonSessionID)
-	if sess == "" {
-		sess = strings.TrimSpace(recActiveSessionID)
-	}
-	return sess != "" && sess != strings.TrimSpace(recActiveSessionID)
+	return sess != "" && sess != recSess
 }
 
 // AcquireLease blocks until the target lock is acquired and returns an exclusive SessionLease.
@@ -1165,7 +1163,7 @@ func (p *UnifiedProcessPool) AcquireLease(ctx context.Context, targetKey string)
 		return nil, ErrPoolDraining
 	}
 
-	rec := p.resolveTargetSessionRecord(ctx, trimmedKey)
+	rec := p.acquireTargetSessionRecord(ctx, trimmedKey)
 	d, dErr := p.GetOrCreate(ctx, trimmedKey, rec.ActiveSessionID, rec.TurnCount)
 	if dErr != nil {
 		p.releaseTargetLock(trimmedKey, tl)
@@ -1189,6 +1187,7 @@ func (p *UnifiedProcessPool) AcquireLease(ctx context.Context, targetKey string)
 		prevSessID: rec.PreviousSessionID,
 		isCold:     isCold,
 		turnCount:  turnCount,
+		leaseGen:   rec.LeaseGeneration,
 		lock:       tl,
 	}, nil
 }
@@ -1199,6 +1198,7 @@ type unifiedSessionLease struct {
 	lock                             *targetLock
 	targetKey, sessionID, prevSessID string
 	turnCount                        int
+	leaseGen                         int64
 	isCold, cancelRotation           bool
 	releaseOnce                      sync.Once
 	mu                               sync.RWMutex
@@ -1230,21 +1230,16 @@ func (l *unifiedSessionLease) TurnCount() int            { return l.turnCount }
 func (l *unifiedSessionLease) MarkDirty() {
 	if l != nil {
 		l.mu.RLock()
-		d := l.daemon
-		l.mu.RUnlock()
-		if d != nil {
-			d.MarkDirty()
+		defer l.mu.RUnlock()
+		if l.daemon != nil {
+			l.daemon.MarkDirty()
 		}
 	}
 }
 
 func (l *unifiedSessionLease) ensureActiveDaemon(ctx context.Context) error {
 	l.mu.RLock()
-	d := l.daemon
-	pool := l.pool
-	targetKey := l.targetKey
-	sessID := l.sessionID
-	turnCount := l.turnCount
+	d, pool, targetKey, sessID, turnCount := l.daemon, l.pool, l.targetKey, l.sessionID, l.turnCount
 	l.mu.RUnlock()
 	if pool == nil || (d != nil && d.State() != StateClosed && !d.IsDirty()) {
 		return nil
@@ -1267,8 +1262,7 @@ func (l *unifiedSessionLease) evaluateEmptyResponseOutcome(ctx context.Context, 
 		return
 	}
 	l.mu.RLock()
-	sessID := l.sessionID
-	d := l.daemon
+	sessID, d := l.sessionID, l.daemon
 	l.mu.RUnlock()
 	isQuota := IsQuotaPause(res.Stderr, "") || IsCapacityBlip(res.Stderr, "")
 	if !isQuota && l.pool != nil && l.pool.cfg.SessionManager != nil && sessID != "" {
@@ -1356,15 +1350,11 @@ func (l *unifiedSessionLease) evaluateRotation() (bool, string) {
 		return false, ""
 	}
 	l.mu.RLock()
-	cancelRot := l.cancelRotation
-	targetKey := l.targetKey
-	d := l.daemon
-	poolClosed := l.pool.isClosed()
-	turnCount := l.turnCount
+	cancelRot, targetKey, d, poolClosed, turnCount := l.cancelRotation, l.targetKey, l.daemon, l.pool.isClosed(), l.turnCount
 	l.mu.RUnlock()
 
 	maxTurns := DefaultMaxSessionTurns
-	if l.pool != nil && l.pool.cfg.MaxSessionTurns > 0 {
+	if l.pool.cfg.MaxSessionTurns > 0 {
 		maxTurns = l.pool.cfg.MaxSessionTurns
 	}
 
@@ -1411,12 +1401,8 @@ func (l *unifiedSessionLease) Release() error {
 		l.mu.RLock()
 		targetKey := l.targetKey
 		oldSessionID := l.sessionID
+		leaseGen := l.leaseGen
 		l.mu.RUnlock()
-
-		baselineRec := l.pool.resolveTargetSessionRecord(l.pool.ctx, targetKey)
-		if baselineRec.ActiveSessionID == "" && oldSessionID != "" {
-			baselineRec.ActiveSessionID = oldSessionID
-		}
 
 		l.pool.mu.RLock()
 		if l.pool.closed {
@@ -1431,12 +1417,12 @@ func (l *unifiedSessionLease) Release() error {
 		log.Printf("[UnifiedProcessPool] Session rotation triggered for %s (reason: %s)", targetKey, reason)
 		metrics.RecordSessionRotation("turn_end", "pool", reason)
 
-		go l.pool.rotateReleasedTarget(targetKey, oldSessionID, baselineRec, l.lock)
+		go l.pool.rotateReleasedTarget(targetKey, oldSessionID, leaseGen, l.lock)
 	})
 	return releaseErr
 }
 
-func (p *UnifiedProcessPool) rotateReleasedTarget(targetKey, oldSessionID string, baselineRec SessionRecord, lock *targetLock) {
+func (p *UnifiedProcessPool) rotateReleasedTarget(targetKey, oldSessionID string, leaseGen int64, lock *targetLock) {
 	defer p.bgWg.Done()
 	defer p.releaseTargetLock(targetKey, lock)
 
@@ -1466,7 +1452,7 @@ func (p *UnifiedProcessPool) rotateReleasedTarget(targetKey, oldSessionID string
 		return
 	}
 
-	superseded, checkErr := p.isSessionRecordSuperseded(rotCtx, targetKey, oldSessionID, baselineRec)
+	superseded, checkErr := p.isSessionRecordSuperseded(rotCtx, targetKey, oldSessionID, leaseGen)
 	if checkErr != nil {
 		evict("[UnifiedProcessPool] Warning: could not verify session record for %s: %v; aborting rotation save and evicting daemon", targetKey, checkErr)
 		return
@@ -1476,21 +1462,36 @@ func (p *UnifiedProcessPool) rotateReleasedTarget(targetKey, oldSessionID string
 		return
 	}
 
-	if newSessionID := newDaemon.SessionID(); p.cfg.OnSessionRotated != nil && newSessionID != "" {
-		if rotErr := p.cfg.OnSessionRotated(rotCtx, targetKey, oldSessionID, newSessionID); rotErr != nil {
-			evict("[UnifiedProcessPool] Persistence callback failed during rotation for %s: %v. Evicting daemon to maintain DB truth.", targetKey, rotErr)
-		}
+	newSessionID := newDaemon.SessionID()
+	if newSessionID == "" {
+		return
+	}
+	p.mu.RLock()
+	onRotCAS, onRot := p.cfg.OnSessionRotatedCAS, p.cfg.OnSessionRotated
+	p.mu.RUnlock()
+	var saveErr error
+	if onRotCAS != nil {
+		saveErr = onRotCAS(rotCtx, targetKey, oldSessionID, newSessionID, leaseGen)
+	} else if onRot != nil {
+		saveErr = onRot(rotCtx, targetKey, oldSessionID, newSessionID)
+	}
+	if saveErr != nil {
+		evict("[UnifiedProcessPool] Persistence callback failed during rotation for %s: %v. Evicting daemon to maintain DB truth.", targetKey, saveErr)
 	}
 }
 
-func (p *UnifiedProcessPool) isSessionRecordSuperseded(ctx context.Context, targetKey, oldSessionID string, baseline SessionRecord) (bool, error) {
-	if p.cfg.GetSessionRecord == nil {
+func (p *UnifiedProcessPool) isSessionRecordSuperseded(ctx context.Context, targetKey, oldSessionID string, leaseGen int64) (bool, error) {
+	p.mu.RLock()
+	getRec := p.cfg.GetSessionRecord
+	p.mu.RUnlock()
+	if getRec == nil {
 		return false, nil
 	}
-	rec, err := p.cfg.GetSessionRecord(ctx, targetKey)
+	rec, err := getRec(ctx, targetKey)
 	if err != nil {
 		return false, fmt.Errorf("failed retrieving session record for %s: %w", targetKey, err)
 	}
-	hasActiveMismatch := (oldSessionID != "" && rec.ActiveSessionID != oldSessionID) || (baseline.ActiveSessionID != "" && rec.ActiveSessionID != baseline.ActiveSessionID)
-	return (rec.ActiveSessionID != "" || baseline.ActiveSessionID != "") && hasActiveMismatch, nil
+	hasActiveMismatch := oldSessionID != "" && rec.ActiveSessionID != "" && rec.ActiveSessionID != oldSessionID
+	hasGenMismatch := leaseGen > 0 && rec.LeaseGeneration > 0 && rec.LeaseGeneration != leaseGen
+	return hasActiveMismatch || hasGenMismatch, nil
 }

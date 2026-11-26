@@ -3,6 +3,8 @@ package queue
 import (
 	"context"
 	"errors"
+	"io"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -395,9 +397,7 @@ func TestWireVoicePoolSessionDependencies(t *testing.T) {
 			var testStore db.Store
 			if tc.withStore {
 				sqlStore, testDB := newTestStore(t)
-				if testDB == nil {
-					t.Fatal("expected testDB not nil")
-				}
+				defer testDB.Close()
 				testStore = sqlStore
 			}
 
@@ -469,9 +469,7 @@ func assertWiredVoiceSessionCallbacks(t *testing.T, voiceMock *mockFullVoicePool
 func TestMakeSessionCallbacks_GuardsSupersededRotation(t *testing.T) {
 	t.Parallel()
 	sqlStore, testDB := newTestStore(t)
-	if testDB == nil {
-		t.Fatal("expected testDB not nil")
-	}
+	defer testDB.Close()
 	getRec, onRot := makeSessionCallbacks(sqlStore)
 	ctx := context.Background()
 
@@ -698,9 +696,7 @@ func TestWorkerPool_PersistVoiceTurnSession(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			sqlStore, testDB := newTestStore(t)
-			if testDB == nil {
-				t.Fatal("expected testDB not nil")
-			}
+			defer testDB.Close()
 			pool := &WorkerPool{
 				cfg: WorkerPoolConfig{
 					Store: sqlStore,
@@ -724,5 +720,99 @@ func TestWorkerPool_PersistVoiceTurnSession(t *testing.T) {
 				assertUnpersistedVoiceTurn(t, sqlStore, key)
 			}
 		})
+	}
+}
+
+func TestWorkerPool_TwoPools_SupersededLeaseDoesNotChangeRecord(t *testing.T) {
+	t.Parallel()
+	sqlStore, testDB := newTestStore(t)
+	defer testDB.Close()
+
+	ctx := context.Background()
+	const targetKey = "target-two-pools-cas"
+	const initSessionID = "550e8400-e29b-41d4-a716-446655440001"
+
+	if err := sqlStore.SaveSessionID(ctx, targetKey, initSessionID); err != nil {
+		t.Fatalf("seed session failed: %v", err)
+	}
+	seedSessionTurns(t, sqlStore, targetKey, 2)
+
+	var spawnCount atomic.Int32
+	spawnStarted := make(chan struct{})
+	proceedSpawn := make(chan struct{})
+
+	spawner1 := &mockDaemonSpawner{
+		SpawnFn: func(ctx context.Context, cfg runner.DaemonConfig) (io.WriteCloser, io.ReadCloser, io.ReadCloser, runner.ProcessHandle, error) {
+			n := spawnCount.Add(1)
+			if n == 2 {
+				close(spawnStarted)
+				select {
+				case <-proceedSpawn:
+				case <-ctx.Done():
+					return nil, nil, nil, nil, ctx.Err()
+				}
+			}
+			return spawnDefaultQueueMockPipes(cfg, false)
+		},
+	}
+
+	acq1, get1, rot1 := makeSessionCallbacksCAS(sqlStore)
+	pool1 := runner.NewUnifiedProcessPool(runner.PoolConfig{
+		MaxSessionTurns:      2,
+		AcquireSessionRecord: acq1,
+		GetSessionRecord:     get1,
+		OnSessionRotatedCAS:  rot1,
+	}, spawner1)
+	defer pool1.Close()
+
+	spawner2 := newMockDaemonSpawner()
+	acq2, get2, rot2 := makeSessionCallbacksCAS(sqlStore)
+	pool2 := runner.NewUnifiedProcessPool(runner.PoolConfig{
+		MaxSessionTurns:      2,
+		AcquireSessionRecord: acq2,
+		GetSessionRecord:     get2,
+		OnSessionRotatedCAS:  rot2,
+	}, spawner2)
+	defer pool2.Close()
+
+	// Pool 1 acquires lease at generation 1 and releases it, triggering background rotation.
+	lease1, err := pool1.AcquireLease(ctx, targetKey)
+	if err != nil {
+		t.Fatalf("pool1 AcquireLease failed: %v", err)
+	}
+	if relErr := lease1.Release(); relErr != nil {
+		t.Fatalf("pool1 Release failed: %v", relErr)
+	}
+
+	// Wait until Pool 1 is blocked spawning the replacement daemon for rotation.
+	<-spawnStarted
+
+	// Pool 2 (simulating a newer pod) acquires the same session key.
+	// This increments lease_generation in the store, without changing conversation_id.
+	lease2, err := pool2.AcquireLease(ctx, targetKey)
+	if err != nil {
+		t.Fatalf("pool2 AcquireLease failed: %v", err)
+	}
+	defer lease2.Release()
+
+	// Unblock Pool 1's spawn. Pool 1 must detect that the store record's lease generation
+	// was superseded, and must NOT overwrite the session record.
+	close(proceedSpawn)
+
+	// Close pool1 to wait for its background rotation goroutines to complete.
+	if closeErr := pool1.Close(); closeErr != nil {
+		t.Fatalf("pool1 Close failed: %v", closeErr)
+	}
+
+	// Verify the stored session was not changed by Pool 1's aborted rotation.
+	info, err := sqlStore.GetSessionInfo(ctx, targetKey)
+	if err != nil {
+		t.Fatalf("GetSessionInfo failed: %v", err)
+	}
+	if info.InternalSessionID != initSessionID {
+		t.Fatalf("session ID changed by superseded pool: got %q, want %q", info.InternalSessionID, initSessionID)
+	}
+	if info.TurnCount != 2 {
+		t.Fatalf("turn count overwritten by superseded pool: got %d, want 2", info.TurnCount)
 	}
 }

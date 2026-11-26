@@ -7,6 +7,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -1180,6 +1181,7 @@ func TestUnifiedProcessPool_ResolveTargetSessionRecord(t *testing.T) {
 type supersededSessionCase struct {
 	name            string
 	storeSessID     string
+	storeLeaseGen   int64
 	simulateReadErr bool
 }
 
@@ -1187,7 +1189,7 @@ func runSupersededSessionCase(t *testing.T, tc supersededSessionCase) {
 	t.Helper()
 	ctx := context.Background()
 	var mu sync.Mutex
-	storeRecord := SessionRecord{ActiveSessionID: "00000000-0000-0000-0000-000000000001", TurnCount: 2}
+	storeRecord := SessionRecord{ActiveSessionID: "00000000-0000-0000-0000-000000000001", TurnCount: 2, LeaseGeneration: 1}
 	var onRotatedCalled atomic.Bool
 	spawnStarted := make(chan struct{})
 	proceedSpawn := make(chan struct{})
@@ -1242,6 +1244,9 @@ func runSupersededSessionCase(t *testing.T, tc supersededSessionCase) {
 	if tc.storeSessID != "" {
 		storeRecord.ActiveSessionID = tc.storeSessID
 	}
+	if tc.storeLeaseGen > 0 {
+		storeRecord.LeaseGeneration = tc.storeLeaseGen
+	}
 	mu.Unlock()
 
 	close(proceedSpawn)
@@ -1261,6 +1266,10 @@ func TestUnifiedProcessPool_SupersededSessionDuringBackgroundRotation(t *testing
 		{
 			name:        "different session rotated by other pod",
 			storeSessID: "00000000-0000-0000-0000-000000000099",
+		},
+		{
+			name:          "newer lease generation acquired by other pod",
+			storeLeaseGen: 2,
 		},
 		{
 			name:            "store read error prevents rotation save",
@@ -1346,6 +1355,29 @@ func TestUnifiedProcessPool_WaitingTurnDuringBackgroundRotationGetsNewSession(t 
 		}
 		lease2Chan <- l2
 	}()
+
+	// Wait until the second caller is known to be queued on the target lock (refs reaches 2).
+	for range 10000 {
+		pool.targetMu.Lock()
+		tl := pool.targetLocks[targetKey]
+		var refs int32
+		if tl != nil {
+			refs = tl.refs
+		}
+		pool.targetMu.Unlock()
+		if refs >= 2 {
+			break
+		}
+		runtime.Gosched()
+	}
+	// Assert neither lease2Chan nor errChan has fired yet (caller is still blocked).
+	select {
+	case l2 := <-lease2Chan:
+		t.Fatalf("expected AcquireLease to block on targetLock, but received lease early: %v", l2)
+	case l2Err := <-errChan:
+		t.Fatalf("expected AcquireLease to block on targetLock, but failed early: %v", l2Err)
+	default:
+	}
 
 	// Unblock spawn and allow rotation to finish
 	close(proceedSpawn)

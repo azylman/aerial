@@ -399,6 +399,12 @@ func (m *mockConfigurableVoicePool) SetSessionCallbacks(getRec func(ctx context.
 	}
 }
 
+func (m *mockConfigurableVoicePool) SetSessionCallbacksCAS(acqRec, getRec func(ctx context.Context, targetKey string) (SessionRecord, error), onRotCAS func(ctx context.Context, targetKey, oldSessionID, newSessionID string, leaseGen int64) error) {
+	if m != nil {
+		m.callbacksSet = acqRec != nil && getRec != nil && onRotCAS != nil
+	}
+}
+
 func (m *mockConfigurableVoicePool) UpdateModel(model string) {
 	if m != nil {
 		m.modelUpdated = model
@@ -480,12 +486,15 @@ func TestDynamicVoicePool_WiringAndPropagations(t *testing.T) {
 
 	rescuer := func(context.Context, string, time.Time) string { return "rescued" }
 	sessMgr := &session.Manager{}
+	acqRec := func(context.Context, string) (SessionRecord, error) { return SessionRecord{}, nil }
 	getRec := func(context.Context, string) (SessionRecord, error) { return SessionRecord{}, nil }
 	onRot := func(context.Context, string, string, string) error { return nil }
+	onRotCAS := func(context.Context, string, string, string, int64) error { return nil }
 
 	dyn.SetTranscriptRescuer(rescuer)
 	dyn.SetSessionManager(sessMgr)
 	dyn.SetSessionCallbacks(getRec, onRot)
+	dyn.SetSessionCallbacksCAS(acqRec, getRec, onRotCAS)
 	dyn.UpdateModel("gemini-3.8-flash-low")
 	dyn.UpdateEngine("gemini_api", "/bin/claude")
 

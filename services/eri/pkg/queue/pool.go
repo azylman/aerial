@@ -232,19 +232,16 @@ func voiceSessionKey(targetKey string) string {
 
 func makeSessionCallbacks(store db.Store) (func(context.Context, string) (runner.SessionRecord, error), func(context.Context, string, string, string) error) {
 	getRec := func(ctx context.Context, targetKey string) (runner.SessionRecord, error) {
-		sessID, err := store.GetSessionID(ctx, targetKey)
+		info, err := store.GetSessionInfo(ctx, targetKey)
 		if err != nil {
 			return runner.SessionRecord{}, err
 		}
-		turns, err := store.GetSessionTurnCount(ctx, targetKey)
-		if err != nil {
-			turns = 0
-		}
-		prevID, err := store.GetPreviousSessionID(ctx, targetKey)
-		if err != nil {
-			prevID = ""
-		}
-		return runner.SessionRecord{ActiveSessionID: sessID, PreviousSessionID: prevID, TurnCount: turns}, nil
+		return runner.SessionRecord{
+			ActiveSessionID:   info.InternalSessionID,
+			PreviousSessionID: info.PreviousSessionID,
+			TurnCount:         info.TurnCount,
+			LeaseGeneration:   info.LeaseGeneration,
+		}, nil
 	}
 	onRot := func(ctx context.Context, targetKey, oldSessionID, newSessionID string) error {
 		return store.RotateSessionID(ctx, targetKey, newSessionID, oldSessionID)
@@ -252,27 +249,82 @@ func makeSessionCallbacks(store db.Store) (func(context.Context, string) (runner
 	return getRec, onRot
 }
 
-func makeVoiceSessionCallbacks(store db.Store) (func(context.Context, string) (runner.SessionRecord, error), func(context.Context, string, string, string) error) {
-	getRec := func(ctx context.Context, targetKey string) (runner.SessionRecord, error) {
-		key := voiceSessionKey(targetKey)
-		sessID, err := store.GetSessionID(ctx, key)
+func makeSessionCallbacksCAS(store db.Store) (func(context.Context, string) (runner.SessionRecord, error), func(context.Context, string) (runner.SessionRecord, error), func(context.Context, string, string, string, int64) error) {
+	acqRec := func(ctx context.Context, targetKey string) (runner.SessionRecord, error) {
+		info, err := store.AcquireSession(ctx, targetKey)
 		if err != nil {
 			return runner.SessionRecord{}, err
 		}
-		turns, err := store.GetSessionTurnCount(ctx, key)
+		return runner.SessionRecord{
+			ActiveSessionID:   info.InternalSessionID,
+			PreviousSessionID: info.PreviousSessionID,
+			TurnCount:         info.TurnCount,
+			LeaseGeneration:   info.LeaseGeneration,
+		}, nil
+	}
+	getRec, _ := makeSessionCallbacks(store)
+	onRotCAS := func(ctx context.Context, targetKey, oldSessionID, newSessionID string, leaseGen int64) error {
+		return store.RotateSessionIDCAS(ctx, targetKey, newSessionID, oldSessionID, leaseGen)
+	}
+	return acqRec, getRec, onRotCAS
+}
+
+func makeVoiceSessionCallbacks(store db.Store) (func(context.Context, string) (runner.SessionRecord, error), func(context.Context, string, string, string) error) {
+	getRec := func(ctx context.Context, targetKey string) (runner.SessionRecord, error) {
+		key := voiceSessionKey(targetKey)
+		info, err := store.GetSessionInfo(ctx, key)
 		if err != nil {
-			turns = 0
+			return runner.SessionRecord{}, err
 		}
-		prevID, err := store.GetPreviousSessionID(ctx, key)
-		if err != nil {
-			prevID = ""
-		}
-		return runner.SessionRecord{ActiveSessionID: sessID, PreviousSessionID: prevID, TurnCount: turns}, nil
+		return runner.SessionRecord{
+			ActiveSessionID:   info.InternalSessionID,
+			PreviousSessionID: info.PreviousSessionID,
+			TurnCount:         info.TurnCount,
+			LeaseGeneration:   info.LeaseGeneration,
+		}, nil
 	}
 	onRot := func(ctx context.Context, targetKey, oldSessionID, newSessionID string) error {
 		return store.RotateSessionID(ctx, voiceSessionKey(targetKey), newSessionID, oldSessionID)
 	}
 	return getRec, onRot
+}
+
+func makeVoiceSessionCallbacksCAS(store db.Store) (func(context.Context, string) (runner.SessionRecord, error), func(context.Context, string) (runner.SessionRecord, error), func(context.Context, string, string, string, int64) error) {
+	acqRec := func(ctx context.Context, targetKey string) (runner.SessionRecord, error) {
+		key := voiceSessionKey(targetKey)
+		info, err := store.AcquireSession(ctx, key)
+		if err != nil {
+			return runner.SessionRecord{}, err
+		}
+		return runner.SessionRecord{
+			ActiveSessionID:   info.InternalSessionID,
+			PreviousSessionID: info.PreviousSessionID,
+			TurnCount:         info.TurnCount,
+			LeaseGeneration:   info.LeaseGeneration,
+		}, nil
+	}
+	getRec, _ := makeVoiceSessionCallbacks(store)
+	onRotCAS := func(ctx context.Context, targetKey, oldSessionID, newSessionID string, leaseGen int64) error {
+		return store.RotateSessionIDCAS(ctx, voiceSessionKey(targetKey), newSessionID, oldSessionID, leaseGen)
+	}
+	return acqRec, getRec, onRotCAS
+}
+
+type sessionCallbacksCASSetter interface {
+	SetSessionCallbacksCAS(acqFn, getFn func(context.Context, string) (runner.SessionRecord, error), saveFn func(context.Context, string, string, string, int64) error)
+}
+
+type sessionCallbacksSetter interface {
+	SetSessionCallbacks(getFn func(context.Context, string) (runner.SessionRecord, error), saveFn func(context.Context, string, string, string) error)
+}
+
+func wireSessionCallbacks(pool any, acqRec, getRec func(context.Context, string) (runner.SessionRecord, error), onRotCAS func(context.Context, string, string, string, int64) error, onRot func(context.Context, string, string, string) error) {
+	switch sc := pool.(type) {
+	case sessionCallbacksCASSetter:
+		sc.SetSessionCallbacksCAS(acqRec, getRec, onRotCAS)
+	case sessionCallbacksSetter:
+		sc.SetSessionCallbacks(getRec, onRot)
+	}
 }
 
 func wireVoicePoolSessionDependencies(voicePool runner.AgentPool, pools map[PoolKey]runner.AgentPool, sessionMgr *session.Manager, store db.Store) {
@@ -294,21 +346,13 @@ func wireVoicePoolSessionDependencies(voicePool runner.AgentPool, pools map[Pool
 		}
 	}
 	if store != nil && !inDiscordPools {
-		if sc, ok := voicePool.(interface {
-			SetSessionCallbacks(getFn func(context.Context, string) (runner.SessionRecord, error), saveFn func(context.Context, string, string, string) error)
-		}); ok {
-			getRec, onRot := makeVoiceSessionCallbacks(store)
-			sc.SetSessionCallbacks(getRec, onRot)
-		}
+		acqRec, getRec, onRotCAS := makeVoiceSessionCallbacksCAS(store)
+		_, onRot := makeVoiceSessionCallbacks(store)
+		wireSessionCallbacks(voicePool, acqRec, getRec, onRotCAS, onRot)
 	}
 }
 
 func wirePoolSessionDependencies(pools map[PoolKey]runner.AgentPool, sessionMgr *session.Manager, store db.Store) {
-	var getRec func(context.Context, string) (runner.SessionRecord, error)
-	var onRot func(context.Context, string, string, string) error
-	if store != nil {
-		getRec, onRot = makeSessionCallbacks(store)
-	}
 	for _, k := range AllValidPoolKeys() {
 		pool := pools[k]
 		if pool == nil {
@@ -325,11 +369,9 @@ func wirePoolSessionDependencies(pools map[PoolKey]runner.AgentPool, sessionMgr 
 			}
 		}
 		if store != nil && !k.Ephemeral {
-			if sc, ok := pool.(interface {
-				SetSessionCallbacks(getFn func(context.Context, string) (runner.SessionRecord, error), saveFn func(context.Context, string, string, string) error)
-			}); ok {
-				sc.SetSessionCallbacks(getRec, onRot)
-			}
+			acqRec, getRec, onRotCAS := makeSessionCallbacksCAS(store)
+			_, onRot := makeSessionCallbacks(store)
+			wireSessionCallbacks(pool, acqRec, getRec, onRotCAS, onRot)
 		}
 	}
 }
@@ -378,7 +420,13 @@ func buildDefaultHighEffortPool(appCfg *config.Config, cfg WorkerPoolConfig, ses
 		poolCfg.SessionManager = sessMgr
 	}
 	if store != nil {
-		poolCfg.GetSessionRecord, poolCfg.OnSessionRotated = makeSessionCallbacks(store)
+		acqRec, getRec, onRotCAS := makeSessionCallbacksCAS(store)
+		poolCfg.AcquireSessionRecord = acqRec
+		poolCfg.GetSessionRecord = getRec
+		poolCfg.OnSessionRotatedCAS = onRotCAS
+		poolCfg.OnSessionRotated = func(ctx context.Context, targetKey, oldSessionID, newSessionID string) error {
+			return onRotCAS(ctx, targetKey, oldSessionID, newSessionID, 0)
+		}
 	}
 	return runner.NewUnifiedProcessPool(poolCfg, nil)
 }

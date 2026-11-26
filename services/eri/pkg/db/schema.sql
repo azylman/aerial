@@ -59,6 +59,7 @@ CREATE TABLE IF NOT EXISTS sessions (
     conversation_id TEXT NOT NULL DEFAULT '',
     previous_conversation_id TEXT NOT NULL DEFAULT '',
     turn_count INTEGER NOT NULL DEFAULT 0,
+    lease_generation BIGINT NOT NULL DEFAULT 0,
     summary TEXT NOT NULL DEFAULT '',
     last_summarized_message_id TEXT NOT NULL DEFAULT '',
     created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,

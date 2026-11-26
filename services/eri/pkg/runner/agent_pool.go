@@ -11,6 +11,7 @@ type SessionRecord struct {
 	ActiveSessionID   string
 	PreviousSessionID string
 	TurnCount         int
+	LeaseGeneration   int64
 }
 
 type AgentSession interface {

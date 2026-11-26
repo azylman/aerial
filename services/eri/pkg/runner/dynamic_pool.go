@@ -139,6 +139,29 @@ func (p *DynamicVoicePool) SetSessionCallbacks(getRec func(ctx context.Context, 
 	}
 }
 
+// SetSessionCallbacksCAS updates the session record lookup and CAS rotation callbacks.
+func (p *DynamicVoicePool) SetSessionCallbacksCAS(acqRec, getRec func(ctx context.Context, targetKey string) (SessionRecord, error), onRotCAS func(ctx context.Context, targetKey, oldSessionID, newSessionID string, leaseGen int64) error) {
+	p.mu.Lock()
+	p.getSessionRecord = getRec
+	p.onSessionRotated = func(ctx context.Context, targetKey, oldSessionID, newSessionID string) error {
+		return onRotCAS(ctx, targetKey, oldSessionID, newSessionID, 0)
+	}
+	pool := p.currentPool
+	p.mu.Unlock()
+	if pool != nil {
+		switch s := pool.(type) {
+		case interface {
+			SetSessionCallbacksCAS(acqFn, getFn func(context.Context, string) (SessionRecord, error), onRotFn func(context.Context, string, string, string, int64) error)
+		}:
+			s.SetSessionCallbacksCAS(acqRec, getRec, onRotCAS)
+		case interface {
+			SetSessionCallbacks(getFn func(context.Context, string) (SessionRecord, error), onRotFn func(context.Context, string, string, string) error)
+		}:
+			s.SetSessionCallbacks(getRec, p.onSessionRotated)
+		}
+	}
+}
+
 // UpdateModel updates the model used for newly spawned or rotated daemons in the pool.
 func (p *DynamicVoicePool) UpdateModel(model string) {
 	p.mu.RLock()

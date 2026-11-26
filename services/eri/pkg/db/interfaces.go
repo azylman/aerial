@@ -82,6 +82,9 @@ type SessionStore interface {
 	IncrementSessionTurnCount(ctx context.Context, sessionKey string) (int, error)
 	GetSessionTurnCount(ctx context.Context, sessionKey string) (int, error)
 	RotateSessionID(ctx context.Context, sessionKey, newSessionID string, expectedOldSessionID ...string) error
+	RotateSessionIDCAS(ctx context.Context, sessionKey, newSessionID, expectedOldSessionID string, expectedGeneration int64) error
+	AcquireSession(ctx context.Context, sessionKey string) (SessionInfo, error)
+	GetSessionInfo(ctx context.Context, sessionKey string) (SessionInfo, error)
 	GetThreadSummary(ctx context.Context, threadID string) (summary string, lastSummarizedMsgID string, err error)
 	SaveThreadSummary(ctx context.Context, threadID, summary, lastSummarizedMsgID string) error
 }
