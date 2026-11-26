@@ -124,11 +124,11 @@ bazel test //services/... //pkg/...`,
           'Aerial separates generic platform logic from private user configurations through a strict multi-repository architecture and ephemeral scratch workspaces.',
         paragraphs: [
           'Personal assistant projects often entangle private details into core application source code. Hardcoding personal names, addresses, device identifiers, and secret keys prevents code sharing and complicates upgrades.',
-          'Aerial enforces a decoupled two-repository model. The core monorepo contains domain-agnostic infrastructure code, microservices, and base system rules. The user configuration repository contains private persona rules, smart home skills, service configurations, and Kubernetes cluster overrides.',
+          'Aerial enforces a decoupled two-repository model. The core monorepo contains domain-agnostic infrastructure code, microservices, and base system rules. The user configuration repository contains private persona rules, custom domain skills, service configurations, and Kubernetes cluster overrides.',
         ],
         bullets: [
           'Domain-Agnostic Core: The core repository contains zero personal data, real names, or private credentials.',
-          'Private Config Repository: Personal rules, household runbooks, and cluster overrides live in a private GitOps repository.',
+          'Private Config Repository: Personal rules, custom skill runbooks, and cluster overrides live in a private GitOps repository.',
           'Repository Integrity: Pre-tool security hooks guard base mount directories against in-place mutations.',
           'Ephemeral Scratch Workspaces: Agents perform modifications in isolated scratch clones initialized through helper scripts.',
         ],
@@ -175,10 +175,10 @@ kubectl get nodes -o wide`,
         id: 'two-repo-gitops',
         title: 'The Two-Repo GitOps Architecture',
         lead:
-          'Fork the configuration template to establish your private configuration repository, customize parameters, and bootstrap Flux CD.',
+          'Fork the configuration template to establish your private configuration repository, seed bootstrap credentials, and bootstrap Flux CD.',
         paragraphs: [
           'Aerial uses GitOps for continuous delivery. Flux CD reconciles two Kustomization resources: operator infrastructure and core platform services.',
-          'Users fork azylman/aerial-config-example into a private configuration repository. Flux CD continuously reconciles user overrides on top of upstream base manifests.',
+          'Users fork azylman/aerial-config-example into a private configuration repository. Bootstrap secrets are seeded into Kubernetes via Secret/aerial-bootstrap-secrets, and Flux CD continuously reconciles user overrides on top of upstream base manifests.',
         ],
         bullets: [
           'Zero Plaintext Tokens: In-memory authentication passes tokens during bootstrap without writing credentials to disk.',
@@ -188,9 +188,15 @@ kubectl get nodes -o wide`,
         codeSnippets: [
           {
             language: 'bash',
-            caption: 'Bootstrap Flux CD on your private configuration repository',
-            code: `# Set GitHub personal access token in memory
+            caption: 'Seed bootstrap secrets and bootstrap Flux CD on your private configuration repository',
+            code: `# Set bootstrap credentials in memory
 export GITHUB_PAT="your-github-pat"
+export DISCORD_BOT_TOKEN="your-discord-bot-token"
+
+# Seed bootstrap secrets for in-cluster Infisical auto-bootstrap
+kubectl create secret generic aerial-bootstrap-secrets \\
+  --from-literal=DISCORD_BOT_TOKEN="$DISCORD_BOT_TOKEN" \\
+  --from-literal=GITHUB_PAT="$GITHUB_PAT"
 
 # Install Flux CLI and bootstrap your private repository
 curl -s https://fluxcd.io/install.sh | sudo bash
@@ -207,37 +213,28 @@ GITHUB_TOKEN="$GITHUB_PAT" flux bootstrap github \\
         id: 'infisical-secrets',
         title: 'Infisical Machine Identity & Secret Bootstrap',
         lead:
-          'Aerial centralizes secret management with Infisical and External Secrets Operator, preventing plaintext credentials from entering version control.',
+          'Aerial centralizes secret management with Infisical and External Secrets Operator, auto-bootstrapping credentials in-cluster without host CLI dependencies.',
         paragraphs: [
-          'An in-cluster Infisical instance stores application credentials, bot tokens, and API keys. External Secrets Operator monitors Infisical and generates scoped Kubernetes Secrets for platform services.',
-          'Bootstrapping Infisical creates a Machine Identity with read access to the project. The project slug defaults to aerial and configures through the INFISICAL_PROJECT_SLUG variable. External Secrets Operator provisions database, messaging, and webhook credentials automatically.',
+          'An in-cluster Infisical instance stores application credentials, bot tokens, and API keys. Job/infisical-bootstrap automatically initializes Infisical, creates project aerial and environment default, derives AERIAL_CONFIG_REPO_URL from GitRepository/flux-system, generates Secret/infisical-universal-auth, and ingests seeded secrets from Secret/aerial-bootstrap-secrets.',
+          'External Secrets Operator monitors Infisical and generates scoped Kubernetes Secrets for platform services. External Secrets Operator also provisions database, messaging, and webhook credentials automatically and pushes them into Infisical via PushSecret.',
         ],
         bullets: [
-          'Universal Authentication: Kubernetes workloads authenticate to Infisical through Machine Identity tokens.',
-          'Project Configuration: Infisical defaults to the aerial slug, with overrides configured via INFISICAL_PROJECT_SLUG in cluster overrides.',
-          'Automated Generation: External Secrets Operator provisions database and messaging credentials automatically.',
+          'In-Cluster Bootstrap: Job/infisical-bootstrap automatically initializes Infisical and creates Machine Identity credentials.',
+          'Automatic Repo URL Derivation: Derives AERIAL_CONFIG_REPO_URL from GitRepository/flux-system without manual configuration.',
+          'Zero Host CLI Dependencies: Automatically ingests DISCORD_BOT_TOKEN and GITHUB_PAT from Secret/aerial-bootstrap-secrets without requiring infisical CLI or jq.',
           'Scoped Distribution: Each service pod receives only its declared secret environment variables.',
         ],
         codeSnippets: [
           {
             language: 'bash',
-            caption: 'Bootstrap Infisical and store credentials',
-            code: `# 1. Create Machine Identity Token Auth credential
-export INFISICAL_TOKEN="$(infisical bootstrap \\
-  --domain http://<cluster-ip> \\
-  --email admin@example.com \\
-  --password 'your-master-password' \\
-  --organization aerial \\
-  | jq -r '.identity.credentials.token')"
+            caption: 'In-cluster Infisical bootstrap and secret management',
+            code: `# Initial credentials are seeded during Flux bootstrap via:
+kubectl create secret generic aerial-bootstrap-secrets \\
+  --from-literal=DISCORD_BOT_TOKEN="$DISCORD_BOT_TOKEN" \\
+  --from-literal=GITHUB_PAT="$GITHUB_PAT"
 
-# 2. Store identity token in Kubernetes
-kubectl create secret generic infisical-universal-auth \\
-  --from-literal=INFISICAL_TOKEN="$INFISICAL_TOKEN"
-
-# 3. Populate Discord Bot Token and GitHub PAT in project aerial (default environment)
-infisical secrets set --env=default \\
-  DISCORD_BOT_TOKEN="your-discord-token" \\
-  GITHUB_PAT="$GITHUB_PAT"`,
+# Job/infisical-bootstrap initializes Infisical, creates Secret/infisical-universal-auth,
+# upserts DISCORD_BOT_TOKEN and GITHUB_PAT into Infisical, and deletes aerial-bootstrap-secrets automatically.`,
           },
         ],
       },
@@ -569,12 +566,12 @@ channels:
           'Full duplex interaction spans Discord, real-time voice, outbound telephone calls, persistent cron schedules, and headless web browsing.',
         paragraphs: [
           'Aerial interacts across physical and digital modalities. The persistent scheduler manages recurring cron schedules, one-shot reminders, silent heartbeat monitors, and event watches across container restarts.',
-          'Real-time voice runs through a CUDA speech service hosting neural speech recognition and speech synthesis models. Outbound telephone calls and SMS execute through a PSTN telephony service, while browser automation handles web tasks.',
+          'Real-time voice runs through a CUDA speech service hosting neural speech recognition and speech synthesis models. Outbound telephone calls execute through a PSTN telephony service, while headless browser automation handles web tasks.',
         ],
         bullets: [
           'Persistent Scheduler: Provides durable scheduling tools for recurring jobs, silent polling, and event watches.',
           'Real-Time Voice: Delivers low-latency speech recognition and voice synthesis with fast response times.',
-          'Telephony Service: Executes outbound telephone calls and text messages for appointments and inquiries.',
+          'Telephony Service: Executes outbound and inbound telephone calls for appointments, reservations, and inquiries.',
           'Browser Automation: Automates headless browser tasks with session hygiene and stealth interaction.',
         ],
       },
@@ -675,7 +672,7 @@ channels:
         lead:
           'Extend platform capabilities with custom skills structured with YAML frontmatter and progressive disclosure.',
         paragraphs: [
-          'Skills are modular directories containing instructions, reference documentation, and automation scripts. They teach agents how to interact with specialized domains, home automation devices, and private APIs.',
+          'Skills are modular directories containing instructions, reference documentation, and automation scripts. They teach agents how to interact with specialized domains, external web portals, and private APIs.',
           'Progressive disclosure keeps prompt tokens minimal. Skills declare names and descriptions in frontmatter. Full skill instructions and reference materials load into context only when descriptions match the active request.',
         ],
         bullets: [
@@ -709,7 +706,7 @@ description: Run hermetic offsite backups of CloudNativePG and Restate journals 
           'Integrate third-party tools, hardware bridges, and external APIs using Model Context Protocol streamable servers.',
         paragraphs: [
           'Aerial uses Model Context Protocol to provide agents with typed, schema-validated tool interfaces. Users register custom Streamable HTTP MCP servers in configuration files under target categories.',
-          'Agents discover tools lazily through standard schema endpoints. This mechanism enables agents to call home automation devices, financial endpoints, and hardware monitors without modifying application code.',
+          'Agents discover tools lazily through standard schema endpoints. This mechanism enables agents to call calendar services, external web APIs, and cluster monitors without modifying application code.',
         ],
         bullets: [
           'Streamable HTTP: Provides tool invocations over standard HTTP connections.',
@@ -722,10 +719,10 @@ description: Run hermetic offsite backups of CloudNativePG and Restate journals 
             caption: 'Registering custom MCP server in config.yaml',
             code: `mcp_servers:
   common:
-    home-assistant:
-      serverUrl: http://ha-mcp.aerial/mcp
-    custom-iot:
-      serverUrl: http://iot-bridge.aerial/mcp`,
+    google-workspace:
+      serverUrl: http://google-mcp.aerial/mcp
+    custom-api:
+      serverUrl: http://api-bridge.aerial/mcp`,
           },
         ],
       },
@@ -746,17 +743,17 @@ description: Run hermetic offsite backups of CloudNativePG and Restate journals 
       },
       {
         id: 'homelab-workloads',
-        title: 'Integrating Smart Home & Custom Homelab Workloads',
+        title: 'Integrating External APIs & Custom Homelab Workloads',
         lead:
-          'Connect Home Assistant automations, camera vision event watches, and custom microservices to build a complete home intelligence platform.',
+          'Connect external webhook event watches, third-party APIs, and custom microservices to extend your self-hosted platform.',
         paragraphs: [
-          'Aerial serves as an intelligent coordinator for smart home environments. Agents monitor device states, adjust climate controls, inspect security camera feeds, and coordinate household routines.',
-          'Persistent event watches trigger automations when real-world events occur. Examples include greeting residents, notifying when deliveries arrive, and conducting scheduled security sweeps.',
+          'Aerial coordinates everyday personal workflows alongside custom homelab applications. Agents monitor external APIs, automate browser errands, manage calendars, and supervise custom cluster workloads.',
+          'Persistent event watches trigger agent turns when external events occur. Examples include tracking package or permit updates, processing inbound webhooks, and running scheduled maintenance.',
         ],
         bullets: [
-          'Home Assistant Integration: Monitors entity states and triggers automations bi-directionally.',
-          'Vision Triaging: Triages real-time object detections and events from security camera feeds.',
-          'Event-Driven Routines: Executes deterministic routines in response to sensor events.',
+          'External API Connectors: Queries and mutates third-party services through custom Model Context Protocol servers.',
+          'Browser & Phone Errands: Automates multi-step web flows and outbound telephone calls with persistent session state.',
+          'Event-Driven Routines: Executes deterministic workflows in response to inbound webhooks and scheduled heartbeats.',
         ],
         callout: {
           type: 'tip',

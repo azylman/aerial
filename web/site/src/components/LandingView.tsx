@@ -17,8 +17,8 @@ export const INTEGRATION_BADGES: readonly IntegrationBadge[] = [
   // Surfaces
   { id: 'discord-gateway', group: 'Surfaces', label: 'Discord Gateway' },
   { id: 'webrtc-kiosk-voice', group: 'Surfaces', label: 'WebRTC & Touch Kiosk Voice' },
-  { id: 'pstn-voice-sms', group: 'Surfaces', label: 'PSTN Voice & SMS' },
-  { id: 'console-hud', group: 'Surfaces', label: 'Live Web Console HUD' },
+  { id: 'pstn-voice-calls', group: 'Surfaces', label: 'PSTN Phone Calls' },
+  { id: 'console-hud', group: 'Surfaces', label: 'Headful Browser (CDP) & Web HUD' },
 
   // AI Engines
   { id: 'claude-code', group: 'AI Engines', label: 'Claude Code' },
@@ -58,12 +58,12 @@ export function LandingView() {
         <div className="hero-tag">
           <span>XVX-016 Gundam Aerial</span>
           <span>•</span>
-          <span>Homelab & AI Agent Architecture</span>
+          <span>Self-Hosted on Kubernetes (k3s)</span>
         </div>
-        <h1 className="hero-title">Autonomous AI Personal Assistant & Software Factory</h1>
+        <h1 className="hero-title">Homelab Application Platform, Software Factory & AI Agent</h1>
         <p className="hero-subtitle">
-          A closed-loop, self-hosted platform pairing continuous software delivery with multimodal intelligence.
-          From Discord and voice interactions to multi-PR DAG builds, automated GitHub review loops, and push GitOps.
+          A self-hosted platform where your AI agent manages everyday tasks, automates web and phone errands, and builds and operates stateful homelab apps.
+          Talk over Discord or voice to browse the web, schedule persistent routines, or ship multi-PR builds via push GitOps.
         </p>
 
         {/* Quick-Install Terminal Pill */}
@@ -85,7 +85,7 @@ export function LandingView() {
               <span>{isCopied() ? 'Copied!' : isFailed() ? 'Copy failed' : 'Copy'}</span>
             </button>
             <a href="#quickstart" className="install-guide-link" data-testid="hero-install-jump">
-              4-Step Guide ↓
+              3-Step Guide ↓
             </a>
           </div>
         </div>
@@ -130,7 +130,7 @@ export function LandingView() {
             <span className="feature-icon" role="img" aria-label="platform">
               🪐
             </span>
-            <h2 className="feature-title">Self-Hosted Platform</h2>
+            <h2 className="feature-title">Homelab Application Platform</h2>
           </div>
           <p className="feature-desc">
             Kubernetes (k3s) fabric with NGINX Gateway Fabric, CloudNativePG PostgreSQL 19 + pgvector, Restate durable
@@ -156,11 +156,11 @@ export function LandingView() {
             <span className="feature-icon" role="img" aria-label="agent">
               🛰️
             </span>
-            <h2 className="feature-title">Multimodal AI Agent</h2>
+            <h2 className="feature-title">AI Agent</h2>
           </div>
           <p className="feature-desc">
-            Stateless HTTP ingress, ACT-R cognitive memory with procedural skill synthesis, persistent cron and event-watch scheduling,
-            Discord Gateway, real-time voice, and headful browser control.
+            Talk over Discord, room voice, or phone calls to automate browser errands, manage calendars, and run persistent
+            schedules with long-term semantic memory and SKILL.md skills.
           </p>
         </div>
       </div>
