@@ -86,6 +86,21 @@ func TestTraceparentFromRequest(t *testing.T) {
 			want: testIngressTP,
 		},
 		{
+			name: "mixed_case_ingress_key",
+			req: &restate.Request{
+				Headers: testHeaders{"TraceParent": testIngressTP},
+			},
+			want: testIngressTP,
+		},
+		{
+			name: "empty_attempt_value_falls_back",
+			req: &restate.Request{
+				AttemptHeaders: map[string][]string{"traceparent": {" "}},
+				Headers:        testHeaders{"traceparent": testIngressTP},
+			},
+			want: testIngressTP,
+		},
+		{
 			name: "empty_headers",
 			req: &restate.Request{
 				AttemptHeaders: map[string][]string{"traceparent": {" "}},

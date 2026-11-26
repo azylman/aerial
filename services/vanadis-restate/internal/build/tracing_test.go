@@ -20,7 +20,6 @@ import (
 	"go.opentelemetry.io/otel/trace"
 
 	"github.com/azylman/aerial/pkg/pgtest"
-	"github.com/azylman/aerial/pkg/restateingress"
 	"github.com/azylman/aerial/pkg/tracing"
 	"github.com/azylman/aerial/services/vanadis-restate/internal/executor"
 )
@@ -64,39 +63,6 @@ func (h fakeHeaders) ToMap() map[string]string {
 }
 
 func (h fakeHeaders) MarshalJSON() ([]byte, error) { return json.Marshal(map[string]string(h)) }
-
-func traceparentFromRequest(attempt map[string][]string, headers map[string]string) string {
-	var h fakeHeaders
-	if headers != nil {
-		h = fakeHeaders(headers)
-	}
-	return restateingress.TraceparentFromRequest(&restate.Request{
-		AttemptHeaders: attempt,
-		Headers:        h,
-	})
-}
-
-func TestTraceparentFromRequest(t *testing.T) {
-	t.Parallel()
-	tests := []struct {
-		name    string
-		attempt map[string][]string
-		headers map[string]string
-		want    string
-	}{
-		{"attempt wins", map[string][]string{"Traceparent": {attemptTP}}, map[string]string{"traceparent": ingressTP}, attemptTP},
-		{"ingress fallback", map[string][]string{"X-Other": {"1"}}, map[string]string{"traceparent": ingressTP}, ingressTP},
-		{"mixed-case ingress key", nil, map[string]string{"TraceParent": ingressTP}, ingressTP},
-		{"empty attempt value falls back", map[string][]string{"traceparent": {" "}}, map[string]string{"traceparent": ingressTP}, ingressTP},
-		{"none", nil, nil, ""},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			assert.Equal(t, tc.want, traceparentFromRequest(tc.attempt, tc.headers))
-		})
-	}
-}
 
 type requestRunContext struct {
 	context.Context

@@ -10,10 +10,7 @@ import (
 	"github.com/azylman/aerial/pkg/restateingress"
 )
 
-const (
-	spanPrefix      = "vanadis-restate."
-	traceparentName = "traceparent"
-)
+const spanPrefix = "vanadis-restate."
 
 // requestTraceparent extracts the traceparent from a Restate run or handler context.
 func requestTraceparent(rc restate.RunContext) string {
