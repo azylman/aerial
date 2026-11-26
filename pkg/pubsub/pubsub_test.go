@@ -186,7 +186,18 @@ func pubSpan(key, parent, subject, msgID string) spanShape {
 	if msgID != "" {
 		attrs["messaging.message.id"] = msgID
 	}
-	return spanShape{key: key, name: SpanSubject(subject) + " publish", kind: trace.SpanKindProducer, parent: parent, attrs: attrs}
+	return spanShape{key: key, name: subject + " publish", kind: trace.SpanKindProducer, parent: parent, attrs: attrs}
+}
+
+// pubSpanNamed is the expected producer span with an explicit span name for dynamic subjects.
+func pubSpanNamed(key, parent, name, subject, msgID string) spanShape {
+	attrs := map[string]string{
+		"messaging.system": "nats", "messaging.operation.type": "send", "messaging.operation.name": "publish", "messaging.destination.name": subject,
+	}
+	if msgID != "" {
+		attrs["messaging.message.id"] = msgID
+	}
+	return spanShape{key: key, name: name, kind: trace.SpanKindProducer, parent: parent, attrs: attrs}
 }
 
 // procSpan is the expected consumer span for one delivery of subject; an empty group or msgID
@@ -202,7 +213,22 @@ func procSpan(key, parent, subject, group, msgID string, delivered int) spanShap
 	if msgID != "" {
 		attrs["messaging.message.id"] = msgID
 	}
-	return spanShape{key: key, name: SpanSubject(subject) + " process", kind: trace.SpanKindConsumer, parent: parent, attrs: attrs}
+	return spanShape{key: key, name: subject + " process", kind: trace.SpanKindConsumer, parent: parent, attrs: attrs}
+}
+
+// procSpanNamed is the expected consumer span with an explicit span name for dynamic subjects.
+func procSpanNamed(key, parent, name, subject, group, msgID string, delivered int) spanShape {
+	attrs := map[string]string{
+		"messaging.system": "nats", "messaging.operation.type": "process", "messaging.destination.name": subject,
+		"messaging.nats.message.delivery_count": strconv.Itoa(delivered),
+	}
+	if group != "" {
+		attrs["messaging.consumer.group.name"] = group
+	}
+	if msgID != "" {
+		attrs["messaging.message.id"] = msgID
+	}
+	return spanShape{key: key, name: name, kind: trace.SpanKindConsumer, parent: parent, attrs: attrs}
 }
 
 // failed marks the expected span as ended with an error status.
@@ -1313,7 +1339,7 @@ func runCoreVoiceTest(t *testing.T, tc coreVoiceTestCase) {
 	assertCoreVoiceDelivery(t, obs, tc.subject, tc.payload, tc.customVal, tc.msgID, wantTrace)
 
 	spans := assertSpanShapes(t, testSpans.await(tc.subject, 2), []spanShape{
-		pubSpan("pub", parentRemote, tc.subject, tc.msgID),
+		pubSpanNamed("pub", parentRemote, "voice.stream.* publish", tc.subject, tc.msgID),
 		tc.wantSpan,
 	})
 	if spans["proc"] == nil {
@@ -1333,7 +1359,7 @@ func TestJetStreamBus_CoreVoice_PublishSubscribeDispatch(t *testing.T) {
 			customKey:   "X-Custom-Voice",
 			customVal:   "voice-meta-ok",
 			payload:     "sentence chunk audio",
-			wantSpan:    procSpan("proc", "pub", "voice.stream.turn-trace-ok", "", "vmsg-1", 1),
+			wantSpan:    procSpanNamed("proc", "pub", "voice.stream.* process", "voice.stream.turn-trace-ok", "", "vmsg-1", 1),
 		},
 		{
 			name:        "handler error fails consumer process span",
@@ -1342,7 +1368,7 @@ func TestJetStreamBus_CoreVoice_PublishSubscribeDispatch(t *testing.T) {
 			traceparent: testTraceparent,
 			payload:     "error chunk",
 			handlerErr:  errors.New("downstream speech error"),
-			wantSpan:    procSpan("proc", "pub", "voice.stream.turn-trace-err", "", "vmsg-2", 1).failed(),
+			wantSpan:    procSpanNamed("proc", "pub", "voice.stream.* process", "voice.stream.turn-trace-err", "", "vmsg-2", 1).failed(),
 		},
 	}
 
@@ -1367,7 +1393,7 @@ func TestJetStreamBus_DispatchCore_Direct(t *testing.T) {
 			name:     "dispatch with nil header starts root process span",
 			subject:  "voice.stream.direct.root",
 			msg:      &nats.Msg{Subject: "voice.stream.direct.root", Data: []byte("d")},
-			wantSpan: procSpan("proc", "", "voice.stream.direct.root", "", "", 1),
+			wantSpan: procSpanNamed("proc", "", "voice.stream.* process", "voice.stream.direct.root", "", "", 1),
 		},
 	}
 

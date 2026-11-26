@@ -101,19 +101,31 @@ func ContextWithTrace(ctx context.Context, rc restate.Context, fallbackTracepare
 	return ctx
 }
 
+// ExecuteInSpan runs fn inside an internal step span parented to traceparent (when non-empty),
+// derived from baseCtx. It records errors and sets status Error if fn returns an error.
+func ExecuteInSpan[T any](baseCtx context.Context, spanName, traceparent string, fn func(context.Context) (T, error)) (T, error) {
+	ctx := baseCtx
+	if traceparent != "" {
+		ctx = tracing.ContextWithTraceparent(ctx, traceparent)
+	}
+	ctx, span := tracing.Tracer().Start(ctx, spanName, trace.WithSpanKind(trace.SpanKindInternal))
+	defer span.End()
+	out, err := fn(ctx)
+	if err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, "step failed")
+	}
+	return out, err
+}
+
 // RunInSpan runs fn inside a step span parented on the invocation's traceparent,
-// journaled via restate.Run.
+// journaled via restate.Run. Step context inherits cancellation and deadlines from runCtx.
 func RunInSpan[T any](rc restate.Context, spanName string, fn func(context.Context, restate.RunContext) (T, error), opts ...restate.RunOption) (T, error) {
-	ctx := ContextWithTrace(context.Background(), rc)
+	tp := RequestTraceparent(rc)
 	out, err := restate.Run(rc, func(runCtx restate.RunContext) (T, error) {
-		stepCtx, span := tracing.Tracer().Start(ctx, spanName, trace.WithSpanKind(trace.SpanKindInternal))
-		defer span.End()
-		res, stepErr := fn(stepCtx, runCtx)
-		if stepErr != nil {
-			span.RecordError(stepErr)
-			span.SetStatus(codes.Error, "step failed")
-		}
-		return res, stepErr
+		return ExecuteInSpan(runCtx, spanName, tp, func(stepCtx context.Context) (T, error) {
+			return fn(stepCtx, runCtx)
+		})
 	}, opts...)
 	if err != nil {
 		return out, err

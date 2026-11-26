@@ -160,9 +160,9 @@ func TestRunInSpan(t *testing.T) {
 
 	t.Run("records child span parented to incoming trace ID", func(t *testing.T) {
 		exp.Reset()
+		var callbackSpanCtx trace.SpanContext
 		val, err := RunInSpan(rc, "step.success", func(ctx context.Context, _ restate.RunContext) (string, error) {
-			sc := trace.SpanContextFromContext(ctx)
-			assert.True(t, sc.IsValid())
+			callbackSpanCtx = trace.SpanContextFromContext(ctx)
 			return "done", nil
 		})
 		require.NoError(t, err)
@@ -175,7 +175,45 @@ func TestRunInSpan(t *testing.T) {
 		assert.Equal(t, trace.SpanKindInternal, span.SpanKind)
 		assert.Equal(t, "4bf92f3577b34da6a3ce929d0e0e4736", span.Parent.TraceID().String())
 		assert.Equal(t, "00f067aa0ba902b7", span.Parent.SpanID().String())
+		assert.Equal(t, span.SpanContext.SpanID(), callbackSpanCtx.SpanID())
+		assert.NotEqual(t, span.Parent.SpanID(), callbackSpanCtx.SpanID())
 		assert.Equal(t, codes.Unset, span.Status.Code)
+	})
+
+	t.Run("propagates cancellation from run context to step context", func(t *testing.T) {
+		cancelCtx, cancel := context.WithCancel(context.Background())
+		cancel()
+
+		mc := mocks.NewMockContext(t)
+		mc.On("Request").Return(&restate.Request{}).Maybe()
+		mc.On("Run", mock.Anything, mock.Anything, mock.Anything).Return(func(fn func(restate.RunContext) (any, error), output any, _ ...restate.RunOption) restate.TerminalError {
+			runCtx := restatetest.NewRunContext(cancelCtx)
+			res, err := fn(runCtx)
+			if err != nil {
+				return restate.ToTerminalError(err)
+			}
+			if output != nil && res != nil {
+				outVal := reflect.ValueOf(output)
+				if outVal.Kind() == reflect.Pointer && !outVal.IsNil() {
+					outVal.Elem().Set(reflect.ValueOf(res))
+				}
+			}
+			return nil
+		}).Maybe()
+		cancellingRC := restate.WithMockContext(mc)
+
+		var stepDoneFired bool
+		_, err := RunInSpan(cancellingRC, "step.cancelled", func(ctx context.Context, _ restate.RunContext) (string, error) {
+			select {
+			case <-ctx.Done():
+				stepDoneFired = true
+			default:
+				stepDoneFired = false
+			}
+			return "done", nil
+		})
+		require.NoError(t, err)
+		assert.True(t, stepDoneFired, "stepCtx must inherit cancellation from runCtx")
 	})
 
 	t.Run("sets codes.Error on step error", func(t *testing.T) {

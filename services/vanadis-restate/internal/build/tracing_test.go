@@ -4,7 +4,9 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"iter"
 	"log/slog"
+	"maps"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -18,6 +20,7 @@ import (
 	"go.opentelemetry.io/otel/trace"
 
 	"github.com/azylman/aerial/pkg/pgtest"
+	"github.com/azylman/aerial/pkg/restateingress"
 	"github.com/azylman/aerial/pkg/tracing"
 	"github.com/azylman/aerial/services/vanadis-restate/internal/executor"
 )
@@ -38,6 +41,40 @@ const (
 	attemptTP = "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01"
 	ingressTP = "00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01"
 )
+
+// fakeHeaders satisfies restate.Request.Headers without the SDK's internal constructor.
+type fakeHeaders map[string]string
+
+func (h fakeHeaders) Get(key string) string { return h[key] }
+
+func (h fakeHeaders) Iter() iter.Seq2[string, string] {
+	return func(yield func(string, string) bool) {
+		for k, v := range h {
+			if !yield(k, v) {
+				return
+			}
+		}
+	}
+}
+
+func (h fakeHeaders) ToMap() map[string]string {
+	out := make(map[string]string, len(h))
+	maps.Copy(out, h)
+	return out
+}
+
+func (h fakeHeaders) MarshalJSON() ([]byte, error) { return json.Marshal(map[string]string(h)) }
+
+func traceparentFromRequest(attempt map[string][]string, headers map[string]string) string {
+	var h fakeHeaders
+	if headers != nil {
+		h = fakeHeaders(headers)
+	}
+	return restateingress.TraceparentFromRequest(&restate.Request{
+		AttemptHeaders: attempt,
+		Headers:        h,
+	})
+}
 
 func TestTraceparentFromRequest(t *testing.T) {
 	t.Parallel()
