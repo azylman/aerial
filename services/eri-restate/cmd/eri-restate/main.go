@@ -26,8 +26,9 @@ func main() {
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()
 
-	_, flushTracing := initTracingFn(ctx, "eri-restate", tracing.DefaultConfigPath)
+	tcfg, flushTracing := initTracingFn(ctx, "eri-restate", tracing.DefaultConfigPath)
 	defer flushTracing()
+	cfg.TraceContent = tcfg.Enabled && tcfg.CaptureContent
 	slog.SetDefault(slog.New(tracing.SlogHandler(slog.NewJSONHandler(os.Stdout, nil))))
 
 	if err := runAppFn(ctx, cfg); err != nil && !errors.Is(err, http.ErrServerClosed) {

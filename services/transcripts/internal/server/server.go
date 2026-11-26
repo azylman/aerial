@@ -18,6 +18,7 @@ import (
 	"github.com/azylman/aerial/pkg/pgutil"
 	"github.com/azylman/aerial/pkg/pubsub"
 	"github.com/azylman/aerial/pkg/strutil"
+	"github.com/azylman/aerial/pkg/tracing"
 	"github.com/azylman/aerial/services/transcripts/internal/config"
 	"github.com/azylman/aerial/services/transcripts/internal/store"
 )
@@ -206,7 +207,7 @@ func NewServer(st *store.Store, auth ...*k8sauth.Authenticator) *Server {
 	s.mux.HandleFunc("/api/transcripts/stats", s.handleStats)
 
 	s.mux.HandleFunc("/transcripts/threads/", s.handleThreadTrajectory)
-	s.handler = s.auth.Middleware(k8sauth.DefaultExemptPaths...)(s.mux)
+	s.handler = s.auth.Middleware(k8sauth.DefaultExemptPaths...)(tracing.Middleware("transcripts", s.mux))
 	return s
 }
 

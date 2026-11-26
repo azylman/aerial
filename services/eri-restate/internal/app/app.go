@@ -46,6 +46,7 @@ type Config struct {
 	PostgresURL        string
 	PostgresSocketPath string
 	AgentName          string
+	TraceContent       bool
 }
 
 // LoadConfigFromEnv loads configuration from environment variables with defaults.
@@ -313,8 +314,9 @@ func initializeAgentPools(appCfg *config.Config, cur *config.ConfigData, cfg Con
 
 	ephemUnderlying := runner.NewUnifiedProcessPool(basePoolCfg(ephemeralHome, lowEffortModel, []string{"ephemeral:worker-0", "ephemeral:worker-1"}), spawner)
 	ephemeralPool := runner.NewInterchangeablePool(ephemUnderlying, runner.InterchangeablePoolConfig{
-		WorkerCount: len(basePoolCfg(ephemeralHome, lowEffortModel, []string{"ephemeral:worker-0", "ephemeral:worker-1"}).PrewarmedTargets),
-		KeyPrefix:   "ephemeral:worker",
+		WorkerCount:    len(basePoolCfg(ephemeralHome, lowEffortModel, []string{"ephemeral:worker-0", "ephemeral:worker-1"}).PrewarmedTargets),
+		KeyPrefix:      "ephemeral:worker",
+		CaptureContent: cfg.TraceContent,
 	})
 
 	voiceModel := strutil.FirstNonEmpty(strings.TrimSpace(cur.Voice.Model), lowEffortModel)
@@ -452,6 +454,7 @@ func RunApp(ctx context.Context, cfg Config, opts ...AppOption) error {
 		LLMFunc:                llmFn,
 		NATSURL:                cur.NATSURL,
 		AgentName:              cfg.AgentName,
+		TraceContent:           cfg.TraceContent,
 		ActiveTurns:            activeTurns,
 		ChunkStepFlushInterval: queue.DefaultChunkStepFlushInterval,
 		AmbientResolver:        ambientResolver.Resolve,

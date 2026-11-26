@@ -369,12 +369,12 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("/schedules", s.handleSchedules)
 	mux.HandleFunc("/schedules/runs", s.handleScheduleRuns)
 
-	mcpBridge := tracing.Middleware("haro", http.HandlerFunc(s.handleMCP))
-	mux.Handle("/mcp", mcpBridge)
-	mux.Handle("/sse", mcpBridge)
-	mux.Handle("/", mcpBridge)
+	mcpHandler := http.HandlerFunc(s.handleMCP)
+	mux.Handle("/mcp", mcpHandler)
+	mux.Handle("/sse", mcpHandler)
+	mux.Handle("/", mcpHandler)
 
-	return s.auth.Middleware(k8sauth.DefaultExemptPaths...)(mux)
+	return s.auth.Middleware(k8sauth.DefaultExemptPaths...)(tracing.Middleware("haro", mux))
 }
 
 func (*Server) handleHealth(w http.ResponseWriter, r *http.Request) {
