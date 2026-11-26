@@ -72,23 +72,23 @@ export const USE_CASE_SCENARIOS: readonly UseCaseScenario[] = [
     ],
   },
   {
-    id: 'smart-home-scheduler',
-    category: 'Household & Voice',
-    title: 'Voice Routines & Persistent Event Watches',
+    id: 'personal-agent-errands',
+    category: 'Everyday AI Agent',
+    title: 'Web Browser, Phone Call & Persistent Schedule Errands',
     prompt:
-      'Turn off hallway lights at 11 PM and alert me if the front gate opens tonight.',
+      'Check the city permit portal every morning, call the office if our review status changes, and schedule a Friday summary.',
     engineSteps: [
-      'Schedule durable one-shot timer for lighting shutdown in persistent PostgreSQL schedule storage.',
-      'Register persistent event watch for gate contact sensors through Home Assistant Model Context Protocol.',
-      'Execute light automation at scheduled deadline and monitor event stream for sensor state changes.',
+      'Navigate the municipal portal in a headful browser session and extract current application status.',
+      'Register a persistent daily heartbeat schedule in PostgreSQL and place an outbound PSTN phone call when status changes.',
+      'Store extracted reference details in hybrid semantic memory and post the weekly summary to Discord.',
     ],
     outcome:
-      'Routines survive service restarts and trigger immediately upon designated timestamps or physical sensor state events.',
+      'Everyday web errands, phone calls, and recurring schedules execute durably across restarts with full semantic memory.',
     stackBadges: [
-      'Home Assistant MCP',
-      'CloudNativePG Postgres 19',
-      'Restate Virtual Objects',
-      'Discord Gateway',
+      'Headful Browser (CDP)',
+      'PSTN Telephony',
+      'Persistent Scheduler',
+      'Hybrid RRF Memory',
     ],
   },
 ];
@@ -107,7 +107,7 @@ export function UseCaseGallery() {
         <div className="section-eyebrow">Day-in-the-Life Workflows</div>
         <h2 className="section-title">What Aerial Does in Practice</h2>
         <p className="section-subtitle">
-          Explore how Aerial autonomously resolves engineering tasks, orchestrates cross-repository releases, triages incidents, and manages physical devices.
+          Explore how Aerial handles everyday browser, phone, and scheduling errands alongside autonomous code delivery, cross-repository releases, and incident triage.
         </p>
 
         {/* Scenario selector tabs */}
