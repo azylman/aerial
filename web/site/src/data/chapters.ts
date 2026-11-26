@@ -175,10 +175,10 @@ kubectl get nodes -o wide`,
         id: 'two-repo-gitops',
         title: 'The Two-Repo GitOps Architecture',
         lead:
-          'Fork the configuration template to establish your private configuration repository, customize parameters, and bootstrap Flux CD.',
+          'Fork the configuration template to establish your private configuration repository, seed bootstrap credentials, and bootstrap Flux CD.',
         paragraphs: [
           'Aerial uses GitOps for continuous delivery. Flux CD reconciles two Kustomization resources: operator infrastructure and core platform services.',
-          'Users fork azylman/aerial-config-example into a private configuration repository. Flux CD continuously reconciles user overrides on top of upstream base manifests.',
+          'Users fork azylman/aerial-config-example into a private configuration repository. Bootstrap secrets are seeded into Kubernetes via Secret/aerial-bootstrap-secrets, and Flux CD continuously reconciles user overrides on top of upstream base manifests.',
         ],
         bullets: [
           'Zero Plaintext Tokens: In-memory authentication passes tokens during bootstrap without writing credentials to disk.',
@@ -188,9 +188,15 @@ kubectl get nodes -o wide`,
         codeSnippets: [
           {
             language: 'bash',
-            caption: 'Bootstrap Flux CD on your private configuration repository',
-            code: `# Set GitHub personal access token in memory
+            caption: 'Seed bootstrap secrets and bootstrap Flux CD on your private configuration repository',
+            code: `# Set bootstrap credentials in memory
 export GITHUB_PAT="your-github-pat"
+export DISCORD_BOT_TOKEN="your-discord-bot-token"
+
+# Seed bootstrap secrets for in-cluster Infisical auto-bootstrap
+kubectl create secret generic aerial-bootstrap-secrets \\
+  --from-literal=DISCORD_BOT_TOKEN="$DISCORD_BOT_TOKEN" \\
+  --from-literal=GITHUB_PAT="$GITHUB_PAT"
 
 # Install Flux CLI and bootstrap your private repository
 curl -s https://fluxcd.io/install.sh | sudo bash
@@ -207,37 +213,28 @@ GITHUB_TOKEN="$GITHUB_PAT" flux bootstrap github \\
         id: 'infisical-secrets',
         title: 'Infisical Machine Identity & Secret Bootstrap',
         lead:
-          'Aerial centralizes secret management with Infisical and External Secrets Operator, preventing plaintext credentials from entering version control.',
+          'Aerial centralizes secret management with Infisical and External Secrets Operator, auto-bootstrapping credentials in-cluster without host CLI dependencies.',
         paragraphs: [
-          'An in-cluster Infisical instance stores application credentials, bot tokens, and API keys. External Secrets Operator monitors Infisical and generates scoped Kubernetes Secrets for platform services.',
-          'Bootstrapping Infisical creates a Machine Identity with read access to the project. The project slug defaults to aerial and configures through the INFISICAL_PROJECT_SLUG variable. External Secrets Operator provisions database, messaging, and webhook credentials automatically.',
+          'An in-cluster Infisical instance stores application credentials, bot tokens, and API keys. Job/infisical-bootstrap automatically initializes Infisical, creates project aerial and environment default, derives AERIAL_CONFIG_REPO_URL from GitRepository/flux-system, generates Secret/infisical-universal-auth, and ingests seeded secrets from Secret/aerial-bootstrap-secrets.',
+          'External Secrets Operator monitors Infisical and generates scoped Kubernetes Secrets for platform services. External Secrets Operator also provisions database, messaging, and webhook credentials automatically and pushes them into Infisical via PushSecret.',
         ],
         bullets: [
-          'Universal Authentication: Kubernetes workloads authenticate to Infisical through Machine Identity tokens.',
-          'Project Configuration: Infisical defaults to the aerial slug, with overrides configured via INFISICAL_PROJECT_SLUG in cluster overrides.',
-          'Automated Generation: External Secrets Operator provisions database and messaging credentials automatically.',
+          'In-Cluster Bootstrap: Job/infisical-bootstrap automatically initializes Infisical and creates Machine Identity credentials.',
+          'Automatic Repo URL Derivation: Derives AERIAL_CONFIG_REPO_URL from GitRepository/flux-system without manual configuration.',
+          'Zero Host CLI Dependencies: Automatically ingests DISCORD_BOT_TOKEN and GITHUB_PAT from Secret/aerial-bootstrap-secrets without requiring infisical CLI or jq.',
           'Scoped Distribution: Each service pod receives only its declared secret environment variables.',
         ],
         codeSnippets: [
           {
             language: 'bash',
-            caption: 'Bootstrap Infisical and store credentials',
-            code: `# 1. Create Machine Identity Token Auth credential
-export INFISICAL_TOKEN="$(infisical bootstrap \\
-  --domain http://<cluster-ip> \\
-  --email admin@example.com \\
-  --password 'your-master-password' \\
-  --organization aerial \\
-  | jq -r '.identity.credentials.token')"
+            caption: 'In-cluster Infisical bootstrap and secret management',
+            code: `# Initial credentials are seeded during Flux bootstrap via:
+kubectl create secret generic aerial-bootstrap-secrets \\
+  --from-literal=DISCORD_BOT_TOKEN="$DISCORD_BOT_TOKEN" \\
+  --from-literal=GITHUB_PAT="$GITHUB_PAT"
 
-# 2. Store identity token in Kubernetes
-kubectl create secret generic infisical-universal-auth \\
-  --from-literal=INFISICAL_TOKEN="$INFISICAL_TOKEN"
-
-# 3. Populate Discord Bot Token and GitHub PAT in project aerial (default environment)
-infisical secrets set --env=default \\
-  DISCORD_BOT_TOKEN="your-discord-token" \\
-  GITHUB_PAT="$GITHUB_PAT"`,
+# Job/infisical-bootstrap initializes Infisical, creates Secret/infisical-universal-auth,
+# upserts DISCORD_BOT_TOKEN and GITHUB_PAT into Infisical, and deletes aerial-bootstrap-secrets automatically.`,
           },
         ],
       },
