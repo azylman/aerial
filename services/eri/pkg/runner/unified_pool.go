@@ -305,7 +305,8 @@ func (p *UnifiedProcessPool) Initialize(ctx context.Context) error {
 }
 
 // isStaleIsolatedSession reports whether homeDir has an isolated conversation or brain
-// directory (a real non-symlinked directory) that lacks the given session ID on disk.
+// directory (a real non-symlinked directory, or a symlink pointing to a /voice-sessions/ directory)
+// that lacks the given session ID on disk.
 func isStaleIsolatedSession(homeDir, sessionID string) bool {
 	cleanHome, cleanID := strings.TrimSpace(homeDir), strings.TrimSpace(sessionID)
 	if cleanHome == "" || cleanID == "" {
@@ -314,18 +315,32 @@ func isStaleIsolatedSession(homeDir, sessionID string) bool {
 	cliDir := filepath.Join(cleanHome, ".gemini", "antigravity-cli")
 	convDir, brainDir := filepath.Join(cliDir, "conversations"), filepath.Join(cliDir, "brain")
 
-	isRealDir := func(p string) bool {
+	isIsolatedDir := func(p string) bool {
 		fi, err := os.Lstat(p)
-		return err == nil && fi.Mode()&os.ModeSymlink == 0 && fi.IsDir()
+		if err != nil {
+			return false
+		}
+		if fi.Mode()&os.ModeSymlink == 0 {
+			return fi.IsDir()
+		}
+		target, err := os.Readlink(p)
+		if err != nil {
+			return false
+		}
+		cleanTarget := "/" + filepath.ToSlash(filepath.Clean(target)) + "/"
+		if !strings.Contains(cleanTarget, "/voice-sessions/") {
+			return false
+		}
+		statFi, err := os.Stat(p)
+		return err == nil && statFi.IsDir()
 	}
-	if !isRealDir(convDir) && !isRealDir(brainDir) {
+	if !isIsolatedDir(convDir) && !isIsolatedDir(brainDir) {
 		return false
 	}
-	if _, err := os.Stat(filepath.Join(convDir, cleanID+".pb")); err == nil {
-		return false
-	}
-	if _, err := os.Stat(filepath.Join(convDir, cleanID+".db")); err == nil {
-		return false
+	for _, ext := range []string{".pb", ".db"} {
+		if _, err := os.Stat(filepath.Join(convDir, cleanID+ext)); err == nil {
+			return false
+		}
 	}
 	if _, err := os.Stat(filepath.Join(brainDir, cleanID)); err == nil {
 		return false
@@ -1219,78 +1234,6 @@ func (l *unifiedSessionLease) MarkDirty() {
 			d.MarkDirty()
 		}
 	}
-}
-
-type leaseTurnSinkWrapper struct {
-	inner TurnSink
-	buf   *BufferingTurnSink
-}
-
-func (s *leaseTurnSinkWrapper) OnTurnStarted() {
-	if s.inner != nil {
-		s.inner.OnTurnStarted()
-	}
-	s.buf.OnTurnStarted()
-}
-
-func (s *leaseTurnSinkWrapper) OnThinking() {
-	if s.inner != nil {
-		s.inner.OnThinking()
-	}
-	s.buf.OnThinking()
-}
-
-func (s *leaseTurnSinkWrapper) OnStepStarted(idx int) {
-	if s.inner != nil {
-		if sa, ok := s.inner.(StepAwareSink); ok {
-			sa.OnStepStarted(idx)
-		}
-	}
-	if s.buf != nil {
-		s.buf.OnStepStarted(idx)
-	}
-}
-
-func (s *leaseTurnSinkWrapper) OnToolCall(call ToolCall) {
-	if s.inner != nil {
-		s.inner.OnToolCall(call)
-	}
-	s.buf.OnToolCall(call)
-}
-
-func (s *leaseTurnSinkWrapper) OnToolCompleted(call ToolCall, mcp string, d time.Duration, status string) {
-	if s.inner != nil {
-		s.inner.OnToolCompleted(call, mcp, d, status)
-	}
-	s.buf.OnToolCompleted(call, mcp, d, status)
-}
-
-func (s *leaseTurnSinkWrapper) OnSkillActivated(skill, src string) {
-	if s.inner != nil {
-		s.inner.OnSkillActivated(skill, src)
-	}
-	s.buf.OnSkillActivated(skill, src)
-}
-
-func (s *leaseTurnSinkWrapper) OnTextDelta(delta string) {
-	if s.inner != nil {
-		s.inner.OnTextDelta(delta)
-	}
-	s.buf.OnTextDelta(delta)
-}
-
-func (s *leaseTurnSinkWrapper) OnResult(res *TurnResult) {
-	if s.inner != nil {
-		s.inner.OnResult(res)
-	}
-	s.buf.OnResult(res)
-}
-
-func (s *leaseTurnSinkWrapper) OnError(err error) {
-	if s.inner != nil {
-		s.inner.OnError(err)
-	}
-	s.buf.OnError(err)
 }
 
 func (l *unifiedSessionLease) ensureActiveDaemon(ctx context.Context) error {

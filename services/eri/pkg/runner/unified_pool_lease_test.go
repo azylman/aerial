@@ -1007,6 +1007,35 @@ func TestIsStaleIsolatedSession(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	// Scenario 6: Symlinked voice-sessions directory without session file (stale)
+	voiceSessionsEmptyTarget := filepath.Join(tmpDir, "voice-sessions", "sess-empty")
+	if err := os.MkdirAll(filepath.Join(voiceSessionsEmptyTarget, "conversations"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	voiceSymlinkEmptyHome := filepath.Join(tmpDir, "voice-symlink-empty-home")
+	if err := os.MkdirAll(filepath.Join(voiceSymlinkEmptyHome, ".gemini", "antigravity-cli"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(filepath.Join(voiceSessionsEmptyTarget, "conversations"), filepath.Join(voiceSymlinkEmptyHome, ".gemini", "antigravity-cli", "conversations")); err != nil {
+		t.Fatal(err)
+	}
+
+	// Scenario 7: Symlinked voice-sessions directory with session file present (not stale)
+	voiceSessionsPresentTarget := filepath.Join(tmpDir, "voice-sessions", "sess-present", "conversations")
+	if err := os.MkdirAll(voiceSessionsPresentTarget, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(voiceSessionsPresentTarget, "sess-voice.pb"), []byte("data"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	voiceSymlinkPresentHome := filepath.Join(tmpDir, "voice-symlink-present-home")
+	if err := os.MkdirAll(filepath.Join(voiceSymlinkPresentHome, ".gemini", "antigravity-cli"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(voiceSessionsPresentTarget, filepath.Join(voiceSymlinkPresentHome, ".gemini", "antigravity-cli", "conversations")); err != nil {
+		t.Fatal(err)
+	}
+
 	testCases := []struct {
 		name      string
 		homeDir   string
@@ -1021,6 +1050,8 @@ func TestIsStaleIsolatedSession(t *testing.T) {
 		{name: "isolated dir with pb file present", homeDir: isolatedPbHome, sessionID: "sess-1", wantStale: false},
 		{name: "isolated dir with db file present", homeDir: isolatedDbHome, sessionID: "sess-2", wantStale: false},
 		{name: "isolated dir with brain dir present", homeDir: isolatedBrainHome, sessionID: "sess-3", wantStale: false},
+		{name: "symlinked voice-sessions dir lacking session", homeDir: voiceSymlinkEmptyHome, sessionID: "sess-voice-missing", wantStale: true},
+		{name: "symlinked voice-sessions dir with session file present", homeDir: voiceSymlinkPresentHome, sessionID: "sess-voice", wantStale: false},
 	}
 
 	for _, tc := range testCases {
