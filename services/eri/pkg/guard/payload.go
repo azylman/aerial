@@ -36,8 +36,16 @@ const (
 	DecisionDeny  DecisionType = "deny"
 )
 
+// InvocationStep represents a user message step injected into the active session turn.
+type InvocationStep struct {
+	UserMessage string `json:"userMessage,omitempty"`
+}
+
 // InvocationResponse is the JSON payload returned for PreInvocation and PostToolUse hooks.
-type InvocationResponse struct{}
+type InvocationResponse struct {
+	Decision    DecisionType     `json:"-"`
+	InjectSteps []InvocationStep `json:"injectSteps,omitempty"`
+}
 
 // Decision is the JSON payload returned to Antigravity.
 type Decision struct {
@@ -55,6 +63,7 @@ type ClaudeHookSpecificOutput struct {
 	HookEventName            string         `json:"hookEventName"`
 	PermissionDecision       string         `json:"permissionDecision"`
 	PermissionDecisionReason string         `json:"permissionDecisionReason,omitempty"`
+	AdditionalContext        string         `json:"additionalContext,omitempty"`
 	UpdatedInput             map[string]any `json:"updatedInput,omitempty"`
 }
 

@@ -399,3 +399,136 @@ func TestValidateUpdateChunkInput(t *testing.T) {
 		})
 	}
 }
+
+func TestSteerChunkWireTypesJSON(t *testing.T) {
+	t.Parallel()
+	t.Run("SteerChunkRequest round trip", func(t *testing.T) {
+		t.Parallel()
+		req := SteerChunkRequest{
+			BuildID:  "build-123",
+			ChunkRef: "chunk-1",
+			Prompt:   "please steer to new design",
+		}
+		data, err := json.Marshal(req)
+		if err != nil {
+			t.Fatalf("Marshal(SteerChunkRequest): %v", err)
+		}
+		var back SteerChunkRequest
+		if err := json.Unmarshal(data, &back); err != nil {
+			t.Fatalf("Unmarshal(SteerChunkRequest): %v", err)
+		}
+		if back != req {
+			t.Errorf("round trip = %+v, want %+v", back, req)
+		}
+	})
+
+	t.Run("SteerChunkResult round trip", func(t *testing.T) {
+		t.Parallel()
+		res := SteerChunkResult{
+			Accepted:     true,
+			BuildID:      "build-123",
+			ChunkID:      "chunk-1",
+			ChunkStatus:  "in_progress",
+			DispatchID:   "disp-456",
+			Instructions: "updated instructions",
+		}
+		data, err := json.Marshal(res)
+		if err != nil {
+			t.Fatalf("Marshal(SteerChunkResult): %v", err)
+		}
+		var back SteerChunkResult
+		if unmarshalErr := json.Unmarshal(data, &back); unmarshalErr != nil {
+			t.Fatalf("Unmarshal(SteerChunkResult): %v", unmarshalErr)
+		}
+		if back != res {
+			t.Errorf("round trip = %+v, want %+v", back, res)
+		}
+
+		zero := SteerChunkResult{}
+		zeroData, err := json.Marshal(zero)
+		if err != nil {
+			t.Fatalf("Marshal(zero SteerChunkResult): %v", err)
+		}
+		if strings.Contains(string(zeroData), "dispatch_id") {
+			t.Errorf("zero value should omit dispatch_id, got %s", zeroData)
+		}
+	})
+}
+
+func TestValidateSteerChunkInput(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name     string
+		buildID  string
+		chunkRef string
+		prompt   string
+		wantErr  string
+	}{
+		{
+			name:     "valid input",
+			buildID:  "build-1",
+			chunkRef: "chunk-a",
+			prompt:   "steer me",
+			wantErr:  "",
+		},
+		{
+			name:     "valid input with whitespace padding",
+			buildID:  "  build-1  ",
+			chunkRef: "  0  ",
+			prompt:   "  change direction  ",
+			wantErr:  "",
+		},
+		{
+			name:     "empty build id",
+			buildID:  "",
+			chunkRef: "chunk-a",
+			prompt:   "steer me",
+			wantErr:  "build id is required",
+		},
+		{
+			name:     "whitespace build id",
+			buildID:  "   ",
+			chunkRef: "chunk-a",
+			prompt:   "steer me",
+			wantErr:  "build id is required",
+		},
+		{
+			name:     "empty chunk ref",
+			buildID:  "build-1",
+			chunkRef: "",
+			prompt:   "steer me",
+			wantErr:  "chunk ref is required",
+		},
+		{
+			name:     "whitespace chunk ref",
+			buildID:  "build-1",
+			chunkRef: "  \t ",
+			prompt:   "steer me",
+			wantErr:  "chunk ref is required",
+		},
+		{
+			name:     "empty prompt",
+			buildID:  "build-1",
+			chunkRef: "chunk-a",
+			prompt:   "",
+			wantErr:  "prompt is required",
+		},
+		{
+			name:     "whitespace prompt",
+			buildID:  "build-1",
+			chunkRef: "chunk-a",
+			prompt:   "   \n  ",
+			wantErr:  "prompt is required",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			err := ValidateSteerChunkInput(tc.buildID, tc.chunkRef, tc.prompt)
+			if gotErr := errString(err); gotErr != tc.wantErr {
+				t.Errorf("ValidateSteerChunkInput(%q, %q, %q) = %q, want %q", tc.buildID, tc.chunkRef, tc.prompt, gotErr, tc.wantErr)
+			}
+		})
+	}
+}

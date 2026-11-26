@@ -2,9 +2,11 @@ package guard
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"io"
 	"maps"
+	"strings"
 	"time"
 )
 
@@ -142,19 +144,36 @@ func mergeClaudeOverwrite(toolInput json.RawMessage, overwrite map[string]any) m
 // the process environment: BatchDir holds batch-guard state, Getenv resolves the remaining
 // settings (SCRATCH_DIR, AERIAL_COMMIT_GUARD_PATTERNS, HOME, ...) and SQL describes psql
 // queries (nil skips plan validation). EgressScanner scans MCP call arguments bound for
-// blocklisted destinations; nil counts as unavailable, so MCP calls are denied.
+// blocklisted destinations; nil counts as unavailable, so MCP calls are denied. Steerer drains
+// pending mid-turn user steering prompts on active session turns.
 type Options struct {
 	BatchDir      string
 	Getenv        func(string) string
 	SQL           SQLDescriber
 	EgressScanner EgressScanner
+	Steerer       TurnSteerer
 }
 
 // OptionsFromEnv builds the production Options from getenv (os.Getenv in hook-guard's main): the batch directory from
 // AERIAL_BATCH_GUARD_DIR (default DefaultBatchDir), a describer from DATABASE_URL and the HTTP
 // egress scanner targeting eri-restate's loopback egress scan endpoint.
 func OptionsFromEnv(getenv func(string) string) Options {
-	return Options{BatchDir: GetBatchDir(getenv), Getenv: getenv, SQL: DefaultSQLDescriber(getenv), EgressScanner: NewHTTPEgressScanner()}
+	if getenv == nil {
+		getenv = noEnv
+	}
+	opts := Options{
+		BatchDir:      GetBatchDir(getenv),
+		Getenv:        getenv,
+		SQL:           DefaultSQLDescriber(getenv),
+		EgressScanner: NewHTTPEgressScanner(),
+	}
+	if daemonID := strings.TrimSpace(getenv("ERI_DAEMON_ID")); daemonID != "" {
+		opts.Steerer = &HTTPTurnSteerer{
+			Endpoint: SteerDrainURL,
+			DaemonID: daemonID,
+		}
+	}
+	return opts
 }
 
 // ProcessWithOptions reads an Antigravity PreToolUse hook payload from r, evaluates guards per
@@ -170,7 +189,7 @@ func ProcessWithOptions(r io.Reader, w io.Writer, mode string, opts Options) (er
 			return json.NewEncoder(w).Encode(FormatClaudeResponse(&Decision{Decision: DecisionAllow}, nil))
 		}
 		if IsInvocationMode(mode) {
-			return json.NewEncoder(w).Encode(InvocationResponse{})
+			return json.NewEncoder(w).Encode(InvocationResponse{Decision: DecisionAllow})
 		}
 		return json.NewEncoder(w).Encode(Decision{Decision: DecisionAllow})
 	}
@@ -208,16 +227,53 @@ func ProcessWithOptions(r io.Reader, w io.Writer, mode string, opts Options) (er
 
 	switch mode {
 	case string(ModeInv), "invocation":
-		return json.NewEncoder(w).Encode(RecordPreInvocationWithDir(payload, opts.BatchDir, time.Now()))
+		return handleInvocationPreMode(w, payload, opts)
 	case string(ModePost), "post-tool":
 		return json.NewEncoder(w).Encode(RecordPostBatchWithDir(payload, args, opts.BatchDir, time.Now(), opts.Getenv))
 	default:
 		decision := evaluateGuardMode(payload, args, mode, opts)
 		if isClaude {
-			return json.NewEncoder(w).Encode(FormatClaudeResponse(decision, payload.ToolInput))
+			return json.NewEncoder(w).Encode(formatClaudeDecision(decision, payload, opts))
 		}
 		return json.NewEncoder(w).Encode(decision)
 	}
+}
+
+func handleInvocationPreMode(w io.Writer, payload Payload, opts Options) error {
+	resp := RecordPreInvocationWithDir(payload, opts.BatchDir, time.Now())
+	if resp == nil {
+		resp = &InvocationResponse{}
+	}
+	if resp.Decision == "" {
+		resp.Decision = DecisionAllow
+	}
+	if resp.Decision == DecisionAllow && payload.InvocationNum > 1 && opts.Steerer != nil {
+		prompts := opts.Steerer.DrainPending(context.Background(), payload)
+		for _, p := range prompts {
+			if trimmed := strings.TrimSpace(p); trimmed != "" {
+				resp.InjectSteps = append(resp.InjectSteps, InvocationStep{UserMessage: trimmed})
+			}
+		}
+	}
+	return json.NewEncoder(w).Encode(resp)
+}
+
+func formatClaudeDecision(decision *Decision, payload Payload, opts Options) ClaudeHookResponse {
+	claudeResp := FormatClaudeResponse(decision, payload.ToolInput)
+	if decision.Decision != DecisionAllow || opts.Steerer == nil {
+		return claudeResp
+	}
+	prompts := opts.Steerer.DrainPending(context.Background(), payload)
+	var clean []string
+	for _, p := range prompts {
+		if trimmed := strings.TrimSpace(p); trimmed != "" {
+			clean = append(clean, trimmed)
+		}
+	}
+	if len(clean) > 0 {
+		claudeResp.HookSpecificOutput.AdditionalContext = strings.Join(clean, "\n\n")
+	}
+	return claudeResp
 }
 
 // noEnv resolves every variable to empty; it stands in for a missing Options.Getenv.
