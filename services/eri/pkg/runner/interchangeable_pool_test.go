@@ -977,3 +977,47 @@ func TestInterchangeablePool_UnderlyingAndSessionCallbacks(t *testing.T) {
 		t.Errorf("expected SetSessionCallbacks to configure underlying callbacks: get=%v rot=%v", hasGet, hasRot)
 	}
 }
+
+func TestInterchangeablePool_LeaseRelease_CancelsInnerRotation(t *testing.T) {
+	t.Parallel()
+	var onSessionRotatedCalled atomic.Bool
+	spawner := createTestSpawner()
+	cfg := PoolConfig{
+		MaxSessionTurns: 1,
+		OnSessionRotated: func(ctx context.Context, targetKey, oldSessionID, newSessionID string) error {
+			onSessionRotatedCalled.Store(true)
+			return nil
+		},
+	}
+	underlying := NewUnifiedProcessPool(cfg, spawner)
+	t.Cleanup(func() { _ = underlying.Close() })
+	pool := NewInterchangeablePool(underlying, InterchangeablePoolConfig{WorkerCount: 1})
+	t.Cleanup(func() { _ = pool.Close() })
+
+	ctx := context.Background()
+	lease, err := pool.AcquireLease(ctx, "target-1")
+	if err != nil {
+		t.Fatalf("AcquireLease: %v", err)
+	}
+	initialSessID := lease.SessionID()
+	if _, execErr := lease.Execute(ctx, &TurnContext{TurnID: "t1", Prompt: "p1", Ctx: ctx}); execErr != nil {
+		t.Fatalf("Execute: %v", execErr)
+	}
+	if relErr := lease.Release(); relErr != nil {
+		t.Fatalf("Release: %v", relErr)
+	}
+	pool.WaitBackground()
+
+	if onSessionRotatedCalled.Load() {
+		t.Errorf("expected OnSessionRotated never to be called for interchangeable worker lease")
+	}
+
+	lease2, err := pool.AcquireLease(ctx, "target-2")
+	if err != nil {
+		t.Fatalf("AcquireLease 2: %v", err)
+	}
+	defer lease2.Release()
+	if lease2.SessionID() == "" || lease2.SessionID() == initialSessID {
+		t.Errorf("expected fresh rotated session ID from worker-release path, got %q (initial was %q)", lease2.SessionID(), initialSessID)
+	}
+}

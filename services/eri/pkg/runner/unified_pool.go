@@ -1435,6 +1435,13 @@ func (p *UnifiedProcessPool) rotateReleasedTarget(targetKey, oldSessionID string
 	defer p.bgWg.Done()
 	defer p.releaseTargetLock(targetKey, lock)
 
+	if p.Draining() {
+		if evictErr := p.EvictSession(targetKey); evictErr != nil {
+			log.Printf("[UnifiedProcessPool] Warning evicting session for %s during drain: %v", targetKey, evictErr)
+		}
+		return
+	}
+
 	rotCtx, cancel := context.WithTimeout(p.ctx, 35*time.Second)
 	defer cancel()
 
@@ -1443,6 +1450,13 @@ func (p *UnifiedProcessPool) rotateReleasedTarget(targetKey, oldSessionID string
 		log.Printf("[UnifiedProcessPool] Warning rotating daemon for %s: %v", targetKey, rotErr)
 		if evictErr := p.EvictSession(targetKey); evictErr != nil {
 			log.Printf("[UnifiedProcessPool] Warning evicting session for %s: %v", targetKey, evictErr)
+		}
+		return
+	}
+
+	if p.Draining() {
+		if evictErr := p.EvictSession(targetKey); evictErr != nil {
+			log.Printf("[UnifiedProcessPool] Warning evicting session for %s during drain: %v", targetKey, evictErr)
 		}
 		return
 	}

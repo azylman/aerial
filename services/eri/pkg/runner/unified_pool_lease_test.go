@@ -80,7 +80,7 @@ type acquireLeaseSuiteCase struct {
 	existingTurnCount, maxTurns, expectTurnCount                                                    int
 	onRotatedErr                                                                                    error
 	twoAttemptsThrottle, expectCold                                                                 bool
-	expectExecErr, expectReleaseErr, expectRotated                                                  bool
+	expectExecErr, expectRotated                                                                    bool
 }
 
 func executeLeaseTurn(ctx context.Context, t *testing.T, lease SessionLease, tc acquireLeaseSuiteCase) (*TurnResult, error) {
@@ -124,15 +124,6 @@ func assertLeaseReleaseAndRotation(t *testing.T, pool *UnifiedProcessPool, lease
 	if tc.onRotatedErr != nil {
 		if relErr != nil {
 			t.Fatalf("expected nil Release error, got: %v", relErr)
-		}
-		if poolHasDaemon(pool, targetKey) {
-			t.Errorf("expected daemon evicted")
-		}
-		return
-	}
-	if tc.expectReleaseErr {
-		if relErr == nil {
-			t.Fatalf("expected Release error, got nil")
 		}
 		if poolHasDaemon(pool, targetKey) {
 			t.Errorf("expected daemon evicted")
@@ -288,7 +279,7 @@ func TestUnifiedProcessPool_AcquireLease_Suite(t *testing.T) {
 	tests := []acquireLeaseSuiteCase{
 		{name: "BasicExecution", customExistingSessID: "550e8400-e29b-41d4-a716-446655440001", expectPrevSess: "550e8400-e29b-41d4-a716-446655440000", respPayload: "lease reply", expectTurnCount: 1, expectSubstantive: "lease reply", expectCold: true},
 		{name: "RotationAndPersistence", maxTurns: 1, respPayload: "ok", expectRotated: true},
-		{name: "PersistenceFailureRollback", maxTurns: 1, respPayload: "ok", onRotatedErr: errors.New("simulated DB latch timeout"), expectReleaseErr: true},
+		{name: "PersistenceFailureRollback", maxTurns: 1, respPayload: "ok", onRotatedErr: errors.New("simulated DB latch timeout")},
 		{name: "CancelRotationOnQuotaExhausted", maxTurns: 1, respErr: "RESOURCE_EXHAUSTED: quota exceeded. Resets in 30s.", respStatus: "ERROR", expectExecErr: true, expectRotated: false},
 		{name: "RotatesWhenResponseSubstantiveDespiteStderrThrottle", maxTurns: 1, respPayload: "Task completed successfully and verified.", respErr: "API error (attempt 1): RESOURCE_EXHAUSTED (code 429): You have exhausted your capacity on this model. Your quota will reset after 0s.", respStatus: "DONE", expectRotated: true, expectSubstantive: "Task completed successfully and verified."},
 		{name: "ClearsCancelRotationOnSuccessfulRetry", maxTurns: 1, twoAttemptsThrottle: true, expectRotated: true, expectSubstantive: "Retry succeeded with substantive output."},
@@ -864,6 +855,59 @@ func TestUnifiedProcessPool_UpdateEngine(t *testing.T) {
 	}
 }
 
+func runReleaseUpkeepContextCase(t *testing.T, closeDuring bool) {
+	t.Helper()
+	entered, proceed := make(chan struct{}), make(chan struct{})
+	finalErrCh := make(chan error, 1)
+	cfg := PoolConfig{MaxSessionTurns: 1, OnSessionRotated: func(ctx context.Context, _, _, _ string) error {
+		if ctx.Err() != nil {
+			t.Error("upkeep inherited request cancellation")
+		}
+		deadline, ok := ctx.Deadline()
+		if !ok || time.Until(deadline) > 35*time.Second {
+			t.Error("missing bounded upkeep deadline")
+		}
+		close(entered)
+		if closeDuring {
+			<-ctx.Done()
+		} else {
+			<-proceed
+		}
+		err := ctx.Err()
+		finalErrCh <- err
+		return err
+	}}
+	pool := NewUnifiedProcessPool(cfg, &MockDaemonSpawner{})
+	defer pool.Close()
+	request, cancel := context.WithCancel(context.Background())
+	lease, err := pool.AcquireLease(request, "target")
+	if err != nil {
+		t.Fatal(err)
+	}
+	requireType[*unifiedSessionLease](t, lease).turnCount = 2
+	cancel()
+	done := make(chan error, 1)
+	go func() { done <- lease.Release() }()
+	<-entered
+	if err := <-done; err != nil {
+		t.Fatalf("release error = %v", err)
+	}
+	if closeDuring {
+		pool.Close()
+	} else {
+		close(proceed)
+	}
+	waitPoolBackground(pool)
+	finalErr := <-finalErrCh
+	if closeDuring {
+		if !errors.Is(finalErr, context.Canceled) {
+			t.Fatalf("expected context.Canceled, got %v", finalErr)
+		}
+	} else if finalErr != nil {
+		t.Fatalf("expected nil final error, got %v", finalErr)
+	}
+}
+
 func TestUnifiedProcessPool_ReleaseUpkeepContext(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
@@ -873,44 +917,7 @@ func TestUnifiedProcessPool_ReleaseUpkeepContext(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			entered, proceed := make(chan struct{}), make(chan struct{})
-			cfg := PoolConfig{MaxSessionTurns: 1, OnSessionRotated: func(ctx context.Context, _, _, _ string) error {
-				if ctx.Err() != nil {
-					t.Error("upkeep inherited request cancellation")
-				}
-				deadline, ok := ctx.Deadline()
-				if !ok || time.Until(deadline) > 35*time.Second {
-					t.Error("missing bounded upkeep deadline")
-				}
-				close(entered)
-				if tc.closeDuring {
-					<-ctx.Done()
-				} else {
-					<-proceed
-				}
-				return ctx.Err()
-			}}
-			pool := NewUnifiedProcessPool(cfg, &MockDaemonSpawner{})
-			defer pool.Close()
-			request, cancel := context.WithCancel(context.Background())
-			lease, err := pool.AcquireLease(request, "target")
-			if err != nil {
-				t.Fatal(err)
-			}
-			requireType[*unifiedSessionLease](t, lease).turnCount = 2
-			cancel()
-			done := make(chan error, 1)
-			go func() { done <- lease.Release() }()
-			<-entered
-			if err := <-done; err != nil {
-				t.Fatalf("release error = %v", err)
-			}
-			if tc.closeDuring {
-				pool.Close()
-			} else {
-				close(proceed)
-			}
-			waitPoolBackground(pool)
+			runReleaseUpkeepContextCase(t, tc.closeDuring)
 		})
 	}
 }
