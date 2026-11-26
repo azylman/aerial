@@ -21,6 +21,7 @@ func NewPool(ctx context.Context, dsn string, opts PoolOptions) (*pgxpool.Pool, 
 	if err != nil {
 		return nil, fmt.Errorf("parse postgres url: %w", err)
 	}
+	cfg.ConnConfig.Tracer = NewQueryTracer()
 	cfg.MaxConns, cfg.MinConns = opts.MaxConns, opts.MinConns
 	pool, err := pgxpool.NewWithConfig(ctx, cfg)
 	if err != nil {

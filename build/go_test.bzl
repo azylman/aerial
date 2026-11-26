@@ -56,7 +56,8 @@ def go_test(name, data = [], **kwargs):
         pkg.startswith("services/transcripts") or
         pkg.startswith("services/vanadis-restate") or
         pkg == "pkg/pgtest" or
-        pkg == "pkg/hermetictest"
+        pkg == "pkg/hermetictest" or
+        pkg == "pkg/pgutil"
     ):
         extra_data.append("//services/eri/pkg/db:schema.sql")
 
