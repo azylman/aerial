@@ -379,3 +379,98 @@ func TestPublisher_BuildSessionBatches(t *testing.T) {
 		})
 	}
 }
+
+type voiceRuntimeBatchCase struct {
+	name       string
+	sessionID  string
+	wantEngine string
+	wantErrSub string
+}
+
+func setupVoiceRuntimeTestDirs(t *testing.T) (string, string) {
+	t.Helper()
+	tmp := t.TempDir()
+	dataDir := filepath.Join(tmp, "data")
+	brainDir := filepath.Join(dataDir, "brain")
+	voiceAgyDir := filepath.Join(dataDir, "runtimes", "voice", ".gemini", "antigravity-cli", "brain", "s-voice-agy")
+	voiceClaudeDir := filepath.Join(dataDir, "runtimes", "voice", ".claude", "projects", "proj-voice")
+	voiceCodexDir := filepath.Join(dataDir, "runtimes", "voice", ".codex", "sessions")
+	voiceMuseDir := filepath.Join(dataDir, "runtimes", "voice", ".local", "share", "muse", "sessions")
+	ephClaudeDir := filepath.Join(dataDir, "runtimes", "ephemeral", ".claude", "projects", "proj-eph")
+
+	for _, d := range []string{brainDir, voiceAgyDir, voiceClaudeDir, voiceCodexDir, voiceMuseDir, ephClaudeDir} {
+		if err := os.MkdirAll(d, 0o755); err != nil {
+			t.Fatalf("MkdirAll(%s): %v", d, err)
+		}
+	}
+
+	if err := os.WriteFile(filepath.Join(voiceAgyDir, "transcript.jsonl"), []byte(`{"step_index":0,"type":"USER_INPUT","content":"Voice agy"}`+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(voiceClaudeDir, "s-voice-claude.jsonl"), []byte(`{"type":"user","timestamp":"2026-11-25T10:00:00Z","message":{"role":"user","content":"Voice claude"}}`+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(voiceCodexDir, "rollout-s-voice-codex.jsonl"), []byte(`{"type":"session_meta","payload":{"id":"s-voice-codex"}}`+"\n"+`{"type":"response_item","timestamp":"2026-11-25T10:00:01Z","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"Voice codex"}]}}`+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(voiceMuseDir, "s-voice-muse.jsonl"), []byte(`{"recorded_at":1000,"payload_type":"message","payload":{"role":"user","content":"Voice muse"}}`+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(ephClaudeDir, "s-eph-claude.jsonl"), []byte(`{"type":"user","timestamp":"2026-11-25T10:00:00Z","message":{"role":"user","content":"Ephemeral claude"}}`+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	return tmp, brainDir
+}
+
+func runVoiceRuntimeBatchCase(t *testing.T, brainDir string, tc voiceRuntimeBatchCase) {
+	t.Helper()
+	rec := &recordingPublish{failCall: -1}
+	p := NewPublisher("aerial", rec.publish)
+	batches, err := p.BuildSessionBatches(SessionBatchParams{
+		SessionID: tc.sessionID,
+		BrainDir:  brainDir,
+		Watermark: -1,
+	})
+	if tc.wantErrSub != "" {
+		if err == nil || !strings.Contains(err.Error(), tc.wantErrSub) {
+			t.Fatalf("BuildSessionBatches() err = %v, want substring %q", err, tc.wantErrSub)
+		}
+		return
+	}
+	if err != nil {
+		t.Fatalf("BuildSessionBatches() err = %v", err)
+	}
+	if len(batches) == 0 {
+		t.Fatalf("expected at least 1 batch, got 0")
+	}
+	if batches[0].Engine != tc.wantEngine {
+		t.Errorf("batch Engine = %q, want %q", batches[0].Engine, tc.wantEngine)
+	}
+	p.Enqueue(batches...)
+	if err := p.Drain(context.Background()); err != nil {
+		t.Fatalf("Drain() err = %v", err)
+	}
+	if len(rec.published) == 0 || rec.published[0].Engine != tc.wantEngine {
+		t.Errorf("published batch engine = %v, want %q", rec.published, tc.wantEngine)
+	}
+}
+
+func TestPublisher_BuildSessionBatches_VoiceRuntimeEngines(t *testing.T) {
+	t.Parallel()
+	_, brainDir := setupVoiceRuntimeTestDirs(t)
+
+	tests := []voiceRuntimeBatchCase{
+		{name: "agy voice runtime session", sessionID: "s-voice-agy", wantEngine: "agy"},
+		{name: "claude voice runtime session", sessionID: "s-voice-claude", wantEngine: "claude"},
+		{name: "codex voice runtime session", sessionID: "s-voice-codex", wantEngine: "codex"},
+		{name: "muse voice runtime session", sessionID: "s-voice-muse", wantEngine: "muse"},
+		{name: "ephemeral claude session excluded", sessionID: "s-eph-claude", wantErrSub: "transcript file not found"},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			runVoiceRuntimeBatchCase(t, brainDir, tc)
+		})
+	}
+}

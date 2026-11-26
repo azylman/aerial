@@ -64,10 +64,16 @@ func TestFindTranscriptFile_PathResolution(t *testing.T) {
 		{name: "claude relative 1", relPath: "../claude/projects/p1/s-claude1.jsonl", sessionID: "s-claude1", wantFound: true},
 		{name: "claude relative 2", relPath: "../../../claude/projects/p2/s-claude2.jsonl", sessionID: "s-claude2", wantFound: true},
 		{name: "claude relative dot claude", relPath: "../.claude/projects/p3/s-claude3.jsonl", sessionID: "s-claude3", wantFound: true},
+		{name: "claude voice runtime isolated", relPath: "../../../runtimes/voice/.claude/projects/p4/s-claude-voice.jsonl", sessionID: "s-claude-voice", wantFound: true},
+		{name: "claude ephemeral runtime excluded", relPath: "../../../runtimes/ephemeral/.claude/projects/p5/s-claude-eph.jsonl", sessionID: "s-claude-eph", wantFound: false},
 		{name: "codex relative direct", relPath: "../codex/sessions/s-codex1.jsonl", sessionID: "s-codex1", wantFound: true},
 		{name: "codex relative rollout", relPath: "../codex/sessions/rollout-s-codex2.jsonl", sessionID: "s-codex2", wantFound: true},
 		{name: "codex relative nested", relPath: "../../../codex/sessions/2026/11/15/rollout-t-s-codex3.jsonl", sessionID: "s-codex3", wantFound: true},
 		{name: "codex relative dot codex", relPath: "../.codex/sessions/rollout-s-codex4.jsonl", sessionID: "s-codex4", wantFound: true},
+		{name: "codex voice runtime isolated", relPath: "../../../runtimes/voice/.codex/sessions/rollout-s-codex-voice.jsonl", sessionID: "s-codex-voice", wantFound: true},
+		{name: "codex ephemeral runtime excluded", relPath: "../../../runtimes/ephemeral/.codex/sessions/rollout-s-codex-eph.jsonl", sessionID: "s-codex-eph", wantFound: false},
+		{name: "muse voice runtime isolated", relPath: "../../../runtimes/voice/.local/share/muse/sessions/s-muse-voice.jsonl", sessionID: "s-muse-voice", wantFound: true},
+		{name: "muse ephemeral runtime excluded", relPath: "../../../runtimes/ephemeral/.local/share/muse/sessions/s-muse-eph.jsonl", sessionID: "s-muse-eph", wantFound: false},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -109,6 +115,10 @@ func TestEngineForPath(t *testing.T) {
 		{name: "codex sessions dir", brainDir: "/data/brain", path: "/data/codex/sessions/2026/11/15/rollout-sess-1.jsonl", want: "codex"},
 		{name: "dot codex sessions dir", brainDir: "/data/brain", path: "/data/runtimes/discord/.codex/sessions/sess-1.jsonl", want: "codex"},
 		{name: "rollout prefix anywhere", brainDir: "/data/brain", path: "/some/path/rollout-2026-sess-1.jsonl", want: "codex"},
+		{name: "agy voice runtime transcript", brainDir: "/data/runtimes/voice/.gemini/antigravity-cli/brain", path: "/data/runtimes/voice/.gemini/antigravity-cli/brain/sess-1/transcript.jsonl", want: "agy"},
+		{name: "claude voice runtime transcript", brainDir: "/data/runtimes/voice/.gemini/antigravity-cli/brain", path: "/data/runtimes/voice/.claude/projects/proj1/sess-1.jsonl", want: "claude"},
+		{name: "codex voice runtime transcript", brainDir: "/data/runtimes/voice/.gemini/antigravity-cli/brain", path: "/data/runtimes/voice/.codex/sessions/sess-1.jsonl", want: "codex"},
+		{name: "muse voice runtime transcript", brainDir: "/data/runtimes/voice/.gemini/antigravity-cli/brain", path: "/data/runtimes/voice/.local/share/muse/sessions/sess-1.jsonl", want: "muse"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {

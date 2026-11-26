@@ -71,23 +71,25 @@ func discoverSessions(targetBrainDir string, entries []os.DirEntry, claudeProjec
 	}
 
 	// Also discover Claude sessions from Claude project directories
-	var claudeBases []string
+	var extraClaude []string
 	if claudeProjectsDir != "" {
-		claudeBases = append(claudeBases, claudeProjectsDir)
+		extraClaude = append(extraClaude, claudeProjectsDir)
 	}
-	claudeBases = append(claudeBases, filepath.Clean(filepath.Join(targetBrainDir, "..", "claude", "projects")), filepath.Clean(filepath.Join(targetBrainDir, "..", "..", "..", "claude", "projects")), filepath.Clean(filepath.Join(targetBrainDir, "..", ".claude", "projects")))
-	discoverClaudeProjectSessions(claudeBases, discovered)
+	discoverClaudeProjectSessions(claudeProjectBases(targetBrainDir, extraClaude...), discovered)
 
 	// Also discover Codex sessions from Codex sessions directories
-	var codexBases []string
+	var extraCodex []string
 	if codexSessionsDir != "" {
-		codexBases = append(codexBases, codexSessionsDir)
+		extraCodex = append(extraCodex, codexSessionsDir)
 	}
-	codexBases = append(codexBases, filepath.Clean(filepath.Join(targetBrainDir, "..", "codex", "sessions")), filepath.Clean(filepath.Join(targetBrainDir, "..", "..", "..", "codex", "sessions")), filepath.Clean(filepath.Join(targetBrainDir, "..", ".codex", "sessions")))
-	discoverCodexSessions(codexBases, discovered)
+	discoverCodexSessions(codexSessionBases(targetBrainDir, extraCodex...), discovered)
 
 	// Also discover Muse sessions from Muse sessions directories
-	discoverMuseSessions(museSessionBases(targetBrainDir, museSessionsDir), discovered)
+	var extraMuse []string
+	if museSessionsDir != "" {
+		extraMuse = append(extraMuse, museSessionsDir)
+	}
+	discoverMuseSessions(museSessionBases(targetBrainDir, extraMuse...), discovered)
 
 	return discovered
 }
@@ -229,7 +231,8 @@ func engineForPath(brainDir, transcriptPath string, extraDirs ...string) string 
 		strings.HasPrefix(baseName, "rollout-") {
 		return EngineCodex
 	}
-	if strings.HasPrefix(cleanPath, filepath.Clean(brainDir)+string(filepath.Separator)) {
+	if strings.HasPrefix(cleanPath, filepath.Clean(brainDir)+string(filepath.Separator)) ||
+		strings.Contains(slashPath, "/.gemini/") {
 		return EngineAgy
 	}
 	return EngineClaude
@@ -275,8 +278,33 @@ func discoverClaudeProjectSessions(claudeBases []string, discovered map[string]d
 	}
 }
 
-func findClaudeTranscriptFile(brainDir, sessionID string) string {
-	for _, claudeBase := range []string{filepath.Clean(filepath.Join(brainDir, "..", "claude", "projects")), filepath.Clean(filepath.Join(brainDir, "..", "..", "..", "claude", "projects")), filepath.Clean(filepath.Join(brainDir, "..", ".claude", "projects"))} {
+func engineTranscriptBases(brainDir, plainDir, hiddenDir, leafDir string, extraDirs ...string) []string {
+	var bases []string
+	for _, d := range extraDirs {
+		if trimmed := strings.TrimSpace(d); trimmed != "" {
+			bases = append(bases, filepath.Clean(trimmed))
+		}
+	}
+	bases = append(bases,
+		filepath.Clean(filepath.Join(brainDir, "..", plainDir, leafDir)),
+		filepath.Clean(filepath.Join(brainDir, "..", "..", "..", plainDir, leafDir)),
+		filepath.Clean(filepath.Join(brainDir, "..", hiddenDir, leafDir)),
+		filepath.Clean(filepath.Join(brainDir, "..", "..", "..", hiddenDir, leafDir)),
+	)
+	bases = append(bases, runtimeSubdirBases(brainDir, filepath.Join(hiddenDir, leafDir))...)
+	return bases
+}
+
+func claudeProjectBases(brainDir string, extraDirs ...string) []string {
+	return engineTranscriptBases(brainDir, "claude", ".claude", "projects", extraDirs...)
+}
+
+func codexSessionBases(brainDir string, extraDirs ...string) []string {
+	return engineTranscriptBases(brainDir, "codex", ".codex", "sessions", extraDirs...)
+}
+
+func findClaudeTranscriptFile(brainDir, sessionID string, extraDirs ...string) string {
+	for _, claudeBase := range claudeProjectBases(brainDir, extraDirs...) {
 		if entries, err := os.ReadDir(claudeBase); err == nil {
 			for _, entry := range entries {
 				if entry.IsDir() {
@@ -291,8 +319,8 @@ func findClaudeTranscriptFile(brainDir, sessionID string) string {
 	return ""
 }
 
-func findCodexTranscriptFile(brainDir, sessionID string) string {
-	for _, codexBase := range []string{filepath.Clean(filepath.Join(brainDir, "..", "codex", "sessions")), filepath.Clean(filepath.Join(brainDir, "..", "..", "..", "codex", "sessions")), filepath.Clean(filepath.Join(brainDir, "..", ".codex", "sessions"))} {
+func findCodexTranscriptFile(brainDir, sessionID string, extraDirs ...string) string {
+	for _, codexBase := range codexSessionBases(brainDir, extraDirs...) {
 		if fi, err := os.Stat(codexBase); err != nil || !fi.IsDir() {
 			continue
 		}
@@ -320,22 +348,41 @@ func findCodexTranscriptFile(brainDir, sessionID string) string {
 	return ""
 }
 
-func findTranscriptFile(brainDir, sessionID string, extraDirs ...string) string {
-	candidates := []string{
-		filepath.Join(brainDir, sessionID, ".system_generated", "logs", "transcript.jsonl"),
-		filepath.Join(brainDir, sessionID, "system_generated", "logs", "transcript.jsonl"),
-		filepath.Join(brainDir, sessionID, "transcript.jsonl"),
-		filepath.Join(brainDir, sessionID+".jsonl"),
-	}
-	for _, c := range candidates {
-		if fi, err := os.Stat(c); err == nil && !fi.IsDir() {
-			return c
+func agyBrainBases(brainDir string) []string {
+	bases := []string{brainDir}
+	for _, runtimesBase := range runtimeBaseDirs(brainDir) {
+		if entries, err := os.ReadDir(runtimesBase); err == nil {
+			for _, e := range entries {
+				if e.IsDir() && !isSkippedRuntimeDir(e.Name()) {
+					bases = append(bases,
+						filepath.Join(runtimesBase, e.Name(), ".gemini", "antigravity-cli", "brain"),
+						filepath.Join(runtimesBase, e.Name(), ".gemini", "antigravity", "brain"),
+					)
+				}
+			}
 		}
 	}
-	if cand := findClaudeTranscriptFile(brainDir, sessionID); cand != "" {
+	return bases
+}
+
+func findTranscriptFile(brainDir, sessionID string, extraDirs ...string) string {
+	for _, base := range agyBrainBases(brainDir) {
+		candidates := []string{
+			filepath.Join(base, sessionID, ".system_generated", "logs", "transcript.jsonl"),
+			filepath.Join(base, sessionID, "system_generated", "logs", "transcript.jsonl"),
+			filepath.Join(base, sessionID, "transcript.jsonl"),
+			filepath.Join(base, sessionID+".jsonl"),
+		}
+		for _, c := range candidates {
+			if fi, err := os.Stat(c); err == nil && !fi.IsDir() {
+				return c
+			}
+		}
+	}
+	if cand := findClaudeTranscriptFile(brainDir, sessionID, extraDirs...); cand != "" {
 		return cand
 	}
-	if cand := findCodexTranscriptFile(brainDir, sessionID); cand != "" {
+	if cand := findCodexTranscriptFile(brainDir, sessionID, extraDirs...); cand != "" {
 		return cand
 	}
 	return findMuseTranscriptFile(brainDir, sessionID, extraDirs...)

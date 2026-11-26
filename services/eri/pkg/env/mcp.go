@@ -127,6 +127,18 @@ func StripProxyPolicyFields(servers map[string]any) {
 	}
 }
 
+func isEnforceableVoiceMCPServer(entry map[string]any) bool {
+	if stringField(entry, "command") != "" || strings.EqualFold(stringField(entry, "type"), "sse") {
+		return false
+	}
+	for _, key := range mcpURLKeys {
+		if stringField(entry, key) != "" {
+			return true
+		}
+	}
+	return false
+}
+
 func applyVoiceAllowedTools(mergedServers map[string]any, allowedTools []string) {
 	if allowedTools == nil {
 		return
@@ -148,7 +160,11 @@ func applyVoiceAllowedTools(mergedServers map[string]any, allowedTools []string)
 
 	for name, v := range mergedServers {
 		entry, ok := v.(map[string]any)
-		if !ok {
+		if !ok || !isEnforceableVoiceMCPServer(entry) {
+			if ok {
+				log.Printf("dropping voice MCP server %q: cannot enforce allowed tools on non-streamable-http server", name)
+			}
+			delete(mergedServers, name)
 			continue
 		}
 		entry = maps.Clone(entry)

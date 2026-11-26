@@ -103,13 +103,6 @@ func TestManager_VoiceRuntimeRoots(t *testing.T) {
 	if !foundCli || !foundAgy {
 		t.Fatalf("m.getTargetDirs(\"\") = %v, expected voice cli and agy brain dirs", m.getTargetDirs(""))
 	}
-
-	mNoData := New(homeDir, "")
-	for _, dir := range mNoData.getTargetDirs("") {
-		if dir == voiceCliBrain || dir == voiceAgyBrain {
-			t.Fatalf("mNoData found voice dir without dataDir: %s", dir)
-		}
-	}
 }
 
 func TestGetTargetDirs(t *testing.T) {

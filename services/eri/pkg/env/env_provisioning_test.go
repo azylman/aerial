@@ -509,6 +509,8 @@ func TestMCPProvisioning(t *testing.T) {
 				Common: mcpRaw(
 					"keep_server", `{"serverUrl":"http://keep:8080","enabled_tools":["read_tool","other_tool"]}`,
 					"prune_server", `{"serverUrl":"http://prune:8080","enabledTools":["other_tool"]}`,
+					"stdio_server", `{"command":"npx","args":["-y","stdio"]}`,
+					"sse_server", `{"url":"http://sse:8080","type":"sse"}`,
 				),
 				Voice: mcpRaw(
 					"unconstrained_server", `{"serverUrl":"http://unconstrained:8080"}`,
@@ -516,7 +518,7 @@ func TestMCPProvisioning(t *testing.T) {
 			},
 			wantScheduler: true, wantGitHub: true,
 			wantPresent: []string{"keep_server", "unconstrained_server"},
-			wantAbsent:  []string{"prune_server"},
+			wantAbsent:  []string{"prune_server", "stdio_server", "sse_server"},
 		},
 		{
 			name: "voice target with empty allowed tools clears all servers", target: TargetVoice, withPAT: true,
@@ -575,9 +577,11 @@ func TestApplyVoiceAllowedTools(t *testing.T) {
 			name:         "nil allowed tools leaves servers untouched",
 			allowedTools: nil,
 			servers: map[string]any{
-				"s1": map[string]any{"enabledTools": []string{"t1"}},
+				"s1":    map[string]any{"enabledTools": []string{"t1"}},
+				"stdio": map[string]any{"command": "npx"},
+				"sse":   map[string]any{"url": "http://sse", "type": "sse"},
 			},
-			wantPresent: []string{"s1"},
+			wantPresent: []string{"s1", "stdio", "sse"},
 			wantTools:   map[string][]string{"s1": {"t1"}},
 		},
 		{
@@ -589,12 +593,26 @@ func TestApplyVoiceAllowedTools(t *testing.T) {
 			wantAbsent: []string{"s1"},
 		},
 		{
+			name:         "drops stdio and sse servers when allowed tools non-nil",
+			allowedTools: []string{"tool_a"},
+			servers: map[string]any{
+				"stdio_srv": map[string]any{"command": "npx"},
+				"sse_srv":   map[string]any{"url": "http://sse", "type": "sse"},
+				"http_srv":  map[string]any{"serverUrl": "http://http", "enabledTools": []string{"tool_a"}},
+			},
+			wantPresent: []string{"http_srv"},
+			wantAbsent:  []string{"stdio_srv", "sse_srv"},
+			wantTools: map[string][]string{
+				"http_srv": {"tool_a"},
+			},
+		},
+		{
 			name:         "normalizes lowercase trims and deduplicates allowed tools",
 			allowedTools: []string{"  TOOL_A ", "tool_a", "Tool_B"},
 			servers: map[string]any{
 				"unconstrained": map[string]any{"serverUrl": "http://u"},
-				"intersected":   map[string]any{"enabled_tools": []string{"tool_b", "tool_c"}},
-				"disjoint":      map[string]any{"enabledTools": []string{"tool_c"}},
+				"intersected":   map[string]any{"serverUrl": "http://i", "enabled_tools": []string{"tool_b", "tool_c"}},
+				"disjoint":      map[string]any{"serverUrl": "http://d", "enabledTools": []string{"tool_c"}},
 			},
 			wantPresent: []string{"unconstrained", "intersected"},
 			wantAbsent:  []string{"disjoint"},

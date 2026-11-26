@@ -55,6 +55,33 @@ func isSkippedRuntimeDir(name string) bool {
 	return name == "" || name == "ephemeral" || strings.HasPrefix(name, ".")
 }
 
+func runtimeBaseDirs(brainDir string) []string {
+	return []string{
+		filepath.Clean(filepath.Join(brainDir, "..", "runtimes")),
+		filepath.Clean(filepath.Join(brainDir, "..", "..", "..", "..")),
+		filepath.Clean(filepath.Join(brainDir, "..", "..", "..", "runtimes")),
+	}
+}
+
+func runtimeSubdirBases(brainDir, subDir string) []string {
+	var bases []string
+	seen := make(map[string]bool)
+	for _, runtimesBase := range runtimeBaseDirs(brainDir) {
+		if seen[runtimesBase] {
+			continue
+		}
+		seen[runtimesBase] = true
+		if entries, err := os.ReadDir(runtimesBase); err == nil {
+			for _, e := range entries {
+				if e.IsDir() && !isSkippedRuntimeDir(e.Name()) {
+					bases = append(bases, filepath.Join(runtimesBase, e.Name(), subDir))
+				}
+			}
+		}
+	}
+	return bases
+}
+
 func museSessionBases(brainDir string, extraDirs ...string) []string {
 	var bases []string
 	for _, d := range extraDirs {
@@ -68,14 +95,7 @@ func museSessionBases(brainDir string, extraDirs ...string) []string {
 		filepath.Clean(filepath.Join(brainDir, "..", ".local", "share", "muse", "sessions")),
 		filepath.Clean(filepath.Join(brainDir, "..", "..", "..", ".local", "share", "muse", "sessions")),
 	)
-	runtimesBase := filepath.Clean(filepath.Join(brainDir, "..", "runtimes"))
-	if entries, err := os.ReadDir(runtimesBase); err == nil {
-		for _, e := range entries {
-			if e.IsDir() && !isSkippedRuntimeDir(e.Name()) {
-				bases = append(bases, filepath.Join(runtimesBase, e.Name(), ".local", "share", "muse", "sessions"))
-			}
-		}
-	}
+	bases = append(bases, runtimeSubdirBases(brainDir, filepath.Join(".local", "share", "muse", "sessions"))...)
 	return bases
 }
 
