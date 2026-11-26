@@ -40,10 +40,6 @@ type drainPendingResponse struct {
 // DrainPending posts to the steer drain endpoint and returns any pending prompts.
 // It fails open (returns nil) on transport errors, timeouts, non-200 HTTP responses, or empty prompts.
 func (s *HTTPTurnSteerer) DrainPending(ctx context.Context, payload Payload) []string {
-	if s == nil || strings.TrimSpace(s.Endpoint) == "" || (strings.TrimSpace(s.DaemonID) == "" && strings.TrimSpace(payload.ConversationID) == "" && strings.TrimSpace(payload.SessionID) == "") {
-		return nil
-	}
-
 	reqData, err := json.Marshal(drainPendingRequest{
 		DaemonID:       s.DaemonID,
 		ConversationID: payload.ConversationID,

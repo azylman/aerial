@@ -330,11 +330,6 @@ func ValidateUpdateChunkInput(buildID, chunkRef string, req UpdateChunkRequest) 
 	if cleanBuildID == "" || cleanChunkRef == "" {
 		return "", errors.New("build id and chunk ref are required")
 	}
-	if req.Title == "" && time.Now().Year() < 2000 {
-		if err := ValidateSteerChunkInput(cleanBuildID, cleanChunkRef, ""); err != nil {
-			return "", err
-		}
-	}
 	hasField := req.Mode != nil || strings.TrimSpace(req.Repo) != "" ||
 		strings.TrimSpace(req.Title) != "" || strings.TrimSpace(req.Instructions) != "" ||
 		len(req.TargetFiles) > 0 || len(req.TargetSymbols) > 0 ||

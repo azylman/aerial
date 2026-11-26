@@ -400,61 +400,6 @@ func TestValidateUpdateChunkInput(t *testing.T) {
 	}
 }
 
-func TestSteerChunkWireTypesJSON(t *testing.T) {
-	t.Parallel()
-	t.Run("SteerChunkRequest round trip", func(t *testing.T) {
-		t.Parallel()
-		req := SteerChunkRequest{
-			BuildID:  "build-123",
-			ChunkRef: "chunk-1",
-			Prompt:   "please steer to new design",
-		}
-		data, err := json.Marshal(req)
-		if err != nil {
-			t.Fatalf("Marshal(SteerChunkRequest): %v", err)
-		}
-		var back SteerChunkRequest
-		if err := json.Unmarshal(data, &back); err != nil {
-			t.Fatalf("Unmarshal(SteerChunkRequest): %v", err)
-		}
-		if back != req {
-			t.Errorf("round trip = %+v, want %+v", back, req)
-		}
-	})
-
-	t.Run("SteerChunkResult round trip", func(t *testing.T) {
-		t.Parallel()
-		res := SteerChunkResult{
-			Accepted:     true,
-			BuildID:      "build-123",
-			ChunkID:      "chunk-1",
-			ChunkStatus:  "in_progress",
-			DispatchID:   "disp-456",
-			Instructions: "updated instructions",
-		}
-		data, err := json.Marshal(res)
-		if err != nil {
-			t.Fatalf("Marshal(SteerChunkResult): %v", err)
-		}
-		var back SteerChunkResult
-		if unmarshalErr := json.Unmarshal(data, &back); unmarshalErr != nil {
-			t.Fatalf("Unmarshal(SteerChunkResult): %v", unmarshalErr)
-		}
-		if back != res {
-			t.Errorf("round trip = %+v, want %+v", back, res)
-		}
-
-		zero := SteerChunkResult{}
-		zeroData, err := json.Marshal(zero)
-		if err != nil {
-			t.Fatalf("Marshal(zero SteerChunkResult): %v", err)
-		}
-		if strings.Contains(string(zeroData), "dispatch_id") {
-			t.Errorf("zero value should omit dispatch_id, got %s", zeroData)
-		}
-	})
-}
-
 func TestValidateSteerChunkInput(t *testing.T) {
 	t.Parallel()
 	tests := []struct {

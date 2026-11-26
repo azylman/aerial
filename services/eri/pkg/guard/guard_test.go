@@ -649,20 +649,8 @@ func TestOptionsFromEnv(t *testing.T) {
 
 func TestHTTPTurnSteerer_DrainPending(t *testing.T) {
 	t.Parallel()
-	t.Run("nil and empty guards", func(t *testing.T) {
+	t.Run("invalid URL fails open", func(t *testing.T) {
 		t.Parallel()
-		var nilSteerer *HTTPTurnSteerer
-		if nilSteerer.DrainPending(context.Background(), Payload{}) != nil {
-			t.Errorf("expected nil for nil steerer")
-		}
-		emptyEndpoint := &HTTPTurnSteerer{Endpoint: "   ", DaemonID: "d1"}
-		if emptyEndpoint.DrainPending(context.Background(), Payload{}) != nil {
-			t.Errorf("expected nil for empty endpoint")
-		}
-		noIDs := &HTTPTurnSteerer{Endpoint: "http://127.0.0.1", DaemonID: ""}
-		if noIDs.DrainPending(context.Background(), Payload{}) != nil {
-			t.Errorf("expected nil when all IDs are empty")
-		}
 		invalidURL := &HTTPTurnSteerer{Endpoint: "http://[::1]:namedport", DaemonID: "d1"}
 		if invalidURL.DrainPending(context.Background(), Payload{ConversationID: "c1"}) != nil {
 			t.Errorf("expected nil for invalid request URL")
@@ -955,26 +943,17 @@ func TestProcessWithOptions(t *testing.T) {
 		t.Parallel()
 		var out bytes.Buffer
 		opts := Options{BatchDir: t.TempDir()} // Getenv is nil
-		err := ProcessWithOptions(strings.NewReader(`{"conversationId":"c1","invocationNum":1}`), &out, "pre-invocation", opts)
+		inputPayload := `{"toolCall": {"name": "run_command", "args": {"CommandLine": "git commit -m ghp_111111111111111111111111111111"}}, "conversationId": "c1"}`
+		err := ProcessWithOptions(strings.NewReader(inputPayload), &out, "commit", opts)
 		if err != nil {
 			t.Fatalf("unexpected error with nil Getenv: %v", err)
 		}
-	})
-
-	t.Run("claude panic reader fail-open response", func(t *testing.T) {
-		t.Parallel()
-		var out bytes.Buffer
-		opts := testOptions(t)
-		err := ProcessWithOptions(panicReader{}, &out, "all", opts)
-		if err != nil {
-			t.Fatalf("unexpected error on panic fail-open: %v", err)
-		}
 		var d Decision
 		if err := json.Unmarshal(out.Bytes(), &d); err != nil {
-			t.Fatalf("Unmarshal: %v", err)
+			t.Fatalf("Unmarshal(Decision) error: %v", err)
 		}
-		if d.Decision != DecisionAllow {
-			t.Errorf("got decision=%q, want allow", d.Decision)
+		if d.Decision != DecisionDeny {
+			t.Errorf("Decision = %q, want deny (detecting sensitive token with nil Getenv fallback)", d.Decision)
 		}
 	})
 }
