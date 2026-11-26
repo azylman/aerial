@@ -116,7 +116,7 @@ func TestHandleVoiceAsk_Validation(t *testing.T) {
 	})
 }
 
-func seedVoiceTestSession(t *testing.T, store *db.SQLStore, sessionID, seedSession string, seedTurnCount int) {
+func seedVoiceTestSession(t *testing.T, store *db.SQLStore, sessionID, seedSession string, seedTurnCount int, rotateToSession string) {
 	t.Helper()
 	if seedSession == "" {
 		return
@@ -128,6 +128,11 @@ func seedVoiceTestSession(t *testing.T, store *db.SQLStore, sessionID, seedSessi
 	for range seedTurnCount {
 		if _, err := store.IncrementSessionTurnCount(context.Background(), threadKey); err != nil {
 			t.Fatalf("IncrementSessionTurnCount seed failed: %v", err)
+		}
+	}
+	if rotateToSession != "" {
+		if err := store.RotateSessionID(context.Background(), threadKey, rotateToSession); err != nil {
+			t.Fatalf("RotateSessionID seed failed: %v", err)
 		}
 	}
 }
@@ -155,16 +160,17 @@ func TestPersistVoiceConversationID(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
-		name          string
-		nilPool       bool
-		nilStore      bool
-		sessionID     string
-		convID        string
-		seedSession   string
-		seedTurnCount int
-		sabotageSQL   string
-		wantSession   string
-		wantTurnCount int
+		name            string
+		nilPool         bool
+		nilStore        bool
+		sessionID       string
+		convID          string
+		seedSession     string
+		seedTurnCount   int
+		rotateToSession string
+		sabotageSQL     string
+		wantSession     string
+		wantTurnCount   int
 	}{
 		{name: "nil pool", nilPool: true, sessionID: "s1", convID: "c1"},
 		{name: "nil store in pool", nilStore: true, sessionID: "s1", convID: "c1"},
@@ -183,6 +189,16 @@ func TestPersistVoiceConversationID(t *testing.T) {
 			wantSession:   "c-count",
 			wantTurnCount: 3,
 		},
+		{
+			name:            "preserves rotated active conversation ID when called with previous session",
+			sessionID:       "s-rotated",
+			convID:          "c-prev",
+			seedSession:     "c-prev",
+			seedTurnCount:   2,
+			rotateToSession: "c-active",
+			wantSession:     "c-active",
+			wantTurnCount:   0,
+		},
 	}
 
 	for _, tc := range tests {
@@ -193,7 +209,7 @@ func TestPersistVoiceConversationID(t *testing.T) {
 				defer pool.Stop()
 			}
 			if store != nil {
-				seedVoiceTestSession(t, store, tc.sessionID, tc.seedSession, tc.seedTurnCount)
+				seedVoiceTestSession(t, store, tc.sessionID, tc.seedSession, tc.seedTurnCount, tc.rotateToSession)
 			}
 			persistVoiceConversationID(context.Background(), pool, tc.sessionID, tc.convID)
 			if store == nil {

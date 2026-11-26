@@ -221,6 +221,17 @@ func assertSessionTurnCountAndRotation(ctx context.Context, t *testing.T, store 
 		t.Errorf("post-rotation: curr=%q, prev=%q, turns=%d", curr, prev, turns)
 	}
 
+	mustOK(t, store.SaveSessionID(ctx, "th-1", "sess-1"), "SaveSessionID stale previous session")
+	currStale, errCurrStale := store.GetSessionID(ctx, "th-1")
+	mustOK(t, errCurrStale, "GetSessionID stale")
+	prevStale, errPrevStale := store.GetPreviousSessionID(ctx, "th-1")
+	mustOK(t, errPrevStale, "GetPreviousSessionID stale")
+	turnsStale, errTurnsStale := store.GetSessionTurnCount(ctx, "th-1")
+	mustOK(t, errTurnsStale, "GetSessionTurnCount stale")
+	if currStale != "sess-2" || prevStale != "sess-1" || turnsStale != 0 {
+		t.Errorf("post-stale-save: curr=%q, prev=%q, turns=%d", currStale, prevStale, turnsStale)
+	}
+
 	mustOK(t, store.SaveSessionID(ctx, "th-1", ""), "SaveSessionID clear empty")
 	cleared, errCleared := store.GetSessionID(ctx, "th-1")
 	mustOK(t, errCleared, "GetSessionID cleared")
