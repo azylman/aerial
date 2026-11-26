@@ -559,7 +559,7 @@ func assertRuntimeRulesMD(t *testing.T, p *Provisioner) {
 	t.Helper()
 	for _, target := range allRuntimeTargets {
 		rtHome := p.runtimeHomeDir(target)
-		isEph := target == TargetEphemeral
+		isIsolated := target == TargetEphemeral || target == TargetVoice
 		for _, mdRel := range []string{
 			filepath.Join(".claude", "CLAUDE.md"),
 			filepath.Join(".codex", "AGENTS.md"),
@@ -569,9 +569,9 @@ func assertRuntimeRulesMD(t *testing.T, p *Provisioner) {
 				t.Errorf("expected %s in %s runtime: %v", mdRel, target, err)
 			}
 		}
-		assertTargetDirectoryOrSymlink(t, filepath.Join(rtHome, ".claude", "projects"), "claude projects", isEph)
-		assertTargetDirectoryOrSymlink(t, filepath.Join(rtHome, ".codex", "sessions"), "codex sessions", isEph)
-		assertTargetDirectoryOrSymlink(t, filepath.Join(rtHome, ".local", "share", "muse", "sessions"), "muse sessions", isEph)
+		assertTargetDirectoryOrSymlink(t, filepath.Join(rtHome, ".claude", "projects"), "claude projects", isIsolated)
+		assertTargetDirectoryOrSymlink(t, filepath.Join(rtHome, ".codex", "sessions"), "codex sessions", isIsolated)
+		assertTargetDirectoryOrSymlink(t, filepath.Join(rtHome, ".local", "share", "muse", "sessions"), "muse sessions", isIsolated)
 	}
 }
 

@@ -79,7 +79,11 @@ func New(homeDir, dataDir string) *Manager {
 
 	var roots []string
 	if cleanData != "" {
-		roots = append(roots, filepath.Join(cleanData, "brain"))
+		roots = append(roots,
+			filepath.Join(cleanData, "brain"),
+			filepath.Join(cleanData, "runtimes", runtimeVoice, ".gemini", "antigravity-cli", "brain"),
+			filepath.Join(cleanData, "runtimes", runtimeVoice, ".gemini", "antigravity", "brain"),
+		)
 	}
 	if cleanHome != "" {
 		roots = append(roots,

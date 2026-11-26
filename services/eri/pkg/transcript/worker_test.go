@@ -68,11 +68,13 @@ func TestFindTranscriptFile_PathResolution(t *testing.T) {
 		{name: "codex relative rollout", relPath: "../codex/sessions/rollout-s-codex2.jsonl", sessionID: "s-codex2", wantFound: true},
 		{name: "codex relative nested", relPath: "../../../codex/sessions/2026/11/15/rollout-t-s-codex3.jsonl", sessionID: "s-codex3", wantFound: true},
 		{name: "codex relative dot codex", relPath: "../.codex/sessions/rollout-s-codex4.jsonl", sessionID: "s-codex4", wantFound: true},
+		{name: "codex ephemeral runtime excluded", relPath: "../runtimes/ephemeral/.codex/sessions/rollout-s-codex-eph.jsonl", sessionID: "s-codex-eph", wantFound: false},
+		{name: "four levels up non runtime sibling ignored", relPath: "../../../../sibling/.claude/projects/p/s-sibling.jsonl", sessionID: "s-sibling", wantFound: false},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			tmp := t.TempDir()
-			brainDir := filepath.Join(tmp, "sub1", "sub2", "brain")
+			brainDir := filepath.Join(tmp, "root", "sub1", "sub2", "brain")
 			if err := os.MkdirAll(brainDir, 0o755); err != nil {
 				t.Fatalf("MkdirAll(brainDir): %v", err)
 			}
@@ -97,6 +99,67 @@ func TestFindTranscriptFile_PathResolution(t *testing.T) {
 	}
 }
 
+func TestFindTranscriptFile_VoiceAndPlainRoots(t *testing.T) {
+	t.Parallel()
+	tmp := t.TempDir()
+	dataDir := filepath.Join(tmp, "data")
+	plainBrain := filepath.Join(dataDir, "brain")
+	voiceBrain := filepath.Join(dataDir, "runtimes", "voice", ".gemini", "antigravity-cli", "brain")
+	voiceAgyDir := filepath.Join(voiceBrain, "s-v-agy")
+	voiceClaudeDir := filepath.Join(dataDir, "runtimes", "voice", ".claude", "projects", "proj")
+	voiceCodexDir := filepath.Join(dataDir, "runtimes", "voice", ".codex", "sessions")
+	voiceMuseDir := filepath.Join(dataDir, "runtimes", "voice", ".local", "share", "muse", "sessions")
+	ephClaudeDir := filepath.Join(dataDir, "runtimes", "ephemeral", ".claude", "projects", "proj")
+
+	dirs := []string{plainBrain, voiceAgyDir, voiceClaudeDir, voiceCodexDir, voiceMuseDir, ephClaudeDir}
+	for _, d := range dirs {
+		if err := os.MkdirAll(d, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	files := map[string]string{
+		filepath.Join(voiceAgyDir, "transcript.jsonl"):          `{"step_index":0,"type":"USER_INPUT","content":"agy"}`,
+		filepath.Join(voiceClaudeDir, "s-v-claude.jsonl"):       `{"type":"user","message":{"role":"user","content":"claude"}}`,
+		filepath.Join(voiceCodexDir, "rollout-s-v-codex.jsonl"): `{"type":"session_meta","payload":{"id":"s-v-codex"}}`,
+		filepath.Join(voiceMuseDir, "s-v-muse.jsonl"):           `{"recorded_at":1000}`,
+		filepath.Join(ephClaudeDir, "s-v-eph.jsonl"):            `{"type":"user","message":{"role":"user","content":"eph"}}`,
+	}
+	for p, content := range files {
+		if err := os.WriteFile(p, []byte(content), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	cases := []struct {
+		name      string
+		brainDir  string
+		sessionID string
+		wantFound bool
+	}{
+		{name: "plain brain finds voice agy", brainDir: plainBrain, sessionID: "s-v-agy", wantFound: true},
+		{name: "plain brain finds voice claude", brainDir: plainBrain, sessionID: "s-v-claude", wantFound: true},
+		{name: "plain brain finds voice codex", brainDir: plainBrain, sessionID: "s-v-codex", wantFound: true},
+		{name: "plain brain finds voice muse", brainDir: plainBrain, sessionID: "s-v-muse", wantFound: true},
+		{name: "voice brain finds voice claude", brainDir: voiceBrain, sessionID: "s-v-claude", wantFound: true},
+		{name: "voice brain finds voice codex", brainDir: voiceBrain, sessionID: "s-v-codex", wantFound: true},
+		{name: "voice brain finds voice muse", brainDir: voiceBrain, sessionID: "s-v-muse", wantFound: true},
+		{name: "voice brain excludes ephemeral", brainDir: voiceBrain, sessionID: "s-v-eph", wantFound: false},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			got := FindTranscriptFile(tc.brainDir, tc.sessionID)
+			if tc.wantFound && got == "" {
+				t.Fatalf("expected to find transcript file for %q from %q", tc.sessionID, tc.brainDir)
+			} else if !tc.wantFound && got != "" {
+				t.Fatalf("expected not to find transcript file for %q from %q, got %q", tc.sessionID, tc.brainDir, got)
+			}
+		})
+	}
+}
+
 func TestEngineForPath(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
@@ -109,6 +172,7 @@ func TestEngineForPath(t *testing.T) {
 		{name: "codex sessions dir", brainDir: "/data/brain", path: "/data/codex/sessions/2026/11/15/rollout-sess-1.jsonl", want: "codex"},
 		{name: "dot codex sessions dir", brainDir: "/data/brain", path: "/data/runtimes/discord/.codex/sessions/sess-1.jsonl", want: "codex"},
 		{name: "rollout prefix anywhere", brainDir: "/data/brain", path: "/some/path/rollout-2026-sess-1.jsonl", want: "codex"},
+		{name: "claude voice runtime transcript", brainDir: "/data/runtimes/voice/.gemini/antigravity-cli/brain", path: "/data/runtimes/voice/.claude/projects/proj1/sess-1.jsonl", want: "claude"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {

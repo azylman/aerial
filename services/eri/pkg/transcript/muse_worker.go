@@ -55,6 +55,53 @@ func isSkippedRuntimeDir(name string) bool {
 	return name == "" || name == "ephemeral" || strings.HasPrefix(name, ".")
 }
 
+func isRuntimeBrainDir(brainDir string) (string, bool) {
+	cleaned := filepath.Clean(brainDir)
+	slash := filepath.ToSlash(cleaned)
+	if !strings.HasSuffix(slash, "/.gemini/antigravity-cli/brain") &&
+		!strings.HasSuffix(slash, "/.gemini/antigravity/brain") &&
+		slash != ".gemini/antigravity-cli/brain" &&
+		slash != ".gemini/antigravity/brain" {
+		return "", false
+	}
+	parent := filepath.Clean(filepath.Join(cleaned, "..", "..", "..", ".."))
+	if filepath.Base(parent) != "runtimes" {
+		return "", false
+	}
+	return parent, true
+}
+
+func runtimeBaseDirs(brainDir string) []string {
+	bases := []string{
+		filepath.Clean(filepath.Join(brainDir, "..", "runtimes")),
+	}
+	if parent, ok := isRuntimeBrainDir(brainDir); ok {
+		if parent != bases[0] {
+			bases = append(bases, parent)
+		}
+	}
+	return bases
+}
+
+func runtimeSubdirBases(brainDir, subDir string) []string {
+	var bases []string
+	seen := make(map[string]bool)
+	for _, runtimesBase := range runtimeBaseDirs(brainDir) {
+		if seen[runtimesBase] {
+			continue
+		}
+		seen[runtimesBase] = true
+		if entries, err := os.ReadDir(runtimesBase); err == nil {
+			for _, e := range entries {
+				if e.IsDir() && !isSkippedRuntimeDir(e.Name()) {
+					bases = append(bases, filepath.Join(runtimesBase, e.Name(), subDir))
+				}
+			}
+		}
+	}
+	return bases
+}
+
 func museSessionBases(brainDir string, extraDirs ...string) []string {
 	var bases []string
 	for _, d := range extraDirs {
@@ -68,14 +115,7 @@ func museSessionBases(brainDir string, extraDirs ...string) []string {
 		filepath.Clean(filepath.Join(brainDir, "..", ".local", "share", "muse", "sessions")),
 		filepath.Clean(filepath.Join(brainDir, "..", "..", "..", ".local", "share", "muse", "sessions")),
 	)
-	runtimesBase := filepath.Clean(filepath.Join(brainDir, "..", "runtimes"))
-	if entries, err := os.ReadDir(runtimesBase); err == nil {
-		for _, e := range entries {
-			if e.IsDir() && !isSkippedRuntimeDir(e.Name()) {
-				bases = append(bases, filepath.Join(runtimesBase, e.Name(), ".local", "share", "muse", "sessions"))
-			}
-		}
-	}
+	bases = append(bases, runtimeSubdirBases(brainDir, filepath.Join(".local", "share", "muse", "sessions"))...)
 	return bases
 }
 

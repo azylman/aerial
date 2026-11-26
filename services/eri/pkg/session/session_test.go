@@ -50,10 +50,13 @@ func writeConversationFile(t *testing.T, dir, sessionID, ext string, size int) s
 
 func TestManager_Init(t *testing.T) {
 	tmp := t.TempDir()
-	m := New(filepath.Join(tmp, "home"), filepath.Join(tmp, "data"))
+	homeDir := filepath.Join(tmp, "home")
+	dataDir := filepath.Join(tmp, "data")
+	m := New(homeDir, dataDir)
 	if m == nil || m.homeDir == "" || m.dataDir == "" || len(m.Roots()) == 0 {
 		t.Fatalf("unexpected Manager initialization: %+v", m)
 	}
+
 	var nilMgr *Manager
 	if len(nilMgr.Roots()) != 0 {
 		t.Fatalf("nil Manager should return nil roots")
@@ -69,6 +72,36 @@ func TestManager_Init(t *testing.T) {
 	}
 	if id, ok := m.validSessionID("good-sess"); !ok || id != "good-sess" {
 		t.Fatalf("expected validSessionID to return clean ID")
+	}
+}
+
+func TestManager_VoiceRuntimeRoots(t *testing.T) {
+	t.Parallel()
+	tmp := t.TempDir()
+	homeDir := filepath.Join(tmp, "home")
+	dataDir := filepath.Join(tmp, "data")
+
+	voiceCliBrain := filepath.Join(dataDir, "runtimes", runtimeVoice, ".gemini", "antigravity-cli", "brain", "conv-cli")
+	voiceAgyBrain := filepath.Join(dataDir, "runtimes", runtimeVoice, ".gemini", "antigravity", "brain", "conv-agy")
+	if err := os.MkdirAll(voiceCliBrain, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(voiceAgyBrain, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	m := New(homeDir, dataDir)
+	foundCli, foundAgy := false, false
+	for _, dir := range m.getTargetDirs("") {
+		if dir == voiceCliBrain {
+			foundCli = true
+		}
+		if dir == voiceAgyBrain {
+			foundAgy = true
+		}
+	}
+	if !foundCli || !foundAgy {
+		t.Fatalf("m.getTargetDirs(\"\") = %v, expected voice cli and agy brain dirs", m.getTargetDirs(""))
 	}
 }
 
