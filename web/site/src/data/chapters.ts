@@ -471,17 +471,17 @@ scripts/aerial-build.sh status <build-id>`,
       },
       {
         id: 'ci-cd-gitops',
-        title: 'Declarative Migrations, Hybrid CI & Event-Driven GitOps',
+        title: 'Declarative Migrations, GitHub Actions CI & Event-Driven GitOps',
         lead:
-          'Ariga Atlas declarative migrations, dynamic runner routing in GitHub Actions, and event-driven GitOps complete the software factory loop.',
+          'Ariga Atlas declarative migrations, automated verification in GitHub Actions, and event-driven GitOps complete the software factory loop.',
         paragraphs: [
           'Database schemas declare table structures in a central SQL specification. Startup code never executes imperative database mutations. Development tools generate declarative migration files using Ariga Atlas, while automated verification validates migration directories.',
-          'Continuous integration uses dynamic runner routing. Internal runs leverage local self-hosted runner scale sets, while external fork pull requests run on standard GitHub-hosted environments.',
+          'Continuous integration executes automated test suites, coverage checks, and LLM code reviews in GitHub Actions upon every pull request.',
           'Event-driven webhook routers notify Flux CD upon pull request merges, triggering immediate cluster reconciliation. Automated monitors wake remediation agents when test runs or automated reviews fail.',
         ],
         bullets: [
           'Ariga Atlas: Generates declarative schema diffs with automated migration directory validation in test pipelines.',
-          'Dynamic Runner Routing: Dispatches jobs to self-hosted runners or GitHub-hosted environments based on repository origin.',
+          'Automated CI & Code Review: Runs test suites, schema linters, and automated review passes in GitHub Actions.',
           'Event-Driven Push GitOps: Webhook routers trigger Flux reconciliation immediately upon pull request merges.',
           'Self-Healing CI Wakes: Automated test failures wake targeted remediation agents with complete log diagnostics.',
         ],

@@ -147,7 +147,7 @@ export function LandingView() {
           </div>
           <p className="feature-desc">
             Vikunja DAG backlog, tiered multi-agent review panel, Restate multi-PR DAG builds,
-            scale-to-zero in-cluster ARC runners, and proactive CI failure remediation wakes.
+            GitHub Actions CI and automated code review gates, and proactive CI failure remediation wakes.
           </p>
         </div>
 

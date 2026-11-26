@@ -503,7 +503,7 @@ func isDependabotPR(p GitHubPullRequestPayload) bool {
 
 func isMainBranch(branch string) bool {
 	clean := strings.TrimSpace(branch)
-	return clean == "main" || strings.HasPrefix(clean, "refs/heads/main")
+	return clean == "main" || clean == "refs/heads/main"
 }
 
 func resolveImagesWorkloadsAndNames(repo string, images []string) ([]string, []string) {
