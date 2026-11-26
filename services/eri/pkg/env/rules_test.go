@@ -559,7 +559,7 @@ func assertRuntimeRulesMD(t *testing.T, p *Provisioner) {
 	t.Helper()
 	for _, target := range allRuntimeTargets {
 		rtHome := p.runtimeHomeDir(target)
-		isIsolated := target == TargetEphemeral || target == TargetVoice
+		isEphemeral := target == TargetEphemeral
 		for _, mdRel := range []string{
 			filepath.Join(".claude", "CLAUDE.md"),
 			filepath.Join(".codex", "AGENTS.md"),
@@ -569,9 +569,36 @@ func assertRuntimeRulesMD(t *testing.T, p *Provisioner) {
 				t.Errorf("expected %s in %s runtime: %v", mdRel, target, err)
 			}
 		}
-		assertTargetDirectoryOrSymlink(t, filepath.Join(rtHome, ".claude", "projects"), "claude projects", isIsolated)
-		assertTargetDirectoryOrSymlink(t, filepath.Join(rtHome, ".codex", "sessions"), "codex sessions", isIsolated)
-		assertTargetDirectoryOrSymlink(t, filepath.Join(rtHome, ".local", "share", "muse", "sessions"), "muse sessions", isIsolated)
+		assertTargetDirectoryOrSymlink(t, filepath.Join(rtHome, ".claude", "projects"), "claude projects", isEphemeral)
+		assertTargetDirectoryOrSymlink(t, filepath.Join(rtHome, ".codex", "sessions"), "codex sessions", isEphemeral)
+		assertTargetDirectoryOrSymlink(t, filepath.Join(rtHome, ".local", "share", "muse", "sessions"), "muse sessions", isEphemeral)
+
+		if target == TargetVoice && p.dataDir != "" {
+			voiceData := filepath.Join(p.dataDir, "voice-sessions")
+			for _, check := range []struct {
+				linkPath string
+				wantDst  string
+			}{
+				{filepath.Join(rtHome, ".claude", "projects"), filepath.Join(voiceData, "claude", "projects")},
+				{filepath.Join(rtHome, ".codex", "sessions"), filepath.Join(voiceData, "codex", "sessions")},
+				{filepath.Join(rtHome, ".local", "share", "muse", "sessions"), filepath.Join(voiceData, "muse", "sessions")},
+				{filepath.Join(rtHome, ".gemini", "antigravity-cli", "brain"), filepath.Join(voiceData, ".gemini", "antigravity-cli", "brain")},
+				{filepath.Join(rtHome, ".gemini", "antigravity-cli", "conversations"), filepath.Join(voiceData, ".gemini", "antigravity-cli", "conversations")},
+			} {
+				dst, err := os.Readlink(check.linkPath)
+				if err != nil {
+					t.Errorf("expected %s to be symlink: %v", check.linkPath, err)
+					continue
+				}
+				if filepath.Clean(dst) != filepath.Clean(check.wantDst) {
+					t.Errorf("symlink %s points to %s; want %s", check.linkPath, dst, check.wantDst)
+				}
+				if filepath.Clean(dst) == filepath.Clean(filepath.Join(p.dataDir, "brain")) ||
+					filepath.Clean(dst) == filepath.Clean(filepath.Join(p.dataDir, "conversations")) {
+					t.Errorf("voice session link %s points to shared storage %s", check.linkPath, dst)
+				}
+			}
+		}
 	}
 }
 

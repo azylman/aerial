@@ -25,33 +25,83 @@ type sharedAssetsCase struct {
 	emptyDataDir      bool
 }
 
-func assertIsolatedEphemeralStorage(t *testing.T, p *Provisioner, tmpData string) {
+func setupPreexistingSessionSymlinks(t *testing.T, homeDir, tmpData string) (string, string) {
 	t.Helper()
-	p.linkSharedSessionStorage(tmpData, filepath.Join(tmpData, "brain"), filepath.Join(tmpData, "conversations"))
-	for _, target := range []RuleTarget{TargetEphemeral, TargetVoice} {
-		rtHome := p.runtimeHomeDir(target)
-		rtCliBrain := filepath.Join(rtHome, ".gemini", "antigravity-cli", "brain")
-		if err := os.MkdirAll(filepath.Dir(rtCliBrain), 0o755); err != nil {
-			t.Fatalf("MkdirAll: %v", err)
-		}
-		if err := os.Symlink(filepath.Join(tmpData, "brain"), rtCliBrain); err != nil {
-			t.Fatalf("Symlink: %v", err)
-		}
-		rtCodexSessions := filepath.Join(rtHome, ".codex", "sessions")
-		if err := os.MkdirAll(filepath.Dir(rtCodexSessions), 0o755); err != nil {
-			t.Fatalf("MkdirAll: %v", err)
-		}
-		if err := os.Symlink(filepath.Join(tmpData, "codex", "sessions"), rtCodexSessions); err != nil {
-			t.Fatalf("Symlink: %v", err)
-		}
-		p.provisionRuntimeSharedAssets(rtHome)
-		if fi, err := os.Lstat(rtCliBrain); err != nil || fi.Mode()&os.ModeSymlink != 0 || !fi.IsDir() {
-			t.Fatalf("expected %s brain to be isolated directory, got fi=%v err=%v", target, fi, err)
-		}
-		if fi, err := os.Lstat(rtCodexSessions); err != nil || fi.Mode()&os.ModeSymlink != 0 || !fi.IsDir() {
-			t.Fatalf("expected %s codex sessions to be isolated directory, got fi=%v err=%v", target, fi, err)
+	cliBrain := filepath.Join(homeDir, ".gemini", "antigravity-cli", "brain")
+	if err := os.MkdirAll(filepath.Dir(cliBrain), 0o755); err != nil {
+		t.Fatalf("MkdirAll: %v", err)
+	}
+	if err := os.Symlink(filepath.Join(tmpData, "brain"), cliBrain); err != nil {
+		t.Fatalf("Symlink: %v", err)
+	}
+	codexSessions := filepath.Join(homeDir, ".codex", "sessions")
+	if err := os.MkdirAll(filepath.Dir(codexSessions), 0o755); err != nil {
+		t.Fatalf("MkdirAll: %v", err)
+	}
+	if err := os.Symlink(filepath.Join(tmpData, "codex", "sessions"), codexSessions); err != nil {
+		t.Fatalf("Symlink: %v", err)
+	}
+	return cliBrain, codexSessions
+}
+
+func assertEphemeralStorageIsolated(t *testing.T, p *Provisioner, tmpData string) {
+	t.Helper()
+	ephHome := p.runtimeHomeDir(TargetEphemeral)
+	ephCliBrain, ephCodexSessions := setupPreexistingSessionSymlinks(t, ephHome, tmpData)
+	p.provisionRuntimeSharedAssets(ephHome)
+	for _, dir := range []struct {
+		path  string
+		label string
+	}{
+		{ephCliBrain, "brain"},
+		{ephCodexSessions, "codex sessions"},
+	} {
+		fi, err := os.Lstat(dir.path)
+		if err != nil || fi.Mode()&os.ModeSymlink != 0 || !fi.IsDir() {
+			t.Fatalf("expected %s %s to be isolated directory, got fi=%v err=%v", TargetEphemeral, dir.label, fi, err)
 		}
 	}
+}
+
+func assertVoiceStorageIsolated(t *testing.T, p *Provisioner, tmpData string) {
+	t.Helper()
+	voiceHome := p.runtimeHomeDir(TargetVoice)
+	voiceCliBrain, voiceCodexSessions := setupPreexistingSessionSymlinks(t, voiceHome, tmpData)
+	p.provisionRuntimeSharedAssets(voiceHome)
+
+	wantVoiceData := filepath.Join(tmpData, "voice-sessions")
+	targets := []struct {
+		symlinkPath string
+		wantDst     string
+		sharedDst   string
+		label       string
+	}{
+		{voiceCliBrain, filepath.Join(wantVoiceData, ".gemini", "antigravity-cli", "brain"), filepath.Join(tmpData, "brain"), "brain"},
+		{voiceCodexSessions, filepath.Join(wantVoiceData, "codex", "sessions"), filepath.Join(tmpData, "codex", "sessions"), "codex sessions"},
+	}
+	for _, tc := range targets {
+		fi, err := os.Lstat(tc.symlinkPath)
+		if err != nil || fi.Mode()&os.ModeSymlink == 0 {
+			t.Fatalf("expected %s %s to be symlink, got fi=%v err=%v", TargetVoice, tc.label, fi, err)
+		}
+		linkTarget, err := os.Readlink(tc.symlinkPath)
+		if err != nil || filepath.Clean(linkTarget) != filepath.Clean(tc.wantDst) {
+			t.Fatalf("expected %s %s to link to %s, got %s (err=%v)", TargetVoice, tc.label, tc.wantDst, linkTarget, err)
+		}
+		if filepath.Clean(linkTarget) == filepath.Clean(tc.sharedDst) {
+			t.Fatalf("expected %s %s to be distinct from shared storage", TargetVoice, tc.label)
+		}
+	}
+}
+
+func assertIsolatedEphemeralStorage(t *testing.T, p *Provisioner, tmpData string) {
+	t.Helper()
+	origSymlink := symlinkRuntimeAsset
+	symlinkRuntimeAsset = os.Symlink
+	defer func() { symlinkRuntimeAsset = origSymlink }()
+
+	assertEphemeralStorageIsolated(t, p, tmpData)
+	assertVoiceStorageIsolated(t, p, tmpData)
 }
 
 func runProvisionRuntimeSharedAssetsCase(t *testing.T, tc sharedAssetsCase) {
