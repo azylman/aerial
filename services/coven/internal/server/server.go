@@ -134,12 +134,12 @@ func (s *Server) Routes() http.Handler {
 
 	mux.HandleFunc("/facts", s.handleFacts)
 
-	mcpBridge := tracing.Middleware("coven", http.HandlerFunc(s.handleMCP))
-	mux.Handle("/mcp", mcpBridge)
-	mux.Handle("/sse", mcpBridge)
-	mux.Handle("/", mcpBridge)
+	mcpHandler := http.HandlerFunc(s.handleMCP)
+	mux.Handle("/mcp", mcpHandler)
+	mux.Handle("/sse", mcpHandler)
+	mux.Handle("/", mcpHandler)
 
-	return s.auth.Middleware(k8sauth.DefaultExemptPaths...)(mux)
+	return s.auth.Middleware(k8sauth.DefaultExemptPaths...)(tracing.Middleware("coven", mux))
 }
 
 func (*Server) handleHealth(w http.ResponseWriter, r *http.Request) {
