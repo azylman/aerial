@@ -142,6 +142,8 @@ spec:
     role: primary
   type: ClusterIP
 ---
+# Suspended by default on single-node installations lacking barmanObjectStore.
+# Deployments configuring S3/B2 backups must patch suspend: false in their overlay.
 apiVersion: postgresql.cnpg.io/v1
 kind: ScheduledBackup
 metadata:

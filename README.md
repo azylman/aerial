@@ -78,6 +78,7 @@ In-cluster `Job/infisical-bootstrap` and **External Secrets Operator** automatic
 Base manifests in `aerial/k8s/` use portable single-node defaults (single-instance PostgreSQL, no `nodeSelector` constraints, HTTP-only routes). To scale across a multi-node homelab without forking base manifests, layer Flux Kustomization `spec.patches` in `aerial-config/k8s/cluster-overrides.yaml`:
 - **PostgreSQL High Availability**: Patch `Cluster/postgres-19` (fronted by `Service/postgres`) to `spec.instances: 2` with node anti-affinity across NVMe storage nodes.
 - **Hardware & Role Pinning**: Attach `nodeSelector` and taint/toleration rules to schedule GPU inference sidecars on GPU nodes, databases on storage nodes, and display workloads on touch kiosks.
+- **Nightly Database Backups**: Single-node base manifests suspend nightly backups (`ScheduledBackup/postgres-19-nightly-backup` with `spec.suspend: true`) since base `Cluster/postgres-19` declares no default object storage. To enable backups, configure your S3/B2 bucket under `spec.backup.barmanObjectStore` on `Cluster/postgres-19` and patch `ScheduledBackup/postgres-19-nightly-backup` with `spec.suspend: false`.
 - **TLS & Custom Domains**: Patch `Gateway/lan-gateway` with Let's Encrypt HTTPS listeners and custom domain `HTTPRoute` rules.
 - **Shared NAS Mounts**: Attach SMB or NFS CSI volumes across worker nodes.
 
