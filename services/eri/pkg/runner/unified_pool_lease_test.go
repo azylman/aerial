@@ -7,7 +7,6 @@ import (
 	"io"
 	"os"
 	"path/filepath"
-	"runtime"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -1083,36 +1082,89 @@ func TestIsStaleIsolatedSession(t *testing.T) {
 
 func TestUnifiedProcessPool_ResolveTargetSessionRecord(t *testing.T) {
 	t.Parallel()
+
 	testCases := []struct {
-		name, engine, targetKey, recordSession string
-		recordTurns                            int
-		hasFileOnDisk                          bool
-		wantSession                            string
-		wantTurns                              int
+		name          string
+		engine        string
+		targetKey     string
+		recordSession string
+		recordTurns   int
+		hasFileOnDisk bool
+		wantSession   string
+		wantTurns     int
 	}{
-		{"empty targetKey returns empty record", "", "  ", "sess-should-not-reach", 7, true, "", 0},
-		{"targetKey containing colon skips getRec", "", "ephemeral:worker-0", "sess-ephem", 3, true, "", 0},
-		{"valid session on disk preserved", "", "living-room", "sess-valid", 5, true, "sess-valid", 5},
-		{"stale session lacking on disk cleared", "", "kitchen", "sess-stale", 8, false, "", 0},
-		{"non-agy engine preserves voice session without agy artifacts", "claude", "office", "sess-claude", 4, false, "sess-claude", 4},
+		{
+			name:          "empty targetKey returns empty record",
+			targetKey:     "  ",
+			recordSession: "sess-should-not-reach",
+			recordTurns:   7,
+			hasFileOnDisk: true,
+			wantSession:   "",
+			wantTurns:     0,
+		},
+		{
+			name:          "targetKey containing colon skips getRec",
+			targetKey:     "ephemeral:worker-0",
+			recordSession: "sess-ephem",
+			recordTurns:   3,
+			hasFileOnDisk: true,
+			wantSession:   "",
+			wantTurns:     0,
+		},
+		{
+			name:          "valid session on disk preserved",
+			targetKey:     "living-room",
+			recordSession: "sess-valid",
+			recordTurns:   5,
+			hasFileOnDisk: true,
+			wantSession:   "sess-valid",
+			wantTurns:     5,
+		},
+		{
+			name:          "stale session lacking on disk cleared",
+			targetKey:     "kitchen",
+			recordSession: "sess-stale",
+			recordTurns:   8,
+			hasFileOnDisk: false,
+			wantSession:   "",
+			wantTurns:     0,
+		},
+		{
+			name:          "non-agy engine preserves voice session without agy artifacts",
+			engine:        "claude",
+			targetKey:     "office",
+			recordSession: "sess-claude",
+			recordTurns:   4,
+			hasFileOnDisk: false,
+			wantSession:   "sess-claude",
+			wantTurns:     4,
+		},
 	}
+
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			isolatedHome := filepath.Join(t.TempDir(), "voice-home")
+			subTmp := t.TempDir()
+			isolatedHome := filepath.Join(subTmp, "voice-home")
 			convDir := filepath.Join(isolatedHome, ".gemini", "antigravity-cli", "conversations")
 			if err := os.MkdirAll(convDir, 0o755); err != nil {
 				t.Fatal(err)
 			}
+
 			if tc.hasFileOnDisk && tc.recordSession != "" {
 				if err := os.WriteFile(filepath.Join(convDir, tc.recordSession+".pb"), []byte("data"), 0o644); err != nil {
 					t.Fatal(err)
 				}
 			}
+
 			pool := NewUnifiedProcessPool(PoolConfig{
-				Engine: tc.engine, GeminiHomeDir: isolatedHome,
+				Engine:        tc.engine,
+				GeminiHomeDir: isolatedHome,
 				GetSessionRecord: func(ctx context.Context, key string) (SessionRecord, error) {
-					return SessionRecord{ActiveSessionID: tc.recordSession, TurnCount: tc.recordTurns}, nil
+					return SessionRecord{
+						ActiveSessionID: tc.recordSession,
+						TurnCount:       tc.recordTurns,
+					}, nil
 				},
 			}, &MockDaemonSpawner{})
 			defer pool.Close()
@@ -1122,364 +1174,5 @@ func TestUnifiedProcessPool_ResolveTargetSessionRecord(t *testing.T) {
 				t.Fatalf("expected session=%q turns=%d, got session=%q turns=%d", tc.wantSession, tc.wantTurns, got.ActiveSessionID, got.TurnCount)
 			}
 		})
-	}
-}
-
-type supersededSessionCase struct {
-	name, storeSessID string
-	storeLeaseGen     int64
-	simulateReadErr   bool
-}
-
-func runSupersededSessionCase(t *testing.T, tc supersededSessionCase) {
-	t.Helper()
-	ctx := context.Background()
-	var mu sync.Mutex
-	storeRecord := SessionRecord{ActiveSessionID: "00000000-0000-0000-0000-000000000001", TurnCount: 2, LeaseGeneration: 1}
-	var onRotatedCalled, readErrActive atomic.Bool
-	spawnStarted, proceedSpawn := make(chan struct{}), make(chan struct{})
-	var spawnCount atomic.Int32
-
-	mock := newPipeMockSpawner(pipeMockSpawnerOpts{
-		pid: 450, initSessID: "00000000-0000-0000-0000-000000000001", echoRes: "ok",
-		onSpawn: func(cfg DaemonConfig) {
-			if spawnCount.Add(1) == 2 {
-				close(spawnStarted)
-				<-proceedSpawn
-			}
-		},
-	})
-	pool := NewUnifiedProcessPool(PoolConfig{
-		MaxSessionTurns: 1,
-		GetSessionRecord: func(ctx context.Context, targetKey string) (SessionRecord, error) {
-			if readErrActive.Load() {
-				return SessionRecord{}, errors.New("simulated store read error")
-			}
-			mu.Lock()
-			defer mu.Unlock()
-			return storeRecord, nil
-		},
-		OnSessionRotated: func(ctx context.Context, targetKey, oldSessionID, newSessionID string) error {
-			onRotatedCalled.Store(true)
-			return nil
-		},
-	}, mock)
-	defer pool.Close()
-
-	const targetKey = "target-superseded"
-	lease, err := pool.AcquireLease(ctx, targetKey)
-	if err != nil {
-		t.Fatalf("AcquireLease failed: %v", err)
-	}
-	requireType[*unifiedSessionLease](t, lease).turnCount = 2
-	if err := lease.Release(); err != nil {
-		t.Fatalf("Release failed: %v", err)
-	}
-
-	<-spawnStarted
-	if tc.simulateReadErr {
-		readErrActive.Store(true)
-	}
-	mu.Lock()
-	if tc.storeSessID != "" {
-		storeRecord.ActiveSessionID = tc.storeSessID
-	}
-	if tc.storeLeaseGen > 0 {
-		storeRecord.LeaseGeneration = tc.storeLeaseGen
-	}
-	mu.Unlock()
-
-	close(proceedSpawn)
-	waitPoolBackground(pool)
-	if onRotatedCalled.Load() || poolHasDaemon(pool, targetKey) {
-		t.Errorf("expected superseded rotation aborted and daemon evicted: called=%v hasDaemon=%v", onRotatedCalled.Load(), poolHasDaemon(pool, targetKey))
-	}
-}
-
-func TestUnifiedProcessPool_SupersededSessionDuringBackgroundRotation(t *testing.T) {
-	t.Parallel()
-	tests := []supersededSessionCase{
-		{name: "different session rotated by other pod", storeSessID: "00000000-0000-0000-0000-000000000099"},
-		{name: "newer lease generation acquired by other pod", storeLeaseGen: 2},
-		{name: "store read error prevents rotation save", simulateReadErr: true},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			runSupersededSessionCase(t, tc)
-		})
-	}
-}
-
-func TestUnifiedProcessPool_WaitingTurnDuringBackgroundRotationGetsNewSession(t *testing.T) {
-	t.Parallel()
-	ctx := context.Background()
-	var mu sync.Mutex
-	storeRecord := SessionRecord{ActiveSessionID: "00000000-0000-0000-0000-000000000001", TurnCount: 2}
-	var onRotatedCalled atomic.Bool
-	spawnStarted := make(chan struct{})
-	proceedSpawn := make(chan struct{})
-	var spawnCount atomic.Int32
-
-	mock := newPipeMockSpawner(pipeMockSpawnerOpts{
-		pid:        452,
-		initSessID: "00000000-0000-0000-0000-000000000001",
-		echoRes:    "ok",
-		onSpawn: func(cfg DaemonConfig) {
-			if spawnCount.Add(1) == 2 {
-				close(spawnStarted)
-				<-proceedSpawn
-			}
-		},
-	})
-
-	pool := NewUnifiedProcessPool(PoolConfig{
-		MaxSessionTurns: 2,
-		GetSessionRecord: func(ctx context.Context, targetKey string) (SessionRecord, error) {
-			mu.Lock()
-			defer mu.Unlock()
-			return storeRecord, nil
-		},
-		OnSessionRotated: func(ctx context.Context, targetKey, oldSessionID, newSessionID string) error {
-			onRotatedCalled.Store(true)
-			mu.Lock()
-			defer mu.Unlock()
-			storeRecord.ActiveSessionID = newSessionID
-			storeRecord.PreviousSessionID = oldSessionID
-			storeRecord.TurnCount = 0
-			return nil
-		},
-	}, mock)
-	defer pool.Close()
-
-	const targetKey = "target-waiting-turn"
-	lease1, err := pool.AcquireLease(ctx, targetKey)
-	if err != nil {
-		t.Fatalf("AcquireLease 1 failed: %v", err)
-	}
-	requireType[*unifiedSessionLease](t, lease1).turnCount = 2
-
-	if err := lease1.Release(); err != nil {
-		t.Fatalf("Release failed: %v", err)
-	}
-
-	<-spawnStarted
-
-	// Simulate incoming Discord message: PrepareTurn increments turn_count in store before acquiring lease
-	mu.Lock()
-	storeRecord.TurnCount = 3
-	mu.Unlock()
-
-	// Launch second AcquireLease in goroutine; it must block waiting for targetLock held by background rotation
-	lease2Chan := make(chan SessionLease, 1)
-	errChan := make(chan error, 1)
-	go func() {
-		l2, l2Err := pool.AcquireLease(ctx, targetKey)
-		if l2Err != nil {
-			errChan <- l2Err
-			return
-		}
-		lease2Chan <- l2
-	}()
-
-	// Wait until the second caller is known to be queued on the target lock (refs reaches 2).
-	var sawQueuedCaller bool
-	deadline := time.Now().Add(5 * time.Second)
-	for time.Now().Before(deadline) {
-		pool.targetMu.Lock()
-		tl := pool.targetLocks[targetKey]
-		var refs int32
-		if tl != nil {
-			refs = tl.refs
-		}
-		pool.targetMu.Unlock()
-		if refs >= 2 {
-			sawQueuedCaller = true
-			break
-		}
-		runtime.Gosched()
-	}
-	if !sawQueuedCaller {
-		t.Fatal("timed out waiting for second AcquireLease caller to queue on targetLock (refs >= 2)")
-	}
-	// Assert neither lease2Chan nor errChan has fired yet (caller is still blocked).
-	select {
-	case l2 := <-lease2Chan:
-		t.Fatalf("expected AcquireLease to block on targetLock, but received lease early: %v", l2)
-	case l2Err := <-errChan:
-		t.Fatalf("expected AcquireLease to block on targetLock, but failed early: %v", l2Err)
-	default:
-	}
-
-	// Unblock spawn and allow rotation to finish
-	close(proceedSpawn)
-	waitPoolBackground(pool)
-
-	if !onRotatedCalled.Load() {
-		t.Errorf("expected OnSessionRotated to be called when turn count was incremented by waiting turn")
-	}
-
-	select {
-	case l2Err := <-errChan:
-		t.Fatalf("waiting AcquireLease failed: %v", l2Err)
-	case l2 := <-lease2Chan:
-		defer l2.Release()
-		if l2.SessionID() != "00000000-0000-0000-0000-000000000002" {
-			t.Errorf("expected waiting lease to get new session %q, got %q", "00000000-0000-0000-0000-000000000002", l2.SessionID())
-		}
-	case <-time.After(5 * time.Second):
-		t.Fatal("timed out waiting for lease2 to unblock")
-	}
-}
-
-func TestUnifiedProcessPool_ColdLease_RotationSucceedsWithTurnIncrement(t *testing.T) {
-	t.Parallel()
-	ctx := context.Background()
-	var mu sync.Mutex
-	storeRecord := SessionRecord{ActiveSessionID: "00000000-0000-0000-0000-000000000001", TurnCount: 1}
-	var onRotatedCalled atomic.Bool
-	var rotatedOld, rotatedNew string
-
-	mock := newPipeMockSpawner(pipeMockSpawnerOpts{
-		pid:        451,
-		initSessID: "00000000-0000-0000-0000-000000000001",
-		echoRes:    "ok",
-	})
-
-	pool := NewUnifiedProcessPool(PoolConfig{
-		MaxSessionTurns: 1,
-		GetSessionRecord: func(ctx context.Context, targetKey string) (SessionRecord, error) {
-			mu.Lock()
-			defer mu.Unlock()
-			return storeRecord, nil
-		},
-		OnSessionRotated: func(ctx context.Context, targetKey, oldSessionID, newSessionID string) error {
-			onRotatedCalled.Store(true)
-			mu.Lock()
-			defer mu.Unlock()
-			rotatedOld, rotatedNew = oldSessionID, newSessionID
-			return nil
-		},
-	}, mock)
-	defer pool.Close()
-
-	const targetKey = "target-cold-lease-rot"
-	lease, err := pool.AcquireLease(ctx, targetKey)
-	if err != nil {
-		t.Fatalf("AcquireLease failed: %v", err)
-	}
-	if !lease.IsCold() {
-		t.Fatalf("expected lease to be cold when store has TurnCount=1")
-	}
-
-	// Simulate turn execution: store turn count is incremented once by its own turn before release
-	mu.Lock()
-	storeRecord.TurnCount = 2
-	mu.Unlock()
-	lease.MarkDirty()
-
-	if err := lease.Release(); err != nil {
-		t.Fatalf("Release failed: %v", err)
-	}
-
-	waitPoolBackground(pool)
-
-	if !onRotatedCalled.Load() {
-		t.Errorf("expected OnSessionRotated to be called for cold lease with no later use")
-	}
-	if rotatedOld != "00000000-0000-0000-0000-000000000001" || rotatedNew == "" {
-		t.Errorf("expected rotation from old to new session ID, got old=%q new=%q", rotatedOld, rotatedNew)
-	}
-	if !poolHasDaemon(pool, targetKey) {
-		t.Errorf("expected newly rotated daemon to be retained in pool")
-	}
-}
-
-func TestUnifiedProcessPool_AcquireLease_StaleIsolatedSessionAndAcquireFailure(t *testing.T) {
-	t.Parallel()
-	ctx := context.Background()
-	isolatedHome := filepath.Join(t.TempDir(), "voice-home")
-	if err := os.MkdirAll(filepath.Join(isolatedHome, ".gemini", "antigravity-cli", "conversations"), 0o755); err != nil {
-		t.Fatal(err)
-	}
-
-	var mu sync.Mutex
-	storeRecord := SessionRecord{ActiveSessionID: "00000000-0000-0000-0000-0000000000aa", TurnCount: 5, LeaseGeneration: 3}
-	var acqErr error
-	var spawnedSessions []string
-	var rotatedOld, rotatedNew string
-	var rotatedGen int64
-	var rotCalled atomic.Bool
-
-	mock := newPipeMockSpawner(pipeMockSpawnerOpts{
-		pid: 460, initSessID: "00000000-0000-0000-0000-0000000000bb", echoRes: "ok",
-		onSpawn: func(cfg DaemonConfig) {
-			mu.Lock()
-			spawnedSessions = append(spawnedSessions, cfg.SessionID)
-			mu.Unlock()
-		},
-	})
-	pool := NewUnifiedProcessPool(PoolConfig{
-		GeminiHomeDir: isolatedHome, MaxSessionTurns: 1,
-		AcquireSessionRecord: func(ctx context.Context, targetKey string) (SessionRecord, error) {
-			mu.Lock()
-			defer mu.Unlock()
-			if acqErr != nil {
-				return SessionRecord{}, acqErr
-			}
-			return storeRecord, nil
-		},
-		GetSessionRecord: func(ctx context.Context, targetKey string) (SessionRecord, error) {
-			mu.Lock()
-			defer mu.Unlock()
-			return storeRecord, nil
-		},
-		OnSessionRotatedCAS: func(ctx context.Context, targetKey, oldSessionID, newSessionID string, leaseGen int64) error {
-			mu.Lock()
-			defer mu.Unlock()
-			if oldSessionID != "" && storeRecord.ActiveSessionID != "" && storeRecord.ActiveSessionID != oldSessionID {
-				return errors.New("stale session ID mismatch")
-			}
-			if leaseGen > 0 && storeRecord.LeaseGeneration != leaseGen {
-				return errors.New("generation mismatch")
-			}
-			rotCalled.Store(true)
-			rotatedOld, rotatedNew, rotatedGen = oldSessionID, newSessionID, leaseGen
-			storeRecord.ActiveSessionID, storeRecord.TurnCount = newSessionID, 0
-			return nil
-		},
-	}, mock)
-	defer pool.Close()
-
-	mu.Lock()
-	acqErr = errors.New("temporary DB write failure")
-	mu.Unlock()
-	if _, err := pool.AcquireLease(ctx, "kitchen"); err == nil {
-		t.Fatal("expected AcquireLease to fail when AcquireSessionRecord fails")
-	}
-
-	mu.Lock()
-	acqErr = nil
-	mu.Unlock()
-	lease, err := pool.AcquireLease(ctx, "kitchen")
-	if err != nil {
-		t.Fatalf("expected AcquireLease to succeed after retry: %v", err)
-	}
-	mu.Lock()
-	if len(spawnedSessions) != 1 || spawnedSessions[0] != "" {
-		t.Fatalf("expected daemon spawn with cleared session ID (got %v)", spawnedSessions)
-	}
-	mu.Unlock()
-
-	lease.MarkDirty()
-	if err := lease.Release(); err != nil {
-		t.Fatalf("Release failed: %v", err)
-	}
-	waitPoolBackground(pool)
-
-	mu.Lock()
-	defer mu.Unlock()
-	if !rotCalled.Load() || rotatedGen != 3 || rotatedNew == "" {
-		t.Fatalf("unexpected rotation args: called=%v old=%q new=%q gen=%d", rotCalled.Load(), rotatedOld, rotatedNew, rotatedGen)
 	}
 }

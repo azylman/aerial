@@ -990,9 +990,9 @@ func TestInterchangeablePool_LeaseRelease_CancelsInnerRotation(t *testing.T) {
 		},
 	}
 	underlying := NewUnifiedProcessPool(cfg, spawner)
-	t.Cleanup(func() { _ = underlying.Close() })
+	defer underlying.Close()
 	pool := NewInterchangeablePool(underlying, InterchangeablePoolConfig{WorkerCount: 1})
-	t.Cleanup(func() { _ = pool.Close() })
+	defer pool.Close()
 
 	ctx := context.Background()
 	lease, err := pool.AcquireLease(ctx, "target-1")

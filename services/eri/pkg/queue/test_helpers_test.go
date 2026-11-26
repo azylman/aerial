@@ -1017,7 +1017,7 @@ func (*errQueueStore) SaveSessionID(context.Context, string, string) error {
 	return errors.New("errQueueStore: save session id error")
 }
 
-func (*errQueueStore) RotateSessionID(context.Context, string, string, ...string) error {
+func (*errQueueStore) RotateSessionID(context.Context, string, string) error {
 	return errors.New("errQueueStore: rotate session id error")
 }
 

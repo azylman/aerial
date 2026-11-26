@@ -241,58 +241,6 @@ func assertSessionTurnCountAndRotation(ctx context.Context, t *testing.T, store 
 		t.Errorf("post-clear: cleared=%q, prevAfterClear=%q", cleared, prevAfterClear)
 	}
 	mustOK(t, store.SaveSessionID(ctx, "th-1", "sess-2"), "SaveSessionID restore sess-2")
-	assertSessionCASRotation(ctx, t, store)
-}
-
-func assertSessionCASRotation(ctx context.Context, t *testing.T, store Store) {
-	t.Helper()
-	// CAS rotation with matching expectedOldSessionID succeeds
-	mustOK(t, store.RotateSessionID(ctx, "th-1", "sess-3", "sess-2"), "RotateSessionID CAS match")
-	currCAS, errCurrCAS := store.GetSessionID(ctx, "th-1")
-	mustOK(t, errCurrCAS, "GetSessionID CAS")
-	if currCAS != "sess-3" {
-		t.Errorf("expected sess-3 after CAS rotation, got %q", currCAS)
-	}
-
-	// CAS rotation with mismatching expectedOldSessionID fails with ErrSessionSuperseded and leaves record untouched
-	errMismatch := store.RotateSessionID(ctx, "th-1", "sess-4", "sess-stale")
-	if !errors.Is(errMismatch, ErrSessionSuperseded) {
-		t.Errorf("expected ErrSessionSuperseded, got %v", errMismatch)
-	}
-	currAfterMismatch, errCurrMismatch := store.GetSessionID(ctx, "th-1")
-	mustOK(t, errCurrMismatch, "GetSessionID after mismatch")
-	if currAfterMismatch != "sess-3" {
-		t.Errorf("expected sess-3 unchanged after mismatch CAS rotation, got %q", currAfterMismatch)
-	}
-
-	// AcquireSession increments lease generation and returns updated info
-	acq1, errAcq1 := store.AcquireSession(ctx, "th-1")
-	mustOK(t, errAcq1, "AcquireSession 1")
-	if acq1.LeaseGeneration <= 0 {
-		t.Errorf("expected positive lease generation, got %d", acq1.LeaseGeneration)
-	}
-
-	info, errInfo := store.GetSessionInfo(ctx, "th-1")
-	mustOK(t, errInfo, "GetSessionInfo")
-	if info.LeaseGeneration != acq1.LeaseGeneration || info.InternalSessionID != "sess-3" {
-		t.Errorf("GetSessionInfo = %+v, want gen=%d sess=sess-3", info, acq1.LeaseGeneration)
-	}
-
-	// CAS with matching generation succeeds
-	mustOK(t, store.RotateSessionIDCAS(ctx, "th-1", "sess-5", "sess-3", acq1.LeaseGeneration), "RotateSessionIDCAS matching gen")
-
-	// Another acquire increments lease generation
-	acq2, errAcq2 := store.AcquireSession(ctx, "th-1")
-	mustOK(t, errAcq2, "AcquireSession 2")
-	if acq2.LeaseGeneration <= acq1.LeaseGeneration {
-		t.Errorf("expected lease generation to increase, got %d <= %d", acq2.LeaseGeneration, acq1.LeaseGeneration)
-	}
-
-	// CAS with stale generation fails
-	errStaleGen := store.RotateSessionIDCAS(ctx, "th-1", "sess-6", "sess-5", acq1.LeaseGeneration)
-	if !errors.Is(errStaleGen, ErrSessionSuperseded) {
-		t.Errorf("expected ErrSessionSuperseded on stale gen, got %v", errStaleGen)
-	}
 }
 
 func assertSessionEmptyKeyGuards(ctx context.Context, t *testing.T, store Store) {

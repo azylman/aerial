@@ -294,13 +294,6 @@ func mkDispWithRoute(srvName, url, tool string) *DefaultDispatcher {
 	return d
 }
 
-func mkDispWithRouteClient(srvName, url, tool string, client *http.Client) *DefaultDispatcher {
-	srv := MCPServerConfig{Name: srvName, ServerURL: url}
-	d := NewDispatcher([]MCPServerConfig{srv}, client)
-	d.toolRoutes[tool] = srv
-	return d
-}
-
 // closedLoopbackURL returns the URL of an httptest server that is already closed, so dials
 // fail with connection refused without depending on a fixed port being free.
 func closedLoopbackURL(t *testing.T) string {
@@ -620,7 +613,7 @@ func TestExecute(t *testing.T) {
 		{"RPCErrorFails", mkDispWithRoute("rpcErr", rpcErrTs.URL, "rpc_tool"), "rpc_tool", nil, "", true, "returned error: internal error"},
 		{"BadJSONFails", mkDispWithRoute("badJSON", badJSONTs.URL, "bad_tool"), "bad_tool", nil, "", true, "empty or invalid JSON-RPC response"},
 		{"InvalidURLFails", mkDispWithRoute("inv", "://invalid\x7f", "inv_tool"), "inv_tool", nil, "", true, "failed to create request"},
-		{"ClosedPortFails", mkDispWithRouteClient("closed", closedURL, "closed_tool", &http.Client{Transport: errRoundTripper{}, Timeout: 50 * time.Millisecond}), "closed_tool", nil, "", true, "failed to call"},
+		{"ClosedPortFails", mkDispWithRoute("closed", closedURL, "closed_tool"), "closed_tool", nil, "", true, "failed to call"},
 		{"SSEStreamCall", mkDispWithRoute("sse", sseTs.URL, "sse_tool"), "sse_tool", nil, "sse text call", false, ""},
 		{"EmailNormalizationPrimary", mkDispWithRoute("email", emailTs.URL, "email_tool"), "email_tool", map[string]any{"user_google_email": "PRIMARY", "foo": "bar"}, "ok", false, ""},
 		{"EmailNormalizationPreserve", mkDispWithRoute("email", emailTs.URL, "email_tool"), "email_tool", map[string]any{"user_google_email": "alpha@example.com"}, "ok", false, ""},

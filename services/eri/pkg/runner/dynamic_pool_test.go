@@ -359,22 +359,15 @@ func TestDynamicVoicePool_SerializedReloadsAndDrain(t *testing.T) {
 type mockConfigurableVoicePool struct {
 	*mockVoicePool
 
-	underlying          *UnifiedProcessPool
-	rescuerSet          bool
-	managerSet          bool
-	callbacksSet        bool
-	casCallbacksSet     bool
-	getRecFn            func(context.Context, string) (SessionRecord, error)
-	onRotFn             func(context.Context, string, string, string) error
-	casAcqRecFn         func(context.Context, string) (SessionRecord, error)
-	casGetRecFn         func(context.Context, string) (SessionRecord, error)
-	casOnRotFn          func(context.Context, string, string, string, int64) error
-	modelUpdated        string
-	engineUpdated       string
-	initHadRescuer      bool
-	initHadManager      bool
-	initHadCallbacks    bool
-	initHadCASCallbacks bool
+	underlying       *UnifiedProcessPool
+	rescuerSet       bool
+	managerSet       bool
+	callbacksSet     bool
+	modelUpdated     string
+	engineUpdated    string
+	initHadRescuer   bool
+	initHadManager   bool
+	initHadCallbacks bool
 }
 
 func newMockConfigurableVoicePool(m string) *mockConfigurableVoicePool {
@@ -403,17 +396,6 @@ func (m *mockConfigurableVoicePool) SetSessionManager(sm *session.Manager) {
 func (m *mockConfigurableVoicePool) SetSessionCallbacks(getRec func(ctx context.Context, targetKey string) (SessionRecord, error), onRot func(ctx context.Context, targetKey, oldSessionID, newSessionID string) error) {
 	if m != nil {
 		m.callbacksSet = getRec != nil && onRot != nil
-		m.getRecFn = getRec
-		m.onRotFn = onRot
-	}
-}
-
-func (m *mockConfigurableVoicePool) SetSessionCallbacksCAS(acqRec, getRec func(ctx context.Context, targetKey string) (SessionRecord, error), onRotCAS func(ctx context.Context, targetKey, oldSessionID, newSessionID string, leaseGen int64) error) {
-	if m != nil {
-		m.casCallbacksSet = acqRec != nil && getRec != nil && onRotCAS != nil
-		m.casAcqRecFn = acqRec
-		m.casGetRecFn = getRec
-		m.casOnRotFn = onRotCAS
 	}
 }
 
@@ -434,65 +416,8 @@ func (m *mockConfigurableVoicePool) Initialize(ctx context.Context) error {
 		m.initHadRescuer = m.rescuerSet
 		m.initHadManager = m.managerSet
 		m.initHadCallbacks = m.callbacksSet
-		m.initHadCASCallbacks = m.casCallbacksSet
 	}
 	return m.mockVoicePool.Initialize(ctx)
-}
-
-type mockLegacyCallbackVoicePool struct {
-	*mockVoicePool
-
-	getRecFn func(context.Context, string) (SessionRecord, error)
-	onRotFn  func(context.Context, string, string, string) error
-}
-
-func (m *mockLegacyCallbackVoicePool) SetSessionCallbacks(getRec func(ctx context.Context, targetKey string) (SessionRecord, error), onRot func(ctx context.Context, targetKey, oldSessionID, newSessionID string) error) {
-	m.getRecFn = getRec
-	m.onRotFn = onRot
-}
-
-func assertForwardedCASCallbacks(t *testing.T, pool *mockConfigurableVoicePool, wantAcq, wantGet, wantRot int, wantGen int64, acqCalled, getCalled, rotCASCalled *int, gotLeaseGen *int64) {
-	t.Helper()
-	ctx := context.Background()
-	if _, err := pool.casAcqRecFn(ctx, "k"); err != nil || *acqCalled != wantAcq {
-		t.Fatalf("expected casAcqRecFn to reach acqRec: err=%v count=%d want=%d", err, *acqCalled, wantAcq)
-	}
-	if _, err := pool.casGetRecFn(ctx, "k"); err != nil || *getCalled != wantGet {
-		t.Fatalf("expected casGetRecFn to reach getRec: err=%v count=%d want=%d", err, *getCalled, wantGet)
-	}
-	if err := pool.casOnRotFn(ctx, "k", "old", "new", wantGen); err != nil || *rotCASCalled != wantRot || *gotLeaseGen != wantGen {
-		t.Fatalf("expected casOnRotFn to reach onRotCAS with gen=%d: err=%v count=%d gen=%d", wantGen, err, *rotCASCalled, *gotLeaseGen)
-	}
-}
-
-func verifyLegacyCallbackFallback(t *testing.T, acqRec, getRec func(context.Context, string) (SessionRecord, error), onRot func(context.Context, string, string, string) error, onRotCAS func(context.Context, string, string, string, int64) error, rotCASCalled *int, gotLeaseGen *int64) {
-	t.Helper()
-	ctx := context.Background()
-	legacyInitial := &mockLegacyCallbackVoicePool{mockVoicePool: newMockVoicePool("legacy-1")}
-	legacyCand := &mockLegacyCallbackVoicePool{mockVoicePool: newMockVoicePool("legacy-2")}
-	sfLegacy := &swappablePoolFactory{pool: legacyInitial, fp: "fp-l1"}
-	dynLegacy := NewDynamicVoicePool(sfLegacy.factory)
-	defer dynLegacy.Close()
-	dynLegacy.SetSessionCallbacksCAS(acqRec, getRec, onRotCAS)
-	if legacyInitial.getRecFn == nil || legacyInitial.onRotFn == nil {
-		t.Fatalf("expected legacy initial pool to receive fallback callbacks")
-	}
-	wantCount := *rotCASCalled + 1
-	if err := legacyInitial.onRotFn(ctx, "k", "old", "new"); err != nil || *rotCASCalled != wantCount || *gotLeaseGen != 0 {
-		t.Fatalf("expected legacy fallback onRotFn to invoke onRotCAS with gen=0: err=%v count=%d gen=%d", err, *rotCASCalled, *gotLeaseGen)
-	}
-	sfLegacy.set(legacyCand, "fp-l2", nil)
-	dynLegacy.MarkDirty()
-	if legacyCand.getRecFn == nil || legacyCand.onRotFn == nil {
-		t.Fatalf("expected legacy candidate pool to receive fallback callbacks on reload")
-	}
-	dynLegacy.SetSessionCallbacks(getRec, onRot)
-	legacyCand2 := &mockLegacyCallbackVoicePool{mockVoicePool: newMockVoicePool("legacy-3")}
-	sfLegacy.set(legacyCand2, "fp-l3", nil)
-	dynLegacy.MarkDirty()
-	if legacyCand2.getRecFn == nil || legacyCand2.onRotFn == nil {
-		t.Fatalf("expected legacy candidate pool to receive non-CAS callbacks on reload")
-	}
 }
 
 func TestDynamicVoicePool_Underlying(t *testing.T) {
@@ -553,48 +478,33 @@ func TestDynamicVoicePool_WiringAndPropagations(t *testing.T) {
 	dyn := NewDynamicVoicePool(sf.factory)
 	defer dyn.Close()
 
-	var acqCalled, getCalled, rotCASCalled int
-	var gotLeaseGen int64
 	rescuer := func(context.Context, string, time.Time) string { return "rescued" }
 	sessMgr := &session.Manager{}
-	acqRec := func(context.Context, string) (SessionRecord, error) {
-		acqCalled++
-		return SessionRecord{ActiveSessionID: "s-acq", LeaseGeneration: 7}, nil
-	}
-	getRec := func(context.Context, string) (SessionRecord, error) {
-		getCalled++
-		return SessionRecord{ActiveSessionID: "s-get", LeaseGeneration: 7}, nil
-	}
+	getRec := func(context.Context, string) (SessionRecord, error) { return SessionRecord{}, nil }
 	onRot := func(context.Context, string, string, string) error { return nil }
-	onRotCAS := func(_ context.Context, _, _, _ string, leaseGen int64) error {
-		rotCASCalled++
-		gotLeaseGen = leaseGen
-		return nil
-	}
 
 	dyn.SetTranscriptRescuer(rescuer)
 	dyn.SetSessionManager(sessMgr)
 	dyn.SetSessionCallbacks(getRec, onRot)
-	dyn.SetSessionCallbacksCAS(acqRec, getRec, onRotCAS)
 	dyn.UpdateModel("gemini-3.8-flash-low")
 	dyn.UpdateEngine("gemini_api", "/bin/claude")
 
-	if !initialPool.rescuerSet || !initialPool.managerSet || !initialPool.callbacksSet || !initialPool.casCallbacksSet {
-		t.Fatalf("expected initial pool to have rescuer, manager, callbacks, and CAS callbacks set")
+	if !initialPool.rescuerSet || !initialPool.managerSet || !initialPool.callbacksSet {
+		t.Fatalf("expected initial pool to have rescuer, manager, and callbacks set")
 	}
-	assertForwardedCASCallbacks(t, initialPool, 1, 1, 1, 42, &acqCalled, &getCalled, &rotCASCalled, &gotLeaseGen)
-	if initialPool.modelUpdated != "gemini-3.8-flash-low" || initialPool.engineUpdated != "gemini_api" {
-		t.Fatalf("expected initial pool model/engine updated, got model=%q engine=%q", initialPool.modelUpdated, initialPool.engineUpdated)
+	if initialPool.modelUpdated != "gemini-3.8-flash-low" {
+		t.Fatalf("expected initial pool modelUpdated = %q, got %q", "gemini-3.8-flash-low", initialPool.modelUpdated)
+	}
+	if initialPool.engineUpdated != "gemini_api" {
+		t.Fatalf("expected initial pool engineUpdated = %q, got %q", "gemini_api", initialPool.engineUpdated)
 	}
 
 	// Swap factory to return candidatePool with new fingerprint, then MarkDirty()
 	sf.set(candidatePool, "fp-2", nil)
 	dyn.MarkDirty()
 
-	if !candidatePool.initHadRescuer || !candidatePool.initHadManager || !candidatePool.initHadCASCallbacks {
-		t.Fatalf("expected candidate pool to receive dependencies before Initialize: rescuer=%v manager=%v casCallbacks=%v",
-			candidatePool.initHadRescuer, candidatePool.initHadManager, candidatePool.initHadCASCallbacks)
+	if !candidatePool.initHadRescuer || !candidatePool.initHadManager || !candidatePool.initHadCallbacks {
+		t.Fatalf("expected candidate pool to receive dependencies before Initialize: rescuer=%v manager=%v callbacks=%v",
+			candidatePool.initHadRescuer, candidatePool.initHadManager, candidatePool.initHadCallbacks)
 	}
-	assertForwardedCASCallbacks(t, candidatePool, 2, 2, 2, 99, &acqCalled, &getCalled, &rotCASCalled, &gotLeaseGen)
-	verifyLegacyCallbackFallback(t, acqRec, getRec, onRot, onRotCAS, &rotCASCalled, &gotLeaseGen)
 }

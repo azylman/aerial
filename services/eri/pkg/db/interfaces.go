@@ -38,9 +38,6 @@ type AttemptStart struct {
 // ErrRecordNotFound is returned by by-ID record operations when the row does not exist.
 var ErrRecordNotFound = errors.New("record not found")
 
-// ErrSessionSuperseded is returned when RotateSessionID cannot match the expected prior session ID.
-var ErrSessionSuperseded = errors.New("session rotation superseded: active session does not match expected baseline")
-
 // MessageStore handles message queue lifecycle and turn history.
 type MessageStore interface {
 	InsertMessage(ctx context.Context, msg Message) error
@@ -81,10 +78,7 @@ type SessionStore interface {
 	SaveSessionID(ctx context.Context, threadID, sessionID string) error
 	IncrementSessionTurnCount(ctx context.Context, sessionKey string) (int, error)
 	GetSessionTurnCount(ctx context.Context, sessionKey string) (int, error)
-	RotateSessionID(ctx context.Context, sessionKey, newSessionID string, expectedOldSessionID ...string) error
-	RotateSessionIDCAS(ctx context.Context, sessionKey, newSessionID, expectedOldSessionID string, expectedGeneration int64) error
-	AcquireSession(ctx context.Context, sessionKey string) (SessionInfo, error)
-	GetSessionInfo(ctx context.Context, sessionKey string) (SessionInfo, error)
+	RotateSessionID(ctx context.Context, sessionKey, newSessionID string) error
 	GetThreadSummary(ctx context.Context, threadID string) (summary string, lastSummarizedMsgID string, err error)
 	SaveThreadSummary(ctx context.Context, threadID, summary, lastSummarizedMsgID string) error
 }

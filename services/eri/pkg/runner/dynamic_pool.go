@@ -25,12 +25,10 @@ type DynamicVoicePool struct {
 	closed      bool
 	draining    atomic.Bool
 
-	transcriptRescuer    func(context.Context, string, time.Time) string
-	sessionManager       *session.Manager
-	acquireSessionRecord func(context.Context, string) (SessionRecord, error)
-	getSessionRecord     func(context.Context, string) (SessionRecord, error)
-	onSessionRotated     func(context.Context, string, string, string) error
-	onSessionRotatedCAS  func(context.Context, string, string, string, int64) error
+	transcriptRescuer func(context.Context, string, time.Time) string
+	sessionManager    *session.Manager
+	getSessionRecord  func(context.Context, string) (SessionRecord, error)
+	onSessionRotated  func(context.Context, string, string, string) error
 }
 
 var _ AgentPool = (*DynamicVoicePool)(nil)
@@ -88,20 +86,6 @@ func (p *DynamicVoicePool) applyDependenciesToPool(target AgentPool) {
 			s.SetSessionManager(p.sessionManager)
 		}
 	}
-	if p.acquireSessionRecord != nil || p.onSessionRotatedCAS != nil {
-		switch s := target.(type) {
-		case interface {
-			SetSessionCallbacksCAS(acqRec, getRec func(ctx context.Context, targetKey string) (SessionRecord, error), onRotCAS func(ctx context.Context, targetKey, oldSessionID, newSessionID string, leaseGen int64) error)
-		}:
-			s.SetSessionCallbacksCAS(p.acquireSessionRecord, p.getSessionRecord, p.onSessionRotatedCAS)
-			return
-		case interface {
-			SetSessionCallbacks(getRec func(ctx context.Context, targetKey string) (SessionRecord, error), onRot func(ctx context.Context, targetKey, oldSessionID, newSessionID string) error)
-		}:
-			s.SetSessionCallbacks(p.getSessionRecord, p.onSessionRotated)
-			return
-		}
-	}
 	if p.getSessionRecord != nil || p.onSessionRotated != nil {
 		if s, ok := target.(interface {
 			SetSessionCallbacks(getRec func(ctx context.Context, targetKey string) (SessionRecord, error), onRot func(ctx context.Context, targetKey, oldSessionID, newSessionID string) error)
@@ -142,10 +126,8 @@ func (p *DynamicVoicePool) SetSessionManager(sm *session.Manager) {
 // SetSessionCallbacks updates the session record lookup and rotation callbacks.
 func (p *DynamicVoicePool) SetSessionCallbacks(getRec func(ctx context.Context, targetKey string) (SessionRecord, error), onRot func(ctx context.Context, targetKey, oldSessionID, newSessionID string) error) {
 	p.mu.Lock()
-	p.acquireSessionRecord = nil
 	p.getSessionRecord = getRec
 	p.onSessionRotated = onRot
-	p.onSessionRotatedCAS = nil
 	pool := p.currentPool
 	p.mu.Unlock()
 	if pool != nil {
@@ -153,35 +135,6 @@ func (p *DynamicVoicePool) SetSessionCallbacks(getRec func(ctx context.Context, 
 			SetSessionCallbacks(getFn func(ctx context.Context, targetKey string) (SessionRecord, error), onRotFn func(ctx context.Context, targetKey, oldSessionID, newSessionID string) error)
 		}); ok {
 			s.SetSessionCallbacks(getRec, onRot)
-		}
-	}
-}
-
-// SetSessionCallbacksCAS updates the session record lookup and CAS rotation callbacks.
-func (p *DynamicVoicePool) SetSessionCallbacksCAS(acqRec, getRec func(ctx context.Context, targetKey string) (SessionRecord, error), onRotCAS func(ctx context.Context, targetKey, oldSessionID, newSessionID string, leaseGen int64) error) {
-	var fallbackRot func(context.Context, string, string, string) error
-	if onRotCAS != nil {
-		fallbackRot = func(ctx context.Context, targetKey, oldSessionID, newSessionID string) error {
-			return onRotCAS(ctx, targetKey, oldSessionID, newSessionID, 0)
-		}
-	}
-	p.mu.Lock()
-	p.acquireSessionRecord = acqRec
-	p.getSessionRecord = getRec
-	p.onSessionRotated = fallbackRot
-	p.onSessionRotatedCAS = onRotCAS
-	pool := p.currentPool
-	p.mu.Unlock()
-	if pool != nil {
-		switch s := pool.(type) {
-		case interface {
-			SetSessionCallbacksCAS(acqFn, getFn func(context.Context, string) (SessionRecord, error), onRotFn func(context.Context, string, string, string, int64) error)
-		}:
-			s.SetSessionCallbacksCAS(acqRec, getRec, onRotCAS)
-		case interface {
-			SetSessionCallbacks(getFn func(context.Context, string) (SessionRecord, error), onRotFn func(context.Context, string, string, string) error)
-		}:
-			s.SetSessionCallbacks(getRec, fallbackRot)
 		}
 	}
 }

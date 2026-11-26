@@ -335,12 +335,6 @@ func (p *InterchangeablePool) SetSessionCallbacks(getRec func(ctx context.Contex
 	}
 }
 
-func (p *InterchangeablePool) SetSessionCallbacksCAS(acqRec, getRec func(ctx context.Context, targetKey string) (SessionRecord, error), onRotCAS func(ctx context.Context, targetKey, oldSessionID, newSessionID string, leaseGen int64) error) {
-	if p != nil && p.underlying != nil {
-		p.underlying.SetSessionCallbacksCAS(acqRec, getRec, onRotCAS)
-	}
-}
-
 func (p *InterchangeablePool) UpdateModel(model string) {
 	if p != nil && p.underlying != nil {
 		p.underlying.UpdateModel(model)
