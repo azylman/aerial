@@ -57,15 +57,6 @@ func RegisterSteerHandler(mux *http.ServeMux, pool *WorkerPool) {
 // HandleDrainPending drains pending messages or dispatches for the turn currently running under
 // the daemon or conversation identified by req.
 func (p *WorkerPool) HandleDrainPending(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		w.Header().Set("Allow", http.MethodPost)
-		writeDrainError(w, http.StatusMethodNotAllowed, "method not allowed")
-		return
-	}
-	if p == nil || p.turns == nil {
-		writeDrainError(w, http.StatusNotFound, "turn registry not available")
-		return
-	}
 	var req SteerDrainRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeDrainError(w, http.StatusBadRequest, fmt.Sprintf("invalid request: %v", err))

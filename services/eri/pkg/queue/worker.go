@@ -641,9 +641,6 @@ func (te *turnExecution) evaluateAmbientWake() (shouldExit bool) {
 // EvaluateIngressWake evaluates whether an incoming Discord message should wake a turn
 // or be completed immediately (e.g. ignored channel policy or ambient message).
 func (p *WorkerPool) EvaluateIngressWake(ctx context.Context, threadID string, msg db.Message) (shouldEnqueue bool, completedReason string) {
-	if p == nil {
-		return true, ""
-	}
 	te := p.newStepTurnExecution(ctx, threadID, []db.Message{msg})
 	te.resolveChannelPolicy()
 	if !isHTTPClientBurst(te.burst) && te.policy.IsIgnored() {

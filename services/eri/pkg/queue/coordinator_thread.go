@@ -164,43 +164,25 @@ func (t *ThreadCoordinator) Enqueue(ctx restate.ObjectSharedContext, req ThreadE
 	}
 
 	fallbackID := deriveDeterministicMessageID(ctx, final)
-	recRes, err := t.recordQueuedMessage(ctx, req, final, fallbackID)
+	msgID, err := t.recordQueuedMessage(ctx, req, final, fallbackID)
 	if err != nil {
 		return ThreadEnqueueResponse{}, coordinatorError(err)
 	}
 
-	if recRes.ShouldEnqueue {
-		restate.ObjectSend(ctx, t.ServiceName(), final, HandlerAppend).Send(AppendRequest{IDs: []string{recRes.MessageID}, SkipIfActive: req.SkipIfActive})
-	}
-	return ThreadEnqueueResponse{Status: eriwire.StatusAccepted, ThreadID: final, MessageID: recRes.MessageID}, nil
+	restate.ObjectSend(ctx, t.ServiceName(), final, HandlerAppend).Send(AppendRequest{IDs: []string{msgID}, SkipIfActive: req.SkipIfActive})
+	return ThreadEnqueueResponse{Status: eriwire.StatusAccepted, ThreadID: final, MessageID: msgID}, nil
 }
 
-type recordQueuedResult struct {
-	MessageID     string `json:"message_id"`
-	ShouldEnqueue bool   `json:"should_enqueue"`
-}
-
-func (t *ThreadCoordinator) recordQueuedMessage(ctx restate.ObjectSharedContext, req ThreadEnqueueRequest, final, fallbackID string) (recordQueuedResult, error) {
-	return restate.Run(ctx, func(rc restate.RunContext) (recordQueuedResult, error) {
+func (t *ThreadCoordinator) recordQueuedMessage(ctx restate.ObjectSharedContext, req ThreadEnqueueRequest, final, fallbackID string) (string, error) {
+	return restate.Run(ctx, func(rc restate.RunContext) (string, error) {
 		msg := buildEnqueuedMessage(req, final, fallbackID, time.Now().UTC())
-		shouldEnqueue := true
-		if req.Message != nil {
-			if eval, ok := t.resolver.(ingressWakeEvaluator); ok && eval != nil {
-				var completedReason string
-				shouldEnqueue, completedReason = eval.EvaluateIngressWake(rc, final, msg)
-				if !shouldEnqueue {
-					msg.Status = db.StatusCompleted
-					msg.ErrorMessage = completedReason
-				}
-			}
-		}
 		if _, sErr := storeCall(rc, func(sc context.Context) (struct{}, error) {
 			return struct{}{}, t.store.InsertMessage(sc, msg)
 		}); sErr != nil {
 			log.Printf("[ThreadSession] Error recording message %s: %v", msg.ID, sErr)
-			return recordQueuedResult{}, sErr
+			return "", sErr
 		}
-		return recordQueuedResult{MessageID: msg.ID, ShouldEnqueue: shouldEnqueue}, nil
+		return msg.ID, nil
 	}, restate.WithName(StepRecordQueued))
 }
 
@@ -239,7 +221,67 @@ func (t *ThreadCoordinator) lookupExistingPrompt(ctx restate.ObjectSharedContext
 // Append adds IDs to the thread's pending list (deduplicated) and starts a turn when idle; with
 // SkipIfActive on a busy thread the new rows are recorded COMPLETED as skipped instead.
 func (t *ThreadCoordinator) Append(ctx restate.ObjectContext, req AppendRequest) error {
-	return t.core.append(ctx, req)
+	ids := req.IDs
+	eval, ok := t.resolver.(ingressWakeEvaluator)
+	if ok && eval != nil {
+		allowed, err := t.filterAllowedIDs(ctx, req, eval)
+		if err != nil {
+			return coordinatorError(err)
+		}
+		ids = allowed
+	}
+	return t.core.append(ctx, AppendRequest{IDs: ids, SkipIfActive: req.SkipIfActive})
+}
+
+func (t *ThreadCoordinator) filterAllowedIDs(ctx restate.ObjectContext, req AppendRequest, eval ingressWakeEvaluator) ([]string, error) {
+	st, err := loadCoordinatorState(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if req.SkipIfActive && st.busy() {
+		return req.IDs, nil
+	}
+	fresh := make([]string, 0, len(req.IDs))
+	for _, id := range normalizeStepIDs(req.IDs) {
+		if !st.holds(id) {
+			fresh = append(fresh, id)
+		}
+	}
+	if len(fresh) == 0 {
+		return req.IDs, nil
+	}
+	return t.gatePendingMessages(ctx, fresh, eval)
+}
+
+func (t *ThreadCoordinator) gatePendingMessages(ctx restate.ObjectContext, fresh []string, eval ingressWakeEvaluator) ([]string, error) {
+	threadKey := restate.Key(ctx)
+	return restate.Run(ctx, func(rc restate.RunContext) ([]string, error) {
+		allowed := make([]string, 0, len(fresh))
+		for _, id := range fresh {
+			var msg *db.Message
+			if _, sErr := storeCall(rc, func(sc context.Context) (struct{}, error) {
+				var gErr error
+				msg, gErr = t.store.GetMessage(sc, id)
+				return struct{}{}, gErr
+			}); sErr != nil {
+				return nil, sErr
+			}
+			if msg == nil {
+				continue
+			}
+			shouldEnqueue, completedReason := eval.EvaluateIngressWake(rc, threadKey, *msg)
+			if shouldEnqueue {
+				allowed = append(allowed, id)
+			} else {
+				if _, sErr := storeCall(rc, func(sc context.Context) (struct{}, error) {
+					return struct{}{}, t.store.UpdateMessageStatus(sc, id, db.StatusCompleted, completedReason)
+				}); sErr != nil {
+					return nil, sErr
+				}
+			}
+		}
+		return allowed, nil
+	}, restate.WithName(StepGateIngressWake))
 }
 
 // OnTurnDone ends the active turn reported by its TurnRunner (fenced on TurnID).

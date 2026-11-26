@@ -158,23 +158,18 @@ func TestMatchTurnExecution(t *testing.T) {
 }
 
 type handlerValidationCase struct {
-	name          string
-	method        string
-	body          string
-	noTurns       bool
-	noMatch       bool
-	closed        bool
-	finalized     bool
-	interrupted   bool
-	wantStatus    int
-	wantSubstr    string
-	wantAllowPost bool
+	name        string
+	method      string
+	body        string
+	noMatch     bool
+	closed      bool
+	finalized   bool
+	interrupted bool
+	wantStatus  int
+	wantSubstr  string
 }
 
 func setupValidationTestPool(tc handlerValidationCase) (*WorkerPool, func()) {
-	if tc.noTurns {
-		return nil, func() {}
-	}
 	pool := NewWorkerPool(WorkerPoolConfig{})
 	if tc.noMatch {
 		return pool, func() {}
@@ -203,13 +198,6 @@ func TestHandleDrainPending_ValidationAndStatus(t *testing.T) {
 
 	tests := []handlerValidationCase{
 		{
-			name:          "GET returns 405 with Allow POST",
-			method:        http.MethodGet,
-			wantStatus:    http.StatusMethodNotAllowed,
-			wantSubstr:    "method not allowed",
-			wantAllowPost: true,
-		},
-		{
 			name:       "invalid JSON body returns 400",
 			method:     http.MethodPost,
 			body:       "{not-json",
@@ -229,14 +217,6 @@ func TestHandleDrainPending_ValidationAndStatus(t *testing.T) {
 			body:       `{"daemon_id":"   ","conversation_id":"  ","session_id":""}`,
 			wantStatus: http.StatusBadRequest,
 			wantSubstr: "at least one of daemon_id",
-		},
-		{
-			name:       "turn registry nil returns 404",
-			method:     http.MethodPost,
-			body:       `{"daemon_id":"daemon-1"}`,
-			noTurns:    true,
-			wantStatus: http.StatusNotFound,
-			wantSubstr: "turn registry not available",
 		},
 		{
 			name:       "turn not found returns 404",
@@ -282,19 +262,11 @@ func TestHandleDrainPending_ValidationAndStatus(t *testing.T) {
 			req := httptest.NewRequest(tc.method, SteerDrainPath, bytes.NewBufferString(tc.body))
 			rec := httptest.NewRecorder()
 
-			if pool != nil {
-				pool.HandleDrainPending(rec, req)
-			} else {
-				var nilPool *WorkerPool
-				nilPool.HandleDrainPending(rec, req)
-			}
+			pool.HandleDrainPending(rec, req)
 
 			assert.Equal(t, tc.wantStatus, rec.Code)
 			if tc.wantSubstr != "" {
 				assert.Contains(t, rec.Body.String(), tc.wantSubstr)
-			}
-			if tc.wantAllowPost {
-				assert.Equal(t, http.MethodPost, rec.Header().Get("Allow"))
 			}
 		})
 	}
@@ -599,6 +571,13 @@ func TestRegisterSteerHandler(t *testing.T) {
 	recLoopback := httptest.NewRecorder()
 	mux.ServeHTTP(recLoopback, reqLoopback)
 	assert.Equal(t, http.StatusBadRequest, recLoopback.Code)
+
+	// Non-POST method (GET) rejected with 405 Method Not Allowed by mux pattern
+	reqGET := httptest.NewRequest(http.MethodGet, SteerDrainPath, http.NoBody)
+	reqGET.RemoteAddr = "127.0.0.1:54321"
+	recGET := httptest.NewRecorder()
+	mux.ServeHTTP(recGET, reqGET)
+	assert.Equal(t, http.StatusMethodNotAllowed, recGET.Code)
 }
 
 func TestDrainHTTPClient(t *testing.T) {

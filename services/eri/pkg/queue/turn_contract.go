@@ -53,6 +53,7 @@ const (
 // Step names.
 const (
 	StepRecordQueued         = "record-queued"
+	StepGateIngressWake      = "gate-ingress-wake"
 	StepResolveTargetThread  = "resolve-target-thread"
 	StepLookupExisting       = "lookup-existing"
 	StepRecordSkipped        = "record-skipped"
