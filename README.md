@@ -39,13 +39,18 @@ Install vanilla `k3s` with Traefik disabled (**NGINX Gateway Fabric** handles in
 curl -sfL https://get.k3s.io | sh -s - --disable traefik --write-kubeconfig ~/.kube/config --write-kubeconfig-mode 600
 ```
 
-### Step 2: Fork Configuration & Bootstrap via Flux CD
+### Step 2: Fork Configuration, Seed Bootstrap Secrets & Bootstrap Flux CD
 1. Fork [**`azylman/aerial-config-example`**](https://github.com/azylman/aerial-config-example) to create your private `aerial-config` repository (e.g. `your-username/my-aerial-config`).
 2. Customize `config.yaml` with your Discord administrator ID (`admin_users`) and persona rules.
-3. Install the Flux CLI and bootstrap your private configuration repository:
+3. Seed the bootstrap credentials secret and bootstrap Flux CD:
 
 ```bash
 export GITHUB_PAT="your-github-pat"
+export DISCORD_BOT_TOKEN="your-discord-bot-token"
+
+kubectl create secret generic aerial-bootstrap-secrets \
+  --from-literal=DISCORD_BOT_TOKEN="$DISCORD_BOT_TOKEN" \
+  --from-literal=GITHUB_PAT="$GITHUB_PAT"
 
 curl -s https://fluxcd.io/install.sh | sudo bash
 GITHUB_TOKEN="$GITHUB_PAT" flux bootstrap github \
@@ -56,28 +61,9 @@ GITHUB_TOKEN="$GITHUB_PAT" flux bootstrap github \
   --personal
 ```
 
-### Step 3: Bootstrap Infisical & Populate Application Secrets
-Once Flux boots Infisical, initialize the instance from the CLI (`infisical bootstrap` creates the admin account, organization, and Instance Admin Machine Identity and returns a **Token Auth** access token), store `INFISICAL_TOKEN` for **External Secrets Operator**, and populate your external application secrets in project `aerial` (`default` environment). External Secrets Operator automatically generates database, Infisical, VictoriaMetrics, NATS, and GitHub webhook (`GITHUB_WEBHOOK_SECRET`) credentials and syncs them into Infisical via `PushSecret`:
+In-cluster `Job/infisical-bootstrap` and **External Secrets Operator** automatically initialize Infisical, derive `AERIAL_CONFIG_REPO_URL` from `GitRepository/flux-system`, create `Secret/infisical-universal-auth`, and sync application and generated credentials into Infisical without requiring the Infisical CLI or `jq` on the host. External Secrets Operator automatically generates database, Infisical, VictoriaMetrics, NATS, and GitHub webhook (`GITHUB_WEBHOOK_SECRET`) credentials and syncs them into Infisical via `PushSecret`.
 
-```bash
-# 1. Bootstrap Infisical and store the returned Machine Identity Token Auth token
-export INFISICAL_TOKEN="$(infisical bootstrap \
-  --domain http://<node-ip> \
-  --email admin@example.com \
-  --password 'your-admin-password' \
-  --organization aerial \
-  | jq -r '.identity.credentials.token')"
-
-kubectl create secret generic infisical-universal-auth \
-  --from-literal=INFISICAL_TOKEN="$INFISICAL_TOKEN"
-
-# 2. Populate external application secrets in Infisical (project slug aerial, default environment)
-infisical secrets set --env=default \
-  DISCORD_BOT_TOKEN="your-discord-bot-token" \
-  GITHUB_PAT="$GITHUB_PAT"
-```
-
-### Step 4: Authenticate Agent CLI & Verify Rollout
+### Step 3: Authenticate Agent CLI & Verify Rollout
 1. Authenticate your preferred execution engine (for example, `agy` via Google OAuth) in the execution worker pod:
    ```bash
    kubectl exec -it $(kubectl get pod -l app.kubernetes.io/name=eri-restate -o name | head -n1) -c eri-restate -- agy

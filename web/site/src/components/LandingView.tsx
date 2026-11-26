@@ -85,7 +85,7 @@ export function LandingView() {
               <span>{isCopied() ? 'Copied!' : isFailed() ? 'Copy failed' : 'Copy'}</span>
             </button>
             <a href="#quickstart" className="install-guide-link" data-testid="hero-install-jump">
-              4-Step Guide ↓
+              3-Step Guide ↓
             </a>
           </div>
         </div>
