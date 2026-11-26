@@ -751,6 +751,13 @@ func (p *WorkerPool) StopBurstTurn(ctx context.Context, turnID string, ids []str
 	if err != nil {
 		return err
 	}
+	if live := p.turns.LiveExecution(turnID); live != nil {
+		live.steerMu.Lock()
+		if len(live.drainedIDs) > 0 {
+			ids = append(ids, live.drainedIDs...)
+		}
+		live.steerMu.Unlock()
+	}
 	p.turns.Stop(turnID, CancelledByOperatorReason)
 	_, err = p.failActiveBurstRows(ctx, s, normalizeStepIDs(ids), AttemptSummary{Outcome: OutcomeCancelled})
 	return err
@@ -761,8 +768,15 @@ func (p *WorkerPool) StopDispatchTurn(ctx context.Context, turnID string, ids []
 	if _, err := p.stepStore(); err != nil {
 		return err
 	}
+	if live := p.turns.LiveExecution(turnID); live != nil {
+		live.steerMu.Lock()
+		if len(live.drainedIDs) > 0 {
+			ids = append(ids, live.drainedIDs...)
+		}
+		live.steerMu.Unlock()
+	}
 	p.turns.Stop(turnID, CancelledByOperatorReason)
-	return p.RecordDispatchOutcome(ctx, ids, AttemptSummary{Outcome: OutcomeCancelled})
+	return p.RecordDispatchOutcome(ctx, normalizeStepIDs(ids), AttemptSummary{Outcome: OutcomeCancelled})
 }
 
 func anyAttempted(rows []db.Message) bool {

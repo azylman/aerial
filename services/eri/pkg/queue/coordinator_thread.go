@@ -21,6 +21,10 @@ type threadResolver interface {
 	ResolveTargetThread(channelID, title, prompt string, now time.Time) string
 }
 
+type ingressWakeEvaluator interface {
+	EvaluateIngressWake(ctx context.Context, threadID string, msg db.Message) (shouldEnqueue bool, completedReason string)
+}
+
 // ThreadCoordinator is the ThreadSession Virtual Object keyed by thread ID. It
 // owns the thread's turn order and its active turn; TurnRunner RunBurst executes each turn.
 type ThreadCoordinator struct {
@@ -160,22 +164,44 @@ func (t *ThreadCoordinator) Enqueue(ctx restate.ObjectSharedContext, req ThreadE
 	}
 
 	fallbackID := deriveDeterministicMessageID(ctx, final)
-	msgID, err := restate.Run(ctx, func(rc restate.RunContext) (string, error) {
-		msg := buildEnqueuedMessage(req, final, fallbackID, time.Now().UTC())
-		if _, sErr := storeCall(rc, func(sc context.Context) (struct{}, error) {
-			return struct{}{}, t.store.InsertMessage(sc, msg)
-		}); sErr != nil {
-			log.Printf("[ThreadSession] Error recording message %s: %v", msg.ID, sErr)
-			return "", sErr
-		}
-		return msg.ID, nil
-	}, restate.WithName(StepRecordQueued))
+	recRes, err := t.recordQueuedMessage(ctx, req, final, fallbackID)
 	if err != nil {
 		return ThreadEnqueueResponse{}, coordinatorError(err)
 	}
 
-	restate.ObjectSend(ctx, t.ServiceName(), final, HandlerAppend).Send(AppendRequest{IDs: []string{msgID}, SkipIfActive: req.SkipIfActive})
-	return ThreadEnqueueResponse{Status: eriwire.StatusAccepted, ThreadID: final, MessageID: msgID}, nil
+	if recRes.ShouldEnqueue {
+		restate.ObjectSend(ctx, t.ServiceName(), final, HandlerAppend).Send(AppendRequest{IDs: []string{recRes.MessageID}, SkipIfActive: req.SkipIfActive})
+	}
+	return ThreadEnqueueResponse{Status: eriwire.StatusAccepted, ThreadID: final, MessageID: recRes.MessageID}, nil
+}
+
+type recordQueuedResult struct {
+	MessageID     string `json:"message_id"`
+	ShouldEnqueue bool   `json:"should_enqueue"`
+}
+
+func (t *ThreadCoordinator) recordQueuedMessage(ctx restate.ObjectSharedContext, req ThreadEnqueueRequest, final, fallbackID string) (recordQueuedResult, error) {
+	return restate.Run(ctx, func(rc restate.RunContext) (recordQueuedResult, error) {
+		msg := buildEnqueuedMessage(req, final, fallbackID, time.Now().UTC())
+		shouldEnqueue := true
+		if req.Message != nil {
+			if eval, ok := t.resolver.(ingressWakeEvaluator); ok && eval != nil {
+				var completedReason string
+				shouldEnqueue, completedReason = eval.EvaluateIngressWake(rc, final, msg)
+				if !shouldEnqueue {
+					msg.Status = db.StatusCompleted
+					msg.ErrorMessage = completedReason
+				}
+			}
+		}
+		if _, sErr := storeCall(rc, func(sc context.Context) (struct{}, error) {
+			return struct{}{}, t.store.InsertMessage(sc, msg)
+		}); sErr != nil {
+			log.Printf("[ThreadSession] Error recording message %s: %v", msg.ID, sErr)
+			return recordQueuedResult{}, sErr
+		}
+		return recordQueuedResult{MessageID: msg.ID, ShouldEnqueue: shouldEnqueue}, nil
+	}, restate.WithName(StepRecordQueued))
 }
 
 // existingPrompt is the journaled result of looking up a prompt's message row.
@@ -258,6 +284,11 @@ func (t *ThreadCoordinator) CancelTurn(ctx restate.ObjectSharedContext, req Canc
 		CancelledCount:      len(failed),
 		CancelledActiveTurn: st.active != nil && !st.active.Waiting,
 	}, nil
+}
+
+// DrainPending claims all pending message IDs into the active turn if turnID matches.
+func (t *ThreadCoordinator) DrainPending(ctx restate.ObjectContext, req DrainPendingRequest) (DrainPendingResponse, error) {
+	return t.core.drainPending(ctx, req)
 }
 
 // ClearPending removes IDs from pending and, when asked, cancels the active turn it covers.

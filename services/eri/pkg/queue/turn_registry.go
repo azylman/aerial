@@ -108,6 +108,40 @@ func (r *TurnRegistry) Tombstoned(turnID string) bool {
 	return stopped
 }
 
+// LiveExecution returns the live turnExecution registered for turnID, if any.
+func (r *TurnRegistry) LiveExecution(turnID string) *turnExecution {
+	if r == nil {
+		return nil
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if reg := r.live[turnID]; reg != nil {
+		return reg.te
+	}
+	return nil
+}
+
+// FindExecution returns the first live turnExecution satisfying predicate, or nil.
+func (r *TurnRegistry) FindExecution(predicate func(te *turnExecution) bool) *turnExecution {
+	if r == nil || predicate == nil {
+		return nil
+	}
+	r.mu.Lock()
+	candidates := make([]*turnExecution, 0, len(r.live))
+	for _, reg := range r.live {
+		if reg != nil && reg.te != nil {
+			candidates = append(candidates, reg.te)
+		}
+	}
+	r.mu.Unlock()
+	for _, te := range candidates {
+		if predicate(te) {
+			return te
+		}
+	}
+	return nil
+}
+
 // Turns returns the pool's TurnRegistry.
 func (p *WorkerPool) Turns() *TurnRegistry {
 	return p.turns

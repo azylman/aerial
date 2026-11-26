@@ -1367,3 +1367,107 @@ func wallClockResetIn(t *testing.T, d time.Duration) string {
 	}
 	return time.Now().Add(d).In(loc).Format("3:04 PM")
 }
+
+func TestWorkerPool_EvaluateIngressWake(t *testing.T) {
+	t.Parallel()
+
+	// 1. Nil pool returns true, ""
+	var nilPool *WorkerPool
+	should, reason := nilPool.EvaluateIngressWake(context.Background(), "th-1", db.Message{})
+	if !should {
+		t.Errorf("nilPool: should = false, want true")
+	}
+	if reason != "" {
+		t.Errorf("nilPool: reason = %q, want empty", reason)
+	}
+
+	// 2. Ignored channel returns false, "[IGNORE]" and invokes OnMessageCompleted
+	var completedMsgID string
+	var completedStatus string
+	poolIgnored := NewWorkerPool(WorkerPoolConfig{
+		ResolveChannelPolicy: func(channelID, channelName string) config.ChannelPolicy {
+			return config.ChannelPolicy{Mode: "ignore"}
+		},
+		OnMessageCompleted: func(msg db.Message, finalStatus string) {
+			completedMsgID = msg.ID
+			completedStatus = finalStatus
+		},
+	})
+	msgIgnored := db.Message{ID: "msg-ign-1", ThreadID: "th-ignored", Content: "ignore this"}
+	should, reason = poolIgnored.EvaluateIngressWake(context.Background(), "th-ignored", msgIgnored)
+	if should {
+		t.Errorf("poolIgnored: should = true, want false")
+	}
+	if reason != "[IGNORE]" {
+		t.Errorf("poolIgnored: reason = %q, want [IGNORE]", reason)
+	}
+	if completedMsgID != "msg-ign-1" || completedStatus != db.StatusCompleted {
+		t.Errorf("poolIgnored: completed = (%s, %s), want (msg-ign-1, completed)", completedMsgID, completedStatus)
+	}
+
+	// 3. HTTP client burst skips ambient check and returns true, ""
+	msgHTTP := db.Message{ID: "msg-http-1", AuthorID: httpClientAuthorID, Content: "prompt"}
+	should, reason = poolIgnored.EvaluateIngressWake(context.Background(), "th-ignored", msgHTTP)
+	if !should {
+		t.Errorf("msgHTTP: should = false, want true")
+	}
+	if reason != "" {
+		t.Errorf("msgHTTP: reason = %q, want empty", reason)
+	}
+
+	// 4. Channel-mode ambient message (score < threshold) returns false, "[AMBIENT ...]"
+	clsAmbient := classifier.New(nil)
+	clsAmbient.LLMFunc = func(ctx context.Context, model, prompt string) (string, error) {
+		return `{"confidence": 0.15, "reason": "ambient conversation"}`, nil
+	}
+	th := 0.75
+	var completedAmbientID string
+	poolAmbient := NewWorkerPool(WorkerPoolConfig{
+		ResolveChannelPolicy: func(channelID, channelName string) config.ChannelPolicy {
+			return config.ChannelPolicy{
+				Mode:                 "channel",
+				WakeMode:             "classifier",
+				AmbientWakeThreshold: &th,
+			}
+		},
+		Classifier: clsAmbient,
+		OnMessageCompleted: func(msg db.Message, finalStatus string) {
+			completedAmbientID = msg.ID
+		},
+	})
+	msgAmbient := db.Message{ID: "msg-amb-1", ThreadID: "th-channel", Content: "how is everyone doing"}
+	should, reason = poolAmbient.EvaluateIngressWake(context.Background(), "th-channel", msgAmbient)
+	if should {
+		t.Errorf("poolAmbient: should = true, want false")
+	}
+	if !strings.Contains(reason, "[AMBIENT score=0.15/0.75") {
+		t.Errorf("poolAmbient: reason = %q, want to contain [AMBIENT score=0.15/0.75", reason)
+	}
+	if completedAmbientID != "msg-amb-1" {
+		t.Errorf("poolAmbient: completedMsgID = %q, want msg-amb-1", completedAmbientID)
+	}
+
+	// 5. Channel-mode wake message (score >= threshold) returns true, ""
+	clsWake := classifier.New(nil)
+	clsWake.LLMFunc = func(ctx context.Context, model, prompt string) (string, error) {
+		return `{"confidence": 0.90, "reason": "assistant query"}`, nil
+	}
+	poolWake := NewWorkerPool(WorkerPoolConfig{
+		ResolveChannelPolicy: func(channelID, channelName string) config.ChannelPolicy {
+			return config.ChannelPolicy{
+				Mode:                 "channel",
+				WakeMode:             "classifier",
+				AmbientWakeThreshold: &th,
+			}
+		},
+		Classifier: clsWake,
+	})
+	msgWake := db.Message{ID: "msg-wake-1", ThreadID: "th-channel", Content: "can you fix this error"}
+	should, reason = poolWake.EvaluateIngressWake(context.Background(), "th-channel", msgWake)
+	if !should {
+		t.Errorf("poolWake: should = false, want true")
+	}
+	if reason != "" {
+		t.Errorf("poolWake: reason = %q, want empty", reason)
+	}
+}

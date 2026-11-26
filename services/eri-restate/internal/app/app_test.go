@@ -103,11 +103,11 @@ func TestEriRestateDefinitions(t *testing.T) {
 		return map[string]map[string]string{
 			"ThreadSession" + suffix + " VIRTUAL_OBJECT": {
 				"Enqueue": "SHARED", "Append": "EXCLUSIVE", "OnTurnDone": "EXCLUSIVE", "Kick": "EXCLUSIVE",
-				"CancelTurn": "SHARED", "ClearPending": "EXCLUSIVE", "Status": "SHARED",
+				"CancelTurn": "SHARED", "ClearPending": "EXCLUSIVE", "Status": "SHARED", "DrainPending": "EXCLUSIVE",
 			},
 			"DispatchSession" + suffix + " VIRTUAL_OBJECT": {
 				"Enqueue": "SHARED", "Append": "EXCLUSIVE", "OnTurnDone": "EXCLUSIVE", "Cancel": "SHARED",
-				"ClearPending": "EXCLUSIVE", "Status": "SHARED",
+				"ClearPending": "EXCLUSIVE", "Status": "SHARED", "DrainPending": "EXCLUSIVE",
 			},
 			"VoiceSession" + suffix + " VIRTUAL_OBJECT": {"Ask": "EXCLUSIVE"},
 			"SessionManager" + suffix + " SERVICE":      {"CancelDispatch": "-"},
@@ -683,6 +683,32 @@ func TestSetupHealthMux_LoopbackReload(t *testing.T) {
 	mux.ServeHTTP(rec, req)
 	assert.Equal(t, http.StatusOK, rec.Code)
 	assert.Contains(t, rec.Body.String(), `"status":"queued"`)
+}
+
+func TestSetupHealthMux_DrainPending(t *testing.T) {
+	t.Parallel()
+
+	pool := queue.New(nil, queue.WorkerPoolConfig{})
+	mux := SetupHealthMux(HealthMuxOptions{
+		AgentName: "aerial",
+		Pool:      pool,
+	})
+
+	// Forbidden from non-loopback
+	reqRemote := httptest.NewRequest(http.MethodPost, "/internal/turn/drain-pending", strings.NewReader("{}"))
+	reqRemote.Header.Set("Content-Type", "application/json")
+	reqRemote.RemoteAddr = "192.0.2.20:41000"
+	recRemote := httptest.NewRecorder()
+	mux.ServeHTTP(recRemote, reqRemote)
+	assert.Equal(t, http.StatusForbidden, recRemote.Code)
+
+	// Allowed from loopback, reaches HandleDrainPending
+	reqLoopback := httptest.NewRequest(http.MethodPost, "/internal/turn/drain-pending", strings.NewReader("{}"))
+	reqLoopback.Header.Set("Content-Type", "application/json")
+	reqLoopback.RemoteAddr = "127.0.0.1:41000"
+	recLoopback := httptest.NewRecorder()
+	mux.ServeHTTP(recLoopback, reqLoopback)
+	assert.Equal(t, http.StatusBadRequest, recLoopback.Code)
 }
 
 func TestRunApp_ConfigLoadError(t *testing.T) {

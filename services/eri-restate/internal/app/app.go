@@ -110,6 +110,7 @@ type HealthMuxOptions struct {
 	MCPRoutes     *env.MCPProxyRoutes
 	ActiveTurns   *runner.ActiveTurnRegistry
 	ReloadTrigger *bootstrap.ReloadTrigger
+	Pool          *queue.WorkerPool
 	// Config supplies the live GitHub PAT for the loopback-only GitHub egress
 	// proxy. A nil Config still mounts the routes; they answer 503.
 	Config *config.Config
@@ -167,6 +168,10 @@ func SetupHealthMux(opts HealthMuxOptions) *http.ServeMux {
 	// The in-pod hook-guard posts blocklisted MCP tool arguments here, where the
 	// registered secret values are loaded; loopback-only like the proxy.
 	egressscan.Register(mux, opts.Config)
+
+	if opts.Pool != nil {
+		queue.RegisterSteerHandler(mux, opts.Pool)
+	}
 
 	return mux
 }
@@ -499,6 +504,7 @@ func RunApp(ctx context.Context, cfg Config, opts ...AppOption) error {
 		MCPRoutes:     mcpRoutes,
 		ActiveTurns:   activeTurns,
 		ReloadTrigger: reloadTrigger,
+		Pool:          workerPool,
 		Config:        appCfg,
 	})
 

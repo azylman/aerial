@@ -379,6 +379,10 @@ func (s *TurnRunnerService) runAttempts(ctx restate.Context, subj runnerSubject,
 		}
 		t.attempted = true
 		t.last = res
+		if len(res.DrainedIDs) > 0 {
+			t.ids = normalizeStepIDs(append(t.ids, res.DrainedIDs...))
+			in.IDs = normalizeStepIDs(append(in.IDs, res.DrainedIDs...))
+		}
 		type step struct {
 			action  attemptAction
 			next    AttemptInput

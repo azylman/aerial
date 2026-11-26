@@ -177,6 +177,11 @@ func (d *DispatchCoordinator) Cancel(ctx restate.ObjectSharedContext, req Cancel
 	return CancelDispatchResponse{Status: "ok", CancelledCount: len(ids), CancelledIDs: ids}, nil
 }
 
+// DrainPending claims all pending dispatch IDs into the active turn if turnID matches.
+func (d *DispatchCoordinator) DrainPending(ctx restate.ObjectContext, req DrainPendingRequest) (DrainPendingResponse, error) {
+	return d.core.drainPending(ctx, req)
+}
+
 // ClearPending removes IDs from pending and, when asked, cancels the active turn it covers.
 func (d *DispatchCoordinator) ClearPending(ctx restate.ObjectContext, req ClearPendingRequest) error {
 	return d.core.clearPending(ctx, req)
