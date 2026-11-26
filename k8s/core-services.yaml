@@ -2821,19 +2821,22 @@ spec:
                 } else {
                   throw new Error('Failed to create environment default (status: ' + envRes.statusCode + ')');
                 }
+
+                return projectId;
               }
 
-              async function checkRequiredSecrets(token, projectSlug) {
+              async function checkRequiredSecrets(token, projectSlug, projectId) {
                 try {
-                  const dRes = await infisicalRequest('GET', '/api/v3/secrets/raw/DISCORD_BOT_TOKEN?projectSlug=' + encodeURIComponent(projectSlug) + '&environment=default&secretPath=/', null, token);
-                  const gRes = await infisicalRequest('GET', '/api/v3/secrets/raw/GITHUB_PAT?projectSlug=' + encodeURIComponent(projectSlug) + '&environment=default&secretPath=/', null, token);
+                  const param = projectId ? ('workspaceId=' + encodeURIComponent(projectId)) : ('projectSlug=' + encodeURIComponent(projectSlug));
+                  const dRes = await infisicalRequest('GET', '/api/v3/secrets/raw/DISCORD_BOT_TOKEN?' + param + '&environment=default&secretPath=/', null, token);
+                  const gRes = await infisicalRequest('GET', '/api/v3/secrets/raw/GITHUB_PAT?' + param + '&environment=default&secretPath=/', null, token);
                   return (dRes.statusCode === 200 && gRes.statusCode === 200);
                 } catch (e) {
                   return false;
                 }
               }
 
-              async function importSecrets(data, token, projectSlug) {
+              async function importSecrets(data, token, projectSlug, projectId) {
                 for (const key of Object.keys(data)) {
                   const val = Buffer.from(data[key], 'base64').toString('utf8');
                   const payload = {
@@ -2842,6 +2845,9 @@ spec:
                     secretPath: '/',
                     secretValue: val
                   };
+                  if (projectId) {
+                    payload.workspaceId = projectId;
+                  }
                   let res = await infisicalRequest('POST', '/api/v3/secrets/raw/' + encodeURIComponent(key), payload, token);
                   if (res.statusCode < 200 || res.statusCode >= 300) {
                     res = await infisicalRequest('PATCH', '/api/v3/secrets/raw/' + encodeURIComponent(key), payload, token);
@@ -2976,7 +2982,7 @@ spec:
                 }
 
                 const projectSlug = process.env.INFISICAL_PROJECT_SLUG || 'aerial';
-                await ensureProjectAndEnvironment(infisicalToken, projectSlug);
+                const projectId = await ensureProjectAndEnvironment(infisicalToken, projectSlug);
 
                 let secRes;
                 try {
@@ -2988,7 +2994,7 @@ spec:
                 if (secRes.statusCode === 200 && secRes.json) {
                   console.log('Secret/aerial-bootstrap-secrets found, importing secrets...');
                   const data = secRes.json.data || {};
-                  await importSecrets(data, infisicalToken, projectSlug);
+                  await importSecrets(data, infisicalToken, projectSlug, projectId);
                   const delRes = await k8sRequest('DELETE', '/api/v1/namespaces/default/secrets/aerial-bootstrap-secrets');
                   if ((delRes.statusCode >= 200 && delRes.statusCode < 300) || delRes.statusCode === 404) {
                     console.log('Deleted Secret/aerial-bootstrap-secrets');
@@ -2997,7 +3003,7 @@ spec:
                   }
                   process.exit(0);
                 } else if (secRes.statusCode === 404) {
-                  const alreadySeeded = await checkRequiredSecrets(infisicalToken, projectSlug);
+                  const alreadySeeded = await checkRequiredSecrets(infisicalToken, projectSlug, projectId);
                   if (alreadySeeded) {
                     console.log('Required secrets (DISCORD_BOT_TOKEN, GITHUB_PAT) already present in Infisical project ' + projectSlug + '. Done.');
                     process.exit(0);
@@ -3013,7 +3019,7 @@ spec:
                       if (pollRes.statusCode === 200 && pollRes.json) {
                         console.log('Found Secret/aerial-bootstrap-secrets on attempt ' + attempt);
                         const data = pollRes.json.data || {};
-                        await importSecrets(data, infisicalToken, projectSlug);
+                        await importSecrets(data, infisicalToken, projectSlug, projectId);
                         const delRes = await k8sRequest('DELETE', '/api/v1/namespaces/default/secrets/aerial-bootstrap-secrets');
                         if ((delRes.statusCode >= 200 && delRes.statusCode < 300) || delRes.statusCode === 404) {
                           console.log('Deleted Secret/aerial-bootstrap-secrets');
@@ -3023,7 +3029,7 @@ spec:
                           throw new Error('Failed to delete Secret/aerial-bootstrap-secrets: status ' + delRes.statusCode);
                         }
                       } else if (pollRes.statusCode === 404) {
-                        if (await checkRequiredSecrets(infisicalToken, projectSlug)) {
+                        if (await checkRequiredSecrets(infisicalToken, projectSlug, projectId)) {
                           console.log('Required secrets now present in Infisical.');
                           seeded = true;
                           break;
