@@ -226,84 +226,68 @@ func TestThreadCoordinator_Enqueue(t *testing.T) {
 	}
 }
 
-func TestThreadCoordinator_Append_IngressWakeGating(t *testing.T) {
+func TestThreadCoordinator_Enqueue_IngressWakeGating(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
 		name      string
 		resolver  fakeIngressWakeResolver
-		rows      []db.Message
-		req       AppendRequest
+		req       ThreadEnqueueRequest
 		wantSends []sentCall
 		wantRows  map[string]rowWant
-		wantState coordinatorState
 	}{
 		{
-			name:      "GatedIgnoredChannelCompletesWithoutAppend",
+			name:      "GatedIgnoredMessageCompletesWithoutAppend",
 			resolver:  fakeIngressWakeResolver{shouldEnqueue: false, completedReason: "[IGNORED]"},
-			rows:      []db.Message{msgRow("m-ign", tcKey, db.StatusPending)},
-			req:       AppendRequest{IDs: []string{"m-ign"}},
+			req:       ThreadEnqueueRequest{Message: &db.Message{ID: "m-ign", ThreadID: tcKey, Content: "ambient chat"}},
 			wantSends: nil,
 			wantRows:  map[string]rowWant{"m-ign": {status: db.StatusCompleted, errText: "[IGNORED]"}},
-			wantState: coordinatorState{},
 		},
 		{
 			name:      "GatedWakeMessageEnqueuesAndAppends",
 			resolver:  fakeIngressWakeResolver{shouldEnqueue: true},
-			rows:      []db.Message{msgRow("m-wake", tcKey, db.StatusPending)},
-			req:       AppendRequest{IDs: []string{"m-wake"}},
-			wantSends: []sentCall{runBurst("m-wake")},
-			wantRows:  map[string]rowWant{"m-wake": {status: db.StatusPending}},
-			wantState: st(nil, startedTurn("m-wake")),
-		},
-		{
-			name:     "TerminalFailedAndCompletedRowsSkippedWithoutModifyingStatusOrError",
-			resolver: fakeIngressWakeResolver{shouldEnqueue: false, completedReason: "[IGNORED]"},
-			rows: []db.Message{
-				{ID: "m-fail", ThreadID: tcKey, Status: db.StatusFailed, ErrorMessage: "original fail reason"},
-				{ID: "m-done", ThreadID: tcKey, Status: db.StatusCompleted, ErrorMessage: "original done reason"},
-			},
-			req:       AppendRequest{IDs: []string{"m-fail", "m-done"}},
-			wantSends: nil,
-			wantRows: map[string]rowWant{
-				"m-fail": {status: db.StatusFailed, errText: "original fail reason"},
-				"m-done": {status: db.StatusCompleted, errText: "original done reason"},
-			},
-			wantState: coordinatorState{},
+			req:       ThreadEnqueueRequest{Message: &db.Message{ID: "m-wake", ThreadID: tcKey, Content: "wake question"}},
+			wantSends: []sentCall{threadSend(tcKey, HandlerAppend, AppendRequest{IDs: []string{"m-wake"}}, 0)},
+			wantRows:  map[string]rowWant{"m-wake": {status: db.StatusPending, errText: IngressWakeTag}},
 		},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			store := seedStore(t, tc.rows, nil, "")
+			store := seedStore(t, nil, nil, "")
 			h := newCoordHarness(t, tcKey, tcInv, coordinatorState{})
-			err := NewThreadCoordinator(store, tc.resolver, "aerial").Append(h.objectCtx(), tc.req)
+			resp, err := NewThreadCoordinator(store, tc.resolver, "aerial").Enqueue(h.sharedCtx(), tc.req)
 			require.NoError(t, err)
+			assert.Equal(t, eriwire.StatusAccepted, resp.Status)
 			assert.Equal(t, tc.wantSends, h.sends)
 			assertMessageRows(t, store, tc.wantRows)
-			assert.Equal(t, tc.wantState, h.snapshot(t))
 		})
 	}
 }
 
-func TestThreadCoordinator_Enqueue_LeavesMessagePendingUnderWakeEvaluator(t *testing.T) {
+func TestThreadCoordinator_Enqueue_DoesNotDelayCancelOrDrain(t *testing.T) {
 	t.Parallel()
 
-	store := seedStore(t, nil, nil, "")
-	resolver := fakeIngressWakeResolver{shouldEnqueue: false, completedReason: "[IGNORED]"}
-	coord := NewThreadCoordinator(store, resolver, "aerial")
+	slowEval := fakeIngressWakeResolver{shouldEnqueue: true}
+	store := seedStore(t, []db.Message{msgRow("m-active", tcKey, db.StatusProcessing)}, nil, "")
+	activeState := st([]string{"m-pending"}, &ActiveTurn{TurnID: "turn-slow", ItemIDs: []string{"m-active"}, RunnerInvocationID: "inv-slow"})
+	h := newCoordHarness(t, tcKey, tcInv, activeState)
 
-	h := newCoordHarness(t, tcKey, tcInv, coordinatorState{})
+	coord := NewThreadCoordinator(store, slowEval, "aerial")
+
 	resp, err := coord.Enqueue(h.sharedCtx(), ThreadEnqueueRequest{
-		Message: &db.Message{ID: "m-gated", ThreadID: tcKey, Content: "ambient message"},
+		Message: &db.Message{ID: "m-new", ThreadID: tcKey, Content: "new message"},
 	})
 	require.NoError(t, err)
 	assert.Equal(t, eriwire.StatusAccepted, resp.Status)
-	assert.Equal(t, []sentCall{threadSend(tcKey, HandlerAppend, AppendRequest{IDs: []string{"m-gated"}}, 0)}, h.sends)
 
-	row, err := store.GetMessage(context.Background(), "m-gated")
+	cancelResp, err := coord.CancelTurn(h.sharedCtx(), CancelTurnRequest{Reason: "operator cancel"})
 	require.NoError(t, err)
-	require.NotNil(t, row)
-	assert.Equal(t, db.StatusPending, row.Status)
+	assert.Equal(t, "ok", cancelResp.Status)
+	assert.True(t, cancelResp.CancelledActiveTurn)
+
+	drainResp, err := coord.DrainPending(h.objectCtx(), DrainPendingRequest{TurnID: "turn-slow"})
+	require.NoError(t, err)
+	assert.Equal(t, []string{"m-pending"}, drainResp.DrainedIDs)
 }
 
 func TestThreadCoordinator_Append(t *testing.T) {
@@ -336,24 +320,6 @@ func TestThreadCoordinator_Append(t *testing.T) {
 			state:       st(nil, &ActiveTurn{TurnID: "t0", ItemIDs: []string{"a"}}),
 			rows:        []db.Message{msgRow("s4", tcKey, db.StatusPending)},
 			req:         AppendRequest{IDs: []string{"s4"}, SkipIfActive: true},
-			sabotageSQL: failTriggerSQL("messages", "UPDATE", "23505"),
-			wantCode:    500,
-		},
-		{
-			name:       "GateStepCancelSurfacesAsConflict",
-			state:      coordinatorState{},
-			rows:       []db.Message{msgRow("g1", tcKey, db.StatusPending)},
-			resolver:   fakeIngressWakeResolver{shouldEnqueue: false, completedReason: "[IGNORED]"},
-			req:        AppendRequest{IDs: []string{"g1"}},
-			cancelStep: StepGateIngressWake,
-			wantCode:   CodeQueueConflict,
-		},
-		{
-			name:        "GateStepStoreFailureIsTerminal",
-			state:       coordinatorState{},
-			rows:        []db.Message{msgRow("g2", tcKey, db.StatusPending)},
-			resolver:    fakeIngressWakeResolver{shouldEnqueue: false, completedReason: "[IGNORED]"},
-			req:         AppendRequest{IDs: []string{"g2"}},
 			sabotageSQL: failTriggerSQL("messages", "UPDATE", "23505"),
 			wantCode:    500,
 		},

@@ -182,6 +182,7 @@ func (*WorkerPool) drainDispatchTurn(ctx context.Context, te *turnExecution, s d
 		te.drainedIDs = append(te.drainedIDs, d.ID)
 		if pText := strings.TrimSpace(d.Prompt); pText != "" {
 			prompts = append(prompts, pText)
+			te.drainedPrompts = append(te.drainedPrompts, pText)
 		}
 	}
 	if prompts == nil {
@@ -223,6 +224,7 @@ func (p *WorkerPool) drainBurstTurn(ctx context.Context, te *turnExecution, s db
 	var prompts []string
 	if strings.TrimSpace(coalesced) != "" {
 		prompts = append(prompts, coalesced)
+		te.drainedPrompts = append(te.drainedPrompts, coalesced)
 	} else {
 		prompts = []string{}
 	}

@@ -38,13 +38,14 @@ type fakeAttempt struct {
 // fakeTurnSteps is a declarative turnSteps: errs pops one error per call of a method, panics
 // makes a method panic, attempts scripts the run steps in order.
 type fakeTurnSteps struct {
-	mu       sync.Mutex
-	started  StartedTurn
-	prep     TurnPrep
-	attempts []fakeAttempt
-	errs     map[string][]error
-	panics   map[string]bool
-	max      int
+	mu             sync.Mutex
+	started        StartedTurn
+	prep           TurnPrep
+	attempts       []fakeAttempt
+	errs           map[string][]error
+	panics         map[string]bool
+	max            int
+	attemptPrompts []string
 
 	calls    []string
 	attemptN int
@@ -69,6 +70,9 @@ func (f *fakeTurnSteps) attempt(in AttemptInput) (AttemptResult, error) {
 	if in.Resume {
 		resume = " resume"
 	}
+	f.mu.Lock()
+	f.attemptPrompts = append(f.attemptPrompts, in.Prep.Prompt)
+	f.mu.Unlock()
 	if err := f.call("attempt", fmt.Sprintf("ord=%d run=%d%s", in.Ordinal, in.RunIndex, resume)); err != nil {
 		return AttemptResult{}, err
 	}
@@ -582,6 +586,20 @@ func TestTurnRunnerRunDispatch(t *testing.T) {
 			wantCalls:   []string{"started", "prep", "attempt ord=1 run=1", "fail d1 integrity violation"},
 		},
 		{
+			name: "DrainedDispatchPublishesOutcomeForBothOnSuccess", started: claimed(0, "d1"), prep: runPrep(),
+			attempts:    []fakeAttempt{{res: AttemptResult{Kind: AttemptKindSuccess, DrainedIDs: []string{"d2"}}}},
+			wantOutcome: OutcomeCompleted,
+			wantCmds:    []string{"run record-started", "run prep", "run run-1", "run record-outcome", "run publish-dispatch-outcome", "run publish-dispatch-outcome-2", doneSend(ds, "session-1", OutcomeCompleted, 0)},
+			wantCalls:   []string{"started", "prep", "attempt ord=1 run=1", "outcome completed", "publish completed", "publish completed"},
+		},
+		{
+			name: "DrainedDispatchFailsBothOnTerminalError", started: claimed(0, "d1"), prep: runPrep(),
+			attempts:    []fakeAttempt{{res: AttemptResult{Kind: AttemptKindRetry, DrainedIDs: []string{"d2"}}}, {err: errRunnerTerminal}},
+			wantOutcome: OutcomeFailed,
+			wantCmds:    []string{"run record-started", "run prep", "run run-1", "sleep 0s", "run run-2", "run fail-turn", doneSend(ds, "session-1", OutcomeFailed, 0)},
+			wantCalls:   []string{"started", "prep", "attempt ord=1 run=1", "attempt ord=2 run=2", "fail d1,d2 integrity violation"},
+		},
+		{
 			name: "AgentScopedCoordinator", agent: "agent-beta", started: StartedTurn{},
 			wantOutcome: OutcomeEmpty,
 			wantCmds:    []string{"run record-started", doneSend("DispatchSession-agent-beta", "session-1", OutcomeEmpty, 0)},
@@ -633,6 +651,40 @@ func TestReflectTurnRunner(t *testing.T) {
 			assert.Nil(t, opts.InvocationRetryPolicy)
 		})
 	}
+}
+
+func TestTurnRunner_DrainFollowedBySessionCorruptionRetry_ReplaysDrainedPrompt(t *testing.T) {
+	t.Parallel()
+
+	steps := &fakeTurnSteps{
+		started: claimed(0, "m1"),
+		prep:    TurnPrep{Decision: TurnDecisionRun, Prompt: "initial prompt"},
+		attempts: []fakeAttempt{
+			{
+				res: AttemptResult{
+					Kind:           AttemptKindRetry,
+					DrainedIDs:     []string{"m2"},
+					DrainedPrompts: []string{"steered input text"},
+					Reason:         "session corrupt reset",
+				},
+			},
+			{
+				res: AttemptResult{
+					Kind: AttemptKindSuccess,
+				},
+			},
+		},
+	}
+	j := &runnerJournal{t: t}
+	svc := NewTurnRunnerService(steps, "")
+	res, err := svc.RunBurst(j.context(t), BurstTurnRequest{ThreadID: "thread-1", TurnID: "turn-1", MessageIDs: []string{"m1"}})
+	require.NoError(t, err)
+	assert.Equal(t, OutcomeCompleted, res.Outcome)
+
+	require.Len(t, steps.attemptPrompts, 2)
+	assert.Equal(t, "initial prompt", steps.attemptPrompts[0])
+	assert.Contains(t, steps.attemptPrompts[1], "initial prompt")
+	assert.Contains(t, steps.attemptPrompts[1], "steered input text")
 }
 
 // runStepName reads the restate.WithName option of a Run call.

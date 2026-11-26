@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"strings"
 	"time"
 
 	restate "github.com/restatedev/sdk-go"
@@ -222,9 +223,22 @@ func (d dispatchRunner) afterSteps(t turnProgress) []namedStep {
 	if !t.attempted || dispatchOutcomeStatus(t.outcome) == "" {
 		return nil
 	}
-	return []namedStep{{name: StepPublishDispatchOut, fn: func(ctx context.Context) error {
-		return d.steps.PublishDispatchOutcome(ctx, d.dispatchID, t.outcome)
-	}}}
+	ids := t.ids
+	if len(ids) == 0 {
+		ids = []string{d.dispatchID}
+	}
+	out := make([]namedStep, 0, len(ids))
+	for i, id := range ids {
+		stepName := StepPublishDispatchOut
+		if i > 0 {
+			stepName = fmt.Sprintf("%s-%d", StepPublishDispatchOut, i+1)
+		}
+		targetID := id
+		out = append(out, namedStep{name: stepName, fn: func(ctx context.Context) error {
+			return d.steps.PublishDispatchOutcome(ctx, targetID, t.outcome)
+		}})
+	}
+	return out
 }
 
 func (d dispatchRunner) stop(ctx context.Context, turnID string, ids []string) error {
@@ -381,7 +395,14 @@ func (s *TurnRunnerService) runAttempts(ctx restate.Context, subj runnerSubject,
 		t.last = res
 		if len(res.DrainedIDs) > 0 {
 			t.ids = normalizeStepIDs(append(t.ids, res.DrainedIDs...))
-			in.IDs = normalizeStepIDs(append(in.IDs, res.DrainedIDs...))
+			runIn.IDs = normalizeStepIDs(append(runIn.IDs, res.DrainedIDs...))
+		}
+		if len(res.DrainedPrompts) > 0 {
+			for _, p := range res.DrainedPrompts {
+				if strings.TrimSpace(p) != "" {
+					runIn.Prep.Prompt += "\n\n" + p
+				}
+			}
 		}
 		type step struct {
 			action  attemptAction
@@ -430,7 +451,7 @@ func endOnTerminal(ctx restate.Context, subj runnerSubject, coordinator, key, tu
 	if len(prog) > 0 {
 		t = prog[0]
 	}
-	ids := subj.inputIDs()
+	ids := normalizeStepIDs(append(subj.inputIDs(), t.ids...))
 	outcome := OutcomeFailed
 	var stepErr error
 	if isRestateCancel(cause) {

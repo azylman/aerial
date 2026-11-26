@@ -67,6 +67,7 @@ type turnExecution struct {
 	steerMu                                                                                     sync.Mutex
 	steeringClosed                                                                              bool
 	drainedIDs                                                                                  []string
+	drainedPrompts                                                                              []string
 	steeredDispatches                                                                           []db.Dispatch
 }
 
@@ -231,9 +232,6 @@ func (te *turnExecution) finalizeBurstMessages(msgs []db.Message, msgStatus, msg
 		return
 	}
 	for _, m := range msgs {
-		if te.pool != nil {
-			te.pool.clearIngressGated(m.ID)
-		}
 		if isResponse {
 			te.updateMessageCompleted(m.ID, msgOutput, telemetry...)
 		} else {
@@ -589,18 +587,20 @@ func (te *turnExecution) handleAllAmbientPlan() bool {
 }
 
 func (te *turnExecution) runChannelAmbientTriage() bool {
-	botUserID, botRoleIDs := te.resolveBotIdentity()
-	wakeMode := te.policy.GetWakeMode()
-	hookOverride := te.resolveWakeHookOverride(te.turnCtxValue())
+	if !te.isIngressGated() {
+		botUserID, botRoleIDs := te.resolveBotIdentity()
+		wakeMode := te.policy.GetWakeMode()
+		hookOverride := te.resolveWakeHookOverride(te.turnCtxValue())
 
-	plan := PlanBurstExecution(BurstPlanInput{
-		Burst: te.burst, WakeMode: wakeMode, Threshold: te.policy.GetAmbientWakeThreshold(),
-		BotUserID: botUserID, BotRoleIDs: botRoleIDs, HookOverride: hookOverride, ClassifierFn: te.classifyAmbientMessages,
-	})
-	te.wakeIdx, te.wakeInfos = plan.WakeIndex, plan.WakeInfos
+		plan := PlanBurstExecution(BurstPlanInput{
+			Burst: te.burst, WakeMode: wakeMode, Threshold: te.policy.GetAmbientWakeThreshold(),
+			BotUserID: botUserID, BotRoleIDs: botRoleIDs, HookOverride: hookOverride, ClassifierFn: te.classifyAmbientMessages,
+		})
+		te.wakeIdx, te.wakeInfos = plan.WakeIndex, plan.WakeInfos
 
-	if plan.IsAllAmbient {
-		return te.handleAllAmbientPlan()
+		if plan.IsAllAmbient {
+			return te.handleAllAmbientPlan()
+		}
 	}
 
 	if te.currentSessionID != "" && te.pool.sessionMgr != nil && !te.pool.sessionMgr.SessionExistsOnDisk(te.currentSessionID) {
@@ -626,11 +626,11 @@ func (te *turnExecution) startTurnIndicators() {
 }
 
 func (te *turnExecution) isIngressGated() bool {
-	if te.pool == nil || len(te.burst) == 0 {
+	if len(te.burst) == 0 {
 		return false
 	}
 	for _, m := range te.burst {
-		if te.pool.isIngressGated(m.ID) {
+		if m.ErrorMessage == IngressWakeTag {
 			return true
 		}
 	}
@@ -638,15 +638,6 @@ func (te *turnExecution) isIngressGated() bool {
 }
 
 func (te *turnExecution) evaluateAmbientWake() (shouldExit bool) {
-	if te.isIngressGated() {
-		te.startTurnIndicators()
-		var incErr error
-		te.turnCount, incErr = te.incrementSessionTurnCount(te.threadID)
-		if incErr != nil {
-			te.logf("[Queue] Error incrementing turn count for thread %s: %v", te.threadID, incErr)
-		}
-		return false
-	}
 	if shouldEvaluateAmbientWake(te.policy.Mode, te.isThread, isHTTPClientBurst(te.burst)) {
 		if te.runChannelAmbientTriage() {
 			return true
@@ -660,26 +651,6 @@ func (te *turnExecution) evaluateAmbientWake() (shouldExit bool) {
 		te.logf("[Queue] Error incrementing turn count for thread %s: %v", te.threadID, incErr)
 	}
 	return false
-}
-
-func (p *WorkerPool) markIngressGated(id string) {
-	if p != nil && id != "" {
-		p.ingressGated.Store(id, true)
-	}
-}
-
-func (p *WorkerPool) isIngressGated(id string) bool {
-	if p == nil || id == "" {
-		return false
-	}
-	_, ok := p.ingressGated.Load(id)
-	return ok
-}
-
-func (p *WorkerPool) clearIngressGated(id string) {
-	if p != nil && id != "" {
-		p.ingressGated.Delete(id)
-	}
 }
 
 // EvaluateIngressWake evaluates whether an incoming Discord message should wake a turn
@@ -697,7 +668,6 @@ func (p *WorkerPool) EvaluateIngressWake(ctx context.Context, threadID string, m
 	if shouldEvaluateAmbientWake(te.policy.Mode, te.isThread, isHTTPClientBurst(te.burst)) {
 		return p.evaluateAmbientIngressWake(ctx, te, msg)
 	}
-	p.markIngressGated(msg.ID)
 	return true, ""
 }
 
@@ -715,7 +685,6 @@ func (p *WorkerPool) evaluateAmbientIngressWake(ctx context.Context, te *turnExe
 		ClassifierFn: te.classifyAmbientMessages,
 	})
 	if !plan.IsAllAmbient {
-		p.markIngressGated(msg.ID)
 		return true, ""
 	}
 	metrics.RecordTurnCompleted("ambient", te.triggerType, "classifier", time.Since(te.execStart))

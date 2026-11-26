@@ -64,14 +64,15 @@ type AttemptTelemetry struct {
 
 // AttemptResult is how one attempt ended.
 type AttemptResult struct {
-	Kind        string           `json:"kind"`
-	BackoffMs   int64            `json:"backoff_ms,omitempty"`
-	Reason      string           `json:"reason,omitempty"`
-	Stderr      string           `json:"stderr,omitempty"`
-	SessionID   string           `json:"session_id,omitempty"`
-	AutoResumes int              `json:"auto_resumes"`
-	DrainedIDs  []string         `json:"drained_ids,omitempty"`
-	Telemetry   AttemptTelemetry `json:"telemetry"`
+	Kind           string           `json:"kind"`
+	BackoffMs      int64            `json:"backoff_ms,omitempty"`
+	Reason         string           `json:"reason,omitempty"`
+	Stderr         string           `json:"stderr,omitempty"`
+	SessionID      string           `json:"session_id,omitempty"`
+	AutoResumes    int              `json:"auto_resumes"`
+	DrainedIDs     []string         `json:"drained_ids,omitempty"`
+	DrainedPrompts []string         `json:"drained_prompts,omitempty"`
+	Telemetry      AttemptTelemetry `json:"telemetry"`
 }
 
 // failureKind is the category of a failed lease attempt in the TurnRunner attempt step.
@@ -441,12 +442,14 @@ func (p *WorkerPool) executeAttempt(ctx context.Context, s db.Store, te *turnExe
 		ids = normalizeStepIDs(append(ids, te.drainedIDs...))
 	}
 	drainedIDsClone := slices.Clone(te.drainedIDs)
+	drainedPromptsClone := slices.Clone(te.drainedPrompts)
 	te.steerMu.Unlock()
 
 	base := AttemptResult{
-		AutoResumes: in.AutoResumes,
-		DrainedIDs:  drainedIDsClone,
-		Telemetry:   AttemptTelemetry{DurationMs: te.turnDurationMs, Usage: usage},
+		AutoResumes:    in.AutoResumes,
+		DrainedIDs:     drainedIDsClone,
+		DrainedPrompts: drainedPromptsClone,
+		Telemetry:      AttemptTelemetry{DurationMs: te.turnDurationMs, Usage: usage},
 	}
 	switch class {
 	case classAborted:
@@ -801,16 +804,35 @@ func (d dispatchSubject) load(ctx context.Context, s db.Store, te *turnExecution
 	te.isEphemeral = isEphem
 	te.triggerType = "dispatch:" + row.Source
 	te.activeSessionMu.Unlock()
-	return []string{row.ID}, "", nil
+	activeIDs := []string{row.ID}
+	if len(ids) > 1 {
+		te.steerMu.Lock()
+		for _, extraID := range ids[1:] {
+			extraRow, gErr := storeCall(ctx, func(c context.Context) (*db.Dispatch, error) { return s.GetDispatch(c, extraID) })
+			if gErr != nil || extraRow == nil || extraRow.Status != db.StatusProcessing {
+				continue
+			}
+			activeIDs = append(activeIDs, extraID)
+			te.steeredDispatches = append(te.steeredDispatches, *extraRow)
+			te.drainedIDs = append(te.drainedIDs, extraID)
+		}
+		te.steerMu.Unlock()
+	}
+	return activeIDs, "", nil
 }
 
 func (dispatchSubject) beginAttempt(ctx context.Context, s db.Store, id string, ordinal int) (db.AttemptStart, error) {
 	return s.BeginDispatchAttempt(ctx, id, ordinal)
 }
 
-func (dispatchSubject) applyAttemptStart(te *turnExecution, _ string, start db.AttemptStart) {
-	if te.dispatch != nil {
+func (dispatchSubject) applyAttemptStart(te *turnExecution, id string, start db.AttemptStart) {
+	if te.dispatch != nil && te.dispatch.ID == id {
 		te.dispatch.RetryCount, te.dispatch.RestartCount = start.RetryCount, start.RestartCount
+	}
+	for i := range te.steeredDispatches {
+		if te.steeredDispatches[i].ID == id {
+			te.steeredDispatches[i].RetryCount, te.steeredDispatches[i].RestartCount = start.RetryCount, start.RestartCount
+		}
 	}
 }
 

@@ -68,6 +68,9 @@ const (
 	StepFailTurn             = "fail-turn"
 )
 
+// IngressWakeTag marks a message row that was evaluated and accepted at ingress gating.
+const IngressWakeTag = "[INGRESS_WAKE]"
+
 // TurnOutcome is how a turn ended.
 type TurnOutcome string
 
