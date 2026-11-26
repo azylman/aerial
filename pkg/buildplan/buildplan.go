@@ -355,3 +355,34 @@ func ValidateUpdateChunkInput(buildID, chunkRef string, req UpdateChunkRequest) 
 	}
 	return normEffort, nil
 }
+
+// SteerChunkRequest represents a request to inject a mid-turn steering prompt into an active chunk.
+type SteerChunkRequest struct {
+	BuildID  string `json:"build_id"`
+	ChunkRef string `json:"chunk_ref"`
+	Prompt   string `json:"prompt"`
+}
+
+// SteerChunkResult reports the result of steering an active chunk.
+type SteerChunkResult struct {
+	Accepted     bool   `json:"accepted"`
+	BuildID      string `json:"build_id"`
+	ChunkID      string `json:"chunk_id"`
+	ChunkStatus  string `json:"chunk_status"`
+	DispatchID   string `json:"dispatch_id,omitempty"`
+	Instructions string `json:"instructions"`
+}
+
+// ValidateSteerChunkInput trims and validates that buildID, chunkRef, and prompt are all non-empty.
+func ValidateSteerChunkInput(buildID, chunkRef, prompt string) error {
+	if strings.TrimSpace(buildID) == "" {
+		return errors.New("build id is required")
+	}
+	if strings.TrimSpace(chunkRef) == "" {
+		return errors.New("chunk ref is required")
+	}
+	if strings.TrimSpace(prompt) == "" {
+		return errors.New("prompt is required")
+	}
+	return nil
+}

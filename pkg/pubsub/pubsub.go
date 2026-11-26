@@ -136,7 +136,7 @@ func (b *JetStreamBus) Publish(ctx context.Context, subject string, msgID string
 // PublishWithHeader publishes a message with additional custom headers and trace context.
 // The send is wrapped in a messaging producer span whose context travels in the headers.
 func (b *JetStreamBus) PublishWithHeader(ctx context.Context, subject string, msgID string, data any, header nats.Header) (err error) {
-	ctx, span := tracing.Tracer().Start(ctx, subject+" publish", publishSpanOptions(subject, msgID)...)
+	ctx, span := tracing.Tracer().Start(ctx, SpanSubject(subject)+" publish", publishSpanOptions(subject, msgID)...)
 	defer func() {
 		failSpan(span, err)
 		span.End()
