@@ -31,10 +31,11 @@ const CrashLoopCap = 3
 
 // State keys of the coordinator objects.
 const (
-	StateKeyPending = "pending"
-	StateKeyActive  = "active"
-	StateKeyIngress = "ingress"
-	StateKeyGated   = "gated"
+	StateKeyPending  = "pending"
+	StateKeyActive   = "active"
+	StateKeyIngress  = "ingress"
+	StateKeyGated    = "gated"
+	StateKeyDraining = "draining"
 )
 
 // Handler names.
@@ -128,7 +129,8 @@ type KickRequest struct {
 }
 
 type DrainPendingRequest struct {
-	TurnID string `json:"turn_id"`
+	TurnID string   `json:"turn_id"`
+	AckIDs []string `json:"ack_ids,omitempty"`
 }
 
 type DrainPendingResponse struct {

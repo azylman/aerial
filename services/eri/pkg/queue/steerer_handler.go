@@ -9,6 +9,7 @@ import (
 	"log"
 	"net/http"
 	"net/url"
+	"slices"
 	"strings"
 	"time"
 
@@ -84,13 +85,19 @@ func (p *WorkerPool) HandleDrainPending(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	coordResp, cErr := p.callRestateDrain(r.Context(), te)
+	snap := te.matchSnapshot()
+	coordResp, cErr := p.callRestateDrain(r.Context(), snap, nil)
 	if cErr != nil {
 		writeDrainError(w, http.StatusBadGateway, cErr.Error())
 		return
 	}
 
-	if len(coordResp.DrainedIDs) == 0 {
+	candidates := removeIDs(normalizeStepIDs(append(slices.Clone(te.pendingDrainIDs), coordResp.DrainedIDs...)), te.drainedIDs)
+	te.pendingDrainIDs = candidates
+	if len(candidates) == 0 {
+		if len(coordResp.DrainedIDs) > 0 {
+			p.ackRestateDrain(r.Context(), snap, coordResp.DrainedIDs)
+		}
 		httpkit.WriteJSON(w, http.StatusOK, SteerDrainResponse{Prompts: []string{}})
 		return
 	}
@@ -101,35 +108,48 @@ func (p *WorkerPool) HandleDrainPending(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	if te.isDispatch() {
-		prompts := p.drainDispatchTurn(r.Context(), te, s, coordResp.DrainedIDs)
-		httpkit.WriteJSON(w, http.StatusOK, SteerDrainResponse{Prompts: prompts})
-		return
+	var (
+		prompts []string
+		ackIDs  []string
+		dErr    error
+	)
+	if snap.isDispatch {
+		prompts, ackIDs, dErr = p.drainDispatchTurn(r.Context(), te, s, snap.turnID, candidates)
+	} else {
+		prompts, ackIDs, dErr = p.drainBurstTurn(r.Context(), te, s, snap.turnID, candidates)
 	}
-
-	prompts, bErr := p.drainBurstTurn(r.Context(), te, s, coordResp.DrainedIDs)
-	if bErr != nil {
-		writeDrainError(w, http.StatusInternalServerError, bErr.Error())
+	if len(ackIDs) > 0 {
+		te.pendingDrainIDs = removeIDs(te.pendingDrainIDs, ackIDs)
+		p.ackRestateDrain(r.Context(), snap, ackIDs)
+	}
+	if dErr != nil {
+		writeDrainError(w, http.StatusInternalServerError, dErr.Error())
 		return
 	}
 	httpkit.WriteJSON(w, http.StatusOK, SteerDrainResponse{Prompts: prompts})
 }
 
-func (p *WorkerPool) callRestateDrain(ctx context.Context, te *turnExecution) (DrainPendingResponse, error) {
+func (p *WorkerPool) ackRestateDrain(ctx context.Context, snap turnMatchSnapshot, ackIDs []string) {
+	if _, err := p.callRestateDrain(ctx, snap, ackIDs); err != nil {
+		log.Printf("[SteerHandler] Warning acknowledging drained IDs: %v", err)
+	}
+}
+
+func (p *WorkerPool) callRestateDrain(ctx context.Context, snap turnMatchSnapshot, ackIDs []string) (DrainPendingResponse, error) {
 	ingressURL := p.resolveRestateIngressURL()
 	if ingressURL == "" {
 		ingressURL = "http://restate.aerial:8080"
 	}
 	agentName := p.cfg.AgentName
 	var serviceName string
-	if te.isDispatch() {
+	if snap.isDispatch {
 		serviceName = DispatchSessionServiceName(agentName)
 	} else {
 		serviceName = ThreadSessionServiceName(agentName)
 	}
-	targetURL := fmt.Sprintf("%s/%s/%s/DrainPending", ingressURL, serviceName, url.PathEscape(te.threadID))
+	targetURL := fmt.Sprintf("%s/%s/%s/DrainPending", ingressURL, serviceName, url.PathEscape(snap.threadID))
 
-	bodyBytes, err := json.Marshal(DrainPendingRequest{TurnID: te.turnID})
+	bodyBytes, err := json.Marshal(DrainPendingRequest{TurnID: snap.turnID, AckIDs: normalizeStepIDs(ackIDs)})
 	if err != nil {
 		return DrainPendingResponse{}, err
 	}
@@ -162,24 +182,28 @@ func (p *WorkerPool) callRestateDrain(ctx context.Context, te *turnExecution) (D
 	return coordResp, nil
 }
 
-func (*WorkerPool) drainDispatchTurn(ctx context.Context, te *turnExecution, s db.Store, drainedIDs []string) []string {
-	var prompts []string
+func (*WorkerPool) drainDispatchTurn(ctx context.Context, te *turnExecution, s db.Store, turnID string, drainedIDs []string) ([]string, []string, error) {
+	var prompts, ackIDs []string
 	for _, id := range drainedIDs {
-		claimed, cErr := s.ClaimPendingDispatch(ctx, id)
-		if cErr != nil {
+		if _, cErr := s.ClaimPendingDispatch(ctx, id); cErr != nil {
 			log.Printf("[SteerHandler] Error claiming pending dispatch %s: %v", id, cErr)
-			continue
+			return nil, ackIDs, fmt.Errorf("claim pending dispatch %s: %w", id, cErr)
 		}
-		if !claimed {
-			continue
+		if rErr := recordTurnOwnedIDs(ctx, s, turnID, []string{id}); rErr != nil {
+			return nil, ackIDs, rErr
 		}
 		d, gErr := s.GetDispatch(ctx, id)
-		if gErr != nil || d == nil {
+		if gErr != nil {
 			log.Printf("[SteerHandler] Error getting dispatch %s: %v", id, gErr)
+			return nil, ackIDs, fmt.Errorf("get dispatch %s: %w", id, gErr)
+		}
+		if d == nil || d.Status != db.StatusProcessing {
+			ackIDs = normalizeStepIDs(append(ackIDs, id))
 			continue
 		}
 		te.steeredDispatches = append(te.steeredDispatches, *d)
-		te.drainedIDs = append(te.drainedIDs, d.ID)
+		te.drainedIDs = normalizeStepIDs(append(te.drainedIDs, d.ID))
+		ackIDs = normalizeStepIDs(append(ackIDs, d.ID))
 		if pText := strings.TrimSpace(d.Prompt); pText != "" {
 			prompts = append(prompts, pText)
 			te.drainedPrompts = append(te.drainedPrompts, pText)
@@ -188,39 +212,38 @@ func (*WorkerPool) drainDispatchTurn(ctx context.Context, te *turnExecution, s d
 	if prompts == nil {
 		prompts = []string{}
 	}
-	return prompts
+	return prompts, ackIDs, nil
 }
 
-func (p *WorkerPool) drainBurstTurn(ctx context.Context, te *turnExecution, s db.Store, drainedIDs []string) ([]string, error) {
-	var claimedIDs []string
+func (p *WorkerPool) drainBurstTurn(ctx context.Context, te *turnExecution, s db.Store, turnID string, drainedIDs []string) ([]string, []string, error) {
 	for _, id := range drainedIDs {
-		claimed, cErr := s.ClaimPendingMessage(ctx, id)
-		if cErr != nil {
+		if _, cErr := s.ClaimPendingMessage(ctx, id); cErr != nil {
 			log.Printf("[SteerHandler] Error claiming pending message %s: %v", id, cErr)
-			continue
-		}
-		if claimed {
-			claimedIDs = append(claimedIDs, id)
+			return nil, nil, fmt.Errorf("claim pending message %s: %w", id, cErr)
 		}
 	}
-	if len(claimedIDs) == 0 {
-		return []string{}, nil
+	if rErr := recordTurnOwnedIDs(ctx, s, turnID, drainedIDs); rErr != nil {
+		return nil, nil, rErr
 	}
-	rows, err := messagesByIDOrdered(ctx, s, claimedIDs)
+	rows, err := messagesByIDOrdered(ctx, s, drainedIDs)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
-	te.burst = append(te.burst, rows...)
+	var activeRows []db.Message
+	var activeIDs []string
 	for _, row := range rows {
-		te.drainedIDs = append(te.drainedIDs, row.ID)
-	}
-	var tz string
-	if p.appCfg != nil {
-		if cur := p.appCfg.Current(); cur != nil {
-			tz = cur.Timezone
+		if row.Status == db.StatusProcessing {
+			activeRows = append(activeRows, row)
+			activeIDs = append(activeIDs, row.ID)
 		}
 	}
-	coalesced := CoalesceBurstPrompt(rows, tz)
+	ackIDs := normalizeStepIDs(drainedIDs)
+	if len(activeRows) == 0 {
+		return []string{}, ackIDs, nil
+	}
+	te.steeredMessages = append(te.steeredMessages, activeRows...)
+	te.drainedIDs = normalizeStepIDs(append(te.drainedIDs, activeIDs...))
+	coalesced := CoalesceBurstPrompt(activeRows, p.currentTimezone())
 	var prompts []string
 	if strings.TrimSpace(coalesced) != "" {
 		prompts = append(prompts, coalesced)
@@ -228,20 +251,21 @@ func (p *WorkerPool) drainBurstTurn(ctx context.Context, te *turnExecution, s db
 	} else {
 		prompts = []string{}
 	}
-	return prompts, nil
+	return prompts, ackIDs, nil
 }
 
 func matchTurnExecution(te *turnExecution, daemonID, conversationID, sessionID string) bool {
+	snap := te.matchSnapshot()
 	var owner runner.ActiveTurnOwner
-	if te.lease != nil {
-		if o, ok := te.lease.(runner.ActiveTurnOwner); ok {
+	if snap.lease != nil {
+		if o, ok := snap.lease.(runner.ActiveTurnOwner); ok {
 			owner = o
 		}
 	}
 
 	// Primary match: DaemonID
 	if daemonID != "" {
-		if te.activeTurnDaemon == daemonID {
+		if snap.activeTurnDaemon == daemonID {
 			return true
 		}
 		if owner != nil && owner.ActiveTurn().DaemonID == daemonID {
@@ -250,18 +274,13 @@ func matchTurnExecution(te *turnExecution, daemonID, conversationID, sessionID s
 	}
 
 	// Fallback match: ConversationID or SessionID
-	te.activeSessionMu.Lock()
-	currSess := te.currentSessionID
-	leaseSess := te.leaseSessionID
-	te.activeSessionMu.Unlock()
-
 	var ownerConv string
 	if owner != nil {
 		ownerConv = owner.ActiveTurn().ConversationID
 	}
 
 	matchesTarget := func(target string) bool {
-		return target == currSess || target == leaseSess || (ownerConv != "" && target == ownerConv)
+		return target == snap.currentSessionID || target == snap.leaseSessionID || (ownerConv != "" && target == ownerConv)
 	}
 
 	if conversationID != "" && matchesTarget(conversationID) {

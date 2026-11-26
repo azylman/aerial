@@ -216,10 +216,12 @@ func (t *ThreadCoordinator) enqueueGatedMessage(ctx restate.ObjectSharedContext,
 	restate.ObjectSend(ctx, t.ServiceName(), final, HandlerAppend).Send(AppendRequest{ReserveID: previewID})
 	msgID, rErr := t.recordQueuedMessage(ctx, req, final, fallbackID)
 	if rErr != nil {
+		restate.ObjectSend(ctx, t.ServiceName(), final, HandlerAppend).Send(AppendRequest{DropID: previewID})
 		return ThreadEnqueueResponse{}, coordinatorError(rErr)
 	}
 	shouldEnqueue, gErr := t.evaluateGatedIngress(ctx, eval, final, msgID, req.Message)
 	if gErr != nil {
+		restate.ObjectSend(ctx, t.ServiceName(), final, HandlerAppend).Send(AppendRequest{DropID: msgID})
 		return ThreadEnqueueResponse{}, coordinatorError(gErr)
 	}
 	if shouldEnqueue {

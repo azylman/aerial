@@ -63,6 +63,9 @@ func newCoordHarness(t *testing.T, key, requestID string, st coordinatorState) *
 	if len(st.gated) > 0 {
 		h.state[StateKeyGated] = mustJSON(t, st.gated)
 	}
+	if len(st.draining) > 0 {
+		h.state[StateKeyDraining] = mustJSON(t, st.draining)
+	}
 	mc := h.mc
 	mc.On("Key").Return(key).Maybe()
 	mc.On("Request").Return(&restate.Request{ID: requestID}).Maybe()
@@ -195,6 +198,9 @@ func (h *coordHarness) snapshot(t *testing.T) coordinatorState {
 	}
 	if b, ok := h.state[StateKeyGated]; ok {
 		require.NoError(t, json.Unmarshal(b, &st.gated))
+	}
+	if b, ok := h.state[StateKeyDraining]; ok {
+		require.NoError(t, json.Unmarshal(b, &st.draining))
 	}
 	return st
 }
@@ -499,8 +505,22 @@ func TestCoordinatorDrainPending(t *testing.T) {
 			name:        "PopsPendingIntoActive",
 			state:       st([]string{"b", "c"}, active),
 			req:         DrainPendingRequest{TurnID: "t-1"},
-			wantState:   st(nil, &ActiveTurn{TurnID: "t-1", ItemIDs: []string{"a", "b", "c"}}),
+			wantState:   coordinatorState{active: &ActiveTurn{TurnID: "t-1", ItemIDs: []string{"a", "b", "c"}}, draining: []string{"b", "c"}},
 			wantDrained: []string{"b", "c"},
+		},
+		{
+			name:        "RepeatDrainReturnsUnackedDraining",
+			state:       coordinatorState{active: &ActiveTurn{TurnID: "t-1", ItemIDs: []string{"a", "b", "c"}}, draining: []string{"b", "c"}},
+			req:         DrainPendingRequest{TurnID: "t-1"},
+			wantState:   coordinatorState{active: &ActiveTurn{TurnID: "t-1", ItemIDs: []string{"a", "b", "c"}}, draining: []string{"b", "c"}},
+			wantDrained: []string{"b", "c"},
+		},
+		{
+			name:        "AckClearsDraining",
+			state:       coordinatorState{active: &ActiveTurn{TurnID: "t-1", ItemIDs: []string{"a", "b", "c"}}, draining: []string{"b", "c"}},
+			req:         DrainPendingRequest{TurnID: "t-1", AckIDs: []string{"b", "c"}},
+			wantState:   st(nil, &ActiveTurn{TurnID: "t-1", ItemIDs: []string{"a", "b", "c"}}),
+			wantDrained: nil,
 		},
 	}
 	for _, tc := range tests {

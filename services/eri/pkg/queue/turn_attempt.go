@@ -406,8 +406,12 @@ func (p *WorkerPool) executeAttempt(ctx context.Context, s db.Store, te *turnExe
 	defer stopIndicators()
 	defer func() {
 		te.clearActiveTurn()
-		if te.lease != nil {
-			logInterruptWarning("release attempt lease", te.lease.Release())
+		te.activeSessionMu.Lock()
+		lease := te.lease
+		te.lease = nil
+		te.activeSessionMu.Unlock()
+		if lease != nil {
+			logInterruptWarning("release attempt lease", lease.Release())
 		}
 	}()
 
@@ -483,6 +487,7 @@ func (te *turnExecution) runOneLease(cfg attemptConfig, in AttemptInput) attempt
 	te.steerMu.Lock()
 	te.steeringClosed = false
 	te.steerMu.Unlock()
+	defer te.closeSteering()
 
 	poolErr, leaseErr := te.acquireTurnLease()
 	if poolErr != nil {
@@ -504,9 +509,6 @@ func (te *turnExecution) runOneLease(cfg attemptConfig, in AttemptInput) attempt
 	runCtx, runCancel := context.WithTimeout(baseCtx, attemptRunTimeout(cfg.timeoutMinutes))
 	defer runCancel()
 	outcome, turnRes, stderr, execErr := te.executeLeaseAttemptCtx(runCtx, cfg.model, prompt)
-	te.steerMu.Lock()
-	te.steeringClosed = true
-	te.steerMu.Unlock()
 	return attemptRun{
 		outcome: outcome, turnRes: turnRes, stderr: stderr, execErr: execErr,
 		runDeadline: errors.Is(execErr, context.DeadlineExceeded) || errors.Is(runCtx.Err(), context.DeadlineExceeded),
@@ -701,57 +703,93 @@ func (p *WorkerPool) currentTimezone() string {
 	return ""
 }
 
-func recoverBurstProcessingRows(ctx context.Context, s db.Store, threadID string, knownIDs []string) ([]db.Message, error) {
-	threadID = strings.TrimSpace(threadID)
-	if threadID == "" {
-		return nil, nil
+const turnItemsSessionPrefix = "turn-items-"
+
+func recordTurnOwnedIDs(ctx context.Context, s db.Store, turnID string, ids []string) error {
+	turnID = strings.TrimSpace(turnID)
+	norm := normalizeStepIDs(ids)
+	if turnID == "" || len(norm) == 0 || s == nil {
+		return nil
 	}
-	tasks, err := storeCall(ctx, func(c context.Context) ([]db.ActiveTask, error) {
-		return s.GetActiveTasks(c, db.TasksFilter{Statuses: []string{db.StatusProcessing}, ThreadID: threadID, Order: db.TasksOrderAsc})
+	key := turnItemsSessionPrefix + turnID
+	existingRaw, err := storeCall(ctx, func(c context.Context) (string, error) {
+		sum, _, gErr := s.GetThreadSummary(c, key)
+		return sum, gErr
 	})
 	if err != nil {
+		return err
+	}
+	var merged []string
+	if existingRaw != "" {
+		merged = strings.Split(existingRaw, ",")
+	}
+	merged = normalizeStepIDs(append(merged, norm...))
+	_, err = storeCall(ctx, func(c context.Context) (struct{}, error) {
+		return struct{}{}, s.SaveThreadSummary(c, key, strings.Join(merged, ","), "")
+	})
+	return err
+}
+
+func loadTurnOwnedExtraIDs(ctx context.Context, s db.Store, turnID string, knownIDs []string) ([]string, error) {
+	turnID = strings.TrimSpace(turnID)
+	if turnID == "" || s == nil {
+		return nil, nil
+	}
+	raw, err := storeCall(ctx, func(c context.Context) (string, error) {
+		sum, _, gErr := s.GetThreadSummary(c, turnItemsSessionPrefix+turnID)
+		return sum, gErr
+	})
+	if err != nil || raw == "" {
 		return nil, err
 	}
-	var extraIDs []string
-	for _, t := range tasks {
-		if t.ID != "" && !slices.Contains(knownIDs, t.ID) {
-			extraIDs = append(extraIDs, t.ID)
+	var extra []string
+	for _, id := range normalizeStepIDs(strings.Split(raw, ",")) {
+		if !slices.Contains(knownIDs, id) {
+			extra = append(extra, id)
 		}
 	}
-	if len(extraIDs) == 0 {
-		return nil, nil
+	return extra, nil
+}
+
+func recoverBurstProcessingRows(ctx context.Context, s db.Store, turnID, threadID string, knownIDs []string) ([]db.Message, error) {
+	extraIDs, err := loadTurnOwnedExtraIDs(ctx, s, turnID, knownIDs)
+	if err != nil || len(extraIDs) == 0 {
+		return nil, err
 	}
 	rows, err := messagesByIDOrdered(ctx, s, extraIDs)
 	if err != nil {
 		return nil, err
 	}
+	threadID = strings.TrimSpace(threadID)
 	var out []db.Message
 	for _, m := range rows {
-		if m.Status == db.StatusProcessing {
+		if m.Status == db.StatusProcessing && (threadID == "" || m.ThreadID == threadID) {
 			out = append(out, m)
 		}
 	}
 	return out, nil
 }
 
-func recoverDispatchProcessingIDs(ctx context.Context, s db.Store, sessionID string, knownIDs []string) ([]string, error) {
-	sessionID = strings.TrimSpace(sessionID)
-	if sessionID == "" {
-		return nil, nil
-	}
-	tasks, err := storeCall(ctx, func(c context.Context) ([]db.ActiveTask, error) {
-		return s.GetActiveTasks(c)
-	})
-	if err != nil {
+func recoverDispatchProcessingIDs(ctx context.Context, s db.Store, turnID, sessionID string, knownIDs []string) ([]string, error) {
+	extraIDs, err := loadTurnOwnedExtraIDs(ctx, s, turnID, knownIDs)
+	if err != nil || len(extraIDs) == 0 {
 		return nil, err
 	}
-	var extraIDs []string
-	for _, t := range tasks {
-		if t.Status == db.StatusProcessing && t.ThreadID == sessionID && strings.HasPrefix(t.AuthorID, "dispatch:") && !slices.Contains(knownIDs, t.ID) {
-			extraIDs = append(extraIDs, t.ID)
+	sessionID = strings.TrimSpace(sessionID)
+	var out []string
+	for _, id := range extraIDs {
+		d, gErr := storeCall(ctx, func(c context.Context) (*db.Dispatch, error) { return s.GetDispatch(c, id) })
+		if errors.Is(gErr, db.ErrRecordNotFound) || (gErr == nil && (d == nil || d.Status != db.StatusProcessing)) {
+			continue
+		}
+		if gErr != nil {
+			return nil, gErr
+		}
+		if sessionID == "" || d.SessionID == sessionID {
+			out = append(out, id)
 		}
 	}
-	return extraIDs, nil
+	return out, nil
 }
 
 func (b burstSubject) load(ctx context.Context, s db.Store, te *turnExecution) ([]string, TurnOutcome, error) {
@@ -779,7 +817,7 @@ func (b burstSubject) load(ctx context.Context, s db.Store, te *turnExecution) (
 	if threadID == "" {
 		threadID = te.threadID
 	}
-	extraRows, err := recoverBurstProcessingRows(ctx, s, threadID, knownIDs)
+	extraRows, err := recoverBurstProcessingRows(ctx, s, te.turnID, threadID, knownIDs)
 	if err != nil {
 		return nil, "", err
 	}
@@ -787,7 +825,7 @@ func (b burstSubject) load(ctx context.Context, s db.Store, te *turnExecution) (
 		processing = append(processing, extraRows...)
 		te.steerMu.Lock()
 		for _, row := range extraRows {
-			te.drainedIDs = append(te.drainedIDs, row.ID)
+			te.drainedIDs = normalizeStepIDs(append(te.drainedIDs, row.ID))
 		}
 		if coalesced := strings.TrimSpace(CoalesceBurstPrompt(extraRows, b.pool.currentTimezone())); coalesced != "" {
 			te.drainedPrompts = append(te.drainedPrompts, coalesced)
@@ -817,8 +855,12 @@ func (burstSubject) applyAttemptStart(te *turnExecution, id string, start db.Att
 	}
 }
 
-func (b burstSubject) recordFailure(ctx context.Context, s db.Store, _ *turnExecution, ids []string, summary AttemptSummary) error {
-	_, err := b.pool.failActiveBurstRows(ctx, s, ids, summary)
+func (b burstSubject) recordFailure(ctx context.Context, s db.Store, te *turnExecution, ids []string, summary AttemptSummary) error {
+	var turnID string
+	if te != nil {
+		turnID = te.turnID
+	}
+	_, err := b.pool.failActiveBurstRows(ctx, s, turnID, ids, summary)
 	return err
 }
 
@@ -836,6 +878,26 @@ func (burstSubject) ensureCompleted(ctx context.Context, s db.Store, te *turnExe
 			return struct{}{}, s.UpdateMessageCompleted(c, m.ID, te.turnResponseText, te.currentSessionID, telemetry...)
 		}); err != nil {
 			return err
+		}
+	}
+	te.steerMu.Lock()
+	undelivered := removeIDs(slices.Clone(te.pendingDrainIDs), ids)
+	te.pendingDrainIDs = nil
+	te.steerMu.Unlock()
+	if len(undelivered) > 0 {
+		uRows, uErr := messagesByIDOrdered(ctx, s, undelivered)
+		if uErr != nil {
+			return uErr
+		}
+		for _, m := range uRows {
+			if m.Status != db.StatusProcessing {
+				continue
+			}
+			if _, err := storeCall(ctx, func(c context.Context) (struct{}, error) {
+				return struct{}{}, s.UpdateMessageStatus(c, m.ID, db.StatusPending, "")
+			}); err != nil {
+				return err
+			}
 		}
 	}
 	return nil
@@ -867,12 +929,39 @@ type dispatchSubject struct {
 	ids  []string
 }
 
+func loadExtraDispatches(ctx context.Context, s db.Store, te *turnExecution, knownIDs, extraIDs []string) ([]string, error) {
+	if len(extraIDs) == 0 {
+		return nil, nil
+	}
+	te.steerMu.Lock()
+	defer te.steerMu.Unlock()
+	var active []string
+	for _, extraID := range extraIDs {
+		extraRow, gErr := storeCall(ctx, func(c context.Context) (*db.Dispatch, error) { return s.GetDispatch(c, extraID) })
+		if errors.Is(gErr, db.ErrRecordNotFound) || (gErr == nil && (extraRow == nil || extraRow.Status != db.StatusProcessing)) {
+			continue
+		}
+		if gErr != nil {
+			return nil, gErr
+		}
+		active = append(active, extraID)
+		te.steeredDispatches = append(te.steeredDispatches, *extraRow)
+		if !slices.Contains(knownIDs, extraID) {
+			te.drainedIDs = normalizeStepIDs(append(te.drainedIDs, extraID))
+			if pText := strings.TrimSpace(extraRow.Prompt); pText != "" {
+				te.drainedPrompts = append(te.drainedPrompts, pText)
+			}
+		}
+	}
+	return active, nil
+}
+
 func (d dispatchSubject) load(ctx context.Context, s db.Store, te *turnExecution) ([]string, TurnOutcome, error) {
-	ids := normalizeStepIDs(d.ids)
-	if len(ids) == 0 {
+	knownIDs := normalizeStepIDs(d.ids)
+	if len(knownIDs) == 0 {
 		return nil, OutcomeEmpty, nil
 	}
-	row, err := storeCall(ctx, func(c context.Context) (*db.Dispatch, error) { return s.GetDispatch(c, ids[0]) })
+	row, err := storeCall(ctx, func(c context.Context) (*db.Dispatch, error) { return s.GetDispatch(c, knownIDs[0]) })
 	if errors.Is(err, db.ErrRecordNotFound) || (err == nil && row == nil) {
 		return nil, OutcomeEmpty, nil
 	}
@@ -897,35 +986,19 @@ func (d dispatchSubject) load(ctx context.Context, s db.Store, te *turnExecution
 	te.isEphemeral = isEphem
 	te.triggerType = "dispatch:" + row.Source
 	te.activeSessionMu.Unlock()
+	ids := slices.Clone(knownIDs)
 	if !isEphem {
-		extraIDs, rErr := recoverDispatchProcessingIDs(ctx, s, row.SessionID, ids)
+		extraIDs, rErr := recoverDispatchProcessingIDs(ctx, s, te.turnID, row.SessionID, knownIDs)
 		if rErr != nil {
 			return nil, "", rErr
 		}
 		ids = normalizeStepIDs(append(ids, extraIDs...))
 	}
-	activeIDs := []string{row.ID}
-	if len(ids) > 1 {
-		te.steerMu.Lock()
-		for _, extraID := range ids[1:] {
-			extraRow, gErr := storeCall(ctx, func(c context.Context) (*db.Dispatch, error) { return s.GetDispatch(c, extraID) })
-			if errors.Is(gErr, db.ErrRecordNotFound) || (gErr == nil && (extraRow == nil || extraRow.Status != db.StatusProcessing)) {
-				continue
-			}
-			if gErr != nil {
-				te.steerMu.Unlock()
-				return nil, "", gErr
-			}
-			activeIDs = append(activeIDs, extraID)
-			te.steeredDispatches = append(te.steeredDispatches, *extraRow)
-			te.drainedIDs = append(te.drainedIDs, extraID)
-			if pText := strings.TrimSpace(extraRow.Prompt); pText != "" {
-				te.drainedPrompts = append(te.drainedPrompts, pText)
-			}
-		}
-		te.steerMu.Unlock()
+	extraActive, lErr := loadExtraDispatches(ctx, s, te, knownIDs, ids[1:])
+	if lErr != nil {
+		return nil, "", lErr
 	}
-	return activeIDs, "", nil
+	return append([]string{row.ID}, extraActive...), "", nil
 }
 
 func (dispatchSubject) beginAttempt(ctx context.Context, s db.Store, id string, ordinal int) (db.AttemptStart, error) {
@@ -962,6 +1035,24 @@ func (dispatchSubject) ensureCompleted(ctx context.Context, s db.Store, te *turn
 		telemetry := te.turnTelemetry()
 		if _, err := storeCall(ctx, func(c context.Context) (struct{}, error) {
 			return struct{}{}, s.UpdateDispatchCompleted(c, id, te.turnResponseText, te.currentSessionID, telemetry...)
+		}); err != nil {
+			return err
+		}
+	}
+	te.steerMu.Lock()
+	undelivered := removeIDs(slices.Clone(te.pendingDrainIDs), ids)
+	te.pendingDrainIDs = nil
+	te.steerMu.Unlock()
+	for _, id := range undelivered {
+		row, err := storeCall(ctx, func(c context.Context) (*db.Dispatch, error) { return s.GetDispatch(c, id) })
+		if errors.Is(err, db.ErrRecordNotFound) || (err == nil && (row == nil || row.Status != db.StatusProcessing)) {
+			continue
+		}
+		if err != nil {
+			return err
+		}
+		if _, err := storeCall(ctx, func(c context.Context) (struct{}, error) {
+			return struct{}{}, s.UpdateDispatchStatus(c, id, db.StatusPending, "")
 		}); err != nil {
 			return err
 		}

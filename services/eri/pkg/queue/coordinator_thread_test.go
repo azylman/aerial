@@ -278,15 +278,11 @@ func TestThreadCoordinator_Enqueue_IngressWakeGating(t *testing.T) {
 type channelIngressWakeResolver struct {
 	fakeThreadResolver
 
-	holdA   chan struct{}
-	entered chan string
-	decide  func(msg db.Message) (bool, string)
+	holdA  chan struct{}
+	decide func(msg db.Message) (bool, string)
 }
 
 func (c *channelIngressWakeResolver) EvaluateIngressWake(_ context.Context, _ string, msg db.Message) (bool, string) {
-	if c.entered != nil {
-		c.entered <- msg.ID
-	}
 	if msg.ID == "m-slow" && c.holdA != nil {
 		<-c.holdA
 	}
@@ -364,10 +360,11 @@ func TestThreadCoordinator_Enqueue_ArrivalOrder_SecondFinishesBeforeFirstInsert(
 	snap := h.snapshot(t)
 	assert.Empty(t, snap.pending, "m-fast must not overtake m-slow before m-slow finishes InsertMessage")
 	assert.Nil(t, snap.active, "no turn may start while leading reservation m-slow is undecided")
-	assert.Equal(t, []ingressSlot{
-		{ID: "m-slow"},
-		{ID: "m-fast", Decided: true, Accepted: true, Gated: true},
-	}, snap.ingress)
+	require.Len(t, snap.ingress, 2)
+	assert.Equal(t, "m-slow", snap.ingress[0].ID)
+	assert.False(t, snap.ingress[0].Decided)
+	assert.False(t, snap.ingress[0].ReservedAt.IsZero())
+	assert.Equal(t, ingressSlot{ID: "m-fast", Decided: true, Accepted: true, Gated: true}, snap.ingress[1])
 
 	close(releaseAInsert)
 	wg.Wait()
@@ -378,72 +375,124 @@ func TestThreadCoordinator_Enqueue_ArrivalOrder_SecondFinishesBeforeFirstInsert(
 	assert.Contains(t, h.sends, runGatedBurst("m-slow", "m-fast"))
 }
 
-func TestThreadCoordinator_Enqueue_ArrivalOrder_DecisionAppendReordered(t *testing.T) {
+func TestThreadCoordinator_Enqueue_TerminalFailuresAndCancelReleaseReservation(t *testing.T) {
 	t.Parallel()
 
-	store := seedStore(t, nil, nil, "")
-	h := newCoordHarness(t, tcKey, tcInv, coordinatorState{})
-	aGateEntered := make(chan string, 2)
-	resolver := &channelIngressWakeResolver{entered: aGateEntered}
-	coord := NewThreadCoordinator(store, resolver, "aerial")
+	t.Run("TerminalInsertErrorDropsReservationAndAllowsNextWake", func(t *testing.T) {
+		t.Parallel()
+		store := seedStore(t, nil, nil, failTriggerSQL("messages", "INSERT", "23514"))
+		h := newCoordHarness(t, tcKey, tcInv, coordinatorState{})
+		resolver := &channelIngressWakeResolver{}
+		coord := NewThreadCoordinator(store, resolver, "aerial")
+		h.onSend = func(call sentCall) {
+			if req, ok := call.Input.(AppendRequest); call.Method == HandlerAppend && ok {
+				require.NoError(t, coord.Append(h.objectCtx(), req))
+			}
+		}
 
-	var appendMu sync.Mutex
-	aReserved := make(chan struct{})
-	aDecisionHeld := make(chan struct{})
-	bDecisionApplied := make(chan struct{})
-	h.onSend = func(call sentCall) {
-		req, ok := call.Input.(AppendRequest)
-		if call.Method != HandlerAppend || !ok {
-			return
-		}
-		if req.ReserveID == "m-slow" {
-			appendMu.Lock()
-			require.NoError(t, coord.Append(h.objectCtx(), req))
-			appendMu.Unlock()
-			close(aReserved)
-			return
-		}
-		if len(req.IDs) == 1 && req.IDs[0] == "m-slow" {
-			close(aDecisionHeld)
-			<-bDecisionApplied
-		}
-		appendMu.Lock()
-		require.NoError(t, coord.Append(h.objectCtx(), req))
-		appendMu.Unlock()
-		if len(req.IDs) == 1 && req.IDs[0] == "m-fast" {
-			close(bDecisionApplied)
-		}
-	}
-
-	var wg sync.WaitGroup
-	wg.Add(2)
-	go func() {
-		defer wg.Done()
-		resp, err := coord.Enqueue(h.sharedCtx(), ThreadEnqueueRequest{
-			Message: &db.Message{ID: "m-slow", ThreadID: tcKey, Content: "first message"},
+		_, err := coord.Enqueue(h.sharedCtx(), ThreadEnqueueRequest{
+			Message: &db.Message{ID: "m-bad-insert", ThreadID: tcKey, Content: "fails insert"},
 		})
-		assert.NoError(t, err)
-		assert.Equal(t, eriwire.StatusAccepted, resp.Status)
-	}()
+		assertCoordinatorErr(t, err, 500)
+		assert.Empty(t, h.snapshot(t).ingress, "terminal insert error must drop its reservation slot")
 
-	<-aReserved
-	<-aDecisionHeld
-
-	go func() {
-		defer wg.Done()
-		resp, err := coord.Enqueue(h.sharedCtx(), ThreadEnqueueRequest{
-			Message: &db.Message{ID: "m-fast", ThreadID: tcKey, Content: "second message"},
+		// Subsequent wake message on a working store starts a turn normally.
+		goodCoord := NewThreadCoordinator(seedStore(t, nil, nil, ""), resolver, "aerial")
+		h.onSend = func(call sentCall) {
+			if req, ok := call.Input.(AppendRequest); call.Method == HandlerAppend && ok {
+				require.NoError(t, goodCoord.Append(h.objectCtx(), req))
+			}
+		}
+		resp, err := goodCoord.Enqueue(h.sharedCtx(), ThreadEnqueueRequest{
+			Message: &db.Message{ID: "m-after-insert-err", ThreadID: tcKey, Content: "wake after error"},
 		})
-		assert.NoError(t, err)
+		require.NoError(t, err)
 		assert.Equal(t, eriwire.StatusAccepted, resp.Status)
-	}()
+		assert.Equal(t, startedTurn("m-after-insert-err"), h.snapshot(t).active)
+	})
 
-	wg.Wait()
+	t.Run("TerminalGateErrorDropsReservationAndAllowsNextWake", func(t *testing.T) {
+		t.Parallel()
+		store := seedStore(t, nil, nil, "")
+		h := newCoordHarness(t, tcKey, tcInv, coordinatorState{
+			ingress: []ingressSlot{{ID: "m-killed-stale", ReservedAt: time.Now().UTC().Add(-ingressReservationTTL - time.Second)}},
+		})
+		h.cancelStep = StepGateIngressWake
+		resolver := &channelIngressWakeResolver{}
+		coord := NewThreadCoordinator(store, resolver, "aerial")
+		h.onSend = func(call sentCall) {
+			if req, ok := call.Input.(AppendRequest); call.Method == HandlerAppend && ok {
+				require.NoError(t, coord.Append(h.objectCtx(), req))
+			}
+		}
 
-	finalSnap := h.snapshot(t)
-	assert.Empty(t, finalSnap.ingress)
-	assert.Equal(t, startedTurn("m-slow", "m-fast"), finalSnap.active)
-	assert.Contains(t, h.sends, runGatedBurst("m-slow", "m-fast"))
+		_, err := coord.Enqueue(h.sharedCtx(), ThreadEnqueueRequest{
+			Message: &db.Message{ID: "m-gate-cancelled", ThreadID: tcKey, Content: "cancelled at gate"},
+		})
+		assertCoordinatorErr(t, err, CodeQueueConflict)
+		assert.Empty(t, h.snapshot(t).ingress, "expired and gate-cancelled reservations must be cleared")
+
+		h.cancelStep = ""
+		resp, err := coord.Enqueue(h.sharedCtx(), ThreadEnqueueRequest{
+			Message: &db.Message{ID: "m-after-gate-err", ThreadID: tcKey, Content: "wake after gate error"},
+		})
+		require.NoError(t, err)
+		assert.Equal(t, eriwire.StatusAccepted, resp.Status)
+		assert.Equal(t, startedTurn("m-after-gate-err"), h.snapshot(t).active)
+	})
+
+	t.Run("CancelBetweenReservationAndInsertFailsOrphanedRowAndLeavesHeldUntouched", func(t *testing.T) {
+		t.Parallel()
+		store := seedStore(t, []db.Message{msgRow("m-done", tcKey, db.StatusCompleted)}, nil, "")
+		h := newCoordHarness(t, tcKey, tcInv, coordinatorState{})
+		resolver := &channelIngressWakeResolver{}
+		coord := NewThreadCoordinator(store, resolver, "aerial")
+
+		// 1. Reserve slot for m-cancel-race before InsertMessage runs.
+		require.NoError(t, coord.Append(h.objectCtx(), AppendRequest{ReserveID: "m-cancel-race"}))
+		require.Len(t, h.snapshot(t).ingress, 1)
+
+		// 2. CancelTurn + ClearPending runs before m-cancel-race is inserted in DB.
+		cancelResp, err := coord.CancelTurn(h.sharedCtx(), CancelTurnRequest{Reason: "abort"})
+		require.NoError(t, err)
+		assert.Equal(t, 0, cancelResp.CancelledCount)
+		require.NoError(t, coord.ClearPending(h.objectCtx(), ClearPendingRequest{IDs: []string{"m-cancel-race"}, CancelActive: true}))
+		assert.Empty(t, h.snapshot(t).ingress)
+
+		// 3. Enqueue now inserts m-cancel-race as PENDING and sends FromIngress decision.
+		seedMessageRows(t, store, []db.Message{msgRow("m-cancel-race", tcKey, db.StatusPending)})
+		require.NoError(t, coord.Append(h.objectCtx(), AppendRequest{IDs: []string{"m-cancel-race", "m-done"}, Gated: true, FromIngress: true}))
+		assert.Nil(t, h.snapshot(t).active, "cancelled reservation must not start a turn")
+		assertMessageRows(t, store, map[string]rowWant{
+			"m-cancel-race": {status: db.StatusFailed, errText: cancelledByOperatorReason},
+			"m-done":        {status: db.StatusCompleted},
+		})
+	})
+
+	t.Run("AcceptedReservationMakesSubsequentSkipIfActivePromptBusy", func(t *testing.T) {
+		t.Parallel()
+		store := seedStore(t, []db.Message{
+			msgRow("m-res", tcKey, db.StatusPending),
+			msgRow("p-skip", tcKey, db.StatusPending),
+		}, nil, "")
+		h := newCoordHarness(t, tcKey, tcInv, coordinatorState{})
+		coord := NewThreadCoordinator(store, nil, "aerial")
+
+		// 1. Undecided reservation arrives on idle thread.
+		require.NoError(t, coord.Append(h.objectCtx(), AppendRequest{ReserveID: "m-res"}))
+		// 2. SkipIfActive prompt queues behind the undecided reservation.
+		require.NoError(t, coord.Append(h.objectCtx(), AppendRequest{IDs: []string{"p-skip"}, SkipIfActive: true}))
+		assert.Nil(t, h.snapshot(t).active)
+
+		// 3. Reservation is accepted: m-res starts the turn and p-skip sees busy=true and is marked skipped.
+		require.NoError(t, coord.Append(h.objectCtx(), AppendRequest{IDs: []string{"m-res"}, Gated: true, FromIngress: true}))
+		assert.Equal(t, startedTurn("m-res"), h.snapshot(t).active)
+		assert.Empty(t, h.snapshot(t).pending)
+		assertMessageRows(t, store, map[string]rowWant{
+			"m-res":  {status: db.StatusPending},
+			"p-skip": {status: db.StatusCompleted, errText: skippedActiveTurnReason},
+		})
+	})
 }
 
 func TestThreadCoordinator_Enqueue_ArrivalOrder_IgnoredReservationReleasesWake(t *testing.T) {

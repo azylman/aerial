@@ -402,7 +402,7 @@ func (s *TurnRunnerService) runAttempts(ctx restate.Context, subj runnerSubject,
 		}
 		if len(res.DrainedPrompts) > 0 {
 			for _, p := range res.DrainedPrompts {
-				if strings.TrimSpace(p) != "" {
+				if p = strings.TrimSpace(p); p != "" && !strings.Contains(runIn.Prep.Prompt, p) {
 					runIn.Prep.Prompt += "\n\n" + p
 				}
 			}

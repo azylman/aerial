@@ -37,9 +37,14 @@ func (*testSteerTurnLease) Execute(context.Context, *runner.TurnContext) (*runne
 	return &runner.TurnResult{}, nil
 }
 
-type mockFailingTransport struct{}
+type mockFailingTransport struct {
+	gotURL string
+}
 
-func (mockFailingTransport) RoundTrip(*http.Request) (*http.Response, error) {
+func (m *mockFailingTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	if req != nil && req.URL != nil {
+		m.gotURL = req.URL.String()
+	}
 	return nil, errors.New("simulated network failure")
 }
 
@@ -350,9 +355,10 @@ func TestHandleDrainPending_RestateErrors(t *testing.T) {
 
 	t.Run("empty RestateIngressURL falls back to default restate host", func(t *testing.T) {
 		t.Parallel()
+		transport := &mockFailingTransport{}
 		pool := NewWorkerPool(WorkerPoolConfig{
 			RestateIngressURL: "",
-			DrainHTTPClient:   &http.Client{Transport: mockFailingTransport{}},
+			DrainHTTPClient:   &http.Client{Transport: transport},
 		})
 		te := &turnExecution{
 			turnID:           "turn-restate-default-url",
@@ -371,6 +377,7 @@ func TestHandleDrainPending_RestateErrors(t *testing.T) {
 		pool.HandleDrainPending(rec, req)
 		assert.Equal(t, http.StatusBadGateway, rec.Code)
 		assert.Contains(t, rec.Body.String(), "restate drain call failed")
+		assert.Equal(t, "http://restate.aerial:8080/ThreadSession/thread-123/DrainPending", transport.gotURL)
 	})
 }
 
@@ -431,8 +438,9 @@ func TestHandleDrainPending_BurstTurn(t *testing.T) {
 
 	te.steerMu.Lock()
 	assert.Equal(t, []string{m2.ID, m3.ID}, te.drainedIDs)
-	assert.Len(t, te.burst, 3)
+	assert.Len(t, te.steeredMessages, 2)
 	te.steerMu.Unlock()
+	assert.Len(t, te.burst, 1, "active burst slice must not be mutated while steering is open")
 
 	// Verify messages are claimed (Status = processing) in store
 	row2, err := store.GetMessage(context.Background(), m2.ID)
@@ -700,4 +708,220 @@ func TestHandleDrainPending_ClaimedAndBlankRecords(t *testing.T) {
 	var respDisp SteerDrainResponse
 	require.NoError(t, json.NewDecoder(recDisp.Body).Decode(&respDisp))
 	assert.Empty(t, respDisp.Prompts)
+}
+
+type faultDrainStore struct {
+	*db.SQLStore
+
+	failClaimMsg  bool
+	failReadMsg   bool
+	failClaimDisp bool
+	failReadDisp  bool
+}
+
+func (f *faultDrainStore) ClaimPendingMessage(ctx context.Context, id string) (bool, error) {
+	if f.failClaimMsg {
+		return false, errors.New("simulated claim message failure")
+	}
+	return f.SQLStore.ClaimPendingMessage(ctx, id)
+}
+
+func (f *faultDrainStore) GetMessagesByID(ctx context.Context, ids []string) ([]db.Message, error) {
+	if f.failReadMsg {
+		return nil, errors.New("simulated read messages failure")
+	}
+	return f.SQLStore.GetMessagesByID(ctx, ids)
+}
+
+func (f *faultDrainStore) ClaimPendingDispatch(ctx context.Context, id string) (bool, error) {
+	if f.failClaimDisp {
+		return false, errors.New("simulated claim dispatch failure")
+	}
+	return f.SQLStore.ClaimPendingDispatch(ctx, id)
+}
+
+func (f *faultDrainStore) GetDispatch(ctx context.Context, id string) (*db.Dispatch, error) {
+	if f.failReadDisp {
+		return nil, errors.New("simulated read dispatch failure")
+	}
+	return f.SQLStore.GetDispatch(ctx, id)
+}
+
+func TestHandleDrainPending_LostResponse_ClaimFailure_ReadFailure_AndConcurrentExecution(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	baseStore := testStore(t)
+	fStore := &faultDrainStore{SQLStore: baseStore}
+
+	threadID := "thread-handoff-burst"
+	m1 := db.Message{ID: "m-h-1", ThreadID: threadID, Content: "initial", Status: db.StatusProcessing, CreatedAt: time.Now().UTC()}
+	m2 := db.Message{ID: "m-h-2", ThreadID: threadID, Content: "steered burst", Status: db.StatusPending, CreatedAt: time.Now().UTC().Add(time.Second)}
+	m3 := db.Message{ID: "m-h-3", ThreadID: threadID, Content: "undelivered on finish", Status: db.StatusPending, CreatedAt: time.Now().UTC().Add(2 * time.Second)}
+	seedMessageRows(t, baseStore, []db.Message{m1, m2, m3})
+
+	// Drive real ThreadCoordinator.DrainPending through an httptest server to exercise durable draining state.
+	h := newCoordHarness(t, threadID, tcInv, coordinatorState{
+		pending: []string{m2.ID},
+		active:  &ActiveTurn{TurnID: "turn-handoff-1", ItemIDs: []string{m1.ID}, RunnerInvocationID: "inv-h1"},
+	})
+	coord := NewThreadCoordinator(baseStore, nil, "aerial")
+	dropNextResponse := true
+	var ackedSeen []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var dReq DrainPendingRequest
+		require.NoError(t, json.NewDecoder(r.Body).Decode(&dReq))
+		if len(dReq.AckIDs) > 0 {
+			ackedSeen = append(ackedSeen, dReq.AckIDs...)
+		}
+		dResp, err := coord.DrainPending(h.objectCtx(), dReq)
+		require.NoError(t, err)
+		if dropNextResponse {
+			dropNextResponse = false
+			http.Error(w, "lost response after commit", http.StatusBadGateway)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		require.NoError(t, json.NewEncoder(w).Encode(dResp))
+	}))
+	defer srv.Close()
+
+	pool := NewWorkerPool(WorkerPoolConfig{
+		Store:             fStore,
+		RestateIngressURL: srv.URL,
+		DrainHTTPClient:   srv.Client(),
+		AgentName:         "aerial",
+	})
+	te := &turnExecution{
+		turnID:           "turn-handoff-1",
+		threadID:         threadID,
+		activeTurnDaemon: "daemon-handoff-1",
+		burst:            []db.Message{m1},
+	}
+	release, ok := pool.turns.Begin(ctx, te.turnID, te)
+	require.True(t, ok)
+	defer release()
+
+	reqBody, err := json.Marshal(SteerDrainRequest{DaemonID: "daemon-handoff-1"})
+	require.NoError(t, err)
+
+	// 1. Lost drain response after Restate committed DrainPending: m2 is in st.draining and still PENDING in DB.
+	rec1 := httptest.NewRecorder()
+	pool.HandleDrainPending(rec1, httptest.NewRequest(http.MethodPost, SteerDrainPath, bytes.NewReader(reqBody)))
+	assert.Equal(t, http.StatusBadGateway, rec1.Code)
+	assert.Equal(t, []string{m2.ID}, h.snapshot(t).draining)
+	assertMessageRows(t, baseStore, map[string]rowWant{m2.ID: {status: db.StatusPending}})
+
+	// 2. Claim failure: coordinator repeats m2 from st.draining, claim fails -> 500, still unacknowledged.
+	fStore.failClaimMsg = true
+	rec2 := httptest.NewRecorder()
+	pool.HandleDrainPending(rec2, httptest.NewRequest(http.MethodPost, SteerDrainPath, bytes.NewReader(reqBody)))
+	assert.Equal(t, http.StatusInternalServerError, rec2.Code)
+	assert.Equal(t, []string{m2.ID}, h.snapshot(t).draining)
+	assertMessageRows(t, baseStore, map[string]rowWant{m2.ID: {status: db.StatusPending}})
+	fStore.failClaimMsg = false
+
+	// 3. Read failure after claim: m2 is claimed to PROCESSING, then GetMessagesByID fails -> 500, still unacknowledged.
+	fStore.failReadMsg = true
+	rec3 := httptest.NewRecorder()
+	pool.HandleDrainPending(rec3, httptest.NewRequest(http.MethodPost, SteerDrainPath, bytes.NewReader(reqBody)))
+	assert.Equal(t, http.StatusInternalServerError, rec3.Code)
+	assert.Equal(t, []string{m2.ID}, h.snapshot(t).draining)
+	assertMessageRows(t, baseStore, map[string]rowWant{m2.ID: {status: db.StatusProcessing}})
+	fStore.failReadMsg = false
+
+	// 4. Retry after read failure: adopts already-PROCESSING m2, delivers prompt, and acknowledges m2.
+	rec4 := httptest.NewRecorder()
+	pool.HandleDrainPending(rec4, httptest.NewRequest(http.MethodPost, SteerDrainPath, bytes.NewReader(reqBody)))
+	require.Equal(t, http.StatusOK, rec4.Code)
+	var resp4 SteerDrainResponse
+	require.NoError(t, json.NewDecoder(rec4.Body).Decode(&resp4))
+	require.Len(t, resp4.Prompts, 1)
+	assert.Contains(t, resp4.Prompts[0], "steered burst")
+	assert.Empty(t, h.snapshot(t).draining)
+	assert.Contains(t, ackedSeen, m2.ID)
+
+	// 5. Undelivered row on turn finish: append m3, fail read after claim, then finish attempt via ensureCompleted + OnTurnDone.
+	require.NoError(t, coord.Append(h.objectCtx(), AppendRequest{IDs: []string{m3.ID}}))
+	fStore.failReadMsg = true
+	rec5 := httptest.NewRecorder()
+	pool.HandleDrainPending(rec5, httptest.NewRequest(http.MethodPost, SteerDrainPath, bytes.NewReader(reqBody)))
+	assert.Equal(t, http.StatusInternalServerError, rec5.Code)
+	assertMessageRows(t, baseStore, map[string]rowWant{m3.ID: {status: db.StatusProcessing}})
+	fStore.failReadMsg = false
+
+	// Attempt finishes without delivering m3: ensureCompleted requeues m3 to PENDING, OnTurnDone starts next turn for m3.
+	require.NoError(t, (burstSubject{pool: pool}).ensureCompleted(ctx, baseStore, te, []string{m1.ID, m2.ID}))
+	assertMessageRows(t, baseStore, map[string]rowWant{
+		m1.ID: {status: db.StatusCompleted},
+		m2.ID: {status: db.StatusCompleted},
+		m3.ID: {status: db.StatusPending},
+	})
+	require.NoError(t, coord.OnTurnDone(h.objectCtx(), TurnDoneRequest{TurnID: "turn-handoff-1", Outcome: OutcomeCompleted}))
+	require.NotNil(t, h.snapshot(t).active)
+	assert.Equal(t, []string{m3.ID}, h.snapshot(t).active.ItemIDs)
+}
+
+func TestHandleDrainPending_ConcurrentDuringExecutingAttempt(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	baseStore := testStore(t)
+	raceThread := "thread-race-exec"
+	require.NoError(t, baseStore.SaveSessionID(ctx, raceThread, "44444444-4444-4444-4444-444444444444"))
+	mr1 := db.Message{ID: "m-race-1", ThreadID: raceThread, Content: "start", Status: db.StatusProcessing, CreatedAt: time.Now().UTC()}
+	mr2 := db.Message{ID: "m-race-2", ThreadID: raceThread, Content: "mid-turn steer", Status: db.StatusPending, CreatedAt: time.Now().UTC().Add(time.Second)}
+	seedMessageRows(t, baseStore, []db.Message{mr1, mr2})
+
+	raceSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var dReq DrainPendingRequest
+		require.NoError(t, json.NewDecoder(r.Body).Decode(&dReq))
+		w.Header().Set("Content-Type", "application/json")
+		if len(dReq.AckIDs) > 0 {
+			require.NoError(t, json.NewEncoder(w).Encode(DrainPendingResponse{}))
+			return
+		}
+		require.NoError(t, json.NewEncoder(w).Encode(DrainPendingResponse{DrainedIDs: []string{mr2.ID}}))
+	}))
+	defer raceSrv.Close()
+
+	runnerStarted := make(chan struct{})
+	drainCompleted := make(chan struct{})
+	racePool := NewWorkerPool(WorkerPoolConfig{
+		Store:             baseStore,
+		RestateIngressURL: raceSrv.URL,
+		DrainHTTPClient:   raceSrv.Client(),
+		DeliveryFunc:      (&noticeRecorder{}).deliver,
+		RunnerFunc: func(_ context.Context, _, _, _, _, _ string, _ int) (string, string, int, error) {
+			close(runnerStarted)
+			<-drainCompleted
+			return "race turn done", "", 0, nil
+		},
+	})
+
+	go func() {
+		<-runnerStarted
+		b, mErr := json.Marshal(SteerDrainRequest{SessionID: "44444444-4444-4444-4444-444444444444"})
+		assert.NoError(t, mErr)
+		rec := httptest.NewRecorder()
+		racePool.HandleDrainPending(rec, httptest.NewRequest(http.MethodPost, SteerDrainPath, bytes.NewReader(b)))
+		assert.Equal(t, http.StatusOK, rec.Code)
+		close(drainCompleted)
+	}()
+
+	attemptRes, err := racePool.RunBurstAttempt(ctx, AttemptInput{
+		ThreadID: raceThread,
+		TurnID:   "turn-race-1",
+		IDs:      []string{mr1.ID},
+		Ordinal:  1,
+		RunIndex: 1,
+		Prep:     TurnPrep{Decision: TurnDecisionRun, SessionID: "44444444-4444-4444-4444-444444444444", Model: "gemini-2.5-flash", Prompt: "start"},
+	})
+	require.NoError(t, err)
+	assert.Equal(t, AttemptKindSuccess, attemptRes.Kind)
+	assert.Equal(t, []string{mr2.ID}, attemptRes.DrainedIDs)
+	assertMessageRows(t, baseStore, map[string]rowWant{
+		mr1.ID: {status: db.StatusCompleted},
+		mr2.ID: {status: db.StatusCompleted},
+	})
 }

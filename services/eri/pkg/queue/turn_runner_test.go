@@ -138,8 +138,8 @@ func (f *fakeTurnSteps) RecordDispatchOutcome(_ context.Context, _ []string, s A
 	return f.call("outcome", string(s.Outcome)+" "+s.Reason)
 }
 
-func (f *fakeTurnSteps) PublishDispatchOutcome(_ context.Context, _ string, o TurnOutcome) error {
-	return f.call("publish", string(o))
+func (f *fakeTurnSteps) PublishDispatchOutcome(_ context.Context, dispatchID string, o TurnOutcome) error {
+	return f.call("publish", dispatchID+" "+string(o))
 }
 
 func (f *fakeTurnSteps) StopDispatchTurn(_ context.Context, _ string, ids []string) error {
@@ -554,13 +554,13 @@ func TestTurnRunnerRunDispatch(t *testing.T) {
 			name: "HappyPathPublishesCompleted", started: claimed(0, "d1"), prep: runPrep(), attempts: []fakeAttempt{attemptOf(AttemptKindSuccess)},
 			wantOutcome: OutcomeCompleted,
 			wantCmds:    []string{"run record-started", "run prep", "run run-1", "run record-outcome", "run publish-dispatch-outcome", doneSend(ds, "session-1", OutcomeCompleted, 0)},
-			wantCalls:   []string{"started", "prep", "attempt ord=1 run=1", "outcome completed", "publish completed"},
+			wantCalls:   []string{"started", "prep", "attempt ord=1 run=1", "outcome completed", "publish d1 completed"},
 		},
 		{
 			name: "TimeoutPublishesTimeout", started: claimed(0, "d1"), prep: runPrep(), attempts: []fakeAttempt{{res: AttemptResult{Kind: AttemptKindTimeout, Reason: "timeout"}}},
 			wantOutcome: OutcomeTimeout,
 			wantCmds:    []string{"run record-started", "run prep", "run run-1", "run record-outcome", "run publish-dispatch-outcome", doneSend(ds, "session-1", OutcomeTimeout, 0)},
-			wantCalls:   []string{"started", "prep", "attempt ord=1 run=1", "outcome timeout timeout", "publish timeout"},
+			wantCalls:   []string{"started", "prep", "attempt ord=1 run=1", "outcome timeout timeout", "publish d1 timeout"},
 		},
 		{
 			name: "RecordedCancelPublishesNothing", started: claimed(0, "d1"), prep: runPrep(), attempts: []fakeAttempt{{res: AttemptResult{Kind: AttemptKindRecorded, Reason: string(OutcomeCancelled)}}},
@@ -591,7 +591,7 @@ func TestTurnRunnerRunDispatch(t *testing.T) {
 			attempts:    []fakeAttempt{{res: AttemptResult{Kind: AttemptKindSuccess, DrainedIDs: []string{"d2"}}}},
 			wantOutcome: OutcomeCompleted,
 			wantCmds:    []string{"run record-started", "run prep", "run run-1", "run record-outcome", "run publish-dispatch-outcome", "run publish-dispatch-outcome-2", doneSend(ds, "session-1", OutcomeCompleted, 0)},
-			wantCalls:   []string{"started", "prep", "attempt ord=1 run=1", "outcome completed", "publish completed", "publish completed"},
+			wantCalls:   []string{"started", "prep", "attempt ord=1 run=1", "outcome completed", "publish d1 completed", "publish d2 completed"},
 		},
 		{
 			name: "DrainedDispatchFailsBothOnTerminalError", started: claimed(0, "d1"), prep: runPrep(),
@@ -671,6 +671,14 @@ func TestTurnRunner_DrainFollowedBySessionCorruptionRetry_ReplaysDrainedPrompt(t
 			},
 			{
 				res: AttemptResult{
+					Kind:           AttemptKindRetry,
+					DrainedIDs:     []string{"m2"},
+					DrainedPrompts: []string{"steered input text"},
+					Reason:         "transient blip",
+				},
+			},
+			{
+				res: AttemptResult{
 					Kind: AttemptKindSuccess,
 				},
 			},
@@ -682,10 +690,10 @@ func TestTurnRunner_DrainFollowedBySessionCorruptionRetry_ReplaysDrainedPrompt(t
 	require.NoError(t, err)
 	assert.Equal(t, OutcomeCompleted, res.Outcome)
 
-	require.Len(t, steps.attemptPrompts, 2)
+	require.Len(t, steps.attemptPrompts, 3)
 	assert.Equal(t, "initial prompt", steps.attemptPrompts[0])
-	assert.Contains(t, steps.attemptPrompts[1], "initial prompt")
-	assert.Contains(t, steps.attemptPrompts[1], "steered input text")
+	assert.Equal(t, 1, strings.Count(steps.attemptPrompts[1], "steered input text"))
+	assert.Equal(t, 1, strings.Count(steps.attemptPrompts[2], "steered input text"))
 }
 
 // runStepName reads the restate.WithName option of a Run call.
