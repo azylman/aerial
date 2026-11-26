@@ -562,6 +562,7 @@ func (p *Provisioner) chownProvisionedPaths() {
 			filepath.Join(p.dataDir, "claude"),
 			filepath.Join(p.dataDir, "codex"),
 			filepath.Join(p.dataDir, "muse"),
+			filepath.Join(p.dataDir, "voice-sessions"),
 		} {
 			chownTree(dir)
 		}

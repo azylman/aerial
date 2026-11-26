@@ -419,12 +419,14 @@ func (p *Provisioner) provisionRuntimeSharedAssets(runtimeHome string) {
 		filepath.Join(runtimeGemini, "mcp_oauth_tokens.json"),
 	)
 
-	if p.dataDir != "" && (filepath.Clean(runtimeHome) == filepath.Clean(p.runtimeHomeDir(TargetEphemeral)) || filepath.Clean(runtimeHome) == filepath.Clean(p.runtimeHomeDir(TargetVoice))) {
+	if p.dataDir != "" && filepath.Clean(runtimeHome) == filepath.Clean(p.runtimeHomeDir(TargetEphemeral)) {
 		isolateEphemeralSessionStorage(runtimeHome, runtimeGemini)
-		if filepath.Clean(runtimeHome) == filepath.Clean(p.runtimeHomeDir(TargetVoice)) {
-			if err := p.EnsureEngineHome(runtimeHome); err != nil {
-				log.Printf("[Env] Warning: failed to ensure engine home for %s: %v", runtimeHome, err)
-			}
+		return
+	}
+	if p.dataDir != "" && filepath.Clean(runtimeHome) == filepath.Clean(p.runtimeHomeDir(TargetVoice)) {
+		p.provisionVoiceSessionStorage(runtimeHome, runtimeGemini)
+		if err := p.EnsureEngineHome(runtimeHome); err != nil {
+			log.Printf("[Env] Warning: failed to ensure engine home for %s: %v", runtimeHome, err)
 		}
 		return
 	}
@@ -478,6 +480,42 @@ func (p *Provisioner) provisionRuntimeSharedAssets(runtimeHome string) {
 		if sErr := symlinkRuntimeAsset(canonicalMuseSessions, runtimeMuseSessions); sErr != nil {
 			log.Printf("[Env] Warning: failed to link shared muse sessions %s -> %s: %v", runtimeMuseSessions, canonicalMuseSessions, sErr)
 		}
+	}
+}
+
+// provisionVoiceSessionStorage links voice runtime session storage to persistent /data/voice-sessions/...
+// on the shared volume, keeping voice sessions isolated from /data/brain while persisting across pod restarts.
+// Session discovery by agentsview-sync is configured downstream in aerial-config (k8s/agentsview-session-sources.yaml)
+// as part of chunk 3 per the Two-Step Feature Rule.
+func (p *Provisioner) provisionVoiceSessionStorage(runtimeHome, runtimeGemini string) {
+	voiceData := filepath.Join(p.dataDir, "voice-sessions")
+	voiceBrain := filepath.Join(voiceData, ".gemini", "antigravity-cli", "brain")
+	voiceConversations := filepath.Join(voiceData, ".gemini", "antigravity-cli", "conversations")
+	ignore(os.MkdirAll(voiceBrain, 0o755))
+	ignore(os.MkdirAll(voiceConversations, 0o755))
+
+	p.linkSharedSessionStorage(runtimeGemini, voiceBrain, voiceConversations)
+
+	engineLinks := []struct {
+		voiceDir string
+		rtDir    string
+	}{
+		{filepath.Join(voiceData, "claude", "projects"), filepath.Join(runtimeHome, ".claude", "projects")},
+		{filepath.Join(voiceData, "codex", "sessions"), filepath.Join(runtimeHome, ".codex", "sessions")},
+		{filepath.Join(voiceData, "muse", "sessions"), filepath.Join(runtimeHome, ".local", "share", "muse", "sessions")},
+	}
+	for _, l := range engineLinks {
+		ignore(os.MkdirAll(l.voiceDir, 0o755))
+		ignore(os.MkdirAll(filepath.Dir(l.rtDir), 0o755))
+		prepareSharedTargetDir(l.rtDir, filepath.Clean(l.voiceDir))
+		if sErr := symlinkRuntimeAsset(l.voiceDir, l.rtDir); sErr != nil {
+			log.Printf("[Env] Warning: failed to link voice session dir %s -> %s: %v", l.rtDir, l.voiceDir, sErr)
+		}
+	}
+
+	canonicalCodexAuth := filepath.Join(p.dataDir, "codex", "auth.json")
+	if _, err := os.Stat(canonicalCodexAuth); err == nil {
+		p.linkOrCopyAsset(canonicalCodexAuth, filepath.Join(runtimeHome, ".codex", "auth.json"))
 	}
 }
 
