@@ -48,6 +48,30 @@ const (
 	HeaderSnoozeSeq = "Nats-Snooze-Seq"
 )
 
+// SpanSubject normalizes dynamic per-session/per-agent subjects to bounded wildcard patterns
+// for span names while leaving static subjects unchanged.
+func SpanSubject(subject string) string {
+	if strings.HasPrefix(subject, SubjectTranscriptsStepsPrefix) {
+		return "aerial.transcripts.steps.*"
+	}
+	if strings.HasPrefix(subject, SubjectVoiceStreamPrefix) {
+		return "voice.stream.*"
+	}
+	if rest, ok := strings.CutPrefix(subject, SubjectAerialCoalescedPrefix); ok {
+		if topic, _, cutOk := strings.Cut(rest, "."); cutOk && topic != "" {
+			return SubjectAerialCoalescedPrefix + topic + ".*"
+		} else if rest != "" {
+			return SubjectAerialCoalescedPrefix + "*"
+		}
+	}
+	if rest, ok := strings.CutPrefix(subject, SubjectAerialPRPrefix); ok {
+		if action, _, cutOk := strings.Cut(rest, "."); cutOk && action != "" {
+			return SubjectAerialPRPrefix + action + ".*"
+		}
+	}
+	return subject
+}
+
 // Bus defines the core event bus and work-queue contract across Aerial.
 type Bus interface {
 	Publish(ctx context.Context, subject string, msgID string, data any) error

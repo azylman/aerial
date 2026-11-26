@@ -4,10 +4,19 @@ import (
 	"context"
 	"errors"
 	"net/http"
+	"strings"
 	"testing"
+
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/propagation"
+	"go.opentelemetry.io/otel/trace"
 
 	"github.com/azylman/aerial/pkg/restateingresstest"
 )
+
+func init() {
+	otel.SetTextMapPropagator(propagation.TraceContext{})
+}
 
 type errBody struct{}
 
@@ -34,24 +43,38 @@ const postPath = "/Svc/key/Enqueue"
 func TestPost(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
-		name       string
-		client     *http.Client
-		endpoint   string
-		key        string
-		payload    any
-		maxBody    int64
-		status     int
-		respBody   string
-		wantBody   string
-		wantErr    string
-		wantStatus int
-		wantSent   string
-		wantKey    string
-		wantKeySet bool
+		name        string
+		ctx         context.Context
+		client      *http.Client
+		endpoint    string
+		key         string
+		payload     any
+		maxBody     int64
+		status      int
+		respBody    string
+		wantBody    string
+		wantErr     string
+		wantStatus  int
+		wantSent    string
+		wantKey     string
+		wantKeySet  bool
+		wantTraceID string
 	}{
 		{name: "nil payload sends empty body", status: 200, respBody: `{"status":"accepted"}`, wantBody: `{"status":"accepted"}`},
 		{name: "payload marshaled with idempotency key", key: " prompt:1:2 ", payload: map[string]string{"prompt": "hi"}, status: 202, respBody: "ok", wantBody: "ok", wantSent: `{"prompt":"hi"}`, wantKey: "prompt:1:2", wantKeySet: true},
 		{name: "blank key omitted", key: "   ", payload: map[string]int{"n": 1}, status: 200, respBody: "ok", wantBody: "ok", wantSent: `{"n":1}`},
+		{
+			name: "active span injects traceparent header",
+			ctx: trace.ContextWithSpanContext(context.Background(), trace.NewSpanContext(trace.SpanContextConfig{
+				TraceID:    trace.TraceID{0x4b, 0xf9, 0x2f, 0x35, 0x77, 0xb3, 0x4d, 0xa6, 0xa3, 0xce, 0x92, 0x9d, 0x0e, 0x0e, 0x47, 0x36},
+				SpanID:     trace.SpanID{0x00, 0xf0, 0x67, 0xaa, 0x0b, 0xa9, 0x02, 0xb7},
+				TraceFlags: trace.FlagsSampled,
+			})),
+			status:      200,
+			respBody:    "ok",
+			wantBody:    "ok",
+			wantTraceID: "4bf92f3577b34da6a3ce929d0e0e4736",
+		},
 		{name: "max body truncates", maxBody: 4, status: 200, respBody: "abcdefgh", wantBody: "abcd"},
 		{name: "zero max body unbounded", status: 200, respBody: "abcdefgh", wantBody: "abcdefgh"},
 		{name: "json message error", status: 409, respBody: `{"message":" busy ","error":"other"}`, wantErr: "restate ingress returned HTTP 409: busy", wantStatus: 409},
@@ -71,7 +94,11 @@ func TestPost(t *testing.T) {
 			if endpoint == "" {
 				endpoint = ingress.URL() + postPath
 			}
-			got, err := Post(context.Background(), tc.client, endpoint, tc.key, tc.payload, tc.maxBody)
+			callCtx := tc.ctx
+			if callCtx == nil {
+				callCtx = context.Background()
+			}
+			got, err := Post(callCtx, tc.client, endpoint, tc.key, tc.payload, tc.maxBody)
 			if tc.wantErr != "" {
 				assertPostError(t, err, tc.wantErr, tc.wantStatus)
 				return
@@ -83,6 +110,12 @@ func TestPost(t *testing.T) {
 				t.Errorf("Post() body = %q, want %q", got, tc.wantBody)
 			}
 			assertRecorded(t, ingress.Calls(), tc.wantSent, tc.wantKey, tc.wantKeySet)
+			if tc.wantTraceID != "" {
+				tp := ingress.Calls()[0].Header.Get("Traceparent")
+				if !strings.Contains(tp, tc.wantTraceID) {
+					t.Errorf("Traceparent = %q, want trace ID %q", tp, tc.wantTraceID)
+				}
+			}
 		})
 	}
 }
