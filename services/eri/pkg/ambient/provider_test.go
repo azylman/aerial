@@ -778,3 +778,100 @@ func TestProvider_Retrieve_PreservesCacheOnDeadlineExceeded(t *testing.T) {
 		})
 	}
 }
+
+func TestProvider_SWRBackgroundRefresh_PartialToolTimeoutUpdatesHealthyTool(t *testing.T) {
+	t.Parallel()
+
+	var fastCount atomic.Int32
+	var slowCount atomic.Int32
+	refreshDone := make(chan struct{})
+
+	inv := &mockInvoker{
+		execFunc: func(ctx context.Context, name string, args map[string]any) (string, error) {
+			switch name {
+			case "fast_tool":
+				c := fastCount.Add(1)
+				return fmt.Sprintf(`{"val": %d}`, c), nil
+			case "slow_tool":
+				if slowCount.Add(1) == 1 {
+					return `{"val": "initial"}`, nil
+				}
+				// On background refresh, exceed the per-tool TimeoutMs so toolCtx times out.
+				<-ctx.Done()
+				select {
+				case <-refreshDone:
+				default:
+					close(refreshDone)
+				}
+				return "", ctx.Err()
+			default:
+				return "", fmt.Errorf("unexpected tool %s", name)
+			}
+		},
+	}
+
+	cfg := config.AmbientContextConfig{
+		CacheTTL:  "5s",
+		TimeoutMs: 50,
+		Template:  "Fast: {{.fast.val}} Slow: {{default .slow.error .slow.val}}",
+		Tools: []config.AmbientToolConfig{
+			{Name: "fast", Tool: "fast_tool"},
+			{Name: "slow", Tool: "slow_tool"},
+		},
+	}
+
+	p, err := NewProvider(cfg, inv)
+	if err != nil {
+		t.Fatalf("NewProvider failed: %v", err)
+	}
+
+	simulatedTime := time.Date(2026, 10, 1, 10, 0, 0, 0, time.UTC)
+	var timeMu sync.Mutex
+	p.SetNowFunc(func() time.Time {
+		timeMu.Lock()
+		defer timeMu.Unlock()
+		return simulatedTime
+	})
+
+	// 1. Initial prime caches Fast: 1 Slow: initial
+	res1, err := p.Retrieve(context.Background())
+	if err != nil {
+		t.Fatalf("initial Retrieve failed: %v", err)
+	}
+	if !strings.Contains(res1, "Fast: 1 Slow: initial") {
+		t.Fatalf("expected 'Fast: 1 Slow: initial', got %q", res1)
+	}
+
+	// 2. Advance into SWR window (between soft 5s and hard 10s TTL)
+	timeMu.Lock()
+	simulatedTime = simulatedTime.Add(6 * time.Second)
+	timeMu.Unlock()
+
+	resStale, err := p.Retrieve(context.Background())
+	if err != nil {
+		t.Fatalf("SWR Retrieve failed: %v", err)
+	}
+	if !strings.Contains(resStale, "Fast: 1 Slow: initial") {
+		t.Fatalf("expected stale cache on SWR hit, got %q", resStale)
+	}
+
+	select {
+	case <-refreshDone:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for slow tool timeout in background refresh")
+	}
+
+	deadline := time.Now().Add(2 * time.Second)
+	for p.refreshing.Load() != 0 && time.Now().Before(deadline) {
+		runtime.Gosched()
+	}
+
+	// 3. Subsequent Retrieve within the refreshed TTL must reflect the updated fast tool (Fast: 2)
+	resUpdated, err := p.Retrieve(context.Background())
+	if err != nil {
+		t.Fatalf("post-refresh Retrieve failed: %v", err)
+	}
+	if !strings.Contains(resUpdated, "Fast: 2") {
+		t.Errorf("expected background refresh to update healthy fast tool to 'Fast: 2' despite slow tool timeout, got %q", resUpdated)
+	}
+}

@@ -157,7 +157,7 @@ func primeProvider(ctx context.Context, ambCfg *config.AmbientContextConfig, dis
 	}
 	dispCancel()
 
-	provCtx, provCancel := context.WithTimeout(ctx, primeTimeout)
+	provCtx, provCancel := context.WithTimeout(ctx, primeTimeout+2500*time.Millisecond)
 	defer provCancel()
 	if err := prov.Prime(provCtx); err != nil {
 		log.Printf("[Ambient] Ambient context prime warning: %v", err)

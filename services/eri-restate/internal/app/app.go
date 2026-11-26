@@ -196,7 +196,9 @@ func PrewarmProcessPoolsSequentially(ctx context.Context, pools ...runner.AgentP
 }
 
 // PrewarmAmbientResolver primes configured ambient contexts in the background at startup.
-// It stops when ctx is cancelled or when the returned stop func is called at shutdown.
+// Cancelling ctx or calling the returned stop func cancels the prewarm loop and waits for the
+// prewarm goroutine to exit (any already-started singleflight provider prime completes under
+// its own bounded primeTimeout).
 func PrewarmAmbientResolver(ctx context.Context, resolver *ambient.Resolver) func() {
 	if resolver == nil || ctx.Err() != nil {
 		return func() {}

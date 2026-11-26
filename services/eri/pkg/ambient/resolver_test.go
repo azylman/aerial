@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -372,24 +374,49 @@ func TestResolver_PrimeConfigured(t *testing.T) {
 	rNilCfg := NewResolver(nil)
 	rNilCfg.PrimeConfigured(context.Background())
 
-	// 2. Pre-cancelled context is a safe no-op
+	writeTmpl := func(t *testing.T, name, content string) string {
+		t.Helper()
+		p := filepath.Join(t.TempDir(), name)
+		require.NoError(t, os.WriteFile(p, []byte(content), 0o644))
+		return p
+	}
+
+	// 2. Pre-cancelled context does not prime or cache providers
 	canceledCtx, cancel := context.WithCancel(context.Background())
 	cancel()
+	canceledVoicePath := writeTmpl(t, "canceled-voice.tmpl", "Voice Canceled")
+	cfgCanceled := config.NewFromData(&config.ConfigData{
+		Voice: config.VoiceConfig{
+			AmbientContext: &config.AmbientContextConfig{
+				TemplatePath: canceledVoicePath,
+			},
+		},
+	})
+	rCanceled := NewResolver(cfgCanceled)
+	rCanceled.PrimeConfigured(canceledCtx)
+	require.NoError(t, os.Remove(canceledVoicePath))
+	_, err := rCanceled.ResolveVoice(context.Background(), cfgCanceled.Current().VoiceAmbientContext())
+	require.Error(t, err, "pre-canceled PrimeConfigured must not have cached the provider before template removal")
+
+	// 3. Active context primes voice and sorted channel contexts into cache before Resolve
+	voicePath := writeTmpl(t, "voice.tmpl", "Voice Ambient Primed")
+	alphaPath := writeTmpl(t, "alpha.tmpl", "Alpha Ambient Primed")
+	betaPath := writeTmpl(t, "beta.tmpl", "Beta Ambient Primed")
 	cfg := config.NewFromData(&config.ConfigData{
 		Voice: config.VoiceConfig{
 			AmbientContext: &config.AmbientContextConfig{
-				Template: "Voice Ambient Primed",
+				TemplatePath: voicePath,
 			},
 		},
 		Channels: map[string]config.ChannelPolicy{
 			"beta": {
 				AmbientContext: &config.AmbientContextConfig{
-					Template: "Beta Ambient Primed",
+					TemplatePath: betaPath,
 				},
 			},
 			"alpha": {
 				AmbientContext: &config.AmbientContextConfig{
-					Template: "Alpha Ambient Primed",
+					TemplatePath: alphaPath,
 				},
 			},
 			"gamma": {
@@ -398,10 +425,12 @@ func TestResolver_PrimeConfigured(t *testing.T) {
 		},
 	})
 	r := NewResolver(cfg)
-	r.PrimeConfigured(canceledCtx)
-
-	// 3. Active context primes voice and sorted channel contexts
 	r.PrimeConfigured(context.Background())
+
+	// Delete the underlying template files so Resolve only succeeds if PrimeConfigured already cached them.
+	require.NoError(t, os.Remove(voicePath))
+	require.NoError(t, os.Remove(alphaPath))
+	require.NoError(t, os.Remove(betaPath))
 
 	vAmb := cfg.Current().VoiceAmbientContext()
 	require.NotNil(t, vAmb)
@@ -415,7 +444,14 @@ func TestResolver_PrimeConfigured(t *testing.T) {
 	require.NoError(t, err)
 	assert.Contains(t, outAlpha, "Alpha Ambient Primed")
 
-	// 4. Config with invalid ambient templates handles error branches cleanly
+	betaAmb := cfg.Current().Channels["beta"].AmbientContext
+	require.NotNil(t, betaAmb)
+	outBeta, err := r.ResolveChannel(context.Background(), betaAmb)
+	require.NoError(t, err)
+	assert.Contains(t, outBeta, "Beta Ambient Primed")
+
+	// 4. Config with invalid voice and alpha templates logs warnings and still primes later valid channel (beta)
+	validBetaPath := writeTmpl(t, "valid-beta.tmpl", "Beta Survived Invalid Peers")
 	cfgInvalid := config.NewFromData(&config.ConfigData{
 		Voice: config.VoiceConfig{
 			AmbientContext: &config.AmbientContextConfig{
@@ -428,10 +464,20 @@ func TestResolver_PrimeConfigured(t *testing.T) {
 					Template: "{{ .Unclosed",
 				},
 			},
+			"beta": {
+				AmbientContext: &config.AmbientContextConfig{
+					TemplatePath: validBetaPath,
+				},
+			},
 		},
 	})
 	rInvalid := NewResolver(cfgInvalid)
 	rInvalid.PrimeConfigured(context.Background())
+	require.NoError(t, os.Remove(validBetaPath))
+
+	survivedBeta, err := rInvalid.ResolveChannel(context.Background(), cfgInvalid.Current().Channels["beta"].AmbientContext)
+	require.NoError(t, err)
+	assert.Contains(t, survivedBeta, "Beta Survived Invalid Peers")
 }
 
 func TestResolver_PrimeProvider_Warnings(t *testing.T) {
@@ -486,7 +532,6 @@ func TestResolver_CreateProvider_DoChan_TimeoutAndSharedPriming(t *testing.T) {
 
 	var toolCalls atomic.Int32
 	slowServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		toolCalls.Add(1)
 		var req map[string]any
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			http.Error(w, err.Error(), http.StatusBadRequest)
@@ -520,6 +565,7 @@ func TestResolver_CreateProvider_DoChan_TimeoutAndSharedPriming(t *testing.T) {
 				},
 			})
 		case "tools/call":
+			toolCalls.Add(1)
 			select {
 			case toolStarted <- struct{}{}:
 			default:
@@ -591,4 +637,5 @@ func TestResolver_CreateProvider_DoChan_TimeoutAndSharedPriming(t *testing.T) {
 	out, err := r.Resolve(healthyCtx, ambCfg)
 	require.NoError(t, err)
 	assert.Contains(t, out, "Status: recovered")
+	assert.Equal(t, int32(1), toolCalls.Load(), "second caller must reuse shared prime without re-invoking tools/call")
 }

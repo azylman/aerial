@@ -276,7 +276,7 @@ func (p *Provider) triggerBackgroundRefresh(ctx context.Context) {
 		if p.cfg.TimeoutMs > 0 {
 			timeout = time.Duration(p.cfg.TimeoutMs) * time.Millisecond
 		}
-		bgCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), timeout)
+		bgCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), timeout+2500*time.Millisecond)
 		defer cancel()
 		if _, err := p.fetchAndRender(bgCtx); err != nil {
 			log.Printf("[Ambient] SWR background refresh warning: %v", err)
