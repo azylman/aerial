@@ -6,7 +6,6 @@ import (
 	"errors"
 	"log"
 	"strings"
-	"sync"
 	"time"
 
 	restate "github.com/restatedev/sdk-go"
@@ -34,8 +33,6 @@ type ThreadCoordinator struct {
 	resolver  threadResolver
 	agentName string
 	core      coordinatorCore
-	gateMu    sync.Mutex
-	gateLocks map[string]*sync.Mutex
 }
 
 // NewThreadCoordinator constructs a ThreadCoordinator for agentName.
@@ -45,27 +42,12 @@ func NewThreadCoordinator(store coordinatorStore, resolver threadResolver, agent
 		store:     store,
 		resolver:  resolver,
 		agentName: agentName,
-		gateLocks: make(map[string]*sync.Mutex),
 		core: coordinatorCore{
 			selfService:   ThreadSessionServiceName(agentName),
 			runnerService: TurnRunnerServiceName(agentName),
 			records:       threadRecords{store: store},
 		},
 	}
-}
-
-func (t *ThreadCoordinator) threadGateLock(threadID string) *sync.Mutex {
-	t.gateMu.Lock()
-	defer t.gateMu.Unlock()
-	if t.gateLocks == nil {
-		t.gateLocks = make(map[string]*sync.Mutex)
-	}
-	l, ok := t.gateLocks[threadID]
-	if !ok {
-		l = &sync.Mutex{}
-		t.gateLocks[threadID] = l
-	}
-	return l
 }
 
 // ServiceName returns the per-agent ThreadSession service name.
@@ -80,8 +62,8 @@ type threadRecords struct {
 
 func (threadRecords) runnerHandler() string { return HandlerRunBurst }
 
-func (threadRecords) runnerRequest(key, turnID string, ids []string) any {
-	return BurstTurnRequest{ThreadID: key, TurnID: turnID, MessageIDs: ids, Gated: true}
+func (threadRecords) runnerRequest(key, turnID string, ids []string, gated bool) any {
+	return BurstTurnRequest{ThreadID: key, TurnID: turnID, MessageIDs: ids, Gated: gated}
 }
 
 func (threadRecords) turnCap() int { return maxCoalescedBurstMessages }
@@ -160,17 +142,8 @@ func (t *ThreadCoordinator) resolveFinalTarget(ctx restate.ObjectSharedContext, 
 	return target, nil
 }
 
-// evaluateGatedIngress runs ingress wake evaluation for Discord messages under a per-thread gate lock.
-func (t *ThreadCoordinator) evaluateGatedIngress(ctx restate.ObjectSharedContext, final, msgID string, msg *db.Message) (bool, error) {
-	eval, ok := t.resolver.(ingressWakeEvaluator)
-	if !ok || eval == nil {
-		return true, nil
-	}
-
-	gateLock := t.threadGateLock(final)
-	gateLock.Lock()
-	defer gateLock.Unlock()
-
+// evaluateGatedIngress runs ingress wake evaluation for Discord messages outside the exclusive key lock.
+func (t *ThreadCoordinator) evaluateGatedIngress(ctx restate.ObjectSharedContext, eval ingressWakeEvaluator, final, msgID string, msg *db.Message) (bool, error) {
 	msgCopy := *msg
 	msgCopy.ID = msgID
 	msgCopy.ThreadID = final
@@ -222,26 +195,37 @@ func (t *ThreadCoordinator) Enqueue(ctx restate.ObjectSharedContext, req ThreadE
 	}
 
 	fallbackID := deriveDeterministicMessageID(ctx, final)
+	eval, hasGate := t.resolver.(ingressWakeEvaluator)
+	if req.Message != nil && hasGate && eval != nil {
+		return t.enqueueGatedMessage(ctx, eval, req, final, fallbackID)
+	}
+
 	msgID, err := t.recordQueuedMessage(ctx, req, final, fallbackID)
 	if err != nil {
 		return ThreadEnqueueResponse{}, coordinatorError(err)
 	}
+	restate.ObjectSend(ctx, t.ServiceName(), final, HandlerAppend).Send(AppendRequest{IDs: []string{msgID}, SkipIfActive: req.SkipIfActive})
+	return ThreadEnqueueResponse{Status: eriwire.StatusAccepted, ThreadID: final, MessageID: msgID}, nil
+}
 
-	shouldEnqueue := true
-	if req.Message != nil {
-		var gErr error
-		shouldEnqueue, gErr = t.evaluateGatedIngress(ctx, final, msgID, req.Message)
-		if gErr != nil {
-			return ThreadEnqueueResponse{}, coordinatorError(gErr)
-		}
-	} else {
-		gateLock := t.threadGateLock(final)
-		gateLock.Lock()
-		defer gateLock.Unlock()
+func (t *ThreadCoordinator) enqueueGatedMessage(ctx restate.ObjectSharedContext, eval ingressWakeEvaluator, req ThreadEnqueueRequest, final, fallbackID string) (ThreadEnqueueResponse, error) {
+	previewID := strings.TrimSpace(req.Message.ID)
+	if previewID == "" {
+		previewID = fallbackID
 	}
-
+	restate.ObjectSend(ctx, t.ServiceName(), final, HandlerAppend).Send(AppendRequest{ReserveID: previewID})
+	msgID, rErr := t.recordQueuedMessage(ctx, req, final, fallbackID)
+	if rErr != nil {
+		return ThreadEnqueueResponse{}, coordinatorError(rErr)
+	}
+	shouldEnqueue, gErr := t.evaluateGatedIngress(ctx, eval, final, msgID, req.Message)
+	if gErr != nil {
+		return ThreadEnqueueResponse{}, coordinatorError(gErr)
+	}
 	if shouldEnqueue {
-		restate.ObjectSend(ctx, t.ServiceName(), final, HandlerAppend).Send(AppendRequest{IDs: []string{msgID}, SkipIfActive: req.SkipIfActive})
+		restate.ObjectSend(ctx, t.ServiceName(), final, HandlerAppend).Send(AppendRequest{IDs: []string{msgID}, SkipIfActive: req.SkipIfActive, Gated: true, FromIngress: true})
+	} else {
+		restate.ObjectSend(ctx, t.ServiceName(), final, HandlerAppend).Send(AppendRequest{DropID: msgID})
 	}
 	return ThreadEnqueueResponse{Status: eriwire.StatusAccepted, ThreadID: final, MessageID: msgID}, nil
 }

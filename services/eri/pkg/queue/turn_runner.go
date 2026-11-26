@@ -41,7 +41,7 @@ const (
 // turnSteps is the narrow set of WorkerPool step functions the TurnRunner journals.
 type turnSteps interface {
 	RecordBurstStarted(ctx context.Context, threadID string, ids []string) (StartedTurn, error)
-	PrepareBurstTurn(ctx context.Context, threadID, turnID string, ids []string, gated ...bool) (TurnPrep, error)
+	PrepareBurstTurn(ctx context.Context, threadID, turnID string, ids []string, gated bool) (TurnPrep, error)
 	RunBurstAttempt(ctx context.Context, in AttemptInput) (AttemptResult, error)
 	RecordBurstOutcome(ctx context.Context, ids []string, summary AttemptSummary) error
 	RunBurstPostTurnHook(ctx context.Context, threadID string, ids []string, attempted bool, outcome TurnOutcome, hookMetadata map[string]string) error

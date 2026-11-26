@@ -51,7 +51,7 @@ type dispatchRecords struct {
 
 func (dispatchRecords) runnerHandler() string { return HandlerRunDispatch }
 
-func (dispatchRecords) runnerRequest(key, turnID string, ids []string) any {
+func (dispatchRecords) runnerRequest(key, turnID string, ids []string, _ bool) any {
 	req := DispatchTurnRequest{SessionKey: key, TurnID: turnID}
 	if len(ids) > 0 {
 		req.DispatchID = ids[0]

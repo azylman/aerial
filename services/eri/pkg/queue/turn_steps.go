@@ -352,7 +352,7 @@ func (p *WorkerPool) preTurnDelayMs(delaySeconds int) int64 {
 // requeued are reported as reschedule again without another retry_count bump.
 //
 //nolint:contextcheck,nolintlint // the reused turn helpers own their contexts; store calls take ctx.
-func (p *WorkerPool) PrepareBurstTurn(ctx context.Context, threadID, turnID string, ids []string, gated ...bool) (TurnPrep, error) {
+func (p *WorkerPool) PrepareBurstTurn(ctx context.Context, threadID, turnID string, ids []string, gated bool) (TurnPrep, error) {
 	s, err := p.stepStore()
 	if err != nil {
 		return TurnPrep{}, err
@@ -371,9 +371,7 @@ func (p *WorkerPool) PrepareBurstTurn(ctx context.Context, threadID, turnID stri
 	}
 
 	te := p.newStepTurnExecution(ctx, threadID, burst)
-	if len(gated) > 0 && gated[0] {
-		te.ingressGated = true
-	}
+	te.ingressGated = gated
 	defer te.stopIndicators()
 
 	if !te.resolveTurnPolicy() {
@@ -571,6 +569,11 @@ func (p *WorkerPool) failActiveBurstRows(ctx context.Context, s db.Store, ids []
 	if len(active) == 0 {
 		return 0, nil
 	}
+	if extraRows, rErr := recoverBurstProcessingRows(ctx, s, active[0].ThreadID, ids); rErr != nil {
+		return 0, rErr
+	} else if len(extraRows) > 0 {
+		active = append(active, extraRows...)
+	}
 	reason := summary.failureReason()
 	te := p.newStepTurnExecution(ctx, active[0].ThreadID, active)
 	if prefix := summary.noticePrefix(); prefix != "" {
@@ -604,6 +607,24 @@ func (p *WorkerPool) failActiveBurstRows(ctx context.Context, s db.Store, ids []
 	return len(changed), nil
 }
 
+func expandDispatchActiveIDs(ctx context.Context, s db.Store, ids []string) ([]string, error) {
+	if len(ids) == 0 {
+		return ids, nil
+	}
+	d, err := storeCall(ctx, func(c context.Context) (*db.Dispatch, error) { return s.GetDispatch(c, ids[0]) })
+	if err != nil && !errors.Is(err, db.ErrRecordNotFound) {
+		return nil, err
+	}
+	if d == nil || !isActiveStatus(d.Status) || strings.TrimSpace(d.SessionID) == "" {
+		return ids, nil
+	}
+	extraIDs, err := recoverDispatchProcessingIDs(ctx, s, d.SessionID, ids)
+	if err != nil {
+		return nil, err
+	}
+	return normalizeStepIDs(append(ids, extraIDs...)), nil
+}
+
 // RecordDispatchOutcome records a dispatch's non-success outcome (dispatches deliver no notice),
 // then checks the row is terminal (M2).
 func (p *WorkerPool) RecordDispatchOutcome(ctx context.Context, ids []string, summary AttemptSummary) error {
@@ -614,6 +635,12 @@ func (p *WorkerPool) RecordDispatchOutcome(ctx context.Context, ids []string, su
 	ids = normalizeStepIDs(ids)
 	if summary.Outcome == OutcomeReschedule || len(ids) == 0 {
 		return nil
+	}
+	if recordsFailure(summary.Outcome) {
+		var expErr error
+		if ids, expErr = expandDispatchActiveIDs(ctx, s, ids); expErr != nil {
+			return expErr
+		}
 	}
 	reason := summary.failureReason()
 	telemetry := summary.telemetry()
@@ -764,13 +791,6 @@ func (p *WorkerPool) StopBurstTurn(ctx context.Context, turnID string, ids []str
 	if err != nil {
 		return err
 	}
-	if live := p.turns.LiveExecution(turnID); live != nil {
-		live.steerMu.Lock()
-		if len(live.drainedIDs) > 0 {
-			ids = append(ids, live.drainedIDs...)
-		}
-		live.steerMu.Unlock()
-	}
 	p.turns.Stop(turnID, CancelledByOperatorReason)
 	_, err = p.failActiveBurstRows(ctx, s, normalizeStepIDs(ids), AttemptSummary{Outcome: OutcomeCancelled})
 	return err
@@ -780,13 +800,6 @@ func (p *WorkerPool) StopBurstTurn(ctx context.Context, turnID string, ids []str
 func (p *WorkerPool) StopDispatchTurn(ctx context.Context, turnID string, ids []string) error {
 	if _, err := p.stepStore(); err != nil {
 		return err
-	}
-	if live := p.turns.LiveExecution(turnID); live != nil {
-		live.steerMu.Lock()
-		if len(live.drainedIDs) > 0 {
-			ids = append(ids, live.drainedIDs...)
-		}
-		live.steerMu.Unlock()
 	}
 	p.turns.Stop(turnID, CancelledByOperatorReason)
 	return p.RecordDispatchOutcome(ctx, normalizeStepIDs(ids), AttemptSummary{Outcome: OutcomeCancelled})
@@ -845,7 +858,10 @@ func (p *WorkerPool) FailDispatchTurn(ctx context.Context, turnID string, ids []
 		return err
 	}
 	p.turns.Stop(turnID, reason)
-	ids = normalizeStepIDs(ids)
+	ids, err = expandDispatchActiveIDs(ctx, s, normalizeStepIDs(ids))
+	if err != nil {
+		return err
+	}
 	if err := p.RecordDispatchOutcome(ctx, ids, AttemptSummary{Outcome: OutcomeFailed, Reason: reason}); err != nil {
 		return err
 	}

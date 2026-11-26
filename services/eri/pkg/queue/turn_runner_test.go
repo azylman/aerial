@@ -94,7 +94,7 @@ func (f *fakeTurnSteps) RecordBurstStarted(context.Context, string, []string) (S
 	return f.started, f.call("started", "")
 }
 
-func (f *fakeTurnSteps) PrepareBurstTurn(context.Context, string, string, []string, ...bool) (TurnPrep, error) {
+func (f *fakeTurnSteps) PrepareBurstTurn(context.Context, string, string, []string, bool) (TurnPrep, error) {
 	return f.prep, f.call("prep", "")
 }
 

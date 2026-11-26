@@ -33,6 +33,8 @@ const CrashLoopCap = 3
 const (
 	StateKeyPending = "pending"
 	StateKeyActive  = "active"
+	StateKeyIngress = "ingress"
+	StateKeyGated   = "gated"
 )
 
 // Handler names.
@@ -113,8 +115,12 @@ type ActiveTurn struct {
 }
 
 type AppendRequest struct {
-	IDs          []string `json:"ids"`
-	SkipIfActive bool     `json:"skip_if_active"`
+	IDs          []string `json:"ids,omitempty"`
+	ReserveID    string   `json:"reserve_id,omitempty"`
+	DropID       string   `json:"drop_id,omitempty"`
+	SkipIfActive bool     `json:"skip_if_active,omitempty"`
+	Gated        bool     `json:"gated,omitempty"`
+	FromIngress  bool     `json:"from_ingress,omitempty"`
 }
 
 type KickRequest struct {

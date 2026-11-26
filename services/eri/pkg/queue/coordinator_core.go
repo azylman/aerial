@@ -42,16 +42,27 @@ type coordinatorStore interface {
 // TurnRunner handler runs a turn, how many items a turn takes, and which table holds the rows.
 type coordinatorRecords interface {
 	runnerHandler() string
-	runnerRequest(key, turnID string, ids []string) any
+	runnerRequest(key, turnID string, ids []string, gated bool) any
 	turnCap() int
 	failIfPending(ctx context.Context, ids []string, reason string) ([]string, error)
 	markSkipped(ctx context.Context, id string) error
+}
+
+// ingressSlot tracks one message's arrival position while its ingress gate decision is in flight.
+type ingressSlot struct {
+	ID           string `json:"id"`
+	Decided      bool   `json:"decided,omitempty"`
+	Accepted     bool   `json:"accepted,omitempty"`
+	SkipIfActive bool   `json:"skip_if_active,omitempty"`
+	Gated        bool   `json:"gated,omitempty"`
 }
 
 // coordinatorState is the decoded state of one coordinator key.
 type coordinatorState struct {
 	pending []string
 	active  *ActiveTurn
+	ingress []ingressSlot
+	gated   []string
 }
 
 // coordinatorCore implements the handlers shared by both coordinators.
@@ -70,12 +81,21 @@ func loadCoordinatorState(ctx restate.ObjectSharedContext) (coordinatorState, er
 	if err != nil {
 		return coordinatorState{}, err
 	}
-	return coordinatorState{pending: pending, active: active}, nil
+	ingress, err := restate.Get[[]ingressSlot](ctx, StateKeyIngress)
+	if err != nil {
+		return coordinatorState{}, err
+	}
+	gated, err := restate.Get[[]string](ctx, StateKeyGated)
+	if err != nil {
+		return coordinatorState{}, err
+	}
+	return coordinatorState{pending: pending, active: active, ingress: ingress, gated: gated}, nil
 }
 
-// save writes the state back; an idle key (nothing pending, nothing active) is cleared entirely.
+// save writes the state back; an idle key (nothing pending, nothing active, no ingress slots) is cleared entirely.
 func (st coordinatorState) save(ctx restate.ObjectContext) {
-	if len(st.pending) == 0 && st.active == nil {
+	st.gated = st.filterHeldGated()
+	if len(st.pending) == 0 && st.active == nil && len(st.ingress) == 0 {
 		restate.ClearAll(ctx)
 		return
 	}
@@ -89,6 +109,29 @@ func (st coordinatorState) save(ctx restate.ObjectContext) {
 	} else {
 		restate.Set(ctx, StateKeyActive, st.active)
 	}
+	if len(st.ingress) == 0 {
+		restate.Clear(ctx, StateKeyIngress)
+	} else {
+		restate.Set(ctx, StateKeyIngress, st.ingress)
+	}
+	if len(st.gated) == 0 {
+		restate.Clear(ctx, StateKeyGated)
+	} else {
+		restate.Set(ctx, StateKeyGated, st.gated)
+	}
+}
+
+func (st coordinatorState) filterHeldGated() []string {
+	if len(st.gated) == 0 {
+		return nil
+	}
+	var out []string
+	for _, id := range st.gated {
+		if st.holds(id) || st.ingressIndex(id) >= 0 {
+			out = append(out, id)
+		}
+	}
+	return out
 }
 
 // holds reports whether id is pending or carried by the active turn.
@@ -96,14 +139,26 @@ func (st coordinatorState) holds(id string) bool {
 	return slices.Contains(st.pending, id) || (st.active != nil && slices.Contains(st.active.ItemIDs, id))
 }
 
+func (st coordinatorState) ingressIndex(id string) int {
+	return slices.IndexFunc(st.ingress, func(s ingressSlot) bool { return s.ID == id })
+}
+
 // busy reports whether a SkipIfActive request must be skipped.
 func (st coordinatorState) busy() bool {
 	return st.active != nil || len(st.pending) > 0
 }
 
-// cancelSet is every ID a cancel taken from this snapshot covers: pending plus the active turn's items.
+func (st coordinatorState) pendingAndIngressIDs() []string {
+	ids := slices.Clone(st.pending)
+	for _, slot := range st.ingress {
+		ids = append(ids, slot.ID)
+	}
+	return normalizeStepIDs(ids)
+}
+
+// cancelSet is every ID a cancel taken from this snapshot covers: pending, ingress slots, plus the active turn's items.
 func (st coordinatorState) cancelSet() []string {
-	ids := normalizeStepIDs(st.pending)
+	ids := st.pendingAndIngressIDs()
 	if st.active != nil {
 		ids = normalizeStepIDs(append(ids, st.active.ItemIDs...))
 	}
@@ -168,6 +223,25 @@ func coordinatorError(err error) error {
 	return err
 }
 
+func allGated(batch, gated []string) bool {
+	for _, id := range batch {
+		if !slices.Contains(gated, id) {
+			return false
+		}
+	}
+	return len(batch) > 0
+}
+
+func removeIngressIDs(slots []ingressSlot, drop []string) []ingressSlot {
+	out := make([]ingressSlot, 0, len(slots))
+	for _, s := range slots {
+		if !slices.Contains(drop, s.ID) {
+			out = append(out, s)
+		}
+	}
+	return out
+}
+
 // startNext starts the next turn when the key is idle and saves the state.
 func (c *coordinatorCore) startNext(ctx restate.ObjectContext, st coordinatorState) {
 	if st.active != nil || len(st.pending) == 0 {
@@ -177,10 +251,53 @@ func (c *coordinatorCore) startNext(ctx restate.ObjectContext, st coordinatorSta
 	key := restate.Key(ctx)
 	batch, rest := splitTurnBatch(st.pending, c.records.turnCap())
 	turnID := deriveTurnID(key, ctx.Request().ID)
-	inv := restate.ServiceSend(ctx, c.runnerService, c.records.runnerHandler()).Send(c.records.runnerRequest(key, turnID, batch))
+	batchGated := allGated(batch, st.gated)
+	inv := restate.ServiceSend(ctx, c.runnerService, c.records.runnerHandler()).Send(c.records.runnerRequest(key, turnID, batch, batchGated))
 	st.active = &ActiveTurn{TurnID: turnID, ItemIDs: slices.Clone(batch), RunnerInvocationID: inv.GetInvocationId()}
 	st.pending = slices.Clone(rest)
 	st.save(ctx)
+}
+
+func (c *coordinatorCore) recordSkippedIDs(ctx restate.ObjectContext, ids []string) error {
+	if len(ids) == 0 {
+		return nil
+	}
+	_, rErr := restate.Run(ctx, func(rc restate.RunContext) (restate.Void, error) {
+		for _, id := range ids {
+			if _, sErr := storeCall(rc, func(sc context.Context) (struct{}, error) {
+				return struct{}{}, c.records.markSkipped(sc, id)
+			}); sErr != nil {
+				return restate.Void{}, sErr
+			}
+		}
+		return restate.Void{}, nil
+	}, restate.WithName(StepRecordSkipped))
+	return coordinatorError(rErr)
+}
+
+func (c *coordinatorCore) drainReadyIngress(ctx restate.ObjectContext, st coordinatorState) error {
+	wasBusy := st.busy()
+	var skipIDs []string
+	for len(st.ingress) > 0 && st.ingress[0].Decided {
+		slot := st.ingress[0]
+		st.ingress = st.ingress[1:]
+		if !slot.Accepted || st.holds(slot.ID) {
+			continue
+		}
+		if slot.SkipIfActive && wasBusy {
+			skipIDs = append(skipIDs, slot.ID)
+			continue
+		}
+		st.pending = append(st.pending, slot.ID)
+		if slot.Gated {
+			st.gated = normalizeStepIDs(append(st.gated, slot.ID))
+		}
+	}
+	if err := c.recordSkippedIDs(ctx, skipIDs); err != nil {
+		return err
+	}
+	c.startNext(ctx, st)
+	return nil
 }
 
 // append is the exclusive Append handler body.
@@ -189,36 +306,31 @@ func (c *coordinatorCore) append(ctx restate.ObjectContext, req AppendRequest) e
 	if err != nil {
 		return coordinatorError(err)
 	}
-	fresh := make([]string, 0, len(req.IDs))
+	if reserveID := strings.TrimSpace(req.ReserveID); reserveID != "" {
+		if !st.holds(reserveID) && st.ingressIndex(reserveID) < 0 {
+			st.ingress = append(st.ingress, ingressSlot{ID: reserveID})
+		}
+		st.save(ctx)
+		return nil
+	}
+	if dropID := strings.TrimSpace(req.DropID); dropID != "" {
+		if idx := st.ingressIndex(dropID); idx >= 0 {
+			st.ingress[idx].Decided = true
+			st.ingress[idx].Accepted = false
+		}
+		return c.drainReadyIngress(ctx, st)
+	}
 	for _, id := range normalizeStepIDs(req.IDs) {
-		if !st.holds(id) {
-			fresh = append(fresh, id)
+		if idx := st.ingressIndex(id); idx >= 0 {
+			st.ingress[idx].Decided = true
+			st.ingress[idx].Accepted = true
+			st.ingress[idx].SkipIfActive = req.SkipIfActive
+			st.ingress[idx].Gated = req.Gated
+		} else if !req.FromIngress && !st.holds(id) {
+			st.ingress = append(st.ingress, ingressSlot{ID: id, Decided: true, Accepted: true, SkipIfActive: req.SkipIfActive, Gated: req.Gated})
 		}
 	}
-	if len(fresh) == 0 {
-		if st.active == nil {
-			c.startNext(ctx, st)
-		}
-		return nil
-	}
-	if req.SkipIfActive && st.busy() {
-		if _, rErr := restate.Run(ctx, func(rc restate.RunContext) (restate.Void, error) {
-			for _, id := range fresh {
-				if _, sErr := storeCall(rc, func(sc context.Context) (struct{}, error) {
-					return struct{}{}, c.records.markSkipped(sc, id)
-				}); sErr != nil {
-					return restate.Void{}, sErr
-				}
-			}
-			return restate.Void{}, nil
-		}, restate.WithName(StepRecordSkipped)); rErr != nil {
-			return coordinatorError(rErr)
-		}
-		return nil
-	}
-	st.pending = append(st.pending, fresh...)
-	c.startNext(ctx, st)
-	return nil
+	return c.drainReadyIngress(ctx, st)
 }
 
 // onTurnDone is the exclusive OnTurnDone handler body; reschedule is delegated to the caller.
@@ -263,7 +375,7 @@ func (c *coordinatorCore) cancel(ctx restate.ObjectSharedContext, reason string)
 	if rErr != nil {
 		return coordinatorState{}, nil, coordinatorError(rErr)
 	}
-	clearReq := ClearPendingRequest{IDs: normalizeStepIDs(st.pending), CancelActive: true}
+	clearReq := ClearPendingRequest{IDs: st.pendingAndIngressIDs(), CancelActive: true}
 	if st.active != nil {
 		clearReq.TurnID = st.active.TurnID
 	}
@@ -278,14 +390,15 @@ func (c *coordinatorCore) clearPending(ctx restate.ObjectContext, req ClearPendi
 		return coordinatorError(err)
 	}
 	st.pending = removeIDs(st.pending, req.IDs)
+	st.gated = removeIDs(st.gated, req.IDs)
+	st.ingress = removeIngressIDs(st.ingress, req.IDs)
 	if clearPendingCancelsActive(st.active, req) {
 		if !st.active.Waiting && st.active.RunnerInvocationID != "" {
 			restate.CancelInvocation(ctx, st.active.RunnerInvocationID)
 		}
 		st.active = nil
 	}
-	c.startNext(ctx, st)
-	return nil
+	return c.drainReadyIngress(ctx, st)
 }
 
 // drainPending is the exclusive DrainPending body: if the active turn matches req.TurnID,

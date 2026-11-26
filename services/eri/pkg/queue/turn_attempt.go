@@ -360,13 +360,24 @@ type attemptRun struct {
 	poolMissing bool
 }
 
+func (te *turnExecution) initTurnPrompt(basePrompt string) {
+	te.turnPrompt = basePrompt
+	te.steerMu.Lock()
+	for _, dp := range te.drainedPrompts {
+		if dp = strings.TrimSpace(dp); dp != "" && !strings.Contains(te.turnPrompt, dp) {
+			te.turnPrompt += "\n\n" + dp
+		}
+	}
+	te.steerMu.Unlock()
+}
+
 //nolint:contextcheck,nolintlint // the reused turn helpers own their contexts; store calls take ctx.
 func (p *WorkerPool) executeAttempt(ctx context.Context, s db.Store, te *turnExecution, subj attemptSubject, in AttemptInput, ids []string) (res AttemptResult, err error) {
 	maxAttempts := p.maxAttempts()
 	cfg := te.resolveAttemptConfig(ctx, in.Ordinal)
 	model := cfg.model
 	te.turnModel = model
-	te.turnPrompt = in.Prep.Prompt
+	te.initTurnPrompt(in.Prep.Prompt)
 	te.injectedHookContext = in.Prep.InjectedContext
 	te.turnAttempted = true
 	te.hookMetadata = hookMetadataAny(in.Prep.HookMetadata)
@@ -681,8 +692,71 @@ type burstSubject struct {
 	ids  []string
 }
 
+func (p *WorkerPool) currentTimezone() string {
+	if p != nil && p.appCfg != nil {
+		if cur := p.appCfg.Current(); cur != nil {
+			return cur.Timezone
+		}
+	}
+	return ""
+}
+
+func recoverBurstProcessingRows(ctx context.Context, s db.Store, threadID string, knownIDs []string) ([]db.Message, error) {
+	threadID = strings.TrimSpace(threadID)
+	if threadID == "" {
+		return nil, nil
+	}
+	tasks, err := storeCall(ctx, func(c context.Context) ([]db.ActiveTask, error) {
+		return s.GetActiveTasks(c, db.TasksFilter{Statuses: []string{db.StatusProcessing}, ThreadID: threadID, Order: db.TasksOrderAsc})
+	})
+	if err != nil {
+		return nil, err
+	}
+	var extraIDs []string
+	for _, t := range tasks {
+		if t.ID != "" && !slices.Contains(knownIDs, t.ID) {
+			extraIDs = append(extraIDs, t.ID)
+		}
+	}
+	if len(extraIDs) == 0 {
+		return nil, nil
+	}
+	rows, err := messagesByIDOrdered(ctx, s, extraIDs)
+	if err != nil {
+		return nil, err
+	}
+	var out []db.Message
+	for _, m := range rows {
+		if m.Status == db.StatusProcessing {
+			out = append(out, m)
+		}
+	}
+	return out, nil
+}
+
+func recoverDispatchProcessingIDs(ctx context.Context, s db.Store, sessionID string, knownIDs []string) ([]string, error) {
+	sessionID = strings.TrimSpace(sessionID)
+	if sessionID == "" {
+		return nil, nil
+	}
+	tasks, err := storeCall(ctx, func(c context.Context) ([]db.ActiveTask, error) {
+		return s.GetActiveTasks(c)
+	})
+	if err != nil {
+		return nil, err
+	}
+	var extraIDs []string
+	for _, t := range tasks {
+		if t.Status == db.StatusProcessing && t.ThreadID == sessionID && strings.HasPrefix(t.AuthorID, "dispatch:") && !slices.Contains(knownIDs, t.ID) {
+			extraIDs = append(extraIDs, t.ID)
+		}
+	}
+	return extraIDs, nil
+}
+
 func (b burstSubject) load(ctx context.Context, s db.Store, te *turnExecution) ([]string, TurnOutcome, error) {
-	rows, err := messagesByIDOrdered(ctx, s, normalizeStepIDs(b.ids))
+	knownIDs := normalizeStepIDs(b.ids)
+	rows, err := messagesByIDOrdered(ctx, s, knownIDs)
 	if err != nil {
 		return nil, "", err
 	}
@@ -700,6 +774,25 @@ func (b burstSubject) load(ctx context.Context, s db.Store, te *turnExecution) (
 	}
 	if len(processing) == 0 {
 		return nil, recordedOutcome(statuses, failedErrs), nil
+	}
+	threadID := processing[0].ThreadID
+	if threadID == "" {
+		threadID = te.threadID
+	}
+	extraRows, err := recoverBurstProcessingRows(ctx, s, threadID, knownIDs)
+	if err != nil {
+		return nil, "", err
+	}
+	if len(extraRows) > 0 {
+		processing = append(processing, extraRows...)
+		te.steerMu.Lock()
+		for _, row := range extraRows {
+			te.drainedIDs = append(te.drainedIDs, row.ID)
+		}
+		if coalesced := strings.TrimSpace(CoalesceBurstPrompt(extraRows, b.pool.currentTimezone())); coalesced != "" {
+			te.drainedPrompts = append(te.drainedPrompts, coalesced)
+		}
+		te.steerMu.Unlock()
 	}
 	te.activeSessionMu.Lock()
 	te.burst = processing
@@ -804,17 +897,31 @@ func (d dispatchSubject) load(ctx context.Context, s db.Store, te *turnExecution
 	te.isEphemeral = isEphem
 	te.triggerType = "dispatch:" + row.Source
 	te.activeSessionMu.Unlock()
+	if !isEphem {
+		extraIDs, rErr := recoverDispatchProcessingIDs(ctx, s, row.SessionID, ids)
+		if rErr != nil {
+			return nil, "", rErr
+		}
+		ids = normalizeStepIDs(append(ids, extraIDs...))
+	}
 	activeIDs := []string{row.ID}
 	if len(ids) > 1 {
 		te.steerMu.Lock()
 		for _, extraID := range ids[1:] {
 			extraRow, gErr := storeCall(ctx, func(c context.Context) (*db.Dispatch, error) { return s.GetDispatch(c, extraID) })
-			if gErr != nil || extraRow == nil || extraRow.Status != db.StatusProcessing {
+			if errors.Is(gErr, db.ErrRecordNotFound) || (gErr == nil && (extraRow == nil || extraRow.Status != db.StatusProcessing)) {
 				continue
+			}
+			if gErr != nil {
+				te.steerMu.Unlock()
+				return nil, "", gErr
 			}
 			activeIDs = append(activeIDs, extraID)
 			te.steeredDispatches = append(te.steeredDispatches, *extraRow)
 			te.drainedIDs = append(te.drainedIDs, extraID)
+			if pText := strings.TrimSpace(extraRow.Prompt); pText != "" {
+				te.drainedPrompts = append(te.drainedPrompts, pText)
+			}
 		}
 		te.steerMu.Unlock()
 	}

@@ -63,6 +63,10 @@ func st(pending []string, active *ActiveTurn) coordinatorState {
 }
 
 func runBurst(ids ...string) sentCall {
+	return sentCall{Service: tcRunnerSvc, Method: HandlerRunBurst, Input: BurstTurnRequest{ThreadID: tcKey, TurnID: tcTurn, MessageIDs: ids}}
+}
+
+func runGatedBurst(ids ...string) sentCall {
 	return sentCall{Service: tcRunnerSvc, Method: HandlerRunBurst, Input: BurstTurnRequest{ThreadID: tcKey, TurnID: tcTurn, MessageIDs: ids, Gated: true}}
 }
 
@@ -237,18 +241,24 @@ func TestThreadCoordinator_Enqueue_IngressWakeGating(t *testing.T) {
 		wantRows  map[string]rowWant
 	}{
 		{
-			name:      "GatedIgnoredMessageCompletesWithoutAppend",
-			resolver:  fakeIngressWakeResolver{shouldEnqueue: false, completedReason: "[IGNORED]"},
-			req:       ThreadEnqueueRequest{Message: &db.Message{ID: "m-ign", ThreadID: tcKey, Content: "ambient chat"}},
-			wantSends: nil,
-			wantRows:  map[string]rowWant{"m-ign": {status: db.StatusCompleted, errText: "[IGNORED]"}},
+			name:     "GatedIgnoredMessageCompletesWithoutAppend",
+			resolver: fakeIngressWakeResolver{shouldEnqueue: false, completedReason: "[IGNORED]"},
+			req:      ThreadEnqueueRequest{Message: &db.Message{ID: "m-ign", ThreadID: tcKey, Content: "ambient chat"}},
+			wantSends: []sentCall{
+				threadSend(tcKey, HandlerAppend, AppendRequest{ReserveID: "m-ign"}, 0),
+				threadSend(tcKey, HandlerAppend, AppendRequest{DropID: "m-ign"}, 0),
+			},
+			wantRows: map[string]rowWant{"m-ign": {status: db.StatusCompleted, errText: "[IGNORED]"}},
 		},
 		{
-			name:      "GatedWakeMessageEnqueuesAndAppends",
-			resolver:  fakeIngressWakeResolver{shouldEnqueue: true},
-			req:       ThreadEnqueueRequest{Message: &db.Message{ID: "m-wake", ThreadID: tcKey, Content: "wake question"}},
-			wantSends: []sentCall{threadSend(tcKey, HandlerAppend, AppendRequest{IDs: []string{"m-wake"}}, 0)},
-			wantRows:  map[string]rowWant{"m-wake": {status: db.StatusPending}},
+			name:     "GatedWakeMessageEnqueuesAndAppends",
+			resolver: fakeIngressWakeResolver{shouldEnqueue: true},
+			req:      ThreadEnqueueRequest{Message: &db.Message{ID: "m-wake", ThreadID: tcKey, Content: "wake question"}},
+			wantSends: []sentCall{
+				threadSend(tcKey, HandlerAppend, AppendRequest{ReserveID: "m-wake"}, 0),
+				threadSend(tcKey, HandlerAppend, AppendRequest{IDs: []string{"m-wake"}, Gated: true, FromIngress: true}, 0),
+			},
+			wantRows: map[string]rowWant{"m-wake": {status: db.StatusPending}},
 		},
 	}
 	for _, tc := range tests {
@@ -268,28 +278,67 @@ func TestThreadCoordinator_Enqueue_IngressWakeGating(t *testing.T) {
 type channelIngressWakeResolver struct {
 	fakeThreadResolver
 
-	holdA chan struct{}
+	holdA   chan struct{}
+	entered chan string
+	decide  func(msg db.Message) (bool, string)
 }
 
 func (c *channelIngressWakeResolver) EvaluateIngressWake(_ context.Context, _ string, msg db.Message) (bool, string) {
-	if msg.ID == "m-slow" {
+	if c.entered != nil {
+		c.entered <- msg.ID
+	}
+	if msg.ID == "m-slow" && c.holdA != nil {
 		<-c.holdA
+	}
+	if c.decide != nil {
+		return c.decide(msg)
 	}
 	return true, ""
 }
 
-func TestThreadCoordinator_Enqueue_ArrivalOrderWithSlowEvaluator(t *testing.T) {
+func TestThreadCoordinator_Enqueue_ArrivalOrder_SecondFinishesBeforeFirstInsert(t *testing.T) {
 	t.Parallel()
 
-	holdA := make(chan struct{})
 	store := seedStore(t, nil, nil, "")
 	h := newCoordHarness(t, tcKey, tcInv, coordinatorState{})
-	resolver := &channelIngressWakeResolver{holdA: holdA}
+	resolver := &channelIngressWakeResolver{}
 	coord := NewThreadCoordinator(store, resolver, "aerial")
+
+	var appendMu sync.Mutex
+	bDecisionAppended := make(chan struct{})
+	h.onSend = func(call sentCall) {
+		req, ok := call.Input.(AppendRequest)
+		if call.Method != HandlerAppend || !ok {
+			return
+		}
+		appendMu.Lock()
+		require.NoError(t, coord.Append(h.objectCtx(), req))
+		appendMu.Unlock()
+		if len(req.IDs) == 1 && req.IDs[0] == "m-fast" {
+			close(bDecisionAppended)
+		}
+	}
+
+	var stepMu sync.Mutex
+	recordCalls := 0
+	aPausedBeforeInsert := make(chan struct{})
+	releaseAInsert := make(chan struct{})
+	h.onRunStep = func(stepName string) {
+		if stepName != StepRecordQueued {
+			return
+		}
+		stepMu.Lock()
+		recordCalls++
+		callNum := recordCalls
+		stepMu.Unlock()
+		if callNum == 1 {
+			close(aPausedBeforeInsert)
+			<-releaseAInsert
+		}
+	}
 
 	var wg sync.WaitGroup
 	wg.Add(2)
-
 	go func() {
 		defer wg.Done()
 		resp, err := coord.Enqueue(h.sharedCtx(), ThreadEnqueueRequest{
@@ -299,11 +348,7 @@ func TestThreadCoordinator_Enqueue_ArrivalOrderWithSlowEvaluator(t *testing.T) {
 		assert.Equal(t, eriwire.StatusAccepted, resp.Status)
 	}()
 
-	// Verify message A is immediately stored in DB before its evaluator finishes
-	require.Eventually(t, func() bool {
-		m, err := store.GetMessage(context.Background(), "m-slow")
-		return err == nil && m != nil && m.Status == db.StatusPending
-	}, 2*time.Second, 10*time.Millisecond)
+	<-aPausedBeforeInsert
 
 	go func() {
 		defer wg.Done()
@@ -314,27 +359,161 @@ func TestThreadCoordinator_Enqueue_ArrivalOrderWithSlowEvaluator(t *testing.T) {
 		assert.Equal(t, eriwire.StatusAccepted, resp.Status)
 	}()
 
-	// Verify message B is ALSO immediately stored in DB
-	require.Eventually(t, func() bool {
-		m, err := store.GetMessage(context.Background(), "m-fast")
-		return err == nil && m != nil && m.Status == db.StatusPending
-	}, 2*time.Second, 10*time.Millisecond)
+	<-bDecisionAppended
 
-	// Verify that while A is held, B has not jumped ahead to append
-	h.mu.Lock()
-	assert.Empty(t, h.sends, "no append calls should have completed before A finishes gating")
-	h.mu.Unlock()
+	snap := h.snapshot(t)
+	assert.Empty(t, snap.pending, "m-fast must not overtake m-slow before m-slow finishes InsertMessage")
+	assert.Nil(t, snap.active, "no turn may start while leading reservation m-slow is undecided")
+	assert.Equal(t, []ingressSlot{
+		{ID: "m-slow"},
+		{ID: "m-fast", Decided: true, Accepted: true, Gated: true},
+	}, snap.ingress)
 
-	// Release evaluator for A
+	close(releaseAInsert)
+	wg.Wait()
+
+	finalSnap := h.snapshot(t)
+	assert.Empty(t, finalSnap.ingress)
+	assert.Equal(t, startedTurn("m-slow", "m-fast"), finalSnap.active)
+	assert.Contains(t, h.sends, runGatedBurst("m-slow", "m-fast"))
+}
+
+func TestThreadCoordinator_Enqueue_ArrivalOrder_DecisionAppendReordered(t *testing.T) {
+	t.Parallel()
+
+	store := seedStore(t, nil, nil, "")
+	h := newCoordHarness(t, tcKey, tcInv, coordinatorState{})
+	aGateEntered := make(chan string, 2)
+	resolver := &channelIngressWakeResolver{entered: aGateEntered}
+	coord := NewThreadCoordinator(store, resolver, "aerial")
+
+	var appendMu sync.Mutex
+	aReserved := make(chan struct{})
+	aDecisionHeld := make(chan struct{})
+	bDecisionApplied := make(chan struct{})
+	h.onSend = func(call sentCall) {
+		req, ok := call.Input.(AppendRequest)
+		if call.Method != HandlerAppend || !ok {
+			return
+		}
+		if req.ReserveID == "m-slow" {
+			appendMu.Lock()
+			require.NoError(t, coord.Append(h.objectCtx(), req))
+			appendMu.Unlock()
+			close(aReserved)
+			return
+		}
+		if len(req.IDs) == 1 && req.IDs[0] == "m-slow" {
+			close(aDecisionHeld)
+			<-bDecisionApplied
+		}
+		appendMu.Lock()
+		require.NoError(t, coord.Append(h.objectCtx(), req))
+		appendMu.Unlock()
+		if len(req.IDs) == 1 && req.IDs[0] == "m-fast" {
+			close(bDecisionApplied)
+		}
+	}
+
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		resp, err := coord.Enqueue(h.sharedCtx(), ThreadEnqueueRequest{
+			Message: &db.Message{ID: "m-slow", ThreadID: tcKey, Content: "first message"},
+		})
+		assert.NoError(t, err)
+		assert.Equal(t, eriwire.StatusAccepted, resp.Status)
+	}()
+
+	<-aReserved
+	<-aDecisionHeld
+
+	go func() {
+		defer wg.Done()
+		resp, err := coord.Enqueue(h.sharedCtx(), ThreadEnqueueRequest{
+			Message: &db.Message{ID: "m-fast", ThreadID: tcKey, Content: "second message"},
+		})
+		assert.NoError(t, err)
+		assert.Equal(t, eriwire.StatusAccepted, resp.Status)
+	}()
+
+	wg.Wait()
+
+	finalSnap := h.snapshot(t)
+	assert.Empty(t, finalSnap.ingress)
+	assert.Equal(t, startedTurn("m-slow", "m-fast"), finalSnap.active)
+	assert.Contains(t, h.sends, runGatedBurst("m-slow", "m-fast"))
+}
+
+func TestThreadCoordinator_Enqueue_ArrivalOrder_IgnoredReservationReleasesWake(t *testing.T) {
+	t.Parallel()
+
+	holdA := make(chan struct{})
+	store := seedStore(t, nil, nil, "")
+	h := newCoordHarness(t, tcKey, tcInv, coordinatorState{})
+	resolver := &channelIngressWakeResolver{
+		holdA: holdA,
+		decide: func(msg db.Message) (bool, string) {
+			if msg.ID == "m-slow" {
+				return false, "[IGNORED]"
+			}
+			return true, ""
+		},
+	}
+	coord := NewThreadCoordinator(store, resolver, "aerial")
+
+	var appendMu sync.Mutex
+	aReserved := make(chan struct{})
+	bDecisionApplied := make(chan struct{})
+	h.onSend = func(call sentCall) {
+		req, ok := call.Input.(AppendRequest)
+		if call.Method != HandlerAppend || !ok {
+			return
+		}
+		appendMu.Lock()
+		require.NoError(t, coord.Append(h.objectCtx(), req))
+		appendMu.Unlock()
+		if req.ReserveID == "m-slow" {
+			close(aReserved)
+		}
+		if len(req.IDs) == 1 && req.IDs[0] == "m-fast" {
+			close(bDecisionApplied)
+		}
+	}
+
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		resp, err := coord.Enqueue(h.sharedCtx(), ThreadEnqueueRequest{
+			Message: &db.Message{ID: "m-slow", ThreadID: tcKey, Content: "ambient chatter"},
+		})
+		assert.NoError(t, err)
+		assert.Equal(t, eriwire.StatusAccepted, resp.Status)
+	}()
+
+	<-aReserved
+
+	go func() {
+		defer wg.Done()
+		resp, err := coord.Enqueue(h.sharedCtx(), ThreadEnqueueRequest{
+			Message: &db.Message{ID: "m-fast", ThreadID: tcKey, Content: "hey @Aerial"},
+		})
+		assert.NoError(t, err)
+		assert.Equal(t, eriwire.StatusAccepted, resp.Status)
+	}()
+
+	<-bDecisionApplied
+	assert.Nil(t, h.snapshot(t).active, "m-fast must wait while leading m-slow reservation is undecided")
+
 	close(holdA)
 	wg.Wait()
 
-	// Verify arrival order is preserved in HandlerAppend sends (A before B)
-	wantSends := []sentCall{
-		threadSend(tcKey, HandlerAppend, AppendRequest{IDs: []string{"m-slow"}}, 0),
-		threadSend(tcKey, HandlerAppend, AppendRequest{IDs: []string{"m-fast"}}, 0),
-	}
-	assert.Equal(t, wantSends, h.sends)
+	finalSnap := h.snapshot(t)
+	assert.Empty(t, finalSnap.ingress)
+	assert.Equal(t, startedTurn("m-fast"), finalSnap.active)
+	assert.Contains(t, h.sends, runGatedBurst("m-fast"))
 }
 
 func TestThreadCoordinator_Enqueue_DoesNotDelayCancelOrDrain(t *testing.T) {

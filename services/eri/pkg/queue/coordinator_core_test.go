@@ -42,6 +42,8 @@ type coordHarness struct {
 	replies    map[string]CancelDispatchResponse
 	clearAlls  int
 	cancelStep string
+	onRunStep  func(stepName string)
+	onSend     func(call sentCall)
 }
 
 const harnessRunnerInvocation = "inv-runner"
@@ -55,11 +57,19 @@ func newCoordHarness(t *testing.T, key, requestID string, st coordinatorState) *
 	if st.active != nil {
 		h.state[StateKeyActive] = mustJSON(t, st.active)
 	}
+	if len(st.ingress) > 0 {
+		h.state[StateKeyIngress] = mustJSON(t, st.ingress)
+	}
+	if len(st.gated) > 0 {
+		h.state[StateKeyGated] = mustJSON(t, st.gated)
+	}
 	mc := h.mc
 	mc.On("Key").Return(key).Maybe()
 	mc.On("Request").Return(&restate.Request{ID: requestID}).Maybe()
 	mc.EXPECT().Get(mock.Anything, mock.Anything).RunAndReturn(func(k string, out any, _ ...restate.GetOption) (bool, restate.TerminalError) {
+		h.mu.Lock()
 		b, ok := h.state[k]
+		h.mu.Unlock()
 		if !ok {
 			return false, nil
 		}
@@ -67,20 +77,35 @@ func newCoordHarness(t *testing.T, key, requestID string, st coordinatorState) *
 		return true, nil
 	}).Maybe()
 	mc.On("Set", mock.Anything, mock.Anything).Run(func(args mock.Arguments) {
-		h.state[args.String(0)] = mustJSON(t, args.Get(1))
+		b := mustJSON(t, args.Get(1))
+		h.mu.Lock()
+		h.state[args.String(0)] = b
+		h.mu.Unlock()
 	}).Return().Maybe()
-	mc.On("Clear", mock.Anything).Run(func(args mock.Arguments) { delete(h.state, args.String(0)) }).Return().Maybe()
+	mc.On("Clear", mock.Anything).Run(func(args mock.Arguments) {
+		h.mu.Lock()
+		delete(h.state, args.String(0))
+		h.mu.Unlock()
+	}).Return().Maybe()
 	mc.On("ClearAll").Run(func(mock.Arguments) {
+		h.mu.Lock()
 		h.state = map[string][]byte{}
 		h.clearAlls++
+		h.mu.Unlock()
 	}).Return().Maybe()
 	mc.On("CancelInvocation", mock.Anything).Run(func(args mock.Arguments) {
+		h.mu.Lock()
 		h.cancels = append(h.cancels, args.String(0))
+		h.mu.Unlock()
 	}).Return().Maybe()
 
 	runHandler := func(fn func(restate.RunContext) (any, error), output any, opts ...restate.RunOption) restate.TerminalError {
-		if h.cancelStep != "" && runStepName(opts) == h.cancelStep {
+		stepName := runStepName(opts)
+		if h.cancelStep != "" && stepName == h.cancelStep {
 			return errRestateCancel
+		}
+		if h.onRunStep != nil {
+			h.onRunStep(stepName)
 		}
 		res, err := fn(mockRunContext{Context: context.Background()})
 		if err != nil {
@@ -121,11 +146,15 @@ func newCoordHarness(t *testing.T, key, requestID string, st coordinatorState) *
 
 func (h *coordHarness) record(input any, delay time.Duration) {
 	h.mu.Lock()
-	defer h.mu.Unlock()
 	call := h.target
 	call.Input = input
 	call.Delay = delay
 	h.sends = append(h.sends, call)
+	onSend := h.onSend
+	h.mu.Unlock()
+	if onSend != nil {
+		onSend(call)
+	}
 }
 
 // sendDelay reads the delay carried by a restate.WithDelay send option.
@@ -152,12 +181,20 @@ func (h *coordHarness) plainCtx() restate.Context { return restate.WithMockConte
 // snapshot decodes the harness state.
 func (h *coordHarness) snapshot(t *testing.T) coordinatorState {
 	t.Helper()
+	h.mu.Lock()
+	defer h.mu.Unlock()
 	var st coordinatorState
 	if b, ok := h.state[StateKeyPending]; ok {
 		require.NoError(t, json.Unmarshal(b, &st.pending))
 	}
 	if b, ok := h.state[StateKeyActive]; ok {
 		require.NoError(t, json.Unmarshal(b, &st.active))
+	}
+	if b, ok := h.state[StateKeyIngress]; ok {
+		require.NoError(t, json.Unmarshal(b, &st.ingress))
+	}
+	if b, ok := h.state[StateKeyGated]; ok {
+		require.NoError(t, json.Unmarshal(b, &st.gated))
 	}
 	return st
 }
