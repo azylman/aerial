@@ -455,6 +455,10 @@ func (b *BuildObject) OnDispatchOutcome(ctx restate.ObjectContext, ev pubsub.Dis
 	if b.store == nil {
 		return nil
 	}
+	chunkID := strings.TrimSpace(ev.VanadisChunkID)
+	if executor.IsSteerDispatchID(chunkID, ev.DispatchID) {
+		return nil
+	}
 	applied, err := RunJournaled(ctx, labelOnDispatchOutcome, "handle-dispatch-outcome-postgres", func(rc restate.RunContext) (bool, error) {
 		return b.applyDispatchOutcome(rc, restate.Key(ctx), ev)
 	})

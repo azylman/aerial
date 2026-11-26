@@ -4,6 +4,7 @@ package restatetest
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -36,6 +37,9 @@ func (MockRunContext) Request() *restate.Request { return nil }
 func RunMockRunContext(fn func(restate.RunContext) (any, error), output any, _ ...restate.RunOption) restate.TerminalError {
 	res, err := fn(MockRunContext{Context: context.Background()})
 	if err != nil {
+		if term, ok := errors.AsType[restate.TerminalError](err); ok {
+			return term
+		}
 		return restate.TerminalErrorf("%v", err)
 	}
 	if output != nil && res != nil {
