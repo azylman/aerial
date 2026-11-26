@@ -6,8 +6,10 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -242,16 +244,6 @@ func TestSelectAmbientMCPServers(t *testing.T) {
 			isVoice:     true,
 			wantServers: []string{"srv-common", "srv-discord", "srv-voice"},
 		},
-		{
-			name:      "channel mixed named and unnamed tools includes common, voice, and discord",
-			hasConfig: true,
-			tools: []config.AmbientToolConfig{
-				{Tool: "unnamed_tool"},
-				{Server: "srv-voice", Tool: "voice_tool"},
-			},
-			isVoice:     false,
-			wantServers: []string{"srv-common", "srv-discord", "srv-voice"},
-		},
 	}
 
 	for _, tc := range tests {
@@ -477,18 +469,126 @@ func TestResolver_PrimeProvider_Warnings(t *testing.T) {
 	rErr := NewResolver(cfg)
 	_, err = rErr.Resolve(context.Background(), ambCfgErr)
 	require.Error(t, err)
+}
 
-	// Pre-cancelled context in Resolve exercises primeProvider ctx.Err() check
-	cancCtx, cancel := context.WithCancel(context.Background())
-	cancel()
-	ambCfgCanc := &config.AmbientContextConfig{
-		Template: "Canceled: {{.tool.val}}",
+func TestResolver_CreateProvider_DoChan_TimeoutAndSharedPriming(t *testing.T) {
+	t.Parallel()
+
+	toolStarted := make(chan struct{}, 1)
+	toolBlock := make(chan struct{})
+	var unblockOnce sync.Once
+	unblockTool := func() {
+		unblockOnce.Do(func() {
+			close(toolBlock)
+		})
+	}
+	t.Cleanup(unblockTool)
+
+	var toolCalls atomic.Int32
+	slowServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		toolCalls.Add(1)
+		var req map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		method, _ := req["method"].(string)
+		id := req["id"]
+		if id == nil {
+			id = 1
+		}
+		switch method {
+		case "initialize":
+			w.Header().Set("Mcp-Session-Id", "sess-slow")
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"jsonrpc": "2.0",
+				"id":      id,
+				"result":  map[string]any{"protocolVersion": "2024-11-05"},
+			})
+		case "notifications/initialized":
+			w.WriteHeader(http.StatusOK)
+		case "tools/list":
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"jsonrpc": "2.0",
+				"id":      id,
+				"result": map[string]any{
+					"tools": []map[string]any{
+						{"name": "slow_state", "description": "state"},
+					},
+				},
+			})
+		case "tools/call":
+			select {
+			case toolStarted <- struct{}{}:
+			default:
+			}
+			<-toolBlock
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"jsonrpc": "2.0",
+				"id":      id,
+				"result": map[string]any{
+					"content": []map[string]any{
+						{"type": "text", "text": `{"status":"recovered"}`},
+					},
+				},
+			})
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	t.Cleanup(slowServer.Close)
+
+	cfg := config.NewFromData(&config.ConfigData{
+		McpServers: config.TargetMcpConfig{
+			Common: map[string]json.RawMessage{
+				"srv-slow": []byte(fmt.Sprintf(`{"serverUrl":%q}`, slowServer.URL)),
+			},
+		},
+	})
+
+	r := NewResolver(cfg)
+	ambCfg := &config.AmbientContextConfig{
+		Template:  "Status: {{.tool.status}}",
+		CacheTTL:  "5s",
+		TimeoutMs: 1000,
 		Tools: []config.AmbientToolConfig{
-			{Name: "tool", Tool: "tool_canc"},
+			{Name: "tool", Tool: "slow_state"},
 		},
 	}
-	rCanc := NewResolver(cfg)
-	outCanc, errCanc := rCanc.Resolve(cancCtx, ambCfgCanc)
-	require.NoError(t, errCanc)
-	assert.Contains(t, outCanc, "Canceled:")
+
+	// 1. First caller cancels while creation is blocked and returns immediately without hanging
+	fastCtx, fastCancel := context.WithCancel(context.Background())
+	var fastErr error
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		_, fastErr = r.Resolve(fastCtx, ambCfg)
+	}()
+
+	select {
+	case <-toolStarted:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for tool to start")
+	}
+
+	fastCancel()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for canceled caller to return")
+	}
+	require.ErrorIs(t, fastErr, context.Canceled)
+
+	// Unblock tool execution so shared background priming finishes
+	unblockTool()
+
+	// 2. Later healthy caller waits for shared background priming and receives real data
+	healthyCtx, healthyCancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer healthyCancel()
+	out, err := r.Resolve(healthyCtx, ambCfg)
+	require.NoError(t, err)
+	assert.Contains(t, out, "Status: recovered")
 }

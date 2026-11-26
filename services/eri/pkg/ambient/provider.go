@@ -238,12 +238,14 @@ func (p *Provider) fetchAndRender(ctx context.Context) (string, error) {
 			formatted = fmt.Sprintf("<ambient_context>\n%s\n</ambient_context>", trimmed)
 		}
 
-		p.mu.Lock()
-		p.cache = formatted
-		now := p.now()
-		p.expiresAt = now.Add(p.cacheTTL)
-		p.hardExpiresAt = now.Add(2 * p.cacheTTL)
-		p.mu.Unlock()
+		if ctx.Err() == nil {
+			p.mu.Lock()
+			p.cache = formatted
+			now := p.now()
+			p.expiresAt = now.Add(p.cacheTTL)
+			p.hardExpiresAt = now.Add(2 * p.cacheTTL)
+			p.mu.Unlock()
+		}
 
 		return formatted, nil
 	})

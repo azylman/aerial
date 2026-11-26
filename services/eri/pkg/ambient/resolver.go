@@ -140,9 +140,6 @@ func selectAmbientMCPServers(cur *config.ConfigData, tools []config.AmbientToolC
 }
 
 func primeProvider(ctx context.Context, ambCfg *config.AmbientContextConfig, disp *runner.DefaultDispatcher, prov *Provider, allowedTools []string) {
-	if ctx.Err() != nil {
-		return
-	}
 	if len(allowedTools) == 0 {
 		if err := prov.Prime(ctx); err != nil {
 			log.Printf("[Ambient] Ambient context prime warning: %v", err)
@@ -153,18 +150,23 @@ func primeProvider(ctx context.Context, ambCfg *config.AmbientContextConfig, dis
 	if ambCfg.TimeoutMs > 0 {
 		primeTimeout = time.Duration(ambCfg.TimeoutMs) * time.Millisecond
 	}
-	primeCtx, cancel := context.WithTimeout(ctx, primeTimeout)
-	defer cancel()
-	if err := disp.Prime(primeCtx); err != nil {
+
+	dispCtx, dispCancel := context.WithTimeout(ctx, primeTimeout)
+	if err := disp.Prime(dispCtx); err != nil {
 		log.Printf("[Ambient] MCP dispatcher prime warning: %v", err)
 	}
-	if err := prov.Prime(primeCtx); err != nil {
+	dispCancel()
+
+	provCtx, provCancel := context.WithTimeout(ctx, primeTimeout)
+	defer provCancel()
+	if err := prov.Prime(provCtx); err != nil {
 		log.Printf("[Ambient] Ambient context prime warning: %v", err)
 	}
 }
 
 func (r *Resolver) createProvider(ctx context.Context, ambCfg *config.AmbientContextConfig, key string, isVoice bool) (*Provider, error) {
-	res, err, _ := r.sf.Do(key, func() (any, error) {
+	primeBase := context.WithoutCancel(ctx)
+	ch := r.sf.DoChan(key, func() (any, error) {
 		if val, ok := r.providers.Load(key); ok {
 			if p, ok := val.(*Provider); ok {
 				return p, nil
@@ -181,18 +183,24 @@ func (r *Resolver) createProvider(ctx context.Context, ambCfg *config.AmbientCon
 		if pErr != nil {
 			return nil, fmt.Errorf("failed to create ambient provider: %w", pErr)
 		}
-		primeProvider(ctx, ambCfg, disp, p, allowedTools)
+		primeProvider(primeBase, ambCfg, disp, p, allowedTools)
 		r.providers.Store(key, p)
 		return p, nil
 	})
-	if err != nil {
-		return nil, err
+
+	select {
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	case res := <-ch:
+		if res.Err != nil {
+			return nil, res.Err
+		}
+		prov, ok := res.Val.(*Provider)
+		if !ok || prov == nil {
+			return nil, fmt.Errorf("unexpected provider type from singleflight: %T", res.Val)
+		}
+		return prov, nil
 	}
-	prov, ok := res.(*Provider)
-	if !ok || prov == nil {
-		return nil, fmt.Errorf("unexpected provider type from singleflight: %T", res)
-	}
-	return prov, nil
 }
 
 func (r *Resolver) resolveWithVoice(ctx context.Context, ambCfg *config.AmbientContextConfig, isVoice bool) (string, error) {
