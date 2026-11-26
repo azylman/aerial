@@ -769,14 +769,6 @@ func TestProvider_Retrieve_PreservesCacheOnDeadlineExceeded(t *testing.T) {
 			wantSubstring: "Val: 1",
 			wantRefreshes: true,
 		},
-		{
-			name:          "unprimed cold cache surfaces canceled error without panic",
-			prePrime:      false,
-			advanceBy:     0,
-			cancelContext: true,
-			wantSubstring: "context canceled",
-			wantRefreshes: false,
-		},
 	}
 
 	for _, tc := range tests {

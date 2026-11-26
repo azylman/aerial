@@ -195,12 +195,22 @@ func PrewarmProcessPoolsSequentially(ctx context.Context, pools ...runner.AgentP
 	}()
 }
 
-// PrewarmAmbientResolver primes configured ambient contexts at startup.
-func PrewarmAmbientResolver(ctx context.Context, resolver *ambient.Resolver) {
+// PrewarmAmbientResolver primes configured ambient contexts in the background at startup.
+// It stops when ctx is cancelled or when the returned stop func is called at shutdown.
+func PrewarmAmbientResolver(ctx context.Context, resolver *ambient.Resolver) func() {
 	if resolver == nil || ctx.Err() != nil {
-		return
+		return func() {}
 	}
-	resolver.PrimeConfigured(ctx)
+	prewarmCtx, cancel := context.WithCancel(ctx)
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		resolver.PrimeConfigured(prewarmCtx)
+	}()
+	return func() {
+		cancel()
+		<-done
+	}
 }
 
 // AppOption configures optional dependencies for RunApp.
@@ -259,7 +269,7 @@ func makeVoiceAmbientContextRetriever(appCfg *config.Config, ambientResolver *am
 		if currentCfg == nil {
 			return "", nil
 		}
-		return ambientResolver.Resolve(ctx, currentCfg.VoiceAmbientContext())
+		return ambientResolver.ResolveVoice(ctx, currentCfg.VoiceAmbientContext())
 	}
 }
 
@@ -468,7 +478,8 @@ func RunApp(ctx context.Context, cfg Config, opts ...AppOption) error {
 	})
 
 	PrewarmProcessPoolsSequentially(ctx, pools.allPools...)
-	PrewarmAmbientResolver(ctx, ambientResolver)
+	stopAmbientPrewarm := PrewarmAmbientResolver(ctx, ambientResolver)
+	defer stopAmbientPrewarm()
 	startUsagePoller(ctx, cur, pools.ephemeralHome, pools.discordHome, pools.poolEnv)
 
 	dgSession, closeBus := wireOutboundIntegrations(ctx, cur, workerPool)

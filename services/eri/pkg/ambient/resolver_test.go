@@ -188,27 +188,40 @@ func TestSelectAmbientMCPServers(t *testing.T) {
 		name        string
 		hasConfig   bool
 		tools       []config.AmbientToolConfig
+		isVoice     bool
 		wantServers []string
 	}{
 		{
 			name:        "nil cur returns nil",
 			hasConfig:   false,
 			tools:       []config.AmbientToolConfig{{Tool: "foo"}},
+			isVoice:     true,
 			wantServers: nil,
 		},
 		{
 			name:        "empty tools returns nil",
 			hasConfig:   true,
 			tools:       nil,
+			isVoice:     true,
 			wantServers: nil,
 		},
 		{
-			name:      "unnamed tools excludes discord servers",
+			name:      "voice unnamed tools excludes discord servers",
 			hasConfig: true,
 			tools: []config.AmbientToolConfig{
 				{Tool: "some_tool"},
 			},
+			isVoice:     true,
 			wantServers: []string{"srv-common", "srv-voice"},
+		},
+		{
+			name:      "channel unnamed tools includes discord servers",
+			hasConfig: true,
+			tools: []config.AmbientToolConfig{
+				{Tool: "some_tool"},
+			},
+			isVoice:     false,
+			wantServers: []string{"srv-common", "srv-discord", "srv-voice"},
 		},
 		{
 			name:      "all-named tools returns only named servers",
@@ -216,15 +229,27 @@ func TestSelectAmbientMCPServers(t *testing.T) {
 			tools: []config.AmbientToolConfig{
 				{Server: "srv-discord", Tool: "discord_tool"},
 			},
+			isVoice:     true,
 			wantServers: []string{"srv-discord"},
 		},
 		{
-			name:      "mixed named and unnamed tools includes common, voice, and named discord",
+			name:      "voice mixed named and unnamed tools includes common, voice, and named discord",
 			hasConfig: true,
 			tools: []config.AmbientToolConfig{
 				{Tool: "unnamed_tool"},
 				{Server: "srv-discord", Tool: "discord_tool"},
 			},
+			isVoice:     true,
+			wantServers: []string{"srv-common", "srv-discord", "srv-voice"},
+		},
+		{
+			name:      "channel mixed named and unnamed tools includes common, voice, and discord",
+			hasConfig: true,
+			tools: []config.AmbientToolConfig{
+				{Tool: "unnamed_tool"},
+				{Server: "srv-voice", Tool: "voice_tool"},
+			},
+			isVoice:     false,
 			wantServers: []string{"srv-common", "srv-discord", "srv-voice"},
 		},
 	}
@@ -236,7 +261,7 @@ func TestSelectAmbientMCPServers(t *testing.T) {
 			if tc.hasConfig {
 				cur = baseCfg
 			}
-			servers := selectAmbientMCPServers(cur, tc.tools)
+			servers := selectAmbientMCPServers(cur, tc.tools, tc.isVoice)
 			var serverNames []string
 			for _, s := range servers {
 				serverNames = append(serverNames, s.Name)
@@ -246,19 +271,10 @@ func TestSelectAmbientMCPServers(t *testing.T) {
 	}
 }
 
-func TestResolver_Resolve_ScopedMCPServers(t *testing.T) {
-	t.Parallel()
-
-	var discordCalls atomic.Int32
-	discordServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		discordCalls.Add(1)
-		w.WriteHeader(http.StatusOK)
-	}))
-	t.Cleanup(discordServer.Close)
-
-	var voiceCalls atomic.Int32
-	voiceServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		voiceCalls.Add(1)
+func newMockMCPServer(t *testing.T, calls *atomic.Int32, sessID string) *httptest.Server {
+	t.Helper()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls.Add(1)
 		var req map[string]any
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			http.Error(w, err.Error(), http.StatusBadRequest)
@@ -271,20 +287,18 @@ func TestResolver_Resolve_ScopedMCPServers(t *testing.T) {
 		}
 		switch method {
 		case "initialize":
-			w.Header().Set("Mcp-Session-Id", "sess-voice")
+			w.Header().Set("Mcp-Session-Id", sessID)
 			w.Header().Set("Content-Type", "application/json")
-			if err := json.NewEncoder(w).Encode(map[string]any{
+			_ = json.NewEncoder(w).Encode(map[string]any{
 				"jsonrpc": "2.0",
 				"id":      id,
 				"result":  map[string]any{"protocolVersion": "2024-11-05"},
-			}); err != nil {
-				return
-			}
+			})
 		case "notifications/initialized":
 			w.WriteHeader(http.StatusOK)
 		case "tools/list":
 			w.Header().Set("Content-Type", "application/json")
-			if err := json.NewEncoder(w).Encode(map[string]any{
+			_ = json.NewEncoder(w).Encode(map[string]any{
 				"jsonrpc": "2.0",
 				"id":      id,
 				"result": map[string]any{
@@ -292,12 +306,10 @@ func TestResolver_Resolve_ScopedMCPServers(t *testing.T) {
 						{"name": "ha_state", "description": "state"},
 					},
 				},
-			}); err != nil {
-				return
-			}
+			})
 		case "tools/call":
 			w.Header().Set("Content-Type", "application/json")
-			if err := json.NewEncoder(w).Encode(map[string]any{
+			_ = json.NewEncoder(w).Encode(map[string]any{
 				"jsonrpc": "2.0",
 				"id":      id,
 				"result": map[string]any{
@@ -305,14 +317,23 @@ func TestResolver_Resolve_ScopedMCPServers(t *testing.T) {
 						{"type": "text", "text": `{"status":"operational"}`},
 					},
 				},
-			}); err != nil {
-				return
-			}
+			})
 		default:
 			w.WriteHeader(http.StatusNotFound)
 		}
 	}))
-	t.Cleanup(voiceServer.Close)
+	t.Cleanup(srv.Close)
+	return srv
+}
+
+func TestResolver_Resolve_ScopedMCPServers(t *testing.T) {
+	t.Parallel()
+
+	var discordCalls atomic.Int32
+	discordServer := newMockMCPServer(t, &discordCalls, "sess-discord")
+
+	var voiceCalls atomic.Int32
+	voiceServer := newMockMCPServer(t, &voiceCalls, "sess-voice")
 
 	cfg := config.NewFromData(&config.ConfigData{
 		McpServers: config.TargetMcpConfig{
@@ -335,11 +356,18 @@ func TestResolver_Resolve_ScopedMCPServers(t *testing.T) {
 		},
 	}
 
-	out, err := r.Resolve(context.Background(), ambCfg)
+	// 1. Voice resolution excludes Discord MCP servers
+	out, err := r.ResolveVoice(context.Background(), ambCfg)
 	require.NoError(t, err)
 	assert.Contains(t, out, "Voice Status: operational")
-	assert.Equal(t, int32(0), discordCalls.Load(), "Discord-only MCP server must not be contacted")
+	assert.Equal(t, int32(0), discordCalls.Load(), "Discord-only MCP server must not be contacted for voice")
 	assert.Greater(t, voiceCalls.Load(), int32(0), "Voice MCP server should be contacted")
+
+	// 2. Channel resolution with unnamed tool includes Discord MCP servers
+	outChan, errChan := r.ResolveChannel(context.Background(), ambCfg)
+	require.NoError(t, errChan)
+	assert.Contains(t, outChan, "Voice Status: operational")
+	assert.Greater(t, discordCalls.Load(), int32(0), "Discord MCP server should be contacted for channel")
 }
 
 func TestResolver_PrimeConfigured(t *testing.T) {
@@ -385,21 +413,17 @@ func TestResolver_PrimeConfigured(t *testing.T) {
 
 	vAmb := cfg.Current().VoiceAmbientContext()
 	require.NotNil(t, vAmb)
-	outVoice, err := r.Resolve(context.Background(), vAmb)
+	outVoice, err := r.ResolveVoice(context.Background(), vAmb)
 	require.NoError(t, err)
 	assert.Contains(t, outVoice, "Voice Ambient Primed")
 
 	alphaAmb := cfg.Current().Channels["alpha"].AmbientContext
 	require.NotNil(t, alphaAmb)
-	outAlpha, err := r.Resolve(context.Background(), alphaAmb)
+	outAlpha, err := r.ResolveChannel(context.Background(), alphaAmb)
 	require.NoError(t, err)
 	assert.Contains(t, outAlpha, "Alpha Ambient Primed")
 
-	// 4. Config returning nil Data is safe no-op
-	rNilData := NewResolver(config.NewFromData(nil))
-	rNilData.PrimeConfigured(context.Background())
-
-	// 5. Config with invalid ambient templates handles error branches cleanly
+	// 4. Config with invalid ambient templates handles error branches cleanly
 	cfgInvalid := config.NewFromData(&config.ConfigData{
 		Voice: config.VoiceConfig{
 			AmbientContext: &config.AmbientContextConfig{

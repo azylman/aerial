@@ -86,7 +86,7 @@ func ambientAllowedTools(tools []config.AmbientToolConfig) []string {
 	return result
 }
 
-func selectAmbientMCPServers(cur *config.ConfigData, tools []config.AmbientToolConfig) []runner.MCPServerConfig {
+func selectAmbientMCPServers(cur *config.ConfigData, tools []config.AmbientToolConfig, isVoice bool) []runner.MCPServerConfig {
 	if cur == nil || len(tools) == 0 {
 		return nil
 	}
@@ -113,7 +113,8 @@ func selectAmbientMCPServers(cur *config.ConfigData, tools []config.AmbientToolC
 		return result
 	}
 
-	baseServers := extractMCPServers(cur, false)
+	// For unnamed tools: exclude discord servers only for voice ambient context.
+	baseServers := extractMCPServers(cur, !isVoice)
 	serverMap := make(map[string]runner.MCPServerConfig, len(baseServers)+len(namedServers))
 	for _, s := range baseServers {
 		serverMap[s.Name] = s
@@ -152,7 +153,7 @@ func primeProvider(ctx context.Context, ambCfg *config.AmbientContextConfig, dis
 	if ambCfg.TimeoutMs > 0 {
 		primeTimeout = time.Duration(ambCfg.TimeoutMs) * time.Millisecond
 	}
-	primeCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), primeTimeout)
+	primeCtx, cancel := context.WithTimeout(ctx, primeTimeout)
 	defer cancel()
 	if err := disp.Prime(primeCtx); err != nil {
 		log.Printf("[Ambient] MCP dispatcher prime warning: %v", err)
@@ -162,7 +163,7 @@ func primeProvider(ctx context.Context, ambCfg *config.AmbientContextConfig, dis
 	}
 }
 
-func (r *Resolver) createProvider(ctx context.Context, ambCfg *config.AmbientContextConfig, key string) (*Provider, error) {
+func (r *Resolver) createProvider(ctx context.Context, ambCfg *config.AmbientContextConfig, key string, isVoice bool) (*Provider, error) {
 	res, err, _ := r.sf.Do(key, func() (any, error) {
 		if val, ok := r.providers.Load(key); ok {
 			if p, ok := val.(*Provider); ok {
@@ -173,7 +174,7 @@ func (r *Resolver) createProvider(ctx context.Context, ambCfg *config.AmbientCon
 		if r.cfg != nil {
 			curData = r.cfg.Current()
 		}
-		servers := selectAmbientMCPServers(curData, ambCfg.Tools)
+		servers := selectAmbientMCPServers(curData, ambCfg.Tools, isVoice)
 		allowedTools := ambientAllowedTools(ambCfg.Tools)
 		disp := mcp.NewDispatcher(servers, nil, allowedTools)
 		p, pErr := NewProvider(*ambCfg, disp)
@@ -194,8 +195,7 @@ func (r *Resolver) createProvider(ctx context.Context, ambCfg *config.AmbientCon
 	return prov, nil
 }
 
-// Resolve resolves ambient context for ambCfg using cached or new Providers.
-func (r *Resolver) Resolve(ctx context.Context, ambCfg *config.AmbientContextConfig) (string, error) {
+func (r *Resolver) resolveWithVoice(ctx context.Context, ambCfg *config.AmbientContextConfig, isVoice bool) (string, error) {
 	if ambCfg == nil {
 		return "", nil
 	}
@@ -203,17 +203,32 @@ func (r *Resolver) Resolve(ctx context.Context, ambCfg *config.AmbientContextCon
 	if err != nil {
 		log.Printf("[Ambient] Warning: failed to marshal ambient tools for cache key: %v", err)
 	}
-	key := fmt.Sprintf("%s:%s:%s:%s:%d", ambCfg.TemplatePath, ambCfg.Template, string(toolsJSON), ambCfg.CacheTTL, ambCfg.TimeoutMs)
+	key := fmt.Sprintf("%t:%s:%s:%s:%s:%d", isVoice, ambCfg.TemplatePath, ambCfg.Template, string(toolsJSON), ambCfg.CacheTTL, ambCfg.TimeoutMs)
 	if val, ok := r.providers.Load(key); ok {
 		if p, ok := val.(*Provider); ok {
 			return p.Retrieve(ctx)
 		}
 	}
-	prov, err := r.createProvider(ctx, ambCfg, key)
+	prov, err := r.createProvider(ctx, ambCfg, key, isVoice)
 	if err != nil {
 		return "", err
 	}
 	return prov.Retrieve(ctx)
+}
+
+// Resolve resolves ambient context for ambCfg, defaulting to channel context.
+func (r *Resolver) Resolve(ctx context.Context, ambCfg *config.AmbientContextConfig) (string, error) {
+	return r.ResolveChannel(ctx, ambCfg)
+}
+
+// ResolveVoice resolves ambient context specifically for voice, excluding Discord MCP servers for unnamed tools.
+func (r *Resolver) ResolveVoice(ctx context.Context, ambCfg *config.AmbientContextConfig) (string, error) {
+	return r.resolveWithVoice(ctx, ambCfg, true)
+}
+
+// ResolveChannel resolves ambient context for a text channel, including Discord MCP servers for unnamed tools.
+func (r *Resolver) ResolveChannel(ctx context.Context, ambCfg *config.AmbientContextConfig) (string, error) {
+	return r.resolveWithVoice(ctx, ambCfg, false)
 }
 
 // PrimeConfigured primes configured voice and channel ambient contexts.
@@ -222,11 +237,8 @@ func (r *Resolver) PrimeConfigured(ctx context.Context) {
 		return
 	}
 	cur := r.cfg.Current()
-	if cur == nil {
-		return
-	}
 	if vAmb := cur.VoiceAmbientContext(); vAmb != nil {
-		if _, err := r.Resolve(ctx, vAmb); err != nil {
+		if _, err := r.ResolveVoice(ctx, vAmb); err != nil {
 			log.Printf("[Ambient] Voice ambient prime warning: %v", err)
 		}
 	}
@@ -241,7 +253,7 @@ func (r *Resolver) PrimeConfigured(ctx context.Context) {
 		}
 		policy := cur.Channels[name]
 		if policy.AmbientContext != nil {
-			if _, err := r.Resolve(ctx, policy.AmbientContext); err != nil {
+			if _, err := r.ResolveChannel(ctx, policy.AmbientContext); err != nil {
 				log.Printf("[Ambient] Channel %s ambient prime warning: %v", name, err)
 			}
 		}

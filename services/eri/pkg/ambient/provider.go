@@ -200,6 +200,7 @@ func (p *Provider) collectAmbientToolData(ctx context.Context) (map[string]any, 
 }
 
 func (p *Provider) fetchAndRender(ctx context.Context) (string, error) {
+	var needRefresh bool
 	res, err, _ := p.sf.Do("ambient_fetch", func() (any, error) {
 		curNow := p.now()
 		p.mu.RLock()
@@ -220,7 +221,7 @@ func (p *Provider) fetchAndRender(ctx context.Context) (string, error) {
 			prevCache := p.cache
 			p.mu.RUnlock()
 			if prevCache != "" {
-				p.triggerBackgroundRefresh(ctx)
+				needRefresh = true
 				return prevCache, nil
 			}
 		}
@@ -246,6 +247,10 @@ func (p *Provider) fetchAndRender(ctx context.Context) (string, error) {
 
 		return formatted, nil
 	})
+
+	if needRefresh {
+		p.triggerBackgroundRefresh(ctx)
+	}
 
 	if err != nil {
 		return "", err

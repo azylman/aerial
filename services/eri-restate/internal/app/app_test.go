@@ -1069,12 +1069,13 @@ func TestPrewarmAmbientResolver(t *testing.T) {
 				resolver = ambient.NewResolver(appCfg)
 			}
 
-			PrewarmAmbientResolver(ctx, resolver)
+			stopPrewarm := PrewarmAmbientResolver(ctx, resolver)
+			defer stopPrewarm()
 
 			if !tc.nilResolver && !tc.cancelCtx && tc.hasAmbient {
 				vAmb := appCfg.Current().VoiceAmbientContext()
 				require.NotNil(t, vAmb)
-				out, err := resolver.Resolve(context.Background(), vAmb)
+				out, err := resolver.ResolveVoice(context.Background(), vAmb)
 				require.NoError(t, err)
 				assert.Contains(t, out, "Prewarmed Voice Ambient")
 			}
