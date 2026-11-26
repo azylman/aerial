@@ -14,6 +14,9 @@ import (
 	"net/http"
 	"strings"
 	"time"
+
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/propagation"
 )
 
 // HTTPError is a non-2xx response from the Restate ingress.
@@ -73,6 +76,7 @@ func Post(ctx context.Context, client *http.Client, endpoint, idempotencyKey str
 	if key := strings.TrimSpace(idempotencyKey); key != "" {
 		req.Header.Set("Idempotency-Key", key)
 	}
+	otel.GetTextMapPropagator().Inject(ctx, propagation.HeaderCarrier(req.Header))
 	if client == nil {
 		client = http.DefaultClient
 	}
