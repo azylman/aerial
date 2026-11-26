@@ -91,15 +91,15 @@ export const FACTORY_STAGES: readonly FactoryStage[] = [
   {
     id: 4,
     title: 'GitHub Actions CI & Automated Code Review',
-    subtitle: 'Dynamic runners & RoboRev checks',
+    subtitle: 'Automated tests & RoboRev checks',
     icon: '⚙️',
-    component: 'GitHub Actions + ARC In-Cluster Runners + RoboRev',
+    component: 'GitHub Actions CI + RoboRev',
     inputs: [
       'Pull requests submitted to azylman/aerial or user forks',
       'GitHub webhook notifications (check_run, workflow_run, pull_request)',
     ],
     actions: [
-      'Executes CI test suites on self-hosted ARC runners across same-repo and fork PRs',
+      'Executes CI test suites and coverage verification on GitHub Actions across pull requests',
       'Runs Bazel remote cache, Go test suites, and Atlas schema linting',
       'Executes RoboRev automated LLM review passes with change requests',
     ],
