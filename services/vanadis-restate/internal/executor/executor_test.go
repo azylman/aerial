@@ -813,7 +813,7 @@ func TestDispatchChunkSteer(t *testing.T) {
 			assert.Equal(t, "vanadis", eri.LastDispatch.Source)
 			assert.Equal(t, "vanadis-c1", eri.LastDispatch.SessionID)
 			assert.Equal(t, tc.build.ThreadID, eri.LastDispatch.TargetID)
-			assert.Equal(t, tc.chunk.Effort, eri.LastDispatch.Effort)
+			assert.Equal(t, store.CapChunkEffort(tc.chunk.Effort), eri.LastDispatch.Effort)
 			assert.False(t, eri.LastDispatch.SkipIfActive)
 			assert.Contains(t, eri.LastDispatch.Prompt, tc.prompt)
 		})

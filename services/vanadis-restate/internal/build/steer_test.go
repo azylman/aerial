@@ -89,12 +89,12 @@ func TestBuildObject_SteerChunk(t *testing.T) {
 			wantAccepted: true,
 		},
 		{
-			name:          "store conflict error maps to 409",
+			name:          "store conflict error maps to 412",
 			buildKey:      "b1",
 			req:           store.SteerChunkRequest{ChunkRef: "c1", Prompt: "test prompt"},
 			storeSteerErr: store.ErrBuildConflict,
 			wantErr:       true,
-			terminalCode:  409,
+			terminalCode:  412,
 		},
 		{
 			name:          "store not found error maps to 404",

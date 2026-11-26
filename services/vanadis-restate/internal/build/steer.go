@@ -1,6 +1,7 @@
 package build
 
 import (
+	"errors"
 	"fmt"
 	"strings"
 
@@ -37,6 +38,9 @@ func (b *BuildObject) SteerChunk(ctx restate.ObjectContext, req store.SteerChunk
 	res, err := RunJournaled(ctx, labelSteerChunk, "steer-chunk-postgres", func(rc restate.RunContext) (store.SteerChunkResult, error) {
 		r, err := b.store.SteerChunk(rc, buildID, chunkRef, req)
 		if err != nil {
+			if errors.Is(err, store.ErrBuildConflict) {
+				return store.SteerChunkResult{}, restate.ToTerminalError(err, restate.WithErrorCode(412))
+			}
 			return store.SteerChunkResult{}, err
 		}
 		if r == nil {
@@ -45,7 +49,10 @@ func (b *BuildObject) SteerChunk(ctx restate.ObjectContext, req store.SteerChunk
 		return *r, nil
 	})
 	if err != nil {
-		return store.SteerChunkResult{}, ToTerminalErr(err, labelSteerChunk)
+		if errors.Is(err, store.ErrBuildConflict) {
+			return store.SteerChunkResult{}, restate.ToTerminalError(err, restate.WithErrorCode(412))
+		}
+		return store.SteerChunkResult{}, ToTerminalErr(err)
 	}
 
 	if res.ChunkStatus == statusRunning && b.executor != nil {
@@ -82,7 +89,7 @@ func (b *BuildObject) dispatchRunningChunkSteer(ctx restate.ObjectContext, build
 		return b.executor.DispatchChunkSteer(rc, bldVal, target, prompt, seed)
 	})
 	if err != nil {
-		return "", ToTerminalErr(err, labelSteerChunk)
+		return "", ToTerminalErr(err)
 	}
 	return dispatchID, nil
 }

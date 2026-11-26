@@ -272,7 +272,7 @@ func (e *Executor) DispatchChunkSteer(ctx context.Context, build model.VanadisBu
 		VanadisChunkID: cleanChunkID,
 		VanadisBuildID: cleanBuildID,
 		Prompt:         formattedPrompt,
-		Effort:         chunk.Effort,
+		Effort:         store.CapChunkEffort(chunk.Effort),
 		SkipIfActive:   false,
 	}
 	if err := e.EriClient.Dispatch(ctx, req); err != nil {

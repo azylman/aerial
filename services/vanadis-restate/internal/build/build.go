@@ -355,9 +355,12 @@ func (b *BuildObject) getRuntime(ctx restate.ObjectContext) objectRuntime {
 	return restateObjectRuntime{ctx: ctx, buildService: buildplan.BuildServiceName(agent)}
 }
 
-func ToTerminalErr(err error, handler ...string) error {
+func ToTerminalErr(err error) error {
 	if err == nil {
 		return nil
+	}
+	if term, ok := errors.AsType[restate.TerminalError](err); ok {
+		return term
 	}
 	switch {
 	case errors.Is(err, store.ErrInvalidBuildInput):
