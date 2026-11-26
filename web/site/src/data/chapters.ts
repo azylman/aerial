@@ -124,11 +124,11 @@ bazel test //services/... //pkg/...`,
           'Aerial separates generic platform logic from private user configurations through a strict multi-repository architecture and ephemeral scratch workspaces.',
         paragraphs: [
           'Personal assistant projects often entangle private details into core application source code. Hardcoding personal names, addresses, device identifiers, and secret keys prevents code sharing and complicates upgrades.',
-          'Aerial enforces a decoupled two-repository model. The core monorepo contains domain-agnostic infrastructure code, microservices, and base system rules. The user configuration repository contains private persona rules, smart home skills, service configurations, and Kubernetes cluster overrides.',
+          'Aerial enforces a decoupled two-repository model. The core monorepo contains domain-agnostic infrastructure code, microservices, and base system rules. The user configuration repository contains private persona rules, custom domain skills, service configurations, and Kubernetes cluster overrides.',
         ],
         bullets: [
           'Domain-Agnostic Core: The core repository contains zero personal data, real names, or private credentials.',
-          'Private Config Repository: Personal rules, household runbooks, and cluster overrides live in a private GitOps repository.',
+          'Private Config Repository: Personal rules, custom skill runbooks, and cluster overrides live in a private GitOps repository.',
           'Repository Integrity: Pre-tool security hooks guard base mount directories against in-place mutations.',
           'Ephemeral Scratch Workspaces: Agents perform modifications in isolated scratch clones initialized through helper scripts.',
         ],
@@ -569,12 +569,12 @@ channels:
           'Full duplex interaction spans Discord, real-time voice, outbound telephone calls, persistent cron schedules, and headless web browsing.',
         paragraphs: [
           'Aerial interacts across physical and digital modalities. The persistent scheduler manages recurring cron schedules, one-shot reminders, silent heartbeat monitors, and event watches across container restarts.',
-          'Real-time voice runs through a CUDA speech service hosting neural speech recognition and speech synthesis models. Outbound telephone calls and SMS execute through a PSTN telephony service, while browser automation handles web tasks.',
+          'Real-time voice runs through a CUDA speech service hosting neural speech recognition and speech synthesis models. Outbound telephone calls execute through a PSTN telephony service, while headless browser automation handles web tasks.',
         ],
         bullets: [
           'Persistent Scheduler: Provides durable scheduling tools for recurring jobs, silent polling, and event watches.',
           'Real-Time Voice: Delivers low-latency speech recognition and voice synthesis with fast response times.',
-          'Telephony Service: Executes outbound telephone calls and text messages for appointments and inquiries.',
+          'Telephony Service: Executes outbound and inbound telephone calls for appointments, reservations, and inquiries.',
           'Browser Automation: Automates headless browser tasks with session hygiene and stealth interaction.',
         ],
       },
@@ -675,7 +675,7 @@ channels:
         lead:
           'Extend platform capabilities with custom skills structured with YAML frontmatter and progressive disclosure.',
         paragraphs: [
-          'Skills are modular directories containing instructions, reference documentation, and automation scripts. They teach agents how to interact with specialized domains, home automation devices, and private APIs.',
+          'Skills are modular directories containing instructions, reference documentation, and automation scripts. They teach agents how to interact with specialized domains, external web portals, and private APIs.',
           'Progressive disclosure keeps prompt tokens minimal. Skills declare names and descriptions in frontmatter. Full skill instructions and reference materials load into context only when descriptions match the active request.',
         ],
         bullets: [
@@ -709,7 +709,7 @@ description: Run hermetic offsite backups of CloudNativePG and Restate journals 
           'Integrate third-party tools, hardware bridges, and external APIs using Model Context Protocol streamable servers.',
         paragraphs: [
           'Aerial uses Model Context Protocol to provide agents with typed, schema-validated tool interfaces. Users register custom Streamable HTTP MCP servers in configuration files under target categories.',
-          'Agents discover tools lazily through standard schema endpoints. This mechanism enables agents to call home automation devices, financial endpoints, and hardware monitors without modifying application code.',
+          'Agents discover tools lazily through standard schema endpoints. This mechanism enables agents to call calendar services, external web APIs, and cluster monitors without modifying application code.',
         ],
         bullets: [
           'Streamable HTTP: Provides tool invocations over standard HTTP connections.',
@@ -722,10 +722,10 @@ description: Run hermetic offsite backups of CloudNativePG and Restate journals 
             caption: 'Registering custom MCP server in config.yaml',
             code: `mcp_servers:
   common:
-    home-assistant:
-      serverUrl: http://ha-mcp.aerial/mcp
-    custom-iot:
-      serverUrl: http://iot-bridge.aerial/mcp`,
+    google-workspace:
+      serverUrl: http://google-mcp.aerial/mcp
+    custom-api:
+      serverUrl: http://api-bridge.aerial/mcp`,
           },
         ],
       },
@@ -746,17 +746,17 @@ description: Run hermetic offsite backups of CloudNativePG and Restate journals 
       },
       {
         id: 'homelab-workloads',
-        title: 'Integrating Smart Home & Custom Homelab Workloads',
+        title: 'Integrating External APIs & Custom Homelab Workloads',
         lead:
-          'Connect Home Assistant automations, camera vision event watches, and custom microservices to build a complete home intelligence platform.',
+          'Connect external webhook event watches, third-party APIs, and custom microservices to extend your self-hosted platform.',
         paragraphs: [
-          'Aerial serves as an intelligent coordinator for smart home environments. Agents monitor device states, adjust climate controls, inspect security camera feeds, and coordinate household routines.',
-          'Persistent event watches trigger automations when real-world events occur. Examples include greeting residents, notifying when deliveries arrive, and conducting scheduled security sweeps.',
+          'Aerial coordinates everyday personal workflows alongside custom homelab applications. Agents monitor external APIs, automate browser errands, manage calendars, and supervise custom cluster workloads.',
+          'Persistent event watches trigger agent turns when external events occur. Examples include tracking package or permit updates, processing inbound webhooks, and running scheduled maintenance.',
         ],
         bullets: [
-          'Home Assistant Integration: Monitors entity states and triggers automations bi-directionally.',
-          'Vision Triaging: Triages real-time object detections and events from security camera feeds.',
-          'Event-Driven Routines: Executes deterministic routines in response to sensor events.',
+          'External API Connectors: Queries and mutates third-party services through custom Model Context Protocol servers.',
+          'Browser & Phone Errands: Automates multi-step web flows and outbound telephone calls with persistent session state.',
+          'Event-Driven Routines: Executes deterministic workflows in response to inbound webhooks and scheduled heartbeats.',
         ],
         callout: {
           type: 'tip',
