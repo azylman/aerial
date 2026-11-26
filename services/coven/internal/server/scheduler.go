@@ -74,6 +74,7 @@ func NewWorker(cfg WorkerConfig) *Worker {
 	if httpClient == nil {
 		httpClient = &http.Client{Timeout: 30 * time.Second}
 	}
+	httpClient = tracing.Client(httpClient)
 	return &Worker{
 		store:               cfg.Store,
 		ollama:              cfg.Ollama,
@@ -237,6 +238,7 @@ func classifyExtractError(err error) error {
 
 // Extract extracts the thread's unextracted turns batch by batch.
 func (c *CovenThread) Extract(ctx restate.ObjectContext, req ExtractJobRequest) error {
+	_ = restateingress.ContextWithTrace(context.Background(), ctx)
 	key := restate.Key(ctx)
 	agent, threadID := config.ParseScopedThreadKey(key)
 	if req.ThreadID != "" {
@@ -296,8 +298,8 @@ func (c *CovenThread) processBatch(ctx restate.ObjectContext, threadID, agent st
 	}
 
 	llmKey := extractLLMKey(agent, threadID, batch.Watermark, attempt)
-	ans, err := restate.Run(ctx, func(rc restate.RunContext) (extractAnswer, error) {
-		return c.worker.callExtractStep(rc, llmKey, agent, batch)
+	ans, err := restateingress.RunInSpan(ctx, "coven.extract.llm", func(stepCtx context.Context, rc restate.RunContext) (extractAnswer, error) {
+		return c.worker.callExtractStep(stepCtx, llmKey, agent, batch)
 	}, restate.WithName("extract-llm"))
 	if err != nil {
 		return 0, err
@@ -312,8 +314,8 @@ func (c *CovenThread) processBatch(ctx restate.ObjectContext, threadID, agent st
 			restate.Set(ctx, extractAttemptStateKey, extractAttemptState{Watermark: batch.Watermark, Attempt: attempt})
 			return config.DefaultExtractMaxSteps, nil
 		}
-		if _, err := restate.Run(ctx, func(rc restate.RunContext) (struct{}, error) {
-			return struct{}{}, classifyExtractError(skipRejectedBatch(rc, c.worker.store, threadID, agent, batch, ans.Rejected))
+		if _, err := restateingress.RunInSpan(ctx, "coven.extract.apply", func(stepCtx context.Context, rc restate.RunContext) (struct{}, error) {
+			return struct{}{}, classifyExtractError(skipRejectedBatch(stepCtx, c.worker.store, threadID, agent, batch, ans.Rejected))
 		}, restate.WithName("skip-rejected-batch")); err != nil {
 			return 0, err
 		}
@@ -375,15 +377,15 @@ func skipRejectedBatch(ctx context.Context, s store.Store, threadID, agent strin
 func (c *CovenThread) applyBatch(ctx restate.ObjectContext, threadID, agent string, maxRowID int64, payload ExtractedFactsPayload) error {
 	s := c.worker.store
 	for _, id := range uniquePositiveIDs(payload.ReinforcedIDs) {
-		if _, err := restate.Run(ctx, func(rc restate.RunContext) (struct{}, error) {
-			return struct{}{}, classifyExtractError(reinforceExtractedFactIDs(rc, s, []int64{id}))
+		if _, err := restateingress.RunInSpan(ctx, "coven.extract.apply", func(stepCtx context.Context, rc restate.RunContext) (struct{}, error) {
+			return struct{}{}, classifyExtractError(reinforceExtractedFactIDs(stepCtx, s, []int64{id}))
 		}, restate.WithName("reinforce-fact")); err != nil {
 			return err
 		}
 	}
 	for _, item := range firstFactCandidates(payload.Facts) {
-		plan, err := restate.Run(ctx, func(rc restate.RunContext) (reconcilePlan, error) {
-			p, err := planCandidateReconcile(rc, s, c.worker.ollama, c.worker.llmClient, item, agent)
+		plan, err := restateingress.RunInSpan(ctx, "coven.extract.apply", func(stepCtx context.Context, rc restate.RunContext) (reconcilePlan, error) {
+			p, err := planCandidateReconcile(stepCtx, s, c.worker.ollama, c.worker.llmClient, item, agent)
 			return p, classifyExtractError(err)
 		}, restate.WithName("plan-fact"))
 		if err != nil {
@@ -392,8 +394,8 @@ func (c *CovenThread) applyBatch(ctx restate.ObjectContext, threadID, agent stri
 		if !plan.Admit {
 			continue
 		}
-		if _, err := restate.Run(ctx, func(rc restate.RunContext) (struct{}, error) {
-			return struct{}{}, classifyExtractError(writeCandidateReconcile(rc, s, item, plan, agent))
+		if _, err := restateingress.RunInSpan(ctx, "coven.extract.apply", func(stepCtx context.Context, rc restate.RunContext) (struct{}, error) {
+			return struct{}{}, classifyExtractError(writeCandidateReconcile(stepCtx, s, item, plan, agent))
 		}, restate.WithName("write-fact")); err != nil {
 			return err
 		}
@@ -403,15 +405,15 @@ func (c *CovenThread) applyBatch(ctx restate.ObjectContext, threadID, agent stri
 		procedural = procedural[:3]
 	}
 	for _, item := range procedural {
-		if _, err := restate.Run(ctx, func(rc restate.RunContext) (struct{}, error) {
-			err := stageProceduralCandidates(rc, s, c.worker.ollama, threadID, []ExtractedProceduralItem{item}, agent)
+		if _, err := restateingress.RunInSpan(ctx, "coven.extract.apply", func(stepCtx context.Context, rc restate.RunContext) (struct{}, error) {
+			err := stageProceduralCandidates(stepCtx, s, c.worker.ollama, threadID, []ExtractedProceduralItem{item}, agent)
 			return struct{}{}, classifyExtractError(err)
 		}, restate.WithName("stage-procedural")); err != nil {
 			return err
 		}
 	}
-	_, err := restate.Run(ctx, func(rc restate.RunContext) (struct{}, error) {
-		if err := s.UpdateConversationFactWatermark(rc, threadID, maxRowID, agent); err != nil {
+	_, err := restateingress.RunInSpan(ctx, "coven.extract.apply", func(stepCtx context.Context, rc restate.RunContext) (struct{}, error) {
+		if err := s.UpdateConversationFactWatermark(stepCtx, threadID, maxRowID, agent); err != nil {
 			return struct{}{}, classifyExtractError(fmt.Errorf("failed to update conversation fact watermark: %w", err))
 		}
 		RecordOperation("extract", statusSuccess, 0)
@@ -524,11 +526,15 @@ func (d *CovenDreamer) Arm(ctx restate.ObjectContext, _ struct{}) error {
 	return nil
 }
 
-func (d *CovenDreamer) runConsolidateFacts(rc restate.RunContext) (int, error) {
+func (d *CovenDreamer) runConsolidateFacts(ctx context.Context) (int, error) {
 	if d.worker == nil || d.worker.store == nil || d.worker.ollama == nil || d.worker.llmClient == nil {
 		return 0, nil
 	}
-	spanCtx, span := tracing.Tracer().Start(rc, "coven.consolidate", trace.WithNewRoot())
+	var startOpts []trace.SpanStartOption
+	if !trace.SpanContextFromContext(ctx).IsValid() {
+		startOpts = append(startOpts, trace.WithNewRoot())
+	}
+	spanCtx, span := tracing.Tracer().Start(ctx, "coven.consolidate", startOpts...)
 	defer span.End()
 	consolidated, err := ConsolidateFactClusters(spanCtx, d.worker.store, d.worker.ollama, d.worker.llmClient)
 	if err != nil {
@@ -540,11 +546,15 @@ func (d *CovenDreamer) runConsolidateFacts(rc restate.RunContext) (int, error) {
 	return consolidated, nil
 }
 
-func (d *CovenDreamer) runConsolidateSkills(rc restate.RunContext) (int, error) {
+func (d *CovenDreamer) runConsolidateSkills(ctx context.Context) (int, error) {
 	if d.worker == nil || d.worker.store == nil || d.worker.publisher == nil || d.worker.llmClient == nil {
 		return 0, nil
 	}
-	spanCtx, span := tracing.Tracer().Start(rc, "coven.consolidate_skills", trace.WithNewRoot())
+	var startOpts []trace.SpanStartOption
+	if !trace.SpanContextFromContext(ctx).IsValid() {
+		startOpts = append(startOpts, trace.WithNewRoot())
+	}
+	spanCtx, span := tracing.Tracer().Start(ctx, "coven.consolidate_skills", startOpts...)
 	defer span.End()
 	prNum, err := ConsolidateProceduralSkills(spanCtx, d.worker.store, d.worker.ollama, d.worker.llmClient, d.worker.publisher, d.worker.customSkillsDir)
 	if err != nil {
@@ -580,8 +590,12 @@ func (d *CovenDreamer) Dream(ctx restate.ObjectContext, req DreamRequest) error 
 		return nil
 	}
 
-	_, factsErr := restate.Run(ctx, d.runConsolidateFacts, restate.WithName("consolidate-facts"))
-	_, skillsErr := restate.Run(ctx, d.runConsolidateSkills, restate.WithName("consolidate-skills"))
+	_, factsErr := restateingress.RunInSpan(ctx, "coven.dreamer.consolidate_facts", func(stepCtx context.Context, _ restate.RunContext) (int, error) {
+		return d.runConsolidateFacts(stepCtx)
+	}, restate.WithName("consolidate-facts"))
+	_, skillsErr := restateingress.RunInSpan(ctx, "coven.dreamer.consolidate_skills", func(stepCtx context.Context, _ restate.RunContext) (int, error) {
+		return d.runConsolidateSkills(stepCtx)
+	}, restate.WithName("consolidate-skills"))
 	runErr := errors.Join(factsErr, skillsErr)
 	if runErr != nil {
 		RecordOperation("consolidate", "error", 0)

@@ -9,6 +9,7 @@ import (
 
 	restate "github.com/restatedev/sdk-go"
 
+	"github.com/azylman/aerial/pkg/restateingress"
 	"github.com/azylman/aerial/services/eri/pkg/config"
 )
 
@@ -386,7 +387,8 @@ func (s *TurnRunnerService) runAttempts(ctx restate.Context, subj runnerSubject,
 	for {
 		runIn := in
 		fut := restate.RunAsync(ctx, func(rc restate.RunContext) (AttemptResult, error) {
-			return safeCall(func() (AttemptResult, error) { return subj.attempt(rc, runIn) })
+			stepCtx := restateingress.ContextWithTrace(rc, ctx)
+			return safeCall(func() (AttemptResult, error) { return subj.attempt(stepCtx, runIn) })
 		}, restate.WithName(fmt.Sprintf("run-%d", runIn.RunIndex)))
 		res, resErr := fut.Result()
 		if resErr != nil {
@@ -497,7 +499,8 @@ func sendTurnDone(ctx restate.Context, coordinator, key string, req TurnDoneRequ
 // and runs through safeCall, so a panic is a terminal failure instead of an endless retry.
 func runStep[T any](ctx restate.Context, name string, fn func(rc context.Context) (T, error)) (T, error) {
 	out, err := restate.Run(ctx, func(rc restate.RunContext) (T, error) {
-		return safeCall(func() (T, error) { return fn(rc) })
+		stepCtx := restateingress.ContextWithTrace(rc, ctx)
+		return safeCall(func() (T, error) { return fn(stepCtx) })
 	}, restate.WithName(name))
 	if err != nil {
 		return out, err

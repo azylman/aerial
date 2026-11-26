@@ -225,6 +225,7 @@ func (j *runnerJournal) context(t *testing.T) restate.Context {
 	t.Helper()
 	mc := mocks.NewMockContext(t)
 	mc.EXPECT().Value(mock.Anything).Return(nil).Maybe()
+	mc.EXPECT().Request().Return(&restate.Request{ID: "inv-turn-1"}).Maybe()
 	mc.EXPECT().Run(mock.Anything, mock.Anything, mock.Anything).RunAndReturn(func(fn func(restate.RunContext) (any, error), output any, opts ...restate.RunOption) restate.TerminalError {
 		name := runStepName(opts)
 		j.record("run " + name)

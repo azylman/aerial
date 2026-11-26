@@ -12,6 +12,7 @@ import (
 
 	restate "github.com/restatedev/sdk-go"
 
+	"github.com/azylman/aerial/pkg/tracing"
 	"github.com/azylman/aerial/services/eri/pkg/db"
 	"github.com/azylman/aerial/services/eri/pkg/runner"
 )
@@ -302,6 +303,9 @@ func (p *WorkerPool) RecordDispatchStarted(ctx context.Context, sessionKey, disp
 
 // newStepTurnExecution builds the turnExecution through which a step reuses the shared turn helpers.
 func (p *WorkerPool) newStepTurnExecution(ctx context.Context, threadID string, burst []db.Message) *turnExecution {
+	if len(burst) > 0 && strings.TrimSpace(burst[0].Traceparent) != "" {
+		ctx = tracing.ContextWithTraceparent(ctx, strings.TrimSpace(burst[0].Traceparent))
+	}
 	triggerType := triggerSourceDiscord
 	if len(burst) > 0 {
 		triggerType = resolveBurstTriggerType(burst[0])
@@ -399,7 +403,7 @@ func (p *WorkerPool) PrepareBurstTurn(ctx context.Context, threadID, turnID stri
 			logInterruptWarning("release prep lease", te.lease.Release())
 		}
 	}()
-	te.buildTurnPrompt(ctx)
+	te.buildTurnPrompt(te.turnCtxValue())
 	effort, model := te.turnEffortAndModel()
 	log.Printf("[TurnRunner] Prepared turn %s for thread %s (%d message(s))", turnID, threadID, len(burst))
 	return TurnPrep{
@@ -468,6 +472,9 @@ func (p *WorkerPool) PrepareDispatchTurn(ctx context.Context, sessionKey, turnID
 	leaseKey := d.SessionID
 	if isEphem {
 		leaseKey = "dispatch-" + d.ID
+	}
+	if strings.TrimSpace(d.Traceparent) != "" {
+		ctx = tracing.ContextWithTraceparent(ctx, strings.TrimSpace(d.Traceparent))
 	}
 	te := p.newStepTurnExecution(ctx, leaseKey, nil)
 	te.dispatch = d
@@ -653,7 +660,7 @@ func (p *WorkerPool) RefreshBurstThreadSummary(ctx context.Context, threadID str
 	if err != nil || !ok {
 		return err
 	}
-	te.refreshThreadSummaryAtTurnEnd(ctx)
+	te.refreshThreadSummaryAtTurnEnd(te.turnCtxValue())
 	return nil
 }
 
@@ -743,6 +750,9 @@ func (p *WorkerPool) PublishDispatchOutcome(ctx context.Context, dispatchID stri
 	}
 	pubCtx, cancel := context.WithTimeout(ctx, turnStepStoreTimeout)
 	defer cancel()
+	if strings.TrimSpace(d.Traceparent) != "" {
+		pubCtx = tracing.ContextWithTraceparent(pubCtx, strings.TrimSpace(d.Traceparent))
+	}
 	return p.publishDispatchOutcome(pubCtx, *d, status, errMsg, startedAt, completedAt)
 }
 

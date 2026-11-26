@@ -41,6 +41,7 @@ type PromptDispatchRequest struct {
 	Silent       bool   `json:"silent,omitempty"`
 	Ephemeral    *bool  `json:"ephemeral,omitempty"`
 	SkipIfActive bool   `json:"skip_if_active,omitempty"`
+	Traceparent  string `json:"traceparent,omitempty"`
 }
 
 type PromptDispatchResponse struct {
@@ -172,6 +173,9 @@ func (d *HTTPPromptDispatcher) dispatchPromptRestate(ctx context.Context, req Pr
 	payload := req
 	payload.ChannelID = channelID
 	payload.MessageID = msgID
+	if strings.TrimSpace(payload.Traceparent) == "" {
+		payload.Traceparent = tracing.TraceparentFromContext(ctx)
+	}
 
 	respBytes, err := restateingress.Post(ctx, d.httpClient, endpoint, idempotencyKey, payload, 0)
 	if err != nil {
@@ -227,6 +231,9 @@ func (d *HTTPPromptDispatcher) dispatchRestate(ctx context.Context, req eriwire.
 	payload := req
 	payload.ID = dispatchID
 	payload.Agent = agentName
+	if strings.TrimSpace(payload.Traceparent) == "" {
+		payload.Traceparent = tracing.TraceparentFromContext(ctx)
+	}
 
 	respBytes, err := restateingress.Post(ctx, d.httpClient, endpoint, dispatchID, payload, 0)
 	if err != nil {

@@ -12,6 +12,7 @@ import (
 	restate "github.com/restatedev/sdk-go"
 
 	"github.com/azylman/aerial/pkg/eriwire"
+	"github.com/azylman/aerial/pkg/restateingress"
 	"github.com/azylman/aerial/services/eri/pkg/db"
 )
 
@@ -250,6 +251,9 @@ func (t *ThreadCoordinator) recordQueuedMessage(ctx restate.ObjectSharedContext,
 		msg := buildEnqueuedMessage(req, final, fallbackID, time.Now().UTC())
 		msg.Status = db.StatusPending
 		msg.ErrorMessage = ""
+		if strings.TrimSpace(msg.Traceparent) == "" {
+			msg.Traceparent = restateingress.RequestTraceparent(ctx)
+		}
 		if _, sErr := storeCall(rc, func(sc context.Context) (struct{}, error) {
 			return struct{}{}, t.store.InsertMessage(sc, msg)
 		}); sErr != nil {

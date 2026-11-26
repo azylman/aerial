@@ -19,6 +19,7 @@ import (
 	restate "github.com/restatedev/sdk-go"
 
 	"github.com/azylman/aerial/pkg/agent"
+	"github.com/azylman/aerial/pkg/restateingress"
 	"github.com/azylman/aerial/services/eri/pkg/config"
 	"github.com/azylman/aerial/services/eri/pkg/delivery"
 	"github.com/azylman/aerial/services/eri/pkg/runner"
@@ -173,24 +174,24 @@ func (s *Service) Complete(ctx restate.Context, req Request) (Response, error) {
 	if err := Validate(req); err != nil {
 		return Response{}, restate.ToTerminalError(err, restate.WithErrorCode(400))
 	}
-	return restate.Run(ctx, func(rc restate.RunContext) (Response, error) {
-		return s.complete(rc, req)
+	return restateingress.RunInSpan(ctx, "llm.complete", func(stepCtx context.Context, _ restate.RunContext) (Response, error) {
+		return s.complete(stepCtx, req)
 	}, restate.WithName(StepComplete))
 }
 
-func (s *Service) complete(rc restate.RunContext, req Request) (Response, error) {
+func (s *Service) complete(ctx context.Context, req Request) (Response, error) {
 	prompt := strings.TrimSpace(req.Prompt)
-	dir, block, err := StageAttachments(rc, s.fetch, req.Attachments)
+	dir, block, err := StageAttachments(ctx, s.fetch, req.Attachments)
 	if err != nil {
-		return Response{}, stepError(rc, err)
+		return Response{}, stepError(ctx, err)
 	}
 	if dir != "" {
 		defer removeStagingDir(dir)
 		prompt += block
 	}
-	out, err := s.llm(rc, req.Model, prompt)
+	out, err := s.llm(ctx, req.Model, prompt)
 	if err != nil {
-		return Response{}, stepError(rc, err)
+		return Response{}, stepError(ctx, err)
 	}
 	return Response{Response: out}, nil
 }

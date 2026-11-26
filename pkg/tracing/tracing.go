@@ -255,6 +255,11 @@ func Traceparent(ctx context.Context) string {
 	return carrier.Get("traceparent")
 }
 
+// TraceparentFromContext returns the W3C traceparent carried by ctx, or "" if none.
+func TraceparentFromContext(ctx context.Context) string {
+	return Traceparent(ctx)
+}
+
 // Middleware extracts inbound trace context and wraps next in a server span named
 // "<METHOD> <route pattern>" (operation when no route matched). When Middleware wraps a
 // handler the mux already routed, the span is named up front so next may rename it (e.g.
