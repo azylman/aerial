@@ -71,7 +71,7 @@ func MapRestateError(statusCode int, msg string) error {
 			return fmt.Errorf("%w: %s", model.ErrChunkNotFound, cleanMsg)
 		}
 		return fmt.Errorf("%w: %s", model.ErrBuildNotFound, cleanMsg)
-	case http.StatusConflict:
+	case http.StatusConflict, http.StatusPreconditionFailed:
 		return fmt.Errorf("%w: %s", model.ErrBuildConflict, cleanMsg)
 	default:
 		return fmt.Errorf("restate ingress error (%d): %s", statusCode, cleanMsg)

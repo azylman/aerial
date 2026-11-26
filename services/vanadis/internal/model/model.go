@@ -17,6 +17,10 @@ type (
 	VanadisBuild = buildplan.VanadisBuild
 	// VanadisChunk represents an individual ordered task chunk within a VanadisBuild.
 	VanadisChunk = buildplan.VanadisChunk
+	// SteerChunkRequest represents a request to inject a mid-turn steering prompt into an active or pending chunk.
+	SteerChunkRequest = buildplan.SteerChunkRequest
+	// SteerChunkResult reports the result of steering an active or pending chunk.
+	SteerChunkResult = buildplan.SteerChunkResult
 )
 
 const (
@@ -46,6 +50,9 @@ var (
 	ErrBuildConflict = errors.New("vanadis build state conflict")
 	// ErrInvalidBuildInput indicates invalid inputs for a VanadisBuild or chunk mutation.
 	ErrInvalidBuildInput = buildplan.ErrInvalidBuildInput
+
+	// ValidateSteerChunkInput trims and validates that buildID, chunkRef, and prompt are all non-empty.
+	ValidateSteerChunkInput = buildplan.ValidateSteerChunkInput
 )
 
 // CapChunkEffort maps legacy effort values onto low/medium.
