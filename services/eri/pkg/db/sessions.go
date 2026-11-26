@@ -70,7 +70,7 @@ func (s *SQLStore) SaveSessionID(ctx context.Context, threadID, sessionID string
 		return nil
 	}
 	agent := s.effectiveAgent()
-	query := `INSERT INTO sessions (agent, session_id, conversation_id, created_at, updated_at) VALUES ($1, $2, $3, $4, $5) ON CONFLICT(agent, session_id) DO UPDATE SET created_at = CASE WHEN sessions.conversation_id != EXCLUDED.conversation_id THEN EXCLUDED.created_at ELSE sessions.created_at END, conversation_id = EXCLUDED.conversation_id, updated_at = EXCLUDED.updated_at`
+	query := `INSERT INTO sessions (agent, session_id, conversation_id, created_at, updated_at) VALUES ($1, $2, $3, $4, $5) ON CONFLICT(agent, session_id) DO UPDATE SET created_at = CASE WHEN sessions.conversation_id != EXCLUDED.conversation_id THEN EXCLUDED.created_at ELSE sessions.created_at END, conversation_id = EXCLUDED.conversation_id, updated_at = EXCLUDED.updated_at WHERE EXCLUDED.conversation_id = '' OR sessions.conversation_id = '' OR sessions.previous_conversation_id IS DISTINCT FROM EXCLUDED.conversation_id`
 	return s.execWithTimeout(ctx, query, agent, threadID, sessionID, time.Now().UTC(), time.Now().UTC())
 }
 
