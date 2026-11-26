@@ -81,6 +81,14 @@ metadata:
   name: console
   namespace: default
 ---
+apiVersion: v1
+imagePullSecrets:
+  - name: ghcr-creds
+kind: ServiceAccount
+metadata:
+  name: infisical-bootstrap
+  namespace: default
+---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:
@@ -492,4 +500,99 @@ roleRef:
 subjects:
   - kind: ServiceAccount
     name: eri-aerial
+    namespace: default
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: infisical-bootstrap
+  namespace: default
+rules:
+  - apiGroups:
+      - ""
+    resources:
+      - secrets
+    verbs:
+      - create
+  - apiGroups:
+      - ""
+    resourceNames:
+      - infisical-universal-auth
+      - infisical-admin-bootstrap
+      - aerial-bootstrap-secrets
+    resources:
+      - secrets
+    verbs:
+      - get
+      - patch
+      - update
+      - delete
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: infisical-bootstrap
+  namespace: default
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: infisical-bootstrap
+subjects:
+  - kind: ServiceAccount
+    name: infisical-bootstrap
+    namespace: default
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: infisical-bootstrap-flux
+  namespace: flux-system
+rules:
+  - apiGroups:
+      - ""
+    resources:
+      - configmaps
+    verbs:
+      - create
+  - apiGroups:
+      - ""
+    resourceNames:
+      - aerial-image-tags
+    resources:
+      - configmaps
+    verbs:
+      - get
+      - patch
+      - update
+  - apiGroups:
+      - source.toolkit.fluxcd.io
+    resourceNames:
+      - aerial-config
+      - flux-system
+    resources:
+      - gitrepositories
+    verbs:
+      - get
+  - apiGroups:
+      - kustomize.toolkit.fluxcd.io
+    resourceNames:
+      - aerial-core
+    resources:
+      - kustomizations
+    verbs:
+      - get
+      - patch
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: infisical-bootstrap-flux
+  namespace: flux-system
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: infisical-bootstrap-flux
+subjects:
+  - kind: ServiceAccount
+    name: infisical-bootstrap
     namespace: default

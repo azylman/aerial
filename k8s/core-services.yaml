@@ -371,8 +371,6 @@ spec:
         app.kubernetes.io/name: eri-restate
     spec:
       serviceAccountName: eri-aerial
-      nodeSelector:
-        compute-tier: performance
       containers:
         - env:
             - name: POD_NAME
@@ -2576,6 +2574,487 @@ spec:
   selector:
     app.kubernetes.io/name: infisical
   type: ClusterIP
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  annotations:
+    kustomize.toolkit.fluxcd.io/force: enabled
+  labels:
+    app.kubernetes.io/name: infisical-bootstrap
+  name: infisical-bootstrap
+  namespace: default
+spec:
+  backoffLimit: 10
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: infisical-bootstrap
+    spec:
+      serviceAccountName: infisical-bootstrap
+      restartPolicy: OnFailure
+      imagePullSecrets:
+        - name: ghcr-creds
+      containers:
+        - name: infisical-bootstrap
+          image: ghcr.io/azylman/aerial-infisical-mcp:${TAG_AERIAL_INFISICAL_MCP:=latest}
+          imagePullPolicy: Always
+          env:
+            - name: ADMIN_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  key: ADMIN_PASSWORD
+                  name: infisical-admin-bootstrap
+            - name: INFISICAL_PROJECT_SLUG
+              value: ${INFISICAL_PROJECT_SLUG:=aerial}
+          command:
+            - node
+            - -e
+            - |
+              const https = require('https');
+              const http = require('http');
+              const fs = require('fs');
+
+              const k8sHost = 'kubernetes.default.svc';
+              const k8sPort = 443;
+              const saToken = fs.readFileSync('/var/run/secrets/kubernetes.io/serviceaccount/token', 'utf8').trim();
+              const saCa = fs.readFileSync('/var/run/secrets/kubernetes.io/serviceaccount/ca.crt');
+
+              function k8sRequest(method, path, body, contentType) {
+                return new Promise((resolve, reject) => {
+                  const headers = {
+                    'Authorization': 'Bearer ' + saToken,
+                    'Accept': 'application/json'
+                  };
+                  let payload = null;
+                  if (body) {
+                    payload = typeof body === 'string' ? body : JSON.stringify(body);
+                    headers['Content-Type'] = contentType || 'application/json';
+                    headers['Content-Length'] = Buffer.byteLength(payload);
+                  }
+                  const req = https.request({
+                    hostname: k8sHost,
+                    port: k8sPort,
+                    path: path,
+                    method: method,
+                    ca: saCa,
+                    headers: headers
+                  }, (res) => {
+                    let data = '';
+                    res.on('data', chunk => data += chunk);
+                    res.on('end', () => {
+                      let json = null;
+                      try { json = JSON.parse(data); } catch (e) {}
+                      resolve({ statusCode: res.statusCode, data: data, json: json });
+                    });
+                  });
+                  req.on('error', reject);
+                  if (payload) req.write(payload);
+                  req.end();
+                });
+              }
+
+              function infisicalRequest(method, path, body, token) {
+                return new Promise((resolve, reject) => {
+                  const headers = {
+                    'Accept': 'application/json'
+                  };
+                  if (token) {
+                    headers['Authorization'] = 'Bearer ' + token;
+                  }
+                  let payload = null;
+                  if (body) {
+                    payload = typeof body === 'string' ? body : JSON.stringify(body);
+                    headers['Content-Type'] = 'application/json';
+                    headers['Content-Length'] = Buffer.byteLength(payload);
+                  }
+                  const req = http.request({
+                    hostname: 'infisical.default.svc.cluster.local',
+                    port: 8080,
+                    path: path,
+                    method: method,
+                    headers: headers
+                  }, (res) => {
+                    let data = '';
+                    res.on('data', chunk => data += chunk);
+                    res.on('end', () => {
+                      let json = null;
+                      try { json = JSON.parse(data); } catch (e) {}
+                      resolve({ statusCode: res.statusCode, data: data, json: json });
+                    });
+                  });
+                  req.on('error', reject);
+                  if (payload) req.write(payload);
+                  req.end();
+                });
+              }
+
+              function sleep(ms) {
+                return new Promise(resolve => setTimeout(resolve, ms));
+              }
+
+              function normalizeGitUrl(url) {
+                if (!url) return '';
+                let u = url.trim();
+                u = u.replace(/^ssh:\/\/git@github\.com\//, 'https://github.com/');
+                u = u.replace(/^git@github\.com:/, 'https://github.com/');
+                if (u.startsWith('https://github.com/') && !u.endsWith('.git')) {
+                  u = u + '.git';
+                }
+                return u;
+              }
+
+              async function saveUniversalAuthSecret(token) {
+                for (let attempt = 1; attempt <= 10; attempt++) {
+                  try {
+                    const createRes = await k8sRequest('POST', '/api/v1/namespaces/default/secrets', {
+                      apiVersion: 'v1',
+                      kind: 'Secret',
+                      metadata: {
+                        name: 'infisical-universal-auth',
+                        namespace: 'default'
+                      },
+                      type: 'Opaque',
+                      stringData: {
+                        INFISICAL_TOKEN: token
+                      }
+                    });
+                    if (createRes.statusCode >= 200 && createRes.statusCode < 300) {
+                      console.log('Saved Secret/infisical-universal-auth');
+                      return;
+                    }
+                    if (createRes.statusCode === 409) {
+                      try {
+                        const patchRes = await k8sRequest('PATCH', '/api/v1/namespaces/default/secrets/infisical-universal-auth', {
+                          stringData: {
+                            INFISICAL_TOKEN: token
+                          }
+                        }, 'application/strategic-merge-patch+json');
+                        if (patchRes.statusCode >= 200 && patchRes.statusCode < 300) {
+                          console.log('Updated Secret/infisical-universal-auth');
+                          return;
+                        }
+                        console.error('Patch Secret/infisical-universal-auth returned status: ' + patchRes.statusCode);
+                      } catch (patchErr) {
+                        console.error('Patch Secret/infisical-universal-auth network error on attempt ' + attempt + ': ' + (patchErr.message || 'connection error'));
+                      }
+                    } else {
+                      console.error('Create Secret/infisical-universal-auth returned status: ' + createRes.statusCode);
+                    }
+                  } catch (err) {
+                    console.error('Create Secret/infisical-universal-auth network error on attempt ' + attempt + ': ' + (err.message || 'connection error'));
+                    try {
+                      const patchRes = await k8sRequest('PATCH', '/api/v1/namespaces/default/secrets/infisical-universal-auth', {
+                        stringData: {
+                          INFISICAL_TOKEN: token
+                        }
+                      }, 'application/strategic-merge-patch+json');
+                      if (patchRes.statusCode >= 200 && patchRes.statusCode < 300) {
+                        console.log('Updated Secret/infisical-universal-auth after POST network error');
+                        return;
+                      }
+                    } catch (e) {}
+                  }
+                  await sleep(2000);
+                }
+                throw new Error('Failed to persist Secret/infisical-universal-auth after 10 attempts');
+              }
+
+              async function ensureProjectAndEnvironment(token, projectSlug) {
+                let projectId = '';
+
+                try {
+                  const listProjRes = await infisicalRequest('GET', '/api/v1/projects', null, token);
+                  if (listProjRes.statusCode >= 200 && listProjRes.statusCode < 300 && listProjRes.json) {
+                    const projs = Array.isArray(listProjRes.json.projects) ? listProjRes.json.projects : (Array.isArray(listProjRes.json) ? listProjRes.json : []);
+                    const found = projs.find(p => p.slug === projectSlug || p.name === projectSlug);
+                    if (found) {
+                      projectId = found.id || found._id;
+                      console.log('Found existing project ' + projectSlug);
+                    }
+                  }
+                } catch (e) {
+                  console.error('Error listing projects: ' + (e.message || 'network error'));
+                }
+
+                if (!projectId) {
+                  const projRes = await infisicalRequest('POST', '/api/v1/projects', {
+                    projectName: projectSlug,
+                    slug: projectSlug,
+                    type: 'secret-manager',
+                    shouldCreateDefaultEnvs: true
+                  }, token);
+
+                  if (projRes.statusCode >= 200 && projRes.statusCode < 300) {
+                    projectId = (projRes.json && (projRes.json.project ? (projRes.json.project.id || projRes.json.project._id) : (projRes.json.id || projRes.json._id)));
+                    console.log('Created project ' + projectSlug);
+                  } else if (projRes.statusCode === 400 || projRes.statusCode === 409) {
+                    console.log('Project ' + projectSlug + ' already exists (status: ' + projRes.statusCode + '), retrieving project id');
+                    const listProjRes = await infisicalRequest('GET', '/api/v1/projects', null, token);
+                    if (listProjRes.statusCode >= 200 && listProjRes.statusCode < 300 && listProjRes.json) {
+                      const projs = Array.isArray(listProjRes.json.projects) ? listProjRes.json.projects : (Array.isArray(listProjRes.json) ? listProjRes.json : []);
+                      const found = projs.find(p => p.slug === projectSlug || p.name === projectSlug);
+                      if (found) {
+                        projectId = found.id || found._id;
+                      }
+                    } else {
+                      throw new Error('Failed to list projects (status: ' + listProjRes.statusCode + ')');
+                    }
+                  } else {
+                    throw new Error('Failed to create project ' + projectSlug + ' (status: ' + projRes.statusCode + ')');
+                  }
+                }
+
+                if (!projectId) {
+                  throw new Error('Could not resolve projectId for ' + projectSlug);
+                }
+
+                const envRes = await infisicalRequest('POST', '/api/v1/projects/' + projectId + '/environments', {
+                  name: 'Default',
+                  slug: 'default'
+                }, token);
+
+                if (envRes.statusCode >= 200 && envRes.statusCode < 300) {
+                  console.log('Created environment default');
+                } else if (envRes.statusCode === 400 || envRes.statusCode === 409) {
+                  console.log('Environment default already exists (status: ' + envRes.statusCode + ')');
+                } else {
+                  throw new Error('Failed to create environment default (status: ' + envRes.statusCode + ')');
+                }
+              }
+
+              async function checkRequiredSecrets(token, projectSlug) {
+                try {
+                  const dRes = await infisicalRequest('GET', '/api/v3/secrets/raw/DISCORD_BOT_TOKEN?projectSlug=' + encodeURIComponent(projectSlug) + '&environment=default&secretPath=/', null, token);
+                  const gRes = await infisicalRequest('GET', '/api/v3/secrets/raw/GITHUB_PAT?projectSlug=' + encodeURIComponent(projectSlug) + '&environment=default&secretPath=/', null, token);
+                  return (dRes.statusCode === 200 && gRes.statusCode === 200);
+                } catch (e) {
+                  return false;
+                }
+              }
+
+              async function importSecrets(data, token, projectSlug) {
+                for (const key of Object.keys(data)) {
+                  const val = Buffer.from(data[key], 'base64').toString('utf8');
+                  const payload = {
+                    projectSlug: projectSlug,
+                    environment: 'default',
+                    secretPath: '/',
+                    secretValue: val
+                  };
+                  let res = await infisicalRequest('POST', '/api/v3/secrets/raw/' + encodeURIComponent(key), payload, token);
+                  if (res.statusCode < 200 || res.statusCode >= 300) {
+                    res = await infisicalRequest('PATCH', '/api/v3/secrets/raw/' + encodeURIComponent(key), payload, token);
+                  }
+                  if (res.statusCode < 200 || res.statusCode >= 300) {
+                    throw new Error('Failed to upsert secret ' + key + ' (status: ' + res.statusCode + ')');
+                  }
+                  console.log('Imported secret ' + key + ': ' + res.statusCode);
+                }
+              }
+
+              async function main() {
+                console.log('Starting Infisical auto-bootstrap job...');
+
+                try {
+                  let gitUrl = '';
+                  let gitRes = await k8sRequest('GET', '/apis/source.toolkit.fluxcd.io/v1/namespaces/flux-system/gitrepositories/aerial-config');
+                  if (gitRes.statusCode === 200 && gitRes.json && gitRes.json.spec && gitRes.json.spec.url) {
+                    gitUrl = gitRes.json.spec.url;
+                  } else {
+                    gitRes = await k8sRequest('GET', '/apis/source.toolkit.fluxcd.io/v1/namespaces/flux-system/gitrepositories/flux-system');
+                    if (gitRes.statusCode === 200 && gitRes.json && gitRes.json.spec && gitRes.json.spec.url) {
+                      gitUrl = gitRes.json.spec.url;
+                    }
+                  }
+
+                  if (gitUrl) {
+                    const normalizedUrl = normalizeGitUrl(gitUrl);
+                    console.log('Discovered Git repository URL: ' + normalizedUrl);
+                    const cmRes = await k8sRequest('GET', '/api/v1/namespaces/flux-system/configmaps/aerial-image-tags');
+                    let needUpdate = false;
+                    if (cmRes.statusCode === 404) {
+                      const createRes = await k8sRequest('POST', '/api/v1/namespaces/flux-system/configmaps', {
+                        apiVersion: 'v1',
+                        kind: 'ConfigMap',
+                        metadata: {
+                          name: 'aerial-image-tags',
+                          namespace: 'flux-system'
+                        },
+                        data: {
+                          AERIAL_CONFIG_REPO_URL: normalizedUrl
+                        }
+                      });
+                      if (createRes.statusCode >= 200 && createRes.statusCode < 300) {
+                        needUpdate = true;
+                      } else {
+                        throw new Error('Failed to create ConfigMap/aerial-image-tags (status: ' + createRes.statusCode + ')');
+                      }
+                    } else if (cmRes.statusCode === 200 && cmRes.json) {
+                      const existingVal = cmRes.json.data && cmRes.json.data.AERIAL_CONFIG_REPO_URL;
+                      if (!existingVal || existingVal.trim() === '') {
+                        const patchRes = await k8sRequest('PATCH', '/api/v1/namespaces/flux-system/configmaps/aerial-image-tags', {
+                          data: {
+                            AERIAL_CONFIG_REPO_URL: normalizedUrl
+                          }
+                        }, 'application/strategic-merge-patch+json');
+                        if (patchRes.statusCode >= 200 && patchRes.statusCode < 300) {
+                          needUpdate = true;
+                        } else {
+                          throw new Error('Failed to patch ConfigMap/aerial-image-tags (status: ' + patchRes.statusCode + ')');
+                        }
+                      }
+                    } else {
+                      throw new Error('Unexpected status reading ConfigMap/aerial-image-tags: ' + cmRes.statusCode);
+                    }
+
+                    if (needUpdate) {
+                      console.log('Triggering reconcile on Kustomization/aerial-core');
+                      await k8sRequest('PATCH', '/apis/kustomize.toolkit.fluxcd.io/v1/namespaces/flux-system/kustomizations/aerial-core', {
+                        metadata: {
+                          annotations: {
+                            'reconcile.fluxcd.io/requestedAt': new Date().toISOString()
+                          }
+                        }
+                      }, 'application/merge-patch+json');
+                    }
+                  }
+                } catch (err) {
+                  console.error('Error in GitRepository/ConfigMap step:', err.message || err);
+                  throw err;
+                }
+
+                let existed = false;
+                let infisicalToken = '';
+
+                const authSecretRes = await k8sRequest('GET', '/api/v1/namespaces/default/secrets/infisical-universal-auth');
+                if (authSecretRes.statusCode === 200 && authSecretRes.json && authSecretRes.json.data && authSecretRes.json.data.INFISICAL_TOKEN) {
+                  existed = true;
+                  infisicalToken = Buffer.from(authSecretRes.json.data.INFISICAL_TOKEN, 'base64').toString('utf8');
+                  console.log('Secret/infisical-universal-auth exists, reusing existing token');
+                } else if (authSecretRes.statusCode === 404) {
+                  existed = false;
+                  console.log('Secret/infisical-universal-auth not found (404). Bootstrapping fresh Infisical instance...');
+
+                  let ready = false;
+                  for (let i = 0; i < 60; i++) {
+                    try {
+                      const statusRes = await infisicalRequest('GET', '/api/status');
+                      if (statusRes.statusCode === 200) {
+                        ready = true;
+                        break;
+                      }
+                    } catch (e) {}
+                    await sleep(2000);
+                  }
+                  if (!ready) {
+                    throw new Error('Infisical did not become ready in time');
+                  }
+
+                  const bootstrapRes = await infisicalRequest('POST', '/api/v1/admin/bootstrap', {
+                    email: 'admin@aerial.local',
+                    password: process.env.ADMIN_PASSWORD,
+                    organization: 'aerial'
+                  });
+                  console.log('Bootstrap status: ' + bootstrapRes.statusCode);
+                  if (bootstrapRes.statusCode < 200 || bootstrapRes.statusCode >= 300) {
+                    throw new Error('Infisical bootstrap failed with status: ' + bootstrapRes.statusCode);
+                  }
+
+                  const token = (bootstrapRes.json && bootstrapRes.json.identity && bootstrapRes.json.identity.credentials && bootstrapRes.json.identity.credentials.token)
+                    || (bootstrapRes.json && bootstrapRes.json.token)
+                    || (bootstrapRes.json && bootstrapRes.json.identity && bootstrapRes.json.identity.token);
+
+                  if (!token) {
+                    throw new Error('Failed to extract token from Infisical bootstrap response (status: ' + bootstrapRes.statusCode + ')');
+                  }
+                  infisicalToken = token;
+
+                  await saveUniversalAuthSecret(infisicalToken);
+                } else {
+                  throw new Error('Unexpected status reading Secret/infisical-universal-auth: ' + authSecretRes.statusCode);
+                }
+
+                const projectSlug = process.env.INFISICAL_PROJECT_SLUG || 'aerial';
+                await ensureProjectAndEnvironment(infisicalToken, projectSlug);
+
+                let secRes;
+                try {
+                  secRes = await k8sRequest('GET', '/api/v1/namespaces/default/secrets/aerial-bootstrap-secrets');
+                } catch (e) {
+                  throw new Error('Network error reading Secret/aerial-bootstrap-secrets: ' + (e.message || 'unknown error'));
+                }
+
+                if (secRes.statusCode === 200 && secRes.json) {
+                  console.log('Secret/aerial-bootstrap-secrets found, importing secrets...');
+                  const data = secRes.json.data || {};
+                  await importSecrets(data, infisicalToken, projectSlug);
+                  const delRes = await k8sRequest('DELETE', '/api/v1/namespaces/default/secrets/aerial-bootstrap-secrets');
+                  if ((delRes.statusCode >= 200 && delRes.statusCode < 300) || delRes.statusCode === 404) {
+                    console.log('Deleted Secret/aerial-bootstrap-secrets');
+                  } else {
+                    throw new Error('Failed to delete Secret/aerial-bootstrap-secrets: status ' + delRes.statusCode);
+                  }
+                  process.exit(0);
+                } else if (secRes.statusCode === 404) {
+                  const alreadySeeded = await checkRequiredSecrets(infisicalToken, projectSlug);
+                  if (alreadySeeded) {
+                    console.log('Required secrets (DISCORD_BOT_TOKEN, GITHUB_PAT) already present in Infisical project ' + projectSlug + '. Done.');
+                    process.exit(0);
+                  }
+
+                  console.log('Required secrets not yet in Infisical. Waiting for Secret/aerial-bootstrap-secrets...');
+                  let seeded = false;
+                  for (let attempt = 1; attempt <= 180; attempt++) {
+                    await sleep(5000);
+
+                    try {
+                      const pollRes = await k8sRequest('GET', '/api/v1/namespaces/default/secrets/aerial-bootstrap-secrets');
+                      if (pollRes.statusCode === 200 && pollRes.json) {
+                        console.log('Found Secret/aerial-bootstrap-secrets on attempt ' + attempt);
+                        const data = pollRes.json.data || {};
+                        await importSecrets(data, infisicalToken, projectSlug);
+                        const delRes = await k8sRequest('DELETE', '/api/v1/namespaces/default/secrets/aerial-bootstrap-secrets');
+                        if ((delRes.statusCode >= 200 && delRes.statusCode < 300) || delRes.statusCode === 404) {
+                          console.log('Deleted Secret/aerial-bootstrap-secrets');
+                          seeded = true;
+                          break;
+                        } else {
+                          throw new Error('Failed to delete Secret/aerial-bootstrap-secrets: status ' + delRes.statusCode);
+                        }
+                      } else if (pollRes.statusCode === 404) {
+                        if (await checkRequiredSecrets(infisicalToken, projectSlug)) {
+                          console.log('Required secrets now present in Infisical.');
+                          seeded = true;
+                          break;
+                        }
+                      } else {
+                        throw new Error('Unexpected status reading Secret/aerial-bootstrap-secrets: ' + pollRes.statusCode);
+                      }
+                    } catch (err) {
+                      console.error('Error polling Secret/aerial-bootstrap-secrets: ' + (err.message || err));
+                    }
+                  }
+
+                  if (!seeded) {
+                    throw new Error('Timed out waiting for Secret/aerial-bootstrap-secrets or DISCORD_BOT_TOKEN/GITHUB_PAT in Infisical after 180 attempts (15m)');
+                  }
+                } else {
+                  throw new Error('Unexpected status reading Secret/aerial-bootstrap-secrets: ' + secRes.statusCode);
+                }
+              }
+
+              main().catch(err => {
+                console.error('Fatal error in bootstrap job:', err.message || err);
+                process.exit(1);
+              });
+          resources:
+            limits:
+              cpu: 500m
+              memory: 256Mi
+            requests:
+              cpu: 50m
+              memory: 64Mi
 ---
 apiVersion: v1
 kind: PersistentVolumeClaim

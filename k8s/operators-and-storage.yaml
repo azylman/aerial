@@ -5,7 +5,7 @@ metadata:
   namespace: default
 spec:
   affinity:
-    podAntiAffinityType: required
+    podAntiAffinityType: preferred
   bootstrap:
     initdb:
       database: app
@@ -17,7 +17,7 @@ spec:
   enableSuperuserAccess: false
   failoverDelay: 0
   imageName: ghcr.io/cloudnative-pg/postgresql:19-system-trixie@sha256:789b58fff514c28a42844962951c0556cedecaa8d3f35678bc86162fddad9f18
-  instances: 2
+  instances: 1
   logLevel: info
   managed:
     roles:
@@ -142,76 +142,8 @@ spec:
     role: primary
   type: ClusterIP
 ---
-apiVersion: postgresql.cnpg.io/v1
-kind: ScheduledBackup
-metadata:
-  name: postgres-nightly-backup
-  namespace: default
-spec:
-  backupOwnerReference: self
-  cluster:
-    name: postgres
-  method: barmanObjectStore
-  schedule: 0 0 3 * * *
----
-apiVersion: postgresql.cnpg.io/v1
-kind: Database
-metadata:
-  name: postgres-aerial
-  namespace: default
-spec:
-  cluster:
-    name: postgres
-  databaseReclaimPolicy: retain
-  ensure: present
-  extensions:
-    - ensure: present
-      name: vector
-  name: aerial
-  owner: aerial
----
-apiVersion: postgresql.cnpg.io/v1
-kind: Database
-metadata:
-  name: postgres-infisical
-  namespace: default
-spec:
-  cluster:
-    name: postgres
-  databaseReclaimPolicy: retain
-  ensure: present
-  name: infisical
-  owner: aerial
----
-apiVersion: postgresql.cnpg.io/v1
-kind: Database
-metadata:
-  name: postgres-grafana
-  namespace: default
-spec:
-  cluster:
-    name: postgres
-  databaseReclaimPolicy: retain
-  ensure: present
-  name: grafana
-  owner: aerial
----
-apiVersion: postgresql.cnpg.io/v1
-kind: Database
-metadata:
-  name: postgres-docket
-  namespace: default
-spec:
-  cluster:
-    name: postgres
-  databaseReclaimPolicy: retain
-  ensure: present
-  extensions:
-    - ensure: present
-      name: vector
-  name: docket
-  owner: aerial
----
+# Suspended by default on single-node installations lacking barmanObjectStore.
+# Deployments configuring S3/B2 backups must patch suspend: false in their overlay.
 apiVersion: postgresql.cnpg.io/v1
 kind: ScheduledBackup
 metadata:
@@ -223,6 +155,7 @@ spec:
     name: postgres-19
   method: barmanObjectStore
   schedule: 0 0 3 * * *
+  suspend: true
 ---
 apiVersion: postgresql.cnpg.io/v1
 kind: Database
@@ -299,8 +232,6 @@ spec:
       - name: RESTATE_TRACING_ENDPOINT
         value: http://otel-collector.default.svc.cluster.local:4317
     image: docker.io/restatedev/restate:1.8.1-hotfix.2@sha256:e3a11e7c694cfe0c134eca1652992c068bef0bcba3caeec9d2a3b3bc50daa62e
-    nodeSelector:
-      storage-tier: nvme
     replicas: 1
     resources:
       limits:
@@ -627,6 +558,40 @@ spec:
     deletionPolicy: Retain
     immutable: true
     name: infisical-secret
+---
+apiVersion: generators.external-secrets.io/v1alpha1
+kind: Password
+metadata:
+  name: infisical-admin-password-generator
+  namespace: default
+spec:
+  allowRepeat: true
+  digits: 16
+  length: 32
+  noUpper: true
+  secretKeys:
+    - ADMIN_PASSWORD
+  symbols: 0
+---
+apiVersion: external-secrets.io/v1
+kind: ExternalSecret
+metadata:
+  name: infisical-admin-bootstrap
+  namespace: default
+spec:
+  dataFrom:
+    - sourceRef:
+        generatorRef:
+          apiVersion: generators.external-secrets.io/v1alpha1
+          kind: Password
+          name: infisical-admin-password-generator
+  refreshInterval: "0"
+  refreshPolicy: CreatedOnce
+  target:
+    creationPolicy: CreateOrMerge
+    deletionPolicy: Retain
+    immutable: true
+    name: infisical-admin-bootstrap
 ---
 apiVersion: generators.external-secrets.io/v1alpha1
 kind: Password
