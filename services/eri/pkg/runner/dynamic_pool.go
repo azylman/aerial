@@ -7,6 +7,8 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"github.com/azylman/aerial/services/eri/pkg/session"
 )
 
 // DynamicVoicePoolFactory produces a candidate AgentPool and its configuration fingerprint.
@@ -22,6 +24,11 @@ type DynamicVoicePool struct {
 	retiringWg  sync.WaitGroup
 	closed      bool
 	draining    atomic.Bool
+
+	transcriptRescuer func(context.Context, string, time.Time) string
+	sessionManager    *session.Manager
+	getSessionRecord  func(context.Context, string) (SessionRecord, error)
+	onSessionRotated  func(context.Context, string, string, string) error
 }
 
 var _ AgentPool = (*DynamicVoicePool)(nil)
@@ -42,7 +49,120 @@ func NewDynamicVoicePool(factory DynamicVoicePoolFactory) *DynamicVoicePool {
 
 // NewDynamicVoicePoolWithInitial constructs a DynamicVoicePool with an explicitly supplied initial pool and fingerprint.
 func NewDynamicVoicePoolWithInitial(initialPool AgentPool, initialKey string, factory DynamicVoicePoolFactory) *DynamicVoicePool {
-	return &DynamicVoicePool{currentPool: initialPool, currentKey: initialKey, factory: factory}
+	p := &DynamicVoicePool{currentPool: initialPool, currentKey: initialKey, factory: factory}
+	p.applyDependenciesToPool(initialPool)
+	return p
+}
+
+// Underlying returns the wrapped UnifiedProcessPool, or nil.
+func (p *DynamicVoicePool) Underlying() *UnifiedProcessPool {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	if p.currentPool == nil {
+		return nil
+	}
+	if u, ok := p.currentPool.(*UnifiedProcessPool); ok {
+		return u
+	}
+	if u, ok := p.currentPool.(interface{ Underlying() *UnifiedProcessPool }); ok {
+		return u.Underlying()
+	}
+	return nil
+}
+
+func (p *DynamicVoicePool) applyDependenciesToPool(target AgentPool) {
+	if target == nil {
+		return
+	}
+	if p.transcriptRescuer != nil {
+		if s, ok := target.(interface {
+			SetTranscriptRescuer(rescuer func(ctx context.Context, sessionID string, since time.Time) string)
+		}); ok {
+			s.SetTranscriptRescuer(p.transcriptRescuer)
+		}
+	}
+	if p.sessionManager != nil {
+		if s, ok := target.(interface{ SetSessionManager(sm *session.Manager) }); ok {
+			s.SetSessionManager(p.sessionManager)
+		}
+	}
+	if p.getSessionRecord != nil || p.onSessionRotated != nil {
+		if s, ok := target.(interface {
+			SetSessionCallbacks(getRec func(ctx context.Context, targetKey string) (SessionRecord, error), onRot func(ctx context.Context, targetKey, oldSessionID, newSessionID string) error)
+		}); ok {
+			s.SetSessionCallbacks(p.getSessionRecord, p.onSessionRotated)
+		}
+	}
+}
+
+// SetTranscriptRescuer configures a transcript rescuer callback and applies it to the active pool.
+func (p *DynamicVoicePool) SetTranscriptRescuer(r func(context.Context, string, time.Time) string) {
+	p.mu.Lock()
+	p.transcriptRescuer = r
+	pool := p.currentPool
+	p.mu.Unlock()
+	if pool != nil {
+		if s, ok := pool.(interface {
+			SetTranscriptRescuer(rescuer func(ctx context.Context, sessionID string, since time.Time) string)
+		}); ok {
+			s.SetTranscriptRescuer(r)
+		}
+	}
+}
+
+// SetSessionManager updates the session manager for rotation guardrail checks.
+func (p *DynamicVoicePool) SetSessionManager(sm *session.Manager) {
+	p.mu.Lock()
+	p.sessionManager = sm
+	pool := p.currentPool
+	p.mu.Unlock()
+	if pool != nil {
+		if s, ok := pool.(interface{ SetSessionManager(mgr *session.Manager) }); ok {
+			s.SetSessionManager(sm)
+		}
+	}
+}
+
+// SetSessionCallbacks updates the session record lookup and rotation callbacks.
+func (p *DynamicVoicePool) SetSessionCallbacks(getRec func(ctx context.Context, targetKey string) (SessionRecord, error), onRot func(ctx context.Context, targetKey, oldSessionID, newSessionID string) error) {
+	p.mu.Lock()
+	p.getSessionRecord = getRec
+	p.onSessionRotated = onRot
+	pool := p.currentPool
+	p.mu.Unlock()
+	if pool != nil {
+		if s, ok := pool.(interface {
+			SetSessionCallbacks(getFn func(ctx context.Context, targetKey string) (SessionRecord, error), onRotFn func(ctx context.Context, targetKey, oldSessionID, newSessionID string) error)
+		}); ok {
+			s.SetSessionCallbacks(getRec, onRot)
+		}
+	}
+}
+
+// UpdateModel updates the model used for newly spawned or rotated daemons in the pool.
+func (p *DynamicVoicePool) UpdateModel(model string) {
+	p.mu.RLock()
+	pool := p.currentPool
+	p.mu.RUnlock()
+	if pool != nil {
+		if u, ok := pool.(interface{ UpdateModel(model string) }); ok {
+			u.UpdateModel(model)
+		}
+	}
+}
+
+// UpdateEngine updates the engine and CLI binaries used for newly spawned or rotated daemons in the pool.
+func (p *DynamicVoicePool) UpdateEngine(engine, claudeBin string, extraBins ...string) {
+	p.mu.RLock()
+	pool := p.currentPool
+	p.mu.RUnlock()
+	if pool != nil {
+		if u, ok := pool.(interface {
+			UpdateEngine(engine, claudeBin string, extraBins ...string)
+		}); ok {
+			u.UpdateEngine(engine, claudeBin, extraBins...)
+		}
+	}
 }
 
 func (p *DynamicVoicePool) activePool() (AgentPool, error) {
@@ -161,6 +281,10 @@ func (p *DynamicVoicePool) MarkDirty() {
 		log.Printf("[DynamicVoicePool] Warning: candidate pool is nil for changed fingerprint; retaining LKGP")
 		return
 	}
+
+	p.mu.RLock()
+	p.applyDependenciesToPool(candidatePool)
+	p.mu.RUnlock()
 
 	initCtx, initCancel := context.WithTimeout(context.Background(), 30*time.Second)
 	initErr := candidatePool.Initialize(initCtx)

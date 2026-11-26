@@ -14,6 +14,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -22,6 +23,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/azylman/aerial/pkg/pgtest"
+	"github.com/azylman/aerial/services/eri/pkg/ambient"
 	"github.com/azylman/aerial/services/eri/pkg/bootstrap"
 	"github.com/azylman/aerial/services/eri/pkg/config"
 	"github.com/azylman/aerial/services/eri/pkg/db"
@@ -29,6 +31,7 @@ import (
 	"github.com/azylman/aerial/services/eri/pkg/metrics"
 	"github.com/azylman/aerial/services/eri/pkg/queue"
 	"github.com/azylman/aerial/services/eri/pkg/runner"
+	"github.com/azylman/aerial/services/eri/pkg/session"
 )
 
 func WithStore(store db.Store, txStore db.TranscriptStore) AppOption {
@@ -836,6 +839,178 @@ func TestWireOutboundIntegrations(t *testing.T) {
 			if closeFn != nil {
 				closeFn()
 			}
+		})
+	}
+}
+
+type recordingSpawner struct {
+	mu      sync.Mutex
+	lastCfg runner.DaemonConfig
+}
+
+func (s *recordingSpawner) Spawn(ctx context.Context, cfg runner.DaemonConfig) (io.WriteCloser, io.ReadCloser, io.ReadCloser, runner.ProcessHandle, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.lastCfg = cfg
+	return nil, nil, nil, nil, errors.New("recording spawner stop")
+}
+
+func TestInitializeAgentPools_VoiceConfiguration(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name             string
+		engine           string
+		voiceEngine      string
+		voiceModel       string
+		lowEffortModel   string
+		prewarmedTargets []string
+		wantEngine       string
+		wantModel        string
+		wantTargets      []string
+	}{
+		{
+			name:             "explicit voice model, engine, and targets",
+			engine:           "agy",
+			voiceEngine:      "gemini_api",
+			voiceModel:       "gemini-3.8-flash-voice",
+			lowEffortModel:   "gemini-3.8-flash-low",
+			prewarmedTargets: []string{"kiosk-kitchen", "galaxy-watch7"},
+			wantEngine:       "gemini_api",
+			wantModel:        "gemini-3.8-flash-voice",
+			wantTargets:      []string{"kiosk-kitchen", "galaxy-watch7"},
+		},
+		{
+			name:             "fallback to low effort model and default agy engine when unspecified",
+			engine:           "",
+			voiceEngine:      "",
+			voiceModel:       "",
+			lowEffortModel:   "gemini-3.8-flash-low",
+			prewarmedTargets: []string{"kiosk-bedroom"},
+			wantEngine:       "agy",
+			wantModel:        "gemini-3.8-flash-low",
+			wantTargets:      []string{"kiosk-bedroom"},
+		},
+		{
+			name:             "global engine claude without voice engine inherits claude in pool and spawned daemon config",
+			engine:           "claude",
+			voiceEngine:      "",
+			voiceModel:       "claude-haiku-voice",
+			lowEffortModel:   "claude-haiku-low",
+			prewarmedTargets: []string{"kiosk-living"},
+			wantEngine:       "claude",
+			wantModel:        "claude-haiku-voice",
+			wantTargets:      []string{"kiosk-living"},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			subTmp := t.TempDir()
+			cur := &config.ConfigData{
+				Engine:         tc.engine,
+				DataDir:        subTmp + "/data",
+				Model:          "claude-opus-3",
+				LowEffortModel: tc.lowEffortModel,
+				Voice: config.VoiceConfig{
+					Engine:           tc.voiceEngine,
+					Model:            tc.voiceModel,
+					PrewarmedTargets: tc.prewarmedTargets,
+				},
+			}
+			appCfg := config.NewFromData(cur)
+			sessionMgr := session.New(subTmp+"/home", subTmp+"/data")
+			ambientResolver := ambient.NewResolver(appCfg)
+
+			cfg := Config{
+				HealthPort: "4028",
+				AgentName:  "aerial",
+			}
+
+			spawner := &recordingSpawner{}
+			bundle := initializeAgentPools(appCfg, cur, cfg, sessionMgr, spawner, ambientResolver)
+			require.NotNil(t, bundle.voicePool)
+
+			underlying := bundle.voicePool.Underlying()
+			require.NotNil(t, underlying)
+
+			assert.Equal(t, tc.wantModel, underlying.Model())
+			assert.Equal(t, tc.wantEngine, underlying.Engine())
+			assert.Equal(t, tc.wantTargets, underlying.PrewarmedTargets())
+
+			target := "target-test"
+			if len(tc.prewarmedTargets) > 0 {
+				target = tc.prewarmedTargets[0]
+			}
+			_, spawnErr := underlying.GetOrCreate(context.Background(), target, "")
+			assert.Error(t, spawnErr)
+			spawner.mu.Lock()
+			spawnedCfg := spawner.lastCfg
+			spawner.mu.Unlock()
+			assert.Equal(t, tc.wantEngine, spawnedCfg.Engine)
+		})
+	}
+}
+
+func TestMakeVoiceAmbientContextRetriever(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name          string
+		nilAppCfg     bool
+		nilResolver   bool
+		voiceAmbient  string
+		wantRetriever bool
+		wantContent   string
+	}{
+		{
+			name:          "nil appCfg returns nil",
+			nilAppCfg:     true,
+			wantRetriever: false,
+		},
+		{
+			name:          "nil resolver returns nil",
+			nilResolver:   true,
+			wantRetriever: false,
+		},
+		{
+			name:          "configured voice ambient context resolves",
+			voiceAmbient:  "Current time is 5pm",
+			wantRetriever: true,
+			wantContent:   "<ambient_context>\nCurrent time is 5pm\n</ambient_context>",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			var appCfg *config.Config
+			if !tc.nilAppCfg {
+				var ambientCfg *config.AmbientContextConfig
+				if tc.voiceAmbient != "" {
+					ambientCfg = &config.AmbientContextConfig{Template: tc.voiceAmbient}
+				}
+				appCfg = config.NewFromData(&config.ConfigData{
+					Voice: config.VoiceConfig{
+						AmbientContext: ambientCfg,
+					},
+				})
+			}
+			var resolver *ambient.Resolver
+			if !tc.nilResolver {
+				resolver = ambient.NewResolver(appCfg)
+			}
+
+			retriever := makeVoiceAmbientContextRetriever(appCfg, resolver)
+			if !tc.wantRetriever {
+				assert.Nil(t, retriever)
+				return
+			}
+			require.NotNil(t, retriever)
+			content, err := retriever(context.Background())
+			assert.NoError(t, err)
+			assert.Equal(t, tc.wantContent, content)
 		})
 	}
 }

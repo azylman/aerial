@@ -142,7 +142,7 @@ func TestVoiceSessionObject_Ask(t *testing.T) {
 			wantSession:  "conv-2",
 		},
 		{
-			name:         "successful voice turn streams events and rotates session",
+			name:         "successful voice turn streams events and persists session",
 			deviceKey:    "kiosk-living-room",
 			req:          VoiceSessionRequest{DeviceKey: "kiosk-living-room", Prompt: "what time is it?", TurnID: "turn-voice-1"},
 			runnerReply:  "it is 6 PM",
@@ -151,7 +151,7 @@ func TestVoiceSessionObject_Ask(t *testing.T) {
 			wantSession:  "conv-voice-1",
 		},
 		{
-			name:         "successful voice turn handles store rotate error gracefully",
+			name:         "successful voice turn handles store persist error gracefully",
 			deviceKey:    "kiosk-bedroom",
 			req:          VoiceSessionRequest{DeviceKey: "kiosk-bedroom", Prompt: "lights off"},
 			sabotageSQL:  failTriggerSQL("sessions", "INSERT", "40001"),

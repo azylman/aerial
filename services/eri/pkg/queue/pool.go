@@ -219,6 +219,17 @@ func (p *WorkerPool) NATSURL() string {
 	return p.cfg.NATSURL
 }
 
+func voiceSessionKey(targetKey string) string {
+	trimmed := strings.TrimSpace(targetKey)
+	if trimmed == "" {
+		return ""
+	}
+	if strings.HasPrefix(trimmed, "voice-") {
+		return trimmed
+	}
+	return "voice-" + trimmed
+}
+
 func makeSessionCallbacks(store db.Store) (func(context.Context, string) (runner.SessionRecord, error), func(context.Context, string, string, string) error) {
 	getRec := func(ctx context.Context, targetKey string) (runner.SessionRecord, error) {
 		sessID, err := store.GetSessionID(ctx, targetKey)
@@ -239,6 +250,57 @@ func makeSessionCallbacks(store db.Store) (func(context.Context, string) (runner
 		return store.RotateSessionID(ctx, targetKey, newSessionID)
 	}
 	return getRec, onRot
+}
+
+func makeVoiceSessionCallbacks(store db.Store) (func(context.Context, string) (runner.SessionRecord, error), func(context.Context, string, string, string) error) {
+	getRec := func(ctx context.Context, targetKey string) (runner.SessionRecord, error) {
+		key := voiceSessionKey(targetKey)
+		sessID, err := store.GetSessionID(ctx, key)
+		if err != nil {
+			return runner.SessionRecord{}, err
+		}
+		turns, err := store.GetSessionTurnCount(ctx, key)
+		if err != nil {
+			turns = 0
+		}
+		prevID, err := store.GetPreviousSessionID(ctx, key)
+		if err != nil {
+			prevID = ""
+		}
+		return runner.SessionRecord{ActiveSessionID: sessID, PreviousSessionID: prevID, TurnCount: turns}, nil
+	}
+	onRot := func(ctx context.Context, targetKey, oldSessionID, newSessionID string) error {
+		return store.RotateSessionID(ctx, voiceSessionKey(targetKey), newSessionID)
+	}
+	return getRec, onRot
+}
+
+func wireVoicePoolSessionDependencies(voicePool runner.AgentPool, pools map[PoolKey]runner.AgentPool, sessionMgr *session.Manager, store db.Store) {
+	if sessionMgr != nil {
+		if tr, ok := voicePool.(interface {
+			SetTranscriptRescuer(fn func(context.Context, string, time.Time) string)
+		}); ok {
+			tr.SetTranscriptRescuer(sessionMgr.ExtractResponseSinceContext)
+		}
+		if sm, ok := voicePool.(interface{ SetSessionManager(mgr *session.Manager) }); ok {
+			sm.SetSessionManager(sessionMgr)
+		}
+	}
+	inDiscordPools := false
+	for _, p := range pools {
+		if p == voicePool {
+			inDiscordPools = true
+			break
+		}
+	}
+	if store != nil && !inDiscordPools {
+		if sc, ok := voicePool.(interface {
+			SetSessionCallbacks(getFn func(context.Context, string) (runner.SessionRecord, error), saveFn func(context.Context, string, string, string) error)
+		}); ok {
+			getRec, onRot := makeVoiceSessionCallbacks(store)
+			sc.SetSessionCallbacks(getRec, onRot)
+		}
+	}
 }
 
 func wirePoolSessionDependencies(pools map[PoolKey]runner.AgentPool, sessionMgr *session.Manager, store db.Store) {
@@ -486,6 +548,7 @@ func New(appCfg *config.Config, cfg WorkerPoolConfig) *WorkerPool {
 	applyWorkerPoolServiceDefaults(resolvedAppCfg, &cfg)
 
 	pools := initWorkerPools(resolvedAppCfg, isExplicitAppCfg, cfg, cfg.SessionManager, cfg.Store)
+	wireVoicePoolSessionDependencies(cfg.VoiceProcessPool, pools, cfg.SessionManager, cfg.Store)
 	if cfg.LLMFunc == nil {
 		cfg.LLMFunc = resolveDefaultSummarizerLLM(pools)
 	}
@@ -844,6 +907,21 @@ func updatePoolModel(pool runner.AgentPool, model string) {
 	}
 }
 
+func updateVoiceEngine(voicePool runner.AgentPool, appCfg *config.Config) {
+	if appCfg == nil {
+		return
+	}
+	cur := appCfg.Current()
+	if cur == nil {
+		return
+	}
+	if engineUpdater, ok := voicePool.(interface {
+		UpdateEngine(engine, claudeBin string, extraBins ...string)
+	}); ok {
+		engineUpdater.UpdateEngine(cur.VoiceEngine(), cur.ClaudeBin, cur.CodexBin, cur.MuseBin)
+	}
+}
+
 func (p *WorkerPool) reconcilePoolModelsAndVoiceTargets(poolByKey map[PoolKey]runner.AgentPool, voicePool runner.AgentPool, hasExplicitAppCfg bool, voiceTargets []string) {
 	if hasExplicitAppCfg {
 		for _, k := range AllValidPoolKeys() {
@@ -858,6 +936,7 @@ func (p *WorkerPool) reconcilePoolModelsAndVoiceTargets(poolByKey map[PoolKey]ru
 	}
 	if hasExplicitAppCfg {
 		updatePoolModel(voicePool, p.VoiceModel())
+		updateVoiceEngine(voicePool, p.appCfg)
 	}
 }
 
