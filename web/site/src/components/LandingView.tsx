@@ -58,7 +58,7 @@ export function LandingView() {
         <div className="hero-tag">
           <span>XVX-016 Gundam Aerial</span>
           <span>•</span>
-          <span>Production Architecture</span>
+          <span>Homelab & AI Agent Architecture</span>
         </div>
         <h1 className="hero-title">Autonomous AI Personal Assistant & Software Factory</h1>
         <p className="hero-subtitle">

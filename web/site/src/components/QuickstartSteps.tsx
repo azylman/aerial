@@ -70,7 +70,7 @@ export function QuickstartSteps() {
   return (
     <div className="quickstart-container" data-testid="quickstart-steps">
       <div className="quickstart-header">
-        <div className="section-eyebrow">Production Deployment</div>
+        <div className="section-eyebrow">Homelab & Cluster Deployment</div>
         <h2 className="section-title">Single-Node k3s Quickstart</h2>
         <p className="section-subtitle">
           Aerial runs on a single Linux machine and scales to multi-node clusters through declarative Flux overlays.
