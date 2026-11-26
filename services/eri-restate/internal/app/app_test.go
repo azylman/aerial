@@ -21,6 +21,8 @@ import (
 	restate "github.com/restatedev/sdk-go"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	sdktrace "go.opentelemetry.io/otel/sdk/trace"
+	"go.opentelemetry.io/otel/sdk/trace/tracetest"
 
 	"github.com/azylman/aerial/pkg/pgtest"
 	"github.com/azylman/aerial/services/eri/pkg/ambient"
@@ -1037,6 +1039,130 @@ func TestMakeVoiceAmbientContextRetriever(t *testing.T) {
 			content, err := retriever(context.Background())
 			assert.NoError(t, err)
 			assert.Equal(t, tc.wantContent, content)
+		})
+	}
+}
+
+func replyDaemonSpawner(reply string) *replySpawner {
+	return &replySpawner{reply: reply}
+}
+
+type replySpawner struct {
+	reply string
+}
+
+func (s *replySpawner) Spawn(ctx context.Context, cfg runner.DaemonConfig) (io.WriteCloser, io.ReadCloser, io.ReadCloser, runner.ProcessHandle, error) {
+	outR, outW := io.Pipe()
+	inR, inW := io.Pipe()
+	go func() {
+		defer outW.Close()
+		if _, err := fmt.Fprintln(outW, `{"event":"init","conversation_id":"550e8400-e29b-41d4-a716-000000000001"}`); err != nil {
+			return
+		}
+		buf := make([]byte, 4096)
+		for {
+			if _, err := inR.Read(buf); err != nil {
+				return
+			}
+			if _, err := fmt.Fprintln(outW, s.reply); err != nil {
+				return
+			}
+		}
+	}()
+	return inW, outR, io.NopCloser(strings.NewReader("")), &dummyProcessHandle{}, nil
+}
+
+type dummyProcessHandle struct{}
+
+func (*dummyProcessHandle) Kill() error { return nil }
+func (*dummyProcessHandle) Wait() error { return nil }
+
+func TestInitializeAgentPools_TraceContentPropagation(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name         string
+		traceContent bool
+		wantContent  bool
+	}{
+		{
+			name:         "trace content disabled captures no prompt or response messages",
+			traceContent: false,
+			wantContent:  false,
+		},
+		{
+			name:         "trace content enabled captures prompt and response messages",
+			traceContent: true,
+			wantContent:  true,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			subTmp := t.TempDir()
+			cur := &config.ConfigData{
+				Engine:         "agy",
+				DataDir:        subTmp + "/data",
+				Model:          "gemini-3.8-flash",
+				LowEffortModel: "gemini-3.8-flash-low",
+			}
+			appCfg := config.NewFromData(cur)
+			sessionMgr := session.New(subTmp+"/home", subTmp+"/data")
+			ambientResolver := ambient.NewResolver(appCfg)
+
+			cfg := Config{
+				HealthPort:   "4028",
+				AgentName:    "aerial",
+				TraceContent: tc.traceContent,
+			}
+
+			const reply = `{"event":"result","result":{"status":"SUCCESS","response":"summarized text","usage":{"input_tokens":10,"output_tokens":5}}}`
+			spawner := replyDaemonSpawner(reply)
+			bundle := initializeAgentPools(appCfg, cur, cfg, sessionMgr, spawner, ambientResolver)
+			require.NotNil(t, bundle.ephemeralPool)
+			t.Cleanup(func() {
+				for _, p := range bundle.allPools {
+					_ = p.Close()
+				}
+			})
+
+			rec := tracetest.NewSpanRecorder()
+			tp := sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(rec))
+			ctx, caller := tp.Tracer("test").Start(context.Background(), "caller")
+
+			llmFn := bundle.ephemeralPool.EphemeralLLMFunc("ephemeral:summarizer")
+			resp, err := llmFn(ctx, "gemini-3.8-flash-low", "summarize this thread")
+			caller.End()
+
+			require.NoError(t, err)
+			assert.Equal(t, "summarized text", resp)
+
+			ended := rec.Ended()
+			var agentSpans []sdktrace.ReadOnlySpan
+			for _, s := range ended {
+				if s.Name() == "invoke_agent" {
+					agentSpans = append(agentSpans, s)
+				}
+			}
+			require.Len(t, agentSpans, 1)
+
+			span := agentSpans[0]
+			var hasInput, hasOutput bool
+			for _, attr := range span.Attributes() {
+				if attr.Key == "gen_ai.input.messages" {
+					hasInput = true
+					assert.Contains(t, attr.Value.AsString(), "summarize this thread")
+				}
+				if attr.Key == "gen_ai.output.messages" {
+					hasOutput = true
+					assert.Contains(t, attr.Value.AsString(), "summarized text")
+				}
+			}
+
+			assert.Equal(t, tc.wantContent, hasInput)
+			assert.Equal(t, tc.wantContent, hasOutput)
 		})
 	}
 }
