@@ -228,11 +228,13 @@ func mockMCPCheckPreconditions(w http.ResponseWriter, path, bodyStr string) bool
 	}
 	if strings.Contains(path, "build-mcp-2") || (!strings.Contains(path, "SteerChunk") && strings.Contains(bodyStr, `"chunk_ref":"0"`)) {
 		status := http.StatusConflict
+		msg := `{"message":"vanadis build state conflict"}`
 		if strings.Contains(path, "SteerChunk") {
 			status = http.StatusPreconditionFailed
+			msg = `{"message":"chunk cannot be steered in current status"}`
 		}
 		w.WriteHeader(status)
-		if _, err := w.Write([]byte(`{"message":"vanadis build state conflict"}`)); err != nil {
+		if _, err := w.Write([]byte(msg)); err != nil {
 			return false
 		}
 		return false
