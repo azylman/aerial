@@ -12,6 +12,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
@@ -438,7 +439,11 @@ func runScanWriteCase(t *testing.T, tc scanWriteTestCase) {
 
 func TestScanWrites(t *testing.T) {
 	sanitizer.ResetSensitiveTokensForTest()
-	sanitizer.RegisterSensitiveTokens(proxySecret)
+	sameMaskSecret := "du-different-token-secret-value"
+	shortSecret := "shrt"
+	nestedPass := "dbpass1234"
+	connURL := "postgres://user:dbpass1234@localhost:5432/db"
+	sanitizer.RegisterSensitiveTokens(proxySecret, sameMaskSecret, shortSecret, connURL, nestedPass)
 	t.Cleanup(sanitizer.ResetSensitiveTokensForTest)
 
 	origSharedSecrets := config.SharedSecretsPath
@@ -539,6 +544,22 @@ func TestScanWrites(t *testing.T) {
 			body: `{"secret":"` + proxySecret + `"}`, wantStatus: http.StatusOK, wantEcho: true, wantBody: `{"secret":"` + proxySecret + `"}`,
 		},
 		{
+			name: "secret with same mask as allowlisted secret is rejected", method: http.MethodPatch, target: "/internal/github-api/repos/acme/private-repo/hooks/123/config",
+			body: `{"secret":"` + sameMaskSecret + `"}`, wantStatus: http.StatusUnprocessableEntity, wantSubstrs: []string{"InfisicalSecret"},
+		},
+		{
+			name: "same mask secret alongside allowlisted secret is rejected", method: http.MethodPatch, target: "/internal/github-api/repos/acme/private-repo/hooks/123/config",
+			body: `{"secret":"` + proxySecret + `","other":"` + sameMaskSecret + `"}`, wantStatus: http.StatusUnprocessableEntity, wantSubstrs: []string{"InfisicalSecret"},
+		},
+		{
+			name: "unrelated short secret on allowlisted route is rejected", method: http.MethodPatch, target: "/internal/github-api/repos/acme/private-repo/hooks/123/config",
+			body: `{"secret":"` + shortSecret + `"}`, wantStatus: http.StatusUnprocessableEntity, wantSubstrs: []string{"InfisicalSecret"},
+		},
+		{
+			name: "nested secret on allowlisted route is rejected", method: http.MethodPatch, target: "/internal/github-api/repos/acme/private-repo/hooks/123/config",
+			body: `{"password":"` + nestedPass + `"}`, wantStatus: http.StatusUnprocessableEntity, wantSubstrs: []string{"InfisicalSecret"},
+		},
+		{
 			name: "wildcard pattern webhook config patch forwarded", method: http.MethodPatch, target: "/internal/github-api/repos/org/repo/hooks/123/config",
 			body: `{"secret":"` + proxySecret + `"}`, wantStatus: http.StatusOK, wantEcho: true, wantBody: `{"secret":"` + proxySecret + `"}`,
 		},
@@ -559,36 +580,29 @@ func TestScanWrites(t *testing.T) {
 	}
 }
 
-func TestAllowedSecretSamples(t *testing.T) {
-	sanitizer.ResetSensitiveTokensForTest()
-	sanitizer.RegisterSensitiveTokens("my-secret-token-12345")
-	t.Cleanup(sanitizer.ResetSensitiveTokensForTest)
-
+func TestAllowedSecretValues(t *testing.T) {
 	origShared := config.SharedSecretsPath
 	tmp := t.TempDir()
 	config.SharedSecretsPath = tmp
 	t.Cleanup(func() { config.SharedSecretsPath = origShared })
 
-	if err := os.WriteFile(filepath.Join(tmp, "EXACT_KEY"), []byte("my-secret-token-12345"), 0o600); err != nil {
-		t.Fatalf("write: %v", err)
-	}
-	if err := os.WriteFile(filepath.Join(tmp, "CASE_INSENSITIVE_KEY"), []byte("my-secret-token-12345"), 0o600); err != nil {
+	if err := os.WriteFile(filepath.Join(tmp, "CASE_INSENSITIVE_KEY"), []byte("case-secret-value-9999"), 0o600); err != nil {
 		t.Fatalf("write: %v", err)
 	}
 
 	cfg := config.NewFromData(&config.ConfigData{
 		PushScan: config.PushScanConfig{
 			SecretAllowlist: []string{
-				"acme/widgets:hooks:EXACT_KEY",
 				"acme/widgets:hooks:case_insensitive_key",
 				"acme/widgets:hooks:MISSING_KEY",
 			},
 		},
 	})
 
-	got := allowedSecretSamples(cfg, "acme", "widgets", "hooks")
-	if len(got) == 0 {
-		t.Fatalf("expected non-empty samples, got %v", got)
+	got := allowedSecretValues(cfg, "acme", "widgets", "hooks")
+	want := []string{"case-secret-value-9999"}
+	if !slices.Equal(got, want) {
+		t.Fatalf("allowedSecretValues() = %v, want %v", got, want)
 	}
 }
 

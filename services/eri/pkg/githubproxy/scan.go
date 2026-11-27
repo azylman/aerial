@@ -180,7 +180,7 @@ func scanPolicy(ctx context.Context, cfg *config.Config, owner, repo, pat string
 	}
 }
 
-func allowedSecretSamples(cfg *config.Config, owner, repo, rest string) []string {
+func allowedSecretValues(cfg *config.Config, owner, repo, rest string) []string {
 	if strings.ContainsAny(owner, "?#%") || strings.ContainsAny(repo, "?#%") || strings.ContainsAny(rest, "?#%") {
 		return nil
 	}
@@ -201,18 +201,8 @@ func allowedSecretSamples(cfg *config.Config, owner, repo, rest string) []string
 				}
 			}
 		}
-		if !ok || val == "" {
-			continue
-		}
-		for _, sample := range sanitizer.MatchSensitiveTokens(val) {
-			if sample != "" && !slices.Contains(out, sample) {
-				out = append(out, sample)
-			}
-		}
-		if sample := sanitizer.MaskTokenSample(val); sample != "" {
-			if !slices.Contains(out, sample) {
-				out = append(out, sample)
-			}
+		if ok && val != "" && !slices.Contains(out, val) {
+			out = append(out, val)
 		}
 	}
 	return out
@@ -392,7 +382,7 @@ func scanAPIWrite(w http.ResponseWriter, r *http.Request, cfg *config.Config, pa
 		if filePath, payload, ok := apiPayloads(rest, decoded); ok {
 			violations = append(violations, guard.ScanPayload(payload, filePath, policy)...)
 		} else {
-			policy.AllowedSecretSamples = allowedSecretSamples(cfg, parts[1], parts[2], rest)
+			policy.AllowedSecretValues = allowedSecretValues(cfg, parts[1], parts[2], rest)
 		}
 		violations = append(violations, guard.ScanPayload(decoded, "", policy)...)
 	} else {
