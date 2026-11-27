@@ -2,7 +2,7 @@ import { ArchitectureMap } from './ArchitectureMap';
 import { GlassBoxShowcase } from './GlassBoxShowcase';
 import { FactoryStepper } from './FactoryStepper';
 import { ComparisonMatrix } from './ComparisonMatrix';
-import { QUICKSTART_STEPS, QuickstartSteps } from './QuickstartSteps';
+import { QuickstartSteps } from './QuickstartSteps';
 import { UseCaseGallery, USE_CASE_SCENARIOS } from './UseCaseGallery';
 import { FaqSection, FAQ_ITEMS, type FaqItem } from './FaqSection';
 import { useCopyToClipboard } from '../useCopyToClipboard';
