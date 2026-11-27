@@ -46,6 +46,17 @@ func (f fakeThreadResolver) ResolveTargetThread(channelID, _, _ string, _ time.T
 	return channelID
 }
 
+type fakeIngressWakeResolver struct {
+	fakeThreadResolver
+
+	shouldEnqueue   bool
+	completedReason string
+}
+
+func (f fakeIngressWakeResolver) EvaluateIngressWake(_ context.Context, _ string, _ db.Message) (bool, string) {
+	return f.shouldEnqueue, f.completedReason
+}
+
 func st(pending []string, active *ActiveTurn) coordinatorState {
 	return coordinatorState{pending: pending, active: active}
 }
@@ -69,7 +80,7 @@ func TestThreadCoordinator_Enqueue(t *testing.T) {
 		key             string
 		state           coordinatorState
 		rows            []db.Message
-		resolver        fakeThreadResolver
+		resolver        threadResolver
 		req             ThreadEnqueueRequest
 		cancelStep      string
 		sabotageSQL     string
@@ -211,6 +222,55 @@ func TestThreadCoordinator_Enqueue(t *testing.T) {
 				require.NotNil(t, m)
 				assert.Equal(t, tc.wantTraceparent, m.Traceparent)
 			}
+		})
+	}
+}
+
+func TestThreadCoordinator_Enqueue_IngressWakeGating(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name      string
+		resolver  fakeIngressWakeResolver
+		req       ThreadEnqueueRequest
+		wantResp  ThreadEnqueueResponse
+		wantSends []sentCall
+		wantRows  map[string]rowWant
+	}{
+		{
+			name:      "GatedIgnoredChannelCompletesWithoutAppend",
+			resolver:  fakeIngressWakeResolver{shouldEnqueue: false, completedReason: "[IGNORED]"},
+			req:       ThreadEnqueueRequest{Message: &db.Message{ID: "m-ign", ThreadID: tcKey, Content: "ignore me"}},
+			wantResp:  ThreadEnqueueResponse{Status: eriwire.StatusAccepted, ThreadID: tcKey, MessageID: "m-ign"},
+			wantSends: nil,
+			wantRows:  map[string]rowWant{"m-ign": {status: db.StatusCompleted, errText: "[IGNORED]"}},
+		},
+		{
+			name:      "GatedAmbientChannelCompletesWithoutAppend",
+			resolver:  fakeIngressWakeResolver{shouldEnqueue: false, completedReason: "[AMBIENT score=0.10/0.75 reason=\"no wake\"]"},
+			req:       ThreadEnqueueRequest{Message: &db.Message{ID: "m-amb", ThreadID: tcKey, Content: "ambient chatter"}},
+			wantResp:  ThreadEnqueueResponse{Status: eriwire.StatusAccepted, ThreadID: tcKey, MessageID: "m-amb"},
+			wantSends: nil,
+			wantRows:  map[string]rowWant{"m-amb": {status: db.StatusCompleted, errText: "[AMBIENT score=0.10/0.75 reason=\"no wake\"]"}},
+		},
+		{
+			name:      "GatedWakeMessageEnqueuesAndAppends",
+			resolver:  fakeIngressWakeResolver{shouldEnqueue: true},
+			req:       ThreadEnqueueRequest{Message: &db.Message{ID: "m-wake", ThreadID: tcKey, Content: "hey aerial"}},
+			wantResp:  ThreadEnqueueResponse{Status: eriwire.StatusAccepted, ThreadID: tcKey, MessageID: "m-wake"},
+			wantSends: []sentCall{threadSend(tcKey, HandlerAppend, AppendRequest{IDs: []string{"m-wake"}}, 0)},
+			wantRows:  map[string]rowWant{"m-wake": {status: db.StatusPending}},
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			store := seedStore(t, nil, nil, "")
+			h := newCoordHarness(t, tcKey, tcInv, coordinatorState{})
+			resp, err := NewThreadCoordinator(store, tc.resolver, "aerial").Enqueue(h.sharedCtx(), tc.req)
+			require.NoError(t, err)
+			assert.Equal(t, tc.wantResp, resp)
+			assert.Equal(t, tc.wantSends, h.sends)
+			assertMessageRows(t, store, tc.wantRows)
 		})
 	}
 }

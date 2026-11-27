@@ -63,6 +63,11 @@ type turnExecution struct {
 	finalized                                                                                   atomic.Bool // burst committed as completed; interrupts only cancel post-turn work
 	interruptReason                                                                             string
 	touchedSessions                                                                             []string
+	turnID                                                                                      string
+	steerMu                                                                                     sync.Mutex
+	steeringClosed                                                                              bool
+	drainedIDs                                                                                  []string
+	steeredDispatches                                                                           []db.Dispatch
 }
 
 func (te *turnExecution) touchSessionIDLocked(id string) {
@@ -215,6 +220,13 @@ func (te *turnExecution) finalizeBurstMessages(msgs []db.Message, msgStatus, msg
 			te.updateDispatchCompleted(te.dispatch.ID, msgOutput, telemetry...)
 		} else {
 			te.updateDispatchStatus(te.dispatch.ID, msgStatus, msgOutput, telemetry...)
+		}
+		for _, d := range te.steeredDispatches {
+			if isResponse {
+				te.updateDispatchCompleted(d.ID, msgOutput, telemetry...)
+			} else {
+				te.updateDispatchStatus(d.ID, msgStatus, msgOutput, telemetry...)
+			}
 		}
 		return
 	}
@@ -499,7 +511,7 @@ func shouldEvaluateAmbientWake(mode string, isThread, isHTTP bool) bool {
 	return strings.EqualFold(mode, "channel") && !isThread && !isHTTP
 }
 
-func (te *turnExecution) resolveWakeHookOverride() string {
+func (te *turnExecution) resolveWakeHookOverride(ctx context.Context) string {
 	if te.policy.Hooks.OnWake == nil {
 		return ""
 	}
@@ -513,8 +525,8 @@ func (te *turnExecution) resolveWakeHookOverride() string {
 	}
 	req := &WakeRequest{ChannelID: channelID, ThreadID: te.threadID, Message: firstMsg, Timestamp: time.Now().UTC()}
 
-	dispatcher, poolCtx := te.resolveWebhookDispatcher()
-	wakeResp, err := dispatcher.CallWakeHook(poolCtx, te.policy.Hooks.OnWake, req)
+	dispatcher, _ := te.resolveWebhookDispatcher()
+	wakeResp, err := dispatcher.CallWakeHook(ctx, te.policy.Hooks.OnWake, req)
 	hookOverride := te.policy.Hooks.OnWake.GetOnTimeout("classify")
 	if err == nil && wakeResp != nil && strings.TrimSpace(wakeResp.Override) != "" {
 		hookOverride = strings.ToLower(strings.TrimSpace(wakeResp.Override))
@@ -576,7 +588,7 @@ func (te *turnExecution) handleAllAmbientPlan() bool {
 func (te *turnExecution) runChannelAmbientTriage() bool {
 	botUserID, botRoleIDs := te.resolveBotIdentity()
 	wakeMode := te.policy.GetWakeMode()
-	hookOverride := te.resolveWakeHookOverride()
+	hookOverride := te.resolveWakeHookOverride(te.turnCtxValue())
 
 	plan := PlanBurstExecution(BurstPlanInput{
 		Burst: te.burst, WakeMode: wakeMode, Threshold: te.policy.GetAmbientWakeThreshold(),
@@ -624,6 +636,55 @@ func (te *turnExecution) evaluateAmbientWake() (shouldExit bool) {
 		te.logf("[Queue] Error incrementing turn count for thread %s: %v", te.threadID, incErr)
 	}
 	return false
+}
+
+// EvaluateIngressWake evaluates whether an incoming Discord message should wake a turn
+// or be completed immediately (e.g. ignored channel policy or ambient message).
+func (p *WorkerPool) EvaluateIngressWake(ctx context.Context, threadID string, msg db.Message) (shouldEnqueue bool, completedReason string) {
+	if p == nil {
+		return true, ""
+	}
+	te := p.newStepTurnExecution(ctx, threadID, []db.Message{msg})
+	te.resolveChannelPolicy()
+	if !isHTTPClientBurst(te.burst) && te.policy.IsIgnored() {
+		metrics.RecordTurnCompleted("ignored", te.triggerType, "none", time.Since(te.execStart))
+		if p.cfg.OnMessageCompleted != nil {
+			p.cfg.OnMessageCompleted(msg, db.StatusCompleted)
+		}
+		return false, fmt.Sprintf("[%s]", strings.ToUpper(strings.TrimSpace(te.policy.Mode)))
+	}
+	if shouldEvaluateAmbientWake(te.policy.Mode, te.isThread, isHTTPClientBurst(te.burst)) {
+		return p.evaluateAmbientIngressWake(ctx, te, msg)
+	}
+	return true, ""
+}
+
+func (p *WorkerPool) evaluateAmbientIngressWake(ctx context.Context, te *turnExecution, msg db.Message) (bool, string) {
+	botUserID, botRoleIDs := te.resolveBotIdentity()
+	wakeMode := te.policy.GetWakeMode()
+	hookOverride := te.resolveWakeHookOverride(ctx)
+	plan := PlanBurstExecution(BurstPlanInput{
+		Burst:        te.burst,
+		WakeMode:     wakeMode,
+		Threshold:    te.policy.GetAmbientWakeThreshold(),
+		BotUserID:    botUserID,
+		BotRoleIDs:   botRoleIDs,
+		HookOverride: hookOverride,
+		ClassifierFn: te.classifyAmbientMessages,
+	})
+	if !plan.IsAllAmbient {
+		return true, ""
+	}
+	metrics.RecordTurnCompleted("ambient", te.triggerType, "classifier", time.Since(te.execStart))
+	metrics.DiscordMessagesProcessedTotal.WithLabelValues("true", "ambient").Inc()
+	if p.cfg.OnMessageCompleted != nil {
+		p.cfg.OnMessageCompleted(msg, db.StatusCompleted)
+	}
+	var info WakeInfo
+	if len(plan.WakeInfos) > 0 {
+		info = plan.WakeInfos[0]
+	}
+	return false, fmt.Sprintf("[AMBIENT score=%.2f/%.2f reason=%q]", info.Score, info.Threshold, info.Reason)
 }
 
 func (te *turnExecution) markAmbientBurst() {

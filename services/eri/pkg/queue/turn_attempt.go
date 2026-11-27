@@ -70,6 +70,7 @@ type AttemptResult struct {
 	Stderr      string           `json:"stderr,omitempty"`
 	SessionID   string           `json:"session_id,omitempty"`
 	AutoResumes int              `json:"auto_resumes"`
+	DrainedIDs  []string         `json:"drained_ids,omitempty"`
 	Telemetry   AttemptTelemetry `json:"telemetry"`
 }
 
@@ -270,6 +271,7 @@ func (p *WorkerPool) runAttempt(ctx context.Context, in AttemptInput, subj attem
 	te := &turnExecution{
 		pool:       p,
 		threadID:   in.ThreadID,
+		turnID:     in.TurnID,
 		execStart:  time.Now().UTC(),
 		wakeIdx:    -1,
 		stopTyping: func() {},
@@ -434,7 +436,18 @@ func (p *WorkerPool) executeAttempt(ctx context.Context, s db.Store, te *turnExe
 	}
 	metrics.RecordRunnerExecution(runStatus, model, te.triggerType, time.Since(te.execStart))
 
-	base := AttemptResult{AutoResumes: in.AutoResumes, Telemetry: AttemptTelemetry{DurationMs: te.turnDurationMs, Usage: usage}}
+	te.steerMu.Lock()
+	if len(te.drainedIDs) > 0 {
+		ids = normalizeStepIDs(append(ids, te.drainedIDs...))
+	}
+	drainedIDsClone := slices.Clone(te.drainedIDs)
+	te.steerMu.Unlock()
+
+	base := AttemptResult{
+		AutoResumes: in.AutoResumes,
+		DrainedIDs:  drainedIDsClone,
+		Telemetry:   AttemptTelemetry{DurationMs: te.turnDurationMs, Usage: usage},
+	}
 	switch class {
 	case classAborted:
 		return abortedAttempt(ctx, te, in, base)
@@ -453,6 +466,10 @@ func (p *WorkerPool) executeAttempt(ctx context.Context, s db.Store, te *turnExe
 
 // runOneLease takes the lease and executes the agent once under the attempt's own run deadline.
 func (te *turnExecution) runOneLease(cfg attemptConfig, in AttemptInput) attemptRun {
+	te.steerMu.Lock()
+	te.steeringClosed = false
+	te.steerMu.Unlock()
+
 	poolErr, leaseErr := te.acquireTurnLease()
 	if poolErr != nil {
 		return attemptRun{leaseErr: poolErr, poolMissing: true}
@@ -473,6 +490,9 @@ func (te *turnExecution) runOneLease(cfg attemptConfig, in AttemptInput) attempt
 	runCtx, runCancel := context.WithTimeout(baseCtx, attemptRunTimeout(cfg.timeoutMinutes))
 	defer runCancel()
 	outcome, turnRes, stderr, execErr := te.executeLeaseAttemptCtx(runCtx, cfg.model, prompt)
+	te.steerMu.Lock()
+	te.steeringClosed = true
+	te.steerMu.Unlock()
 	return attemptRun{
 		outcome: outcome, turnRes: turnRes, stderr: stderr, execErr: execErr,
 		runDeadline: errors.Is(execErr, context.DeadlineExceeded) || errors.Is(runCtx.Err(), context.DeadlineExceeded),

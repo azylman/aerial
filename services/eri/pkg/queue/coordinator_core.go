@@ -287,6 +287,23 @@ func (c *coordinatorCore) clearPending(ctx restate.ObjectContext, req ClearPendi
 	return nil
 }
 
+// drainPending is the exclusive DrainPending body: if the active turn matches req.TurnID,
+// it pops all pending items in FIFO order, appends them to active.ItemIDs, and returns them.
+func (*coordinatorCore) drainPending(ctx restate.ObjectContext, req DrainPendingRequest) (DrainPendingResponse, error) {
+	st, err := loadCoordinatorState(ctx)
+	if err != nil {
+		return DrainPendingResponse{}, coordinatorError(err)
+	}
+	if st.active == nil || st.active.Waiting || st.active.TurnID != req.TurnID || len(st.pending) == 0 {
+		return DrainPendingResponse{}, nil
+	}
+	drained := slices.Clone(st.pending)
+	st.active.ItemIDs = normalizeStepIDs(append(st.active.ItemIDs, drained...))
+	st.pending = nil
+	st.save(ctx)
+	return DrainPendingResponse{DrainedIDs: drained}, nil
+}
+
 // status is the shared Status body.
 func (*coordinatorCore) status(ctx restate.ObjectSharedContext) (CoordinatorStatus, error) {
 	st, err := loadCoordinatorState(ctx)

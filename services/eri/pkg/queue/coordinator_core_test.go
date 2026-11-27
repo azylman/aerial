@@ -314,6 +314,7 @@ func TestCoordinatorHandlerKinds(t *testing.T) {
 			want: map[string]string{
 				HandlerEnqueue: "SHARED", HandlerCancelTurn: "SHARED", HandlerStatus: "SHARED",
 				HandlerAppend: "EXCLUSIVE", HandlerOnTurnDone: "EXCLUSIVE", HandlerKick: "EXCLUSIVE", HandlerClearPending: "EXCLUSIVE",
+				HandlerDrainPending: "EXCLUSIVE",
 			},
 		},
 		{
@@ -322,6 +323,7 @@ func TestCoordinatorHandlerKinds(t *testing.T) {
 			want: map[string]string{
 				HandlerEnqueue: "SHARED", HandlerCancel: "SHARED", HandlerStatus: "SHARED",
 				HandlerAppend: "EXCLUSIVE", HandlerOnTurnDone: "EXCLUSIVE", HandlerClearPending: "EXCLUSIVE",
+				HandlerDrainPending: "EXCLUSIVE",
 			},
 		},
 	}
@@ -405,6 +407,80 @@ func TestDispatchRecords_MarkSkipped(t *testing.T) {
 			require.NoError(t, err)
 			require.NotNil(t, d)
 			assert.Equal(t, tc.want, rowWant{status: d.Status, errText: d.ErrorMessage})
+		})
+	}
+}
+
+func TestCoordinatorDrainPending(t *testing.T) {
+	t.Parallel()
+	active := &ActiveTurn{TurnID: "t-1", ItemIDs: []string{"a"}}
+	waiting := &ActiveTurn{TurnID: "t-1", ItemIDs: []string{"a"}, Waiting: true}
+	tests := []struct {
+		name        string
+		state       coordinatorState
+		req         DrainPendingRequest
+		wantState   coordinatorState
+		wantDrained []string
+	}{
+		{
+			name:        "IdleReturnsEmpty",
+			state:       st(nil, nil),
+			req:         DrainPendingRequest{TurnID: "t-1"},
+			wantState:   st(nil, nil),
+			wantDrained: nil,
+		},
+		{
+			name:        "WaitingTurnReturnsEmpty",
+			state:       st([]string{"b", "c"}, waiting),
+			req:         DrainPendingRequest{TurnID: "t-1"},
+			wantState:   st([]string{"b", "c"}, waiting),
+			wantDrained: nil,
+		},
+		{
+			name:        "TurnIDMismatchReturnsEmpty",
+			state:       st([]string{"b", "c"}, active),
+			req:         DrainPendingRequest{TurnID: "t-other"},
+			wantState:   st([]string{"b", "c"}, active),
+			wantDrained: nil,
+		},
+		{
+			name:        "EmptyPendingReturnsEmpty",
+			state:       st(nil, active),
+			req:         DrainPendingRequest{TurnID: "t-1"},
+			wantState:   st(nil, active),
+			wantDrained: nil,
+		},
+		{
+			name:        "PopsPendingIntoActive",
+			state:       st([]string{"b", "c"}, active),
+			req:         DrainPendingRequest{TurnID: "t-1"},
+			wantState:   st(nil, &ActiveTurn{TurnID: "t-1", ItemIDs: []string{"a", "b", "c"}}),
+			wantDrained: []string{"b", "c"},
+		},
+		{
+			name:        "DeduplicatesActiveAndPending",
+			state:       st([]string{"a", "b"}, active),
+			req:         DrainPendingRequest{TurnID: "t-1"},
+			wantState:   st(nil, &ActiveTurn{TurnID: "t-1", ItemIDs: []string{"a", "b"}}),
+			wantDrained: []string{"a", "b"},
+		},
+	}
+	for _, tc := range tests {
+		t.Run("Thread_"+tc.name, func(t *testing.T) {
+			t.Parallel()
+			h := newCoordHarness(t, tcKey, tcInv, tc.state)
+			resp, err := NewThreadCoordinator(nil, nil, "aerial").DrainPending(h.objectCtx(), tc.req)
+			require.NoError(t, err)
+			assert.Equal(t, tc.wantDrained, resp.DrainedIDs)
+			assert.Equal(t, tc.wantState, h.snapshot(t))
+		})
+		t.Run("Dispatch_"+tc.name, func(t *testing.T) {
+			t.Parallel()
+			h := newCoordHarness(t, tcKey, tcInv, tc.state)
+			resp, err := NewDispatchCoordinator(nil, "aerial").DrainPending(h.objectCtx(), tc.req)
+			require.NoError(t, err)
+			assert.Equal(t, tc.wantDrained, resp.DrainedIDs)
+			assert.Equal(t, tc.wantState, h.snapshot(t))
 		})
 	}
 }

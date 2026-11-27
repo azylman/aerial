@@ -45,6 +45,7 @@ const (
 	HandlerCancelTurn   = "CancelTurn"
 	HandlerCancel       = "Cancel"
 	HandlerStatus       = "Status"
+	HandlerDrainPending = "DrainPending"
 	HandlerRunBurst     = "RunBurst"
 	HandlerRunDispatch  = "RunDispatch"
 )
@@ -116,6 +117,14 @@ type AppendRequest struct {
 
 type KickRequest struct {
 	TurnID string `json:"turn_id"`
+}
+
+type DrainPendingRequest struct {
+	TurnID string `json:"turn_id"`
+}
+
+type DrainPendingResponse struct {
+	DrainedIDs []string `json:"drained_ids,omitempty"`
 }
 
 type ClearPendingRequest struct {

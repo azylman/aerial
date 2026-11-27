@@ -124,6 +124,7 @@ type WorkerPoolConfig struct {
 	VanadisURL                       string
 	VanadisHTTPClient                *http.Client
 	SATokenPath                      string
+	DrainHTTPClient                  *http.Client
 }
 
 type WorkerPool struct {
