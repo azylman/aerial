@@ -56,7 +56,7 @@ if ! command -v k3s >/dev/null 2>&1; then
 fi
 if ! command -v flux >/dev/null 2>&1; then
   echo "Flux CLI not found. Installing flux..."
-  if command -v sudo >/dev/null 2>&1 && [ "$(id -u)" -ne 0 ]; then curl -s "$FLUX_INSTALL_URL" | sudo bash; else curl -s "$FLUX_INSTALL_URL" | bash; fi
+  if command -v sudo >/dev/null 2>&1 && [ "$(id -u)" -ne 0 ]; then curl -fsSL "$FLUX_INSTALL_URL" | sudo bash; else curl -fsSL "$FLUX_INSTALL_URL" | bash; fi
 fi
 echo "Seeding bootstrap secrets..."
 kubectl create secret generic aerial-bootstrap-secrets --from-literal=DISCORD_BOT_TOKEN="$DISCORD_BOT_TOKEN" --from-literal=GITHUB_PAT="$GITHUB_PAT" --dry-run=client -o yaml | kubectl apply -f -
