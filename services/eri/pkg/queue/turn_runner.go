@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"strings"
 	"time"
 
 	restate "github.com/restatedev/sdk-go"
@@ -219,13 +220,29 @@ func (d dispatchRunner) recordOutcome(ctx context.Context, ids []string, summary
 	return d.steps.RecordDispatchOutcome(ctx, ids, summary)
 }
 
+// StepPublishDispatchOutcome is the step name for publishing dispatch outcomes.
+const StepPublishDispatchOutcome = StepPublishDispatchOut
+
 func (d dispatchRunner) afterSteps(t turnProgress) []namedStep {
 	if !t.attempted || dispatchOutcomeStatus(t.outcome) == "" {
 		return nil
 	}
-	return []namedStep{{name: StepPublishDispatchOut, fn: func(ctx context.Context) error {
-		return d.steps.PublishDispatchOutcome(ctx, d.dispatchID, t.outcome)
-	}}}
+	ids := normalizeStepIDs(append([]string{d.dispatchID}, t.ids...))
+	steps := make([]namedStep, 0, len(ids))
+	for i, id := range ids {
+		stepName := StepPublishDispatchOutcome
+		if i > 0 {
+			stepName = fmt.Sprintf("%s-%d", StepPublishDispatchOutcome, i+1)
+		}
+		targetID := id
+		steps = append(steps, namedStep{
+			name: stepName,
+			fn: func(ctx context.Context) error {
+				return d.steps.PublishDispatchOutcome(ctx, targetID, t.outcome)
+			},
+		})
+	}
+	return steps
 }
 
 func (d dispatchRunner) stop(ctx context.Context, turnID string, ids []string) error {
@@ -385,6 +402,19 @@ func (s *TurnRunnerService) runAttempts(ctx restate.Context, subj runnerSubject,
 			t.ids = normalizeStepIDs(append(t.ids, res.DrainedIDs...))
 			in.IDs = normalizeStepIDs(append(in.IDs, res.DrainedIDs...))
 		}
+		if len(res.DrainedPrompts) > 0 {
+			for _, dp := range res.DrainedPrompts {
+				trimmed := strings.TrimSpace(dp)
+				if trimmed != "" && !strings.Contains(runIn.Prep.Prompt, dp) {
+					if runIn.Prep.Prompt == "" {
+						runIn.Prep.Prompt = dp
+					} else {
+						runIn.Prep.Prompt += "\n\n" + dp
+					}
+				}
+			}
+			in.Prep.Prompt = runIn.Prep.Prompt
+		}
 		type step struct {
 			action  attemptAction
 			next    AttemptInput
@@ -432,7 +462,7 @@ func endOnTerminal(ctx restate.Context, subj runnerSubject, coordinator, key, tu
 	if len(prog) > 0 {
 		t = prog[0]
 	}
-	ids := subj.inputIDs()
+	ids := normalizeStepIDs(append(subj.inputIDs(), t.ids...))
 	outcome := OutcomeFailed
 	var stepErr error
 	if isRestateCancel(cause) {

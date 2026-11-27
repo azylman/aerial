@@ -67,6 +67,7 @@ type turnExecution struct {
 	steerMu                                                                                     sync.Mutex
 	steeringClosed                                                                              bool
 	drainedIDs                                                                                  []string
+	drainedPrompts                                                                              []string
 	steeredDispatches                                                                           []db.Dispatch
 }
 
