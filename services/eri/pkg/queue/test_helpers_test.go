@@ -1030,11 +1030,11 @@ type mockClaimStore struct {
 	claimedDispatch  bool
 }
 
-func (m *mockClaimStore) ClaimPendingMessage(context.Context, string) (bool, error) {
+func (m *mockClaimStore) ClaimPendingMessage(context.Context, string, ...string) (bool, error) {
 	return m.claimed, m.claimErr
 }
 
-func (m *mockClaimStore) ClaimPendingDispatch(context.Context, string) (bool, error) {
+func (m *mockClaimStore) ClaimPendingDispatch(context.Context, string, ...string) (bool, error) {
 	return m.claimedDispatch, m.claimDispatchErr
 }
 

@@ -994,11 +994,11 @@ func (s *itStore) assertFaults(t *testing.T) {
 	}
 }
 
-func (s *itStore) ClaimPendingMessage(ctx context.Context, id string) (bool, error) {
+func (s *itStore) ClaimPendingMessage(ctx context.Context, id string, turnID ...string) (bool, error) {
 	if err := s.hit(ctx, "ClaimPendingMessage"); err != nil {
 		return false, err
 	}
-	return s.Store.ClaimPendingMessage(ctx, id)
+	return s.Store.ClaimPendingMessage(ctx, id, turnID...)
 }
 
 func (s *itStore) GetMessagesByID(ctx context.Context, ids []string) ([]db.Message, error) {

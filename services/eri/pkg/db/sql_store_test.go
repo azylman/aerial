@@ -63,13 +63,13 @@ func TestSQLStoreDelegationAndQueries(t *testing.T) {
 
 	err := store.InsertMessage(ctx, Message{
 		ID: "m-sqlstore-task", ThreadID: "ext-thread-99", Content: "SQLStore task content",
-		Summary: "SQLStore task summary", Status: StatusPending, CreatedAt: time.Now().UTC(),
+		Summary: "SQLStore task summary", Status: StatusPending, TurnID: "turn-sqlstore-1", CreatedAt: time.Now().UTC(),
 	})
 	if err != nil {
 		t.Fatalf("InsertMessage failed: %v", err)
 	}
 	tasks, err := store.GetActiveTasks(ctx)
-	if err != nil || len(tasks) == 0 || tasks[0].ID != "m-sqlstore-task" || tasks[0].Summary != "SQLStore task summary" {
+	if err != nil || len(tasks) == 0 || tasks[0].ID != "m-sqlstore-task" || tasks[0].Summary != "SQLStore task summary" || tasks[0].TurnID != "turn-sqlstore-1" {
 		t.Fatalf("unexpected active tasks: %+v (err: %v)", tasks, err)
 	}
 }
