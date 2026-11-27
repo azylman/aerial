@@ -106,44 +106,14 @@ func (te *turnExecution) isDispatch() bool {
 	return te != nil && te.dispatch != nil
 }
 
-func (te *turnExecution) leaseKeyLocked() string {
-	if te == nil {
-		return ""
-	}
-	if te.dispatch != nil {
-		return te.threadID
-	}
-	return db.DiscordSessionID(te.threadID)
-}
-
 func (te *turnExecution) leaseKey() string {
 	if te == nil {
 		return ""
 	}
-	te.activeSessionMu.Lock()
-	defer te.activeSessionMu.Unlock()
-	return te.leaseKeyLocked()
-}
-
-func (te *turnExecution) threadIDValue() string {
-	if te == nil {
-		return ""
+	if te.isDispatch() {
+		return te.threadID
 	}
-	te.activeSessionMu.Lock()
-	defer te.activeSessionMu.Unlock()
-	return te.threadID
-}
-
-func (te *turnExecution) dispatchIDValue() string {
-	if te == nil {
-		return ""
-	}
-	te.activeSessionMu.Lock()
-	defer te.activeSessionMu.Unlock()
-	if te.dispatch != nil {
-		return te.dispatch.ID
-	}
-	return ""
+	return db.DiscordSessionID(te.threadID)
 }
 
 func (te *turnExecution) turnEffortAndModel() (string, string) {

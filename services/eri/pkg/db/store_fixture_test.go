@@ -123,7 +123,6 @@ func assertStoreUnavailable(t *testing.T, s Store) {
 	requireErr(t, s.UpdateDispatchStatus(ctx, "id", "", ""), "UpdateDispatchStatus")
 	requireErr(t, s.UpdateDispatchCompleted(ctx, "id", "", ""), "UpdateDispatchCompleted")
 	requireErr(t, c1(s.GetRecentSessionDispatches(ctx, "s", 10)), "GetRecentSessionDispatches")
-	requireErr(t, c1(s.GetProcessingDispatchesBySession(ctx, "s")), "GetProcessingDispatchesBySession")
 	requireErr(t, c1(s.GetMessagesByID(ctx, []string{"id"})), "GetMessagesByID")
 	requireErr(t, c1(s.FailMessagesIfActive(ctx, []string{"id"}, "r")), "FailMessagesIfActive")
 	requireErr(t, c1(s.FailMessagesIfPending(ctx, []string{"id"}, "r")), "FailMessagesIfPending")
