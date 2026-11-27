@@ -1237,7 +1237,7 @@ func TestFlow_EnsureOpenedPRAutoMerge(t *testing.T) {
 				switch {
 				case r.Method == http.MethodGet:
 					w.WriteHeader(http.StatusOK)
-					_, err := w.Write([]byte(`{"state":"open","merged":false,"body":"desc","node_id":"n1","head":{"sha":"abc","ref":"feat/branch","repo":{"fork":false,"full_name":"owner/repo"}},"base":{"repo":{"full_name":"owner/repo"}}}`))
+					_, err := w.Write([]byte(`{"state":"open","merged":false,"body":"desc","node_id":"n1","user":{"login":"owner"},"author_association":"OWNER","head":{"sha":"abc","ref":"feat/branch","repo":{"fork":false,"full_name":"owner/repo"}},"base":{"repo":{"full_name":"owner/repo"}}}`))
 					assert.NoError(t, err)
 				case r.Method == http.MethodPatch:
 					patched = true

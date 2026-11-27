@@ -811,6 +811,11 @@ func (b *BuildObject) reconcileAttachedChunkState(ctx context.Context, buildID, 
 	if rErr != nil {
 		return rErr
 	}
+	if b.executor != nil && chunk.Status == statusPROpened {
+		if aErr := b.executor.EnsurePRAutoMergeAndContext(ctx, *bld, chunks, chunk, prNumber); aErr != nil {
+			slog.WarnContext(ctx, "[vanadis-restate] ensure pr auto-merge warning", "chunk_id", chunk.ID, "pr_number", prNumber, "error", aErr)
+		}
+	}
 	if chunk.Status == statusCompleted {
 		b.notifyChunkCompleted(ctx, bld, chunkID)
 		if sErr := b.completeSweptDeployments(ctx, chunks, chunkID); sErr != nil {

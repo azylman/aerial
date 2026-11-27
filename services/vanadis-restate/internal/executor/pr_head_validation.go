@@ -391,9 +391,13 @@ func (e *Executor) EnsurePRAutoMergeAndContext(ctx context.Context, build model.
 			}
 		}
 	}
-	pr, _, fullRepo, err := e.fetchGitHubPullRequest(ctx, repo, prNumber)
+	pr, owner, fullRepo, err := e.fetchGitHubPullRequest(ctx, repo, prNumber)
 	if err != nil {
 		return err
+	}
+	if !validatePRRepoBinding(pr, fullRepo) || !isTrustedPRAuthor(pr.User.Login, pr.AuthorAssociation, owner) {
+		slog.WarnContext(ctx, "[vanadis-restate] skip pr auto-merge: untrusted author or fork", "repo", fullRepo, "pr_number", prNumber, "login", pr.User.Login, "association", pr.AuthorAssociation)
+		return nil
 	}
 	if err := e.enrichPRContext(ctx, build, chunks, chunk, pr, fullRepo, prNumber); err != nil {
 		return err
