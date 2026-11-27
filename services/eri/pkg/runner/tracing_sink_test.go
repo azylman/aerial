@@ -15,12 +15,14 @@ import (
 )
 
 // sinkEvent is one scripted TurnSink callback: a tool start (start=true), a tool
-// completion, or the terminal result/error when call is zero.
+// completion, an async subagent completion (asyncSummary != nil), or the terminal
+// result/error when call is zero.
 type sinkEvent struct {
-	start  bool
-	call   ToolCall
-	server string
-	status string
+	start        bool
+	call         ToolCall
+	server       string
+	status       string
+	asyncSummary *SubagentTraceSummary
 }
 
 // wantSpan describes an ended span by name: its parent's name ("turn" is the root),
@@ -51,9 +53,12 @@ func driveTracingTurnSinkEvents(sink *TracingTurnSink, tc tracingTurnSinkCase, t
 	sink.OnSkillActivated("self-improvement", "discord")
 	sink.OnTextDelta("partial")
 	for _, ev := range tc.events {
-		if ev.start {
+		switch {
+		case ev.asyncSummary != nil:
+			sink.CompleteAsyncSubagent(*ev.asyncSummary)
+		case ev.start:
 			sink.OnToolCall(ev.call)
-		} else {
+		default:
 			sink.OnToolCompleted(ev.call, ev.server, time.Millisecond, ev.status)
 		}
 	}
@@ -459,5 +464,79 @@ func assertClaimedToolSpans(t *testing.T, ended []sdktrace.ReadOnlySpan, claims 
 		case c.want != "" && got[i].SpanID() != byCallID[c.want]:
 			t.Errorf("claim %d (%s/%s %q) = span %v, want the %s span %v", i, c.server, c.tool, c.callID, got[i].SpanID(), c.want, byCallID[c.want])
 		}
+	}
+}
+
+func TestTracingTurnSink_CompleteAsyncSubagent(t *testing.T) {
+	t.Parallel()
+	tests := []tracingTurnSinkCase{
+		{
+			name: "async subagent keeps invoke_agent open across completion and backfills child spans",
+			events: []sinkEvent{
+				{start: true, call: ToolCall{ID: "step-3", Name: "invoke_subagent", Subagent: true}},
+				{call: ToolCall{ID: "step-3", Name: "invoke_subagent", Subagent: true, SubagentConversationID: "sub-conv-1"}, server: "native", status: "ok"},
+				{asyncSummary: &SubagentTraceSummary{
+					ParentCallID:   "step-3",
+					ConversationID: "sub-conv-1",
+					Model:          "gemini-4-argon-medium",
+					Status:         "ok",
+					Usage:          AgyUsage{InputTokens: 500, OutputTokens: 100, CacheReadTokens: 50},
+					Steps: []SubagentToolStep{
+						{Name: "read_file", MCPServer: "native", Status: "ok"},
+						{Name: "get_me", MCPServer: "github", Status: "error"},
+					},
+				}},
+			},
+			result: &TurnResult{Usage: AgyUsage{InputTokens: 1000, OutputTokens: 200}},
+			want: []wantSpan{
+				{name: "execute_tool invoke_subagent", parent: "turn", code: codes.Unset, attrs: []attribute.KeyValue{AttrGenAIToolCallID.String("step-3"), AttrMCPServer.String("native")}},
+				{name: "execute_tool read_file", parent: "invoke_agent", code: codes.Unset, attrs: []attribute.KeyValue{AttrGenAIToolName.String("read_file"), AttrMCPServer.String("native"), AttrToolStatus.String("ok")}},
+				{name: "execute_tool get_me", parent: "invoke_agent", code: codes.Error, desc: "error", attrs: []attribute.KeyValue{AttrGenAIToolName.String("get_me"), AttrMCPServer.String("github"), AttrToolStatus.String("error")}},
+				{name: "chat", parent: "invoke_agent", code: codes.Unset, attrs: []attribute.KeyValue{AttrGenAIRequestModel.String("gemini-4-argon-medium"), AttrGenAIProviderName.String("gcp.gemini"), AttrGenAIUsageInputTokens.Int(500), AttrGenAIUsageOutputTokens.Int(100), AttrGenAIUsageCacheRead.Int(50)}},
+				{name: "invoke_agent", parent: "execute_tool invoke_subagent", code: codes.Unset, attrs: []attribute.KeyValue{AttrGenAIConversationID.String("sub-conv-1")}},
+				{name: "chat", parent: "turn", code: codes.Unset, attrs: []attribute.KeyValue{AttrGenAIUsageInputTokens.Int(1000), AttrGenAIUsageOutputTokens.Int(200)}},
+			},
+			innerOK: 2,
+			wantUse: AgyUsage{InputTokens: 1000, OutputTokens: 200},
+		},
+		{
+			name: "async subagent aborts invoke_agent when turn closes before completion",
+			events: []sinkEvent{
+				{start: true, call: ToolCall{ID: "step-5", Name: "invoke_subagent", Subagent: true}},
+				{call: ToolCall{ID: "step-5", Name: "invoke_subagent", Subagent: true, SubagentConversationID: "sub-conv-2"}, server: "native", status: "ok"},
+			},
+			turnErr: errors.New("turn aborted"),
+			want: []wantSpan{
+				{name: "execute_tool invoke_subagent", parent: "turn", code: codes.Unset},
+				{name: "invoke_agent", parent: "execute_tool invoke_subagent", code: codes.Error, desc: "aborted", attrs: []attribute.KeyValue{AttrGenAIConversationID.String("sub-conv-2")}},
+				{name: "chat", parent: "turn", code: codes.Error, desc: "turn aborted"},
+			},
+			innerOK: 2,
+		},
+		{
+			name: "async subagent completion with error status marks child chat and invoke_agent error",
+			events: []sinkEvent{
+				{start: true, call: ToolCall{ID: "step-7", Name: "invoke_subagent", Subagent: true}},
+				{call: ToolCall{ID: "step-7", Name: "invoke_subagent", Subagent: true, SubagentConversationID: "sub-conv-err"}, server: "native", status: "ok"},
+				{asyncSummary: &SubagentTraceSummary{
+					Status:   "error",
+					ErrorMsg: "subagent failed",
+				}},
+			},
+			result: &TurnResult{},
+			want: []wantSpan{
+				{name: "execute_tool invoke_subagent", parent: "turn", code: codes.Unset},
+				{name: "chat", parent: "invoke_agent", code: codes.Error, desc: "subagent failed"},
+				{name: "invoke_agent", parent: "execute_tool invoke_subagent", code: codes.Error, desc: "subagent failed"},
+				{name: "chat", parent: "turn", code: codes.Unset},
+			},
+			innerOK: 2,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			runTracingTurnSinkCase(t, tc)
+		})
 	}
 }

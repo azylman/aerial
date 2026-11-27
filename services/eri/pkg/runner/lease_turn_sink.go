@@ -73,3 +73,9 @@ func (s *leaseTurnSinkWrapper) OnError(err error) {
 	}
 	s.buf.OnError(err)
 }
+
+func (s *leaseTurnSinkWrapper) CompleteAsyncSubagent(summary SubagentTraceSummary) {
+	if ts, ok := s.inner.(*TracingTurnSink); ok && ts != nil {
+		ts.CompleteAsyncSubagent(summary)
+	}
+}
