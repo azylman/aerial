@@ -47,6 +47,7 @@ type turnSteps interface {
 	RecordBurstOutcome(ctx context.Context, ids []string, summary AttemptSummary) error
 	RunBurstPostTurnHook(ctx context.Context, threadID string, ids []string, attempted bool, outcome TurnOutcome, hookMetadata map[string]string) error
 	RefreshBurstThreadSummary(ctx context.Context, threadID string, ids []string, outcome TurnOutcome) error
+	ReconcilePendingBurstItems(ctx context.Context, threadID, turnID string, handledIDs []string) ([]string, error)
 	StopBurstTurn(ctx context.Context, turnID string, ids []string) error
 	FailBurstTurn(ctx context.Context, turnID string, ids []string, reason string, hookMetadata ...map[string]string) error
 
@@ -55,6 +56,7 @@ type turnSteps interface {
 	RunDispatchAttempt(ctx context.Context, in AttemptInput) (AttemptResult, error)
 	RecordDispatchOutcome(ctx context.Context, ids []string, summary AttemptSummary) error
 	PublishDispatchOutcome(ctx context.Context, dispatchID string, outcome TurnOutcome) error
+	ReconcilePendingDispatchItems(ctx context.Context, sessionKey, turnID string, handledIDs []string) ([]string, error)
 	StopDispatchTurn(ctx context.Context, turnID string, ids []string) error
 	FailDispatchTurn(ctx context.Context, turnID string, ids []string, reason string) error
 
@@ -120,6 +122,7 @@ type runnerSubject interface {
 	recordOutcome(ctx context.Context, ids []string, summary AttemptSummary) error
 	// afterSteps are the journaled steps run after record-outcome.
 	afterSteps(t turnProgress) []namedStep
+	reconcilePending(ctx context.Context, turnID string, handledIDs []string) ([]string, error)
 	stop(ctx context.Context, turnID string, ids []string) error
 	fail(ctx context.Context, turnID string, ids []string, reason string, hookMetadata ...map[string]string) error
 }
@@ -184,6 +187,10 @@ func (b burstRunner) afterSteps(t turnProgress) []namedStep {
 	return out
 }
 
+func (b burstRunner) reconcilePending(ctx context.Context, turnID string, handledIDs []string) ([]string, error) {
+	return b.steps.ReconcilePendingBurstItems(ctx, b.threadID, turnID, handledIDs)
+}
+
 func (b burstRunner) stop(ctx context.Context, turnID string, ids []string) error {
 	return b.steps.StopBurstTurn(ctx, turnID, ids)
 }
@@ -246,6 +253,10 @@ func (d dispatchRunner) afterSteps(t turnProgress) []namedStep {
 	return steps
 }
 
+func (d dispatchRunner) reconcilePending(ctx context.Context, turnID string, handledIDs []string) ([]string, error) {
+	return d.steps.ReconcilePendingDispatchItems(ctx, d.sessionKey, turnID, handledIDs)
+}
+
 func (d dispatchRunner) stop(ctx context.Context, turnID string, ids []string) error {
 	return d.steps.StopDispatchTurn(ctx, turnID, ids)
 }
@@ -260,7 +271,23 @@ func (s *TurnRunnerService) drive(ctx restate.Context, subj runnerSubject, coord
 	if err := s.executeTurn(ctx, subj, turnID, &t); err != nil {
 		return endOnTerminal(ctx, subj, coordinator, key, turnID, err, t)
 	}
-	sendTurnDone(ctx, coordinator, key, TurnDoneRequest{TurnID: turnID, Outcome: t.outcome, RescheduleDelayMs: t.delayMs})
+	var requeueIDs []string
+	if t.outcome == OutcomeCompleted {
+		ids, err := runStep(ctx, StepReconcilePending, func(rc context.Context) ([]string, error) {
+			return subj.reconcilePending(rc, turnID, t.ids)
+		})
+		if err != nil {
+			log.Printf("[TurnRunner] Turn %s for %s/%s: reconcile pending error: %v", turnID, coordinator, key, err)
+		} else {
+			requeueIDs = ids
+		}
+	}
+	sendTurnDone(ctx, coordinator, key, TurnDoneRequest{
+		TurnID:            turnID,
+		Outcome:           t.outcome,
+		RescheduleDelayMs: t.delayMs,
+		RequeueIDs:        requeueIDs,
+	})
 	return TurnRunResult{TurnID: turnID, Outcome: t.outcome}, nil
 }
 

@@ -2,8 +2,6 @@ package queue
 
 import (
 	"context"
-	"database/sql"
-	"errors"
 	"log"
 	"slices"
 	"strings"
@@ -70,28 +68,6 @@ func (r dispatchRecords) failIfPending(ctx context.Context, ids []string, reason
 func (r dispatchRecords) markSkipped(ctx context.Context, id string) error {
 	_, err := r.store.SkipDispatchesIfActive(ctx, []string{id}, skippedActiveTurnReason)
 	return err
-}
-
-func (r dispatchRecords) pendingItemIDs(ctx context.Context, ids []string) ([]string, error) {
-	if r.store == nil {
-		return nil, nil
-	}
-	var res []string
-	for idx := range ids {
-		dispID := ids[idx]
-		d, err := r.store.GetDispatch(ctx, dispID)
-		switch {
-		case err == nil && d != nil:
-			if d.Status == db.StatusPending {
-				res = append(res, dispID)
-			}
-		case errors.Is(err, sql.ErrNoRows) || errors.Is(err, db.ErrRecordNotFound):
-			// row missing or purged; ignore
-		case err != nil:
-			return nil, err
-		}
-	}
-	return res, nil
 }
 
 // buildEnqueuedDispatch builds the PENDING dispatch row for req under sessionKey.

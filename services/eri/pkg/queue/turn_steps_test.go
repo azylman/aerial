@@ -937,12 +937,43 @@ func TestFailBurstTurn(t *testing.T) {
 	}
 }
 
+func assertLiveTurnStopped(t *testing.T, pool *WorkerPool, te *turnExecution, turnID string) {
+	t.Helper()
+	if te == nil || !te.isInterrupted() {
+		t.Error("expected live turn to be interrupted even on store error")
+	}
+	if !pool.Turns().Tombstoned(turnID) {
+		t.Error("expected live turn to be stopped/tombstoned even on store error")
+	}
+}
+
+func assertDispatchRowStatus(t *testing.T, store db.Store, id, wantStatus, wantErrMsg string) {
+	t.Helper()
+	d, err := store.GetDispatch(context.Background(), id)
+	if err != nil {
+		t.Fatalf("GetDispatch: %v", err)
+	}
+	if d == nil || d.Status != wantStatus || (wantErrMsg != "" && d.ErrorMessage != wantErrMsg) {
+		t.Errorf("dispatch = %+v, want status=%s err=%q", d, wantStatus, wantErrMsg)
+	}
+}
+
+func assertPublishes(t *testing.T, bus *trackingBus, wantSubjects []string) {
+	t.Helper()
+	bus.mu.Lock()
+	defer bus.mu.Unlock()
+	if strings.Join(bus.publishes, ",") != strings.Join(wantSubjects, ",") {
+		t.Errorf("published %v, want %v", bus.publishes, wantSubjects)
+	}
+}
+
 func TestStopDispatchTurn(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
 		name        string
 		status      string
 		noStore     bool
+		closeDB     bool
 		sabotageSQL string
 		wantErr     bool
 		wantStatus  string
@@ -952,14 +983,15 @@ func TestStopDispatchTurn(t *testing.T) {
 		{name: "NoStoreTerminal", status: db.StatusProcessing, noStore: true, wantErr: true},
 		{name: "ActiveRowCancelled", status: db.StatusProcessing, wantStatus: db.StatusFailed, wantErrMsg: CancelledByOperatorReason},
 		{name: "CompletedRowUntouched", status: db.StatusCompleted, wantStatus: db.StatusCompleted},
-		{name: "StoreErrorStopsLiveTurn", status: db.StatusProcessing, sabotageSQL: failTriggerSQL("dispatches", "UPDATE", "40001"), wantErr: true, wantStatus: db.StatusProcessing, liveTurn: true},
+		{name: "StoreErrorStopsLiveTurn", status: db.StatusProcessing, closeDB: true, wantErr: true, liveTurn: true},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			pool, store := stepPool(t, stepFixture{noStore: tc.noStore, disps: []db.Dispatch{{ID: "d1", Source: "test", Prompt: "p", Status: tc.status}}, sabotageSQL: tc.sabotageSQL}, WorkerPoolConfig{})
+			pool, store := stepPool(t, stepFixture{noStore: tc.noStore, closeDB: tc.closeDB, disps: []db.Dispatch{{ID: "d1", Source: "test", Prompt: "p", Status: tc.status}}, sabotageSQL: tc.sabotageSQL}, WorkerPoolConfig{})
+			var te *turnExecution
 			if tc.liveTurn {
-				te := &turnExecution{turnID: "turn-d", threadID: "dispatch-d1"}
+				te = &turnExecution{turnID: "turn-d", threadID: "dispatch-d1"}
 				rel, ok := pool.Turns().Begin(context.Background(), "turn-d", te)
 				if !ok {
 					t.Fatal("turn begin failed")
@@ -969,20 +1001,12 @@ func TestStopDispatchTurn(t *testing.T) {
 			err := pool.StopDispatchTurn(context.Background(), "turn-d", []string{"d1"})
 			assertStepErr(t, err, tc.wantErr, tc.noStore)
 			if tc.liveTurn {
-				if !pool.Turns().Tombstoned("turn-d") {
-					t.Error("expected live turn to be stopped/tombstoned even on store error")
-				}
+				assertLiveTurnStopped(t, pool, te, "turn-d")
 			}
-			if tc.noStore {
+			if tc.noStore || tc.closeDB {
 				return
 			}
-			d, err := store.GetDispatch(context.Background(), "d1")
-			if err != nil {
-				t.Fatalf("GetDispatch: %v", err)
-			}
-			if d == nil || d.Status != tc.wantStatus || d.ErrorMessage != tc.wantErrMsg {
-				t.Errorf("dispatch = %+v, want status=%s err=%q", d, tc.wantStatus, tc.wantErrMsg)
-			}
+			assertDispatchRowStatus(t, store, "d1", tc.wantStatus, tc.wantErrMsg)
 		})
 	}
 }
@@ -994,6 +1018,7 @@ func TestFailDispatchTurn(t *testing.T) {
 		status       string
 		ids          []string
 		noStore      bool
+		closeDB      bool
 		sabotageSQL  string
 		wantErr      bool
 		wantStatus   string
@@ -1005,7 +1030,7 @@ func TestFailDispatchTurn(t *testing.T) {
 		{name: "ActiveRowFailedAndPublished", status: db.StatusProcessing, ids: []string{"d1"}, wantStatus: db.StatusFailed, wantSubjects: []string{pubsub.SubjectAerialDispatchPrefix + "failed"}},
 		{name: "CompletedRowPublishesCompleted", status: db.StatusCompleted, ids: []string{"d1"}, wantStatus: db.StatusCompleted, wantSubjects: []string{pubsub.SubjectAerialDispatchPrefix + "completed"}},
 		{name: "MissingRowSkipped", status: db.StatusCompleted, ids: []string{"nope"}, wantStatus: db.StatusCompleted},
-		{name: "StoreErrorStopsLiveTurn", status: db.StatusProcessing, ids: []string{"d1"}, sabotageSQL: failTriggerSQL("dispatches", "UPDATE", "40001"), wantErr: true, wantStatus: db.StatusProcessing, liveTurn: true},
+		{name: "StoreErrorStopsLiveTurn", status: db.StatusProcessing, ids: []string{"d1"}, closeDB: true, wantErr: true, liveTurn: true},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -1013,9 +1038,10 @@ func TestFailDispatchTurn(t *testing.T) {
 			memBus := pubsub.NewMemoryBus()
 			defer memBus.Close()
 			bus := &trackingBus{Bus: memBus}
-			pool, store := stepPool(t, stepFixture{noStore: tc.noStore, disps: []db.Dispatch{{ID: "d1", Source: "vanadis", Prompt: "p", Status: tc.status}}, sabotageSQL: tc.sabotageSQL}, WorkerPoolConfig{EventBus: bus})
+			pool, store := stepPool(t, stepFixture{noStore: tc.noStore, closeDB: tc.closeDB, disps: []db.Dispatch{{ID: "d1", Source: "vanadis", Prompt: "p", Status: tc.status}}, sabotageSQL: tc.sabotageSQL}, WorkerPoolConfig{EventBus: bus})
+			var te *turnExecution
 			if tc.liveTurn {
-				te := &turnExecution{turnID: "turn-d", threadID: "dispatch-d1"}
+				te = &turnExecution{turnID: "turn-d", threadID: "dispatch-d1"}
 				rel, ok := pool.Turns().Begin(context.Background(), "turn-d", te)
 				if !ok {
 					t.Fatal("turn begin failed")
@@ -1025,24 +1051,13 @@ func TestFailDispatchTurn(t *testing.T) {
 			err := pool.FailDispatchTurn(context.Background(), "turn-d", tc.ids, "integrity violation")
 			assertStepErr(t, err, tc.wantErr, tc.noStore)
 			if tc.liveTurn {
-				if !pool.Turns().Tombstoned("turn-d") {
-					t.Error("expected live turn to be stopped/tombstoned even on store error")
-				}
+				assertLiveTurnStopped(t, pool, te, "turn-d")
 			}
-			if !tc.noStore {
-				d, err := store.GetDispatch(context.Background(), "d1")
-				if err != nil {
-					t.Fatalf("GetDispatch: %v", err)
-				}
-				if d == nil || d.Status != tc.wantStatus {
-					t.Errorf("dispatch = %+v, want status=%s", d, tc.wantStatus)
-				}
+			if tc.noStore || tc.closeDB {
+				return
 			}
-			bus.mu.Lock()
-			defer bus.mu.Unlock()
-			if strings.Join(bus.publishes, ",") != strings.Join(tc.wantSubjects, ",") {
-				t.Errorf("published %v, want %v", bus.publishes, tc.wantSubjects)
-			}
+			assertDispatchRowStatus(t, store, "d1", tc.wantStatus, "")
+			assertPublishes(t, bus, tc.wantSubjects)
 		})
 	}
 }

@@ -404,8 +404,7 @@ func TestThreadCoordinator_OnTurnDone(t *testing.T) {
 		{
 			name:      "CompletedRequeuesPendingActiveItem",
 			state:     st(nil, &ActiveTurn{TurnID: "t0", ItemIDs: []string{"a", "b"}, RunnerInvocationID: "inv-0"}),
-			rows:      []db.Message{msgRow("a", tcKey, db.StatusCompleted), msgRow("b", tcKey, db.StatusPending)},
-			req:       TurnDoneRequest{TurnID: "t0", Outcome: OutcomeCompleted},
+			req:       TurnDoneRequest{TurnID: "t0", Outcome: OutcomeCompleted, RequeueIDs: []string{"b"}},
 			wantState: st(nil, startedTurn("b")),
 			wantSends: []sentCall{runBurst("b")},
 		},

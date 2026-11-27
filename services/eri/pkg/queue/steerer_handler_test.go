@@ -838,6 +838,65 @@ func TestWorkerPool_ReconcileActiveTurnIDs(t *testing.T) {
 	assert.Equal(t, []string{"b1"}, badTransportPool.reconcileActiveTurnIDs(context.Background(), false, "thread-key", "t-burst", []string{"b1"}))
 }
 
+func TestWorkerPool_ReconcilePendingItems(t *testing.T) {
+	t.Parallel()
+
+	store := testStore(t)
+	mHandled := db.Message{ID: "m-handled", ThreadID: "th-p", Status: db.StatusCompleted, CreatedAt: time.Now().UTC()}
+	mPending := db.Message{ID: "m-pending", ThreadID: "th-p", Status: db.StatusPending, CreatedAt: time.Now().UTC()}
+	mCompleted := db.Message{ID: "m-comp", ThreadID: "th-p", Status: db.StatusCompleted, CreatedAt: time.Now().UTC()}
+	seedMessageRows(t, store, []db.Message{mHandled, mPending, mCompleted})
+
+	dHandled := db.Dispatch{ID: "d-handled", SessionID: "sess-p", Status: db.StatusCompleted, CreatedAt: time.Now().UTC()}
+	dPending := db.Dispatch{ID: "d-pending", SessionID: "sess-p", Status: db.StatusPending, CreatedAt: time.Now().UTC()}
+	dCompleted := db.Dispatch{ID: "d-comp", SessionID: "sess-p", Status: db.StatusCompleted, CreatedAt: time.Now().UTC()}
+	seedDispatchRows(t, store, []db.Dispatch{dHandled, dPending, dCompleted})
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if strings.Contains(r.URL.Path, "ThreadSession") {
+			_ = json.NewEncoder(w).Encode(CoordinatorStatus{
+				Active: &ActiveTurn{TurnID: "turn-p", ItemIDs: []string{mHandled.ID, mPending.ID, mCompleted.ID, "m-nonexistent"}},
+			})
+			return
+		}
+		if strings.Contains(r.URL.Path, "DispatchSession") {
+			_ = json.NewEncoder(w).Encode(CoordinatorStatus{
+				Active: &ActiveTurn{TurnID: "turn-p", ItemIDs: []string{dHandled.ID, dPending.ID, dCompleted.ID, "d-nonexistent"}},
+			})
+			return
+		}
+		http.Error(w, "not found", http.StatusNotFound)
+	}))
+	defer srv.Close()
+
+	pool := NewWorkerPool(WorkerPoolConfig{
+		Store:             store,
+		RestateIngressURL: srv.URL,
+		DrainHTTPClient:   srv.Client(),
+	})
+
+	// Burst reconcile: mPending is the only candidate still PENDING
+	gotBurst, err := pool.ReconcilePendingBurstItems(context.Background(), "th-p", "turn-p", []string{mHandled.ID})
+	require.NoError(t, err)
+	assert.Equal(t, []string{mPending.ID}, gotBurst)
+
+	// Burst reconcile when all active items handled: returns nil
+	gotBurstAll, err := pool.ReconcilePendingBurstItems(context.Background(), "th-p", "turn-p", []string{mHandled.ID, mPending.ID, mCompleted.ID, "m-nonexistent"})
+	require.NoError(t, err)
+	assert.Nil(t, gotBurstAll)
+
+	// Dispatch reconcile: dPending is the only candidate still PENDING
+	gotDisp, err := pool.ReconcilePendingDispatchItems(context.Background(), "sess-p", "turn-p", []string{dHandled.ID})
+	require.NoError(t, err)
+	assert.Equal(t, []string{dPending.ID}, gotDisp)
+
+	// Dispatch reconcile when all active items handled: returns nil
+	gotDispAll, err := pool.ReconcilePendingDispatchItems(context.Background(), "sess-p", "turn-p", []string{dHandled.ID, dPending.ID, dCompleted.ID, "d-nonexistent"})
+	require.NoError(t, err)
+	assert.Nil(t, gotDispAll)
+}
+
 func TestHandleDrainPending_DrainedPromptsPopulated(t *testing.T) {
 	t.Parallel()
 

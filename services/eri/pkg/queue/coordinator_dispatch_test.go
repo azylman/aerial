@@ -175,8 +175,7 @@ func TestDispatchCoordinator_OnTurnDone(t *testing.T) {
 		{
 			name:      "CompletedRequeuesPendingActiveItem",
 			state:     st(nil, &ActiveTurn{TurnID: "t0", ItemIDs: []string{"d1", "d2"}, RunnerInvocationID: "inv-0"}),
-			rows:      []db.Dispatch{dispRow("d1", dcKey, db.StatusCompleted), dispRow("d2", dcKey, db.StatusPending)},
-			req:       TurnDoneRequest{TurnID: "t0", Outcome: OutcomeCompleted},
+			req:       TurnDoneRequest{TurnID: "t0", Outcome: OutcomeCompleted, RequeueIDs: []string{"d2"}},
 			wantState: st(nil, startedDispatch("d2")),
 			wantSends: []sentCall{runDispatch("d2")},
 		},

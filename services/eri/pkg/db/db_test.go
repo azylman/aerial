@@ -577,30 +577,6 @@ func assertDispatchClaim(ctx context.Context, t *testing.T, store Store) {
 	if got.Status != StatusProcessing || got.ErrorMessage != "in flight" {
 		t.Errorf("unexpected processing state: %+v", got)
 	}
-
-	// Add a PROCESSING dispatch in a different session and a non-PROCESSING (PENDING) dispatch in heartbeat-hb-1
-	dOther := Dispatch{
-		ID:        "disp-other-proc",
-		Source:    "heartbeat",
-		SessionID: "heartbeat-other-sess",
-		Prompt:    "Prompt for other session",
-	}
-	mustInsertDispatch(ctx, t, store, dOther, "InsertDispatch disp-other-proc")
-	mustOK(t, store.UpdateDispatchStatus(ctx, "disp-other-proc", "PROCESSING", ""), "UpdateDispatchStatus disp-other-proc")
-
-	dPending := Dispatch{
-		ID:        "disp-hb1-pending",
-		Source:    "heartbeat",
-		SessionID: "heartbeat-hb-1",
-		Prompt:    "Prompt for pending in same session",
-	}
-	mustInsertDispatch(ctx, t, store, dPending, "InsertDispatch disp-hb1-pending")
-
-	processing, err := store.GetProcessingDispatchesBySession(ctx, "heartbeat-hb-1")
-	mustOK(t, err, "GetProcessingDispatchesBySession")
-	if len(processing) != 1 || processing[0].ID != "disp-1" {
-		t.Errorf("expected 1 processing dispatch disp-1, got %+v", processing)
-	}
 }
 
 func assertDispatchStoreLifecycleTransitions(ctx context.Context, t *testing.T, store Store) {

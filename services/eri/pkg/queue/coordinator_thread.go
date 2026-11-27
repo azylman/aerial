@@ -77,26 +77,6 @@ func (r threadRecords) markSkipped(ctx context.Context, id string) error {
 	return err
 }
 
-func (r threadRecords) pendingItemIDs(ctx context.Context, ids []string) ([]string, error) {
-	if r.store == nil || len(ids) == 0 {
-		return nil, nil
-	}
-	var pending []string
-	for _, id := range ids {
-		m, err := r.store.GetMessage(ctx, id)
-		if err != nil {
-			if errors.Is(err, sql.ErrNoRows) || errors.Is(err, db.ErrRecordNotFound) {
-				continue
-			}
-			return nil, err
-		}
-		if m != nil && m.Status == db.StatusPending {
-			pending = append(pending, id)
-		}
-	}
-	return pending, nil
-}
-
 // threadEnqueueTarget picks the thread a request addresses before any redirect.
 func threadEnqueueTarget(key string, req ThreadEnqueueRequest) string {
 	threadID := key

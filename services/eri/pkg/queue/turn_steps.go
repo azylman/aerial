@@ -2,6 +2,7 @@ package queue
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -1069,4 +1070,74 @@ func (p *WorkerPool) FailDispatchTurn(ctx context.Context, turnID string, ids []
 		}
 	}
 	return nil
+}
+
+func unhandledCandidates(active, handled []string) []string {
+	var candidates []string
+	for _, id := range active {
+		if !slices.Contains(handled, id) {
+			candidates = append(candidates, id)
+		}
+	}
+	return candidates
+}
+
+func (p *WorkerPool) reconcilePendingTurnItems(ctx context.Context, isDispatch bool, key, turnID string, handledIDs []string, fetchStatus func(context.Context, db.Store, string) (string, error)) ([]string, error) {
+	handled := normalizeStepIDs(handledIDs)
+	candidates := unhandledCandidates(p.reconcileActiveTurnIDs(ctx, isDispatch, key, turnID, handled), handled)
+	if len(candidates) == 0 {
+		return nil, nil
+	}
+	s, err := p.stepStore()
+	if err != nil {
+		return candidates, fmt.Errorf("queue: step store unavailable: %w", err)
+	}
+	var stillPending []string
+	for _, id := range candidates {
+		status, err := fetchStatus(ctx, s, id)
+		if err != nil {
+			if errors.Is(err, sql.ErrNoRows) || errors.Is(err, db.ErrRecordNotFound) {
+				continue
+			}
+			return candidates, fmt.Errorf("queue: check pending status for %s: %w", id, err)
+		}
+		if status == db.StatusPending {
+			stillPending = append(stillPending, id)
+		}
+	}
+	return stillPending, nil
+}
+
+func fetchMessageStatus(ctx context.Context, s db.Store, id string) (string, error) {
+	m, err := storeCall(ctx, func(sc context.Context) (*db.Message, error) { return s.GetMessage(sc, id) })
+	if err != nil {
+		return "", err
+	}
+	if m == nil {
+		return "", db.ErrRecordNotFound
+	}
+	return m.Status, nil
+}
+
+func fetchDispatchStatus(ctx context.Context, s db.Store, id string) (string, error) {
+	d, err := storeCall(ctx, func(sc context.Context) (*db.Dispatch, error) { return s.GetDispatch(sc, id) })
+	if err != nil {
+		return "", err
+	}
+	if d == nil {
+		return "", db.ErrRecordNotFound
+	}
+	return d.Status, nil
+}
+
+// ReconcilePendingBurstItems checks whether any items in the coordinator's active turn were not
+// handled during the turn and remain in PENDING status in the database.
+func (p *WorkerPool) ReconcilePendingBurstItems(ctx context.Context, threadID, turnID string, handledIDs []string) ([]string, error) {
+	return p.reconcilePendingTurnItems(ctx, false, threadID, turnID, handledIDs, fetchMessageStatus)
+}
+
+// ReconcilePendingDispatchItems checks whether any items in the coordinator's active turn were not
+// handled during the turn and remain in PENDING status in the database.
+func (p *WorkerPool) ReconcilePendingDispatchItems(ctx context.Context, sessionKey, turnID string, handledIDs []string) ([]string, error) {
+	return p.reconcilePendingTurnItems(ctx, true, sessionKey, turnID, handledIDs, fetchDispatchStatus)
 }
