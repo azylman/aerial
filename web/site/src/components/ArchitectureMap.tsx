@@ -9,7 +9,6 @@ export interface TopologyNode {
   pillar: 'platform' | 'factory' | 'agent';
   role: string;
   ports: string;
-  displayPorts?: string;
   description: string;
   chapterId: string;
   chapterTitle: string;
@@ -36,7 +35,6 @@ export const TOPOLOGY_NODES: readonly TopologyNode[] = [
     pillar: 'platform',
     role: 'Kubernetes Fabric & Gateway API Ingress',
     ports: 'Gateway API (LAN & Edge HTTPRoutes)',
-    displayPorts: 'Gateway API HTTPRoutes',
     description:
       'Single-node or multi-node k3s cluster pairs NGINX Gateway Fabric with CoreDNS for local applications and external edge webhooks.',
     chapterId: 'application-platform',
@@ -53,7 +51,6 @@ export const TOPOLOGY_NODES: readonly TopologyNode[] = [
     pillar: 'platform',
     role: 'Relational State, Embeddings & Hybrid RRF',
     ports: 'SQL State, pgvector & Prometheus Metrics',
-    displayPorts: 'SQL & pgvector Index',
     description:
       'CloudNativePG PostgreSQL 19 with pgvector stores session memory, task graphs, and hybrid vector search indexes.',
     chapterId: 'application-platform',
@@ -70,7 +67,6 @@ export const TOPOLOGY_NODES: readonly TopologyNode[] = [
     pillar: 'platform',
     role: 'Durable Workflows & Event Streaming',
     ports: 'RocksDB Virtual Objects & Durable Streams',
-    displayPorts: 'Virtual Objects & Streams',
     description:
       'Restate durable virtual objects and NATS JetStream streams execute resilient event propagation and distributed transactions.',
     chapterId: 'application-platform',
@@ -87,7 +83,6 @@ export const TOPOLOGY_NODES: readonly TopologyNode[] = [
     pillar: 'platform',
     role: 'Unified Metrics, Logs & OTLP Tracing',
     ports: 'TSDB Metrics, LogsQL & OTLP Tracing',
-    displayPorts: 'Metrics, LogsQL & OTLP',
     description:
       'VictoriaMetrics provides 60-day LogsQL log retention, 30-day OTLP distributed tracing, and automated anomaly alert rules.',
     chapterId: 'application-platform',
@@ -104,7 +99,6 @@ export const TOPOLOGY_NODES: readonly TopologyNode[] = [
     pillar: 'factory',
     role: 'DAG Backlog Graph & Ready Queue',
     ports: 'REST API & Streamable HTTP Issue MCP',
-    displayPorts: 'REST API & Issue MCP',
     description:
       'Vikunja tracks dependency tasks with PostgreSQL 19 hybrid search and exposes an unblocked ready queue for autonomous task dispatch.',
     chapterId: 'software-factory',
@@ -121,7 +115,6 @@ export const TOPOLOGY_NODES: readonly TopologyNode[] = [
     pillar: 'factory',
     role: 'Multi-PR Build DAG Orchestration',
     ports: 'Restate Build Workflows & JetStream Bridge',
-    displayPorts: 'Restate Build Workflows',
     description:
       'The build orchestrator coordinates multi-chunk pull requests via Restate virtual objects, updates image tags, and dispatches CI remediation wakes.',
     chapterId: 'software-factory',
@@ -138,7 +131,6 @@ export const TOPOLOGY_NODES: readonly TopologyNode[] = [
     pillar: 'factory',
     role: 'Discord Gateway & Push GitOps',
     ports: 'Discord Gateway, GitHub Webhooks & Push GitOps',
-    displayPorts: 'Webhooks & Push GitOps',
     description:
       'The event router forwards GitHub webhooks and Discord events to Restate workflows while Flux CD delivers declarative GitOps updates.',
     chapterId: 'software-factory',
@@ -155,7 +147,6 @@ export const TOPOLOGY_NODES: readonly TopologyNode[] = [
     pillar: 'agent',
     role: 'Stateless Ingress & Multi-Engine Worker',
     ports: 'Stateless HTTP Ingress & Restate Worker',
-    displayPorts: 'HTTP Ingress & Worker',
     description:
       'A stateless HTTP ingress front door pairs with a durable worker to execute coding engines under security guardrails.',
     chapterId: 'multimodal-agent',
@@ -173,7 +164,6 @@ export const TOPOLOGY_NODES: readonly TopologyNode[] = [
     pillar: 'agent',
     role: 'Cognitive Memory & Persistent Timers',
     ports: 'Hybrid RRF Recall & Durable Cron Watches',
-    displayPorts: 'Hybrid RRF & Cron Watches',
     description:
       'The memory service decays facts with ACT-R algorithms while the persistent scheduler evaluates cron jobs, heartbeats, and external event triggers.',
     chapterId: 'multimodal-agent',
@@ -424,17 +414,11 @@ export function ArchitectureMap() {
                     rx="8"
                     className="node-rect"
                   />
-                  <text x="14" y="28" className="node-icon">
+                  <text x="14" y="43" className="node-icon">
                     {node.icon}
                   </text>
-                  <text x="44" y="27" className="node-title">
+                  <text x="44" y="42" className="node-title">
                     {node.displayName || node.name}
-                  </text>
-                  <text x="44" y="47" className="node-role">
-                    {node.role}
-                  </text>
-                  <text x="44" y="62" className="node-ports">
-                    {node.displayPorts || node.ports}
                   </text>
                 </g>
               );
