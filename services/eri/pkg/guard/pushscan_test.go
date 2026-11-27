@@ -465,6 +465,9 @@ func TestScanPayload(t *testing.T) {
 		{name: "regex ignored on private repo", data: "ssh 10.4.4.4", filePath: "docs/a.md"},
 		{name: "allowlisted file path drops regex", data: "ssh 10.4.4.4", filePath: "testdata/x.txt", policy: public},
 		{name: "allowlist never drops value hit", data: "dummy-payload-secret", filePath: "testdata/x.txt", policy: public, want: []Violation{{Category: "InfisicalSecret", File: "testdata/x.txt", LineNum: 1, Sample: "du***et"}}},
+		{name: "allowed secret sample drops value hit on request body", data: `{"body":"dummy-payload-secret"}`, policy: PushScanPolicy{AllowedSecretSamples: []string{"du***et"}}},
+		{name: "allowed secret sample never drops value hit for file payload", data: "dummy-payload-secret", filePath: "docs/key.md", policy: PushScanPolicy{AllowedSecretSamples: []string{"du***et"}}, want: []Violation{{Category: "InfisicalSecret", File: "docs/key.md", LineNum: 1, Sample: "du***et"}}},
+		{name: "non-matching allowed secret sample retains value hit on request body", data: `{"body":"dummy-payload-secret"}`, policy: PushScanPolicy{AllowedSecretSamples: []string{"ot***er"}}, want: []Violation{{Category: "InfisicalSecret", File: "request body", LineNum: 1, Sample: "du***et"}}},
 		{name: "binary payload skips regex", data: "\x00 10.4.4.4", filePath: "img.bin", policy: public},
 	}
 	for _, tc := range tests {

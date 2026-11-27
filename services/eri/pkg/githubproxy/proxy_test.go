@@ -10,6 +10,8 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -56,7 +58,14 @@ func newEchoUpstream(t *testing.T) *httptest.Server {
 }
 
 func cfgWithPAT(pat string) *config.Config {
-	return config.NewFromData(&config.ConfigData{GitHubPAT: pat})
+	return config.NewFromData(&config.ConfigData{
+		GitHubPAT: pat,
+		PushScan: config.PushScanConfig{
+			SecretAllowlist: []string{
+				"acme/private-repo:hooks:GITHUB_WEBHOOK_SECRET",
+			},
+		},
+	})
 }
 
 func TestRegister(t *testing.T) {
@@ -383,6 +392,17 @@ func TestScanWrites(t *testing.T) {
 	sanitizer.ResetSensitiveTokensForTest()
 	sanitizer.RegisterSensitiveTokens(proxySecret)
 	t.Cleanup(sanitizer.ResetSensitiveTokensForTest)
+
+	origSharedSecrets := config.SharedSecretsPath
+	tmpSecrets := t.TempDir()
+	config.SharedSecretsPath = tmpSecrets
+	t.Cleanup(func() {
+		config.SharedSecretsPath = origSharedSecrets
+	})
+	if err := os.WriteFile(filepath.Join(tmpSecrets, "GITHUB_WEBHOOK_SECRET"), []byte(proxySecret), 0o600); err != nil {
+		t.Fatalf("write secret file: %v", err)
+	}
+
 	upstream := newEchoUpstream(t)
 	t.Setenv("GITHUB_API_URL", upstream.URL)
 	t.Setenv("AERIAL_GITHUB_GIT_UPSTREAM", upstream.URL)
@@ -476,6 +496,10 @@ func TestScanWrites(t *testing.T) {
 			name: "clean api write forwarded", method: http.MethodPatch, target: "/internal/github-api/repos/acme/repo/pulls/2",
 			body: `{"title":"hi"}`, wantStatus: http.StatusOK, wantEcho: true, wantBody: `{"title":"hi"}`,
 		},
+		{
+			name: "webhook config patch with allowlisted secret forwarded", method: http.MethodPatch, target: "/internal/github-api/repos/acme/private-repo/hooks/123/config",
+			body: `{"secret":"` + proxySecret + `"}`, wantStatus: http.StatusOK, wantEcho: true, wantBody: `{"secret":"` + proxySecret + `"}`,
+		},
 	}
 
 	for _, tc := range tests {
@@ -512,6 +536,45 @@ func TestScanWrites(t *testing.T) {
 				t.Errorf("rejection leaked the raw secret: %q", rec.Body.String())
 			}
 		})
+	}
+}
+
+func TestAllowedSecretSamples(t *testing.T) {
+	sanitizer.ResetSensitiveTokensForTest()
+	sanitizer.RegisterSensitiveTokens("my-secret-token-12345")
+	t.Cleanup(sanitizer.ResetSensitiveTokensForTest)
+
+	origShared := config.SharedSecretsPath
+	tmp := t.TempDir()
+	config.SharedSecretsPath = tmp
+	t.Cleanup(func() { config.SharedSecretsPath = origShared })
+
+	if err := os.WriteFile(filepath.Join(tmp, "EXACT_KEY"), []byte("my-secret-token-12345"), 0o600); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(tmp, "CASE_INSENSITIVE_KEY"), []byte("my-secret-token-12345"), 0o600); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+
+	cfg := config.NewFromData(&config.ConfigData{
+		PushScan: config.PushScanConfig{
+			SecretAllowlist: []string{
+				"acme/widgets:hooks:EXACT_KEY",
+				"acme/widgets:hooks:case_insensitive_key",
+				"acme/widgets:hooks:MISSING_KEY",
+			},
+		},
+	})
+
+	if got := allowedSecretSamples(nil, "acme", "widgets", "hooks"); got != nil {
+		t.Fatalf("got %v, want nil", got)
+	}
+	if got := allowedSecretSamples(cfg, "acme", "widgets", "other"); got != nil {
+		t.Fatalf("got %v, want nil", got)
+	}
+	got := allowedSecretSamples(cfg, "acme", "widgets", "hooks")
+	if len(got) == 0 {
+		t.Fatalf("expected non-empty samples, got %v", got)
 	}
 }
 
