@@ -12,43 +12,23 @@ export interface UseCaseScenario {
 
 export const USE_CASE_SCENARIOS: readonly UseCaseScenario[] = [
   {
-    id: 'ci-remediation',
-    category: 'Software Factory',
-    title: 'Self-Healing CI & Code Review Remediation',
+    id: 'personal-agent-errands',
+    category: 'Everyday AI Agent',
+    title: 'Web Browser, Phone Call & Persistent Schedule Errands',
     prompt:
-      'Fix the failing unit tests and address reviewer feedback on the payment webhook pull request.',
+      'Check the city permit portal every morning, call the office if our review status changes, and schedule a Friday summary.',
     engineSteps: [
-      'Parse compiler failure logs from GitHub Actions and locate broken assertion lines in scratch workspace.',
-      'Patch test fixtures, update mock assertions, and verify green test execution locally.',
-      'Push amended commit to pull request branch and notify team in Discord thread.',
+      'Navigate the municipal portal in a headful browser session and extract current application status.',
+      'Register a persistent daily heartbeat schedule in PostgreSQL and place an outbound PSTN phone call when status changes.',
+      'Store extracted reference details in hybrid semantic memory and post the weekly summary to Discord.',
     ],
     outcome:
-      'Automated code review passes, all continuous integration jobs succeed, and pull request merges without manual intervention.',
+      'Everyday web errands, phone calls, and recurring schedules execute durably across restarts with full semantic memory.',
     stackBadges: [
-      'Restate',
-      'GitHub Actions CI',
-      'Ephemeral Scratch Git',
-      'Discord REST API',
-    ],
-  },
-  {
-    id: 'multi-pr-migration',
-    category: 'Cross-Repo Delivery',
-    title: 'Multi-PR DAG Schema & Service Rollout',
-    prompt:
-      'Add a vector embeddings column to PostgreSQL and update API gateway routes across both repositories.',
-    engineSteps: [
-      'Author declarative database schema migration and generate versioned migration scripts.',
-      'Enqueue multi-stage build workflow in Restate across engine and config repositories in topological order.',
-      'Verify database migrations, validate gateway routes, and monitor automated Flux continuous delivery rollout.',
-    ],
-    outcome:
-      'Multi-repository changes deploy sequentially with zero downtime and verified database schema compatibility.',
-    stackBadges: [
-      'Restate',
-      'CloudNativePG Postgres 19',
-      'Flux CD',
-      'NGINX Gateway Fabric',
+      'Headful Browser (CDP)',
+      'PSTN Telephony',
+      'Persistent Scheduler',
+      'Hybrid RRF Memory',
     ],
   },
   {
@@ -72,23 +52,23 @@ export const USE_CASE_SCENARIOS: readonly UseCaseScenario[] = [
     ],
   },
   {
-    id: 'personal-agent-errands',
-    category: 'Everyday AI Agent',
-    title: 'Web Browser, Phone Call & Persistent Schedule Errands',
+    id: 'multi-pr-migration',
+    category: 'Software Factory',
+    title: 'Multi-PR DAG Delivery & Automated CI Verification',
     prompt:
-      'Check the city permit portal every morning, call the office if our review status changes, and schedule a Friday summary.',
+      'Add a vector embeddings column to PostgreSQL and update API gateway routes across both repositories.',
     engineSteps: [
-      'Navigate the municipal portal in a headful browser session and extract current application status.',
-      'Register a persistent daily heartbeat schedule in PostgreSQL and place an outbound PSTN phone call when status changes.',
-      'Store extracted reference details in hybrid semantic memory and post the weekly summary to Discord.',
+      'Author declarative schema updates in isolated scratch workspaces and verify with multi-agent peer review.',
+      'Sequence multi-PR build workflows in Restate and remediate failing GitHub Actions CI checks automatically.',
+      'Deploy verified pull requests with push-driven Flux CD rollout across engine and configuration repositories.',
     ],
     outcome:
-      'Everyday web errands, phone calls, and recurring schedules execute durably across restarts with full semantic memory.',
+      'Multi-repository changes deploy sequentially with zero downtime and verified database schema compatibility.',
     stackBadges: [
-      'Headful Browser (CDP)',
-      'PSTN Telephony',
-      'Persistent Scheduler',
-      'Hybrid RRF Memory',
+      'Restate',
+      'CloudNativePG Postgres 19',
+      'Flux CD',
+      'NGINX Gateway Fabric',
     ],
   },
 ];

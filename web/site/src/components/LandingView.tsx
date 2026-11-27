@@ -97,9 +97,6 @@ export function LandingView() {
           <a href="#/docs/overview" className="btn-primary" data-testid="hero-cta-handbook">
             Read the Handbook
           </a>
-          <a href="#/docs/getting-started" className="btn-secondary" data-testid="hero-cta-quickstart">
-            Getting Started Guide
-          </a>
           <a
             href="https://github.com/azylman/aerial"
             className="btn-secondary"

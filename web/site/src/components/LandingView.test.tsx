@@ -22,6 +22,9 @@ describe('LandingView Component', () => {
   it('renders landing hero, spec-sheet pillar cards with capability rows, and all showcase sections', () => {
     render(<LandingView />);
 
+    expect(screen.queryByTestId('hero-cta-quickstart')).toBeNull();
+    expect(screen.getByTestId('hero-cta-handbook')).toBeTruthy();
+    expect(screen.getByTestId('hero-cta-github')).toBeTruthy();
     expect(screen.queryByTestId('integration-strip')).toBeNull();
     const pillarGrid = screen.getByTestId('pillar-cards');
     expect(PILLAR_CARDS).toHaveLength(3);
@@ -59,9 +62,15 @@ describe('ArchitectureMap Component', () => {
     const nodeK3s = screen.getByTestId('node-k3s-nginx');
     const nodeVikunja = screen.getByTestId('node-vikunja-docket');
 
+    expect(nodeEri.querySelector('.node-title')).toBeTruthy();
+    expect(nodeEri.querySelector('.node-role')).toBeNull();
+    expect(nodeEri.querySelector('.node-ports')).toBeNull();
+
     // Default inspector node
     const inspector = screen.getByTestId('node-inspector');
     expect(within(inspector).getByText('Agent Execution Engine')).toBeTruthy();
+    expect(within(inspector).getByText('Stateless Ingress & Multi-Engine Worker')).toBeTruthy();
+    expect(within(inspector).getByText('Stateless HTTP Ingress & Restate Worker')).toBeTruthy();
 
     // Filter by platform pillar
     fireEvent.click(screen.getByTestId('filter-platform'));
@@ -482,24 +491,19 @@ describe('UseCaseGallery Component', () => {
     cleanup();
   });
 
-  it('renders default scenario and switches tabs across all 4 scenarios', () => {
+  it('renders default scenario and switches tabs across all 3 scenarios', () => {
     render(<UseCaseGallery />);
 
     const promptEl = screen.getByTestId('usecase-prompt');
     const outcomeEl = screen.getByTestId('usecase-outcome');
 
-    // Default scenario: ci-remediation
-    expect(screen.getByTestId('usecase-tab-ci-remediation').classList.contains('active')).toBe(true);
-    expect(promptEl.textContent).toContain('Fix the failing unit tests');
-    expect(outcomeEl.textContent).toContain('Automated code review passes');
-    expect(screen.getByTestId('usecase-step-0').textContent).toContain('Parse compiler failure logs');
+    expect(screen.queryByTestId('usecase-tab-ci-remediation')).toBeNull();
 
-    // Switch to multi-pr-migration
-    fireEvent.click(screen.getByTestId('usecase-tab-multi-pr-migration'));
-    expect(screen.getByTestId('usecase-tab-multi-pr-migration').classList.contains('active')).toBe(true);
-    expect(screen.getByTestId('usecase-prompt').textContent).toContain('vector embeddings column');
-    expect(screen.getByTestId('usecase-outcome').textContent).toContain('Multi-repository changes deploy sequentially');
-    expect(screen.getByTestId('usecase-step-1').textContent).toContain('Enqueue multi-stage build workflow');
+    // Default scenario: personal-agent-errands
+    expect(screen.getByTestId('usecase-tab-personal-agent-errands').classList.contains('active')).toBe(true);
+    expect(promptEl.textContent).toContain('Check the city permit portal');
+    expect(outcomeEl.textContent).toContain('Everyday web errands, phone calls, and recurring schedules');
+    expect(screen.getByTestId('usecase-step-0').textContent).toContain('Navigate the municipal portal');
 
     // Switch to incident-triage
     fireEvent.click(screen.getByTestId('usecase-tab-incident-triage'));
@@ -508,12 +512,12 @@ describe('UseCaseGallery Component', () => {
     expect(screen.getByTestId('usecase-outcome').textContent).toContain('Engineers receive root-cause diagnosis');
     expect(screen.getByTestId('usecase-step-2').textContent).toContain('Publish incident diagnosis');
 
-    // Switch to personal-agent-errands
-    fireEvent.click(screen.getByTestId('usecase-tab-personal-agent-errands'));
-    expect(screen.getByTestId('usecase-tab-personal-agent-errands').classList.contains('active')).toBe(true);
-    expect(screen.getByTestId('usecase-prompt').textContent).toContain('Check the city permit portal');
-    expect(screen.getByTestId('usecase-outcome').textContent).toContain('Everyday web errands, phone calls, and recurring schedules');
-    expect(screen.getByTestId('usecase-step-0').textContent).toContain('Navigate the municipal portal');
+    // Switch to multi-pr-migration
+    fireEvent.click(screen.getByTestId('usecase-tab-multi-pr-migration'));
+    expect(screen.getByTestId('usecase-tab-multi-pr-migration').classList.contains('active')).toBe(true);
+    expect(screen.getByTestId('usecase-prompt').textContent).toContain('vector embeddings column');
+    expect(screen.getByTestId('usecase-outcome').textContent).toContain('Multi-repository changes deploy sequentially');
+    expect(screen.getByTestId('usecase-step-1').textContent).toContain('Sequence multi-PR build workflows');
   });
 });
 
