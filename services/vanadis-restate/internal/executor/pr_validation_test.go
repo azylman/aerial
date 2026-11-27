@@ -480,6 +480,9 @@ type autoMergeTestCase struct {
 	name          string
 	initialBody   string
 	nodeID        string
+	login         string
+	association   string
+	fork          bool
 	fetchStatus   int
 	patchStatus   int
 	graphqlStatus int
@@ -494,6 +497,14 @@ type autoMergeTestCase struct {
 
 func handleAutoMergeRequest(t *testing.T, w http.ResponseWriter, r *http.Request, tc autoMergeTestCase, patched, automerged *bool) {
 	t.Helper()
+	login := "owner"
+	if tc.login != "" {
+		login = tc.login
+	}
+	association := "OWNER"
+	if tc.association != "" {
+		association = tc.association
+	}
 	switch {
 	case r.Method == http.MethodGet && r.URL.Path == "/repos/owner/repo/pulls/10":
 		if tc.fetchStatus != 0 {
@@ -501,7 +512,7 @@ func handleAutoMergeRequest(t *testing.T, w http.ResponseWriter, r *http.Request
 			return
 		}
 		w.WriteHeader(http.StatusOK)
-		n, err := fmt.Fprintf(w, `{"state":"open","merged":false,"body":%q,"node_id":%q,"user":{"login":"owner"},"author_association":"OWNER","head":{"sha":"abc","ref":"feat/branch","repo":{"fork":false,"full_name":"owner/repo"}},"base":{"repo":{"full_name":"owner/repo"}}}`, tc.initialBody, tc.nodeID)
+		n, err := fmt.Fprintf(w, `{"state":"open","merged":false,"body":%q,"node_id":%q,"user":{"login":%q},"author_association":%q,"head":{"sha":"abc","ref":"feat/branch","repo":{"fork":%v,"full_name":"owner/repo"}},"base":{"repo":{"full_name":"owner/repo"}}}`, tc.initialBody, tc.nodeID, login, association, tc.fork)
 		assert.NoError(t, err)
 		assert.Positive(t, n)
 	case r.Method == http.MethodPatch && r.URL.Path == "/repos/owner/repo/pulls/10":
@@ -527,6 +538,30 @@ func handleAutoMergeRequest(t *testing.T, w http.ResponseWriter, r *http.Request
 	default:
 		w.WriteHeader(http.StatusNotFound)
 	}
+}
+
+func runAutoMergeTestCase(t *testing.T, tc autoMergeTestCase) {
+	t.Helper()
+	var patched bool
+	var automerged bool
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		handleAutoMergeRequest(t, w, r, tc, &patched, &automerged)
+	}))
+	defer srv.Close()
+	tok := "test-token"
+	if tc.noToken {
+		tok = ""
+	}
+	exec := NewExecutor("", nil, nil, tok, "example-owner", srv.Client())
+	exec.GitHubAPIURL = srv.URL
+	err := exec.EnsurePRAutoMergeAndContext(context.Background(), tc.build, tc.chunks, tc.chunk, 10)
+	if tc.wantErr {
+		assert.Error(t, err)
+		return
+	}
+	assert.NoError(t, err)
+	assert.Equal(t, tc.wantPatched, patched)
+	assert.Equal(t, tc.wantAutomated, automerged)
 }
 
 func TestEnsurePRAutoMergeAndContext(t *testing.T) {
@@ -622,6 +657,35 @@ func TestEnsurePRAutoMergeAndContext(t *testing.T) {
 			chunk:         model.VanadisChunk{ID: "b-stand-chunk-1", Repo: "owner/repo"},
 		},
 		{
+			name:        "untrusted author skips context patch and automerge",
+			initialBody: "Initial PR description",
+			nodeID:      "PR_kwDO12345",
+			login:       "stranger",
+			association: "NONE",
+			build:       model.VanadisBuild{ID: "b-1", Title: "Multi Build"},
+			chunks: []model.VanadisChunk{
+				{ID: "c-1", ChunkIndex: 0, Repo: "owner/repo"},
+				{ID: "c-2", ChunkIndex: 1, Repo: "owner/repo"},
+			},
+			chunk:         model.VanadisChunk{ID: "c-1", ChunkIndex: 0, Repo: "owner/repo"},
+			wantPatched:   false,
+			wantAutomated: false,
+		},
+		{
+			name:        "fork pr skips context patch and automerge",
+			initialBody: "Initial PR description",
+			nodeID:      "PR_kwDO12345",
+			fork:        true,
+			build:       model.VanadisBuild{ID: "b-1", Title: "Multi Build"},
+			chunks: []model.VanadisChunk{
+				{ID: "c-1", ChunkIndex: 0, Repo: "owner/repo"},
+				{ID: "c-2", ChunkIndex: 1, Repo: "owner/repo"},
+			},
+			chunk:         model.VanadisChunk{ID: "c-1", ChunkIndex: 0, Repo: "owner/repo"},
+			wantPatched:   false,
+			wantAutomated: false,
+		},
+		{
 			name:        "no token on local url skips auth header but automerges",
 			initialBody: "Initial PR description",
 			nodeID:      "PR_kwDO12345",
@@ -639,26 +703,7 @@ func TestEnsurePRAutoMergeAndContext(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			var patched bool
-			var automerged bool
-			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				handleAutoMergeRequest(t, w, r, tc, &patched, &automerged)
-			}))
-			defer srv.Close()
-			tok := "test-token"
-			if tc.noToken {
-				tok = ""
-			}
-			exec := NewExecutor("", nil, nil, tok, "example-owner", srv.Client())
-			exec.GitHubAPIURL = srv.URL
-			err := exec.EnsurePRAutoMergeAndContext(context.Background(), tc.build, tc.chunks, tc.chunk, 10)
-			if tc.wantErr {
-				assert.Error(t, err)
-				return
-			}
-			assert.NoError(t, err)
-			assert.Equal(t, tc.wantPatched, patched)
-			assert.Equal(t, tc.wantAutomated, automerged)
+			runAutoMergeTestCase(t, tc)
 		})
 	}
 }
