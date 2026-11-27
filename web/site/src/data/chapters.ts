@@ -150,13 +150,22 @@ bazel test //services/... //pkg/...`,
         paragraphs: [
           'Aerial does not require managed cloud Kubernetes providers. A commodity computer, homelab server, or virtual machine running Linux hosts the platform and software factory.',
           'The bootstrap process disables Traefik. Aerial standardizes on NGINX Gateway Fabric for Kubernetes Gateway API routing across local networks and external edge tunnels.',
+          'For a fully automated deployment from a fresh Linux host, the single-command scripts/quickstart.sh script auto-installs k3s and Flux CD, generates your private configuration repository from azylman/aerial-config-example, seeds Secret/aerial-bootstrap-secrets, and launches agent authentication.',
         ],
         bullets: [
+          'One-Command Quickstart: Single idempotent bash script automates cluster creation, repo generation, Flux bootstrap, and agy OAuth.',
           'Minimum Hardware: 4 vCPU cores, 8 GB memory, and 60 GB solid-state disk storage.',
           'Network Ingress: NGINX Gateway Fabric manages inbound traffic on host interfaces.',
           'Cluster Management: Standard kubectl, Helm, and Flux CLI binaries administer the cluster.',
         ],
         codeSnippets: [
+          {
+            language: 'bash',
+            caption: 'One-line automated quickstart bootstrap',
+            code: `# Automated single-command installation on a fresh Linux host
+GITHUB_PAT="your-github-pat" DISCORD_BOT_TOKEN="your-discord-bot-token" \\
+  bash -c "$(curl -fsSL https://raw.githubusercontent.com/azylman/aerial/main/scripts/quickstart.sh)"`,
+          },
           {
             language: 'bash',
             caption: 'Install single-node k3s with Traefik disabled',

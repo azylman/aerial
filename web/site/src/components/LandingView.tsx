@@ -46,7 +46,8 @@ export {
   type FaqItem,
 };
 
-export const HERO_INSTALL_COMMAND = QUICKSTART_STEPS[0]!.command;
+export const HERO_INSTALL_COMMAND =
+  'GITHUB_PAT="your-github-pat" DISCORD_BOT_TOKEN="your-discord-bot-token" bash -c "$(curl -fsSL https://raw.githubusercontent.com/azylman/aerial/main/scripts/quickstart.sh)"';
 
 export function LandingView() {
   const { copy, isCopied, isFailed } = useCopyToClipboard();
@@ -68,7 +69,7 @@ export function LandingView() {
 
         {/* Quick-Install Terminal Pill */}
         <div className="hero-install-pill" data-testid="hero-install-pill">
-          <span className="install-pill-badge">Step 1</span>
+          <span className="install-pill-badge">One-Line Install</span>
           <span className="install-pill-prompt" aria-hidden="true">
             $
           </span>

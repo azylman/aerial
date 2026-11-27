@@ -416,6 +416,7 @@ describe('LandingView Hero Quick-Install Pill', () => {
 
     const pill = screen.getByTestId('hero-install-pill');
     expect(pill.textContent).toContain(HERO_INSTALL_COMMAND);
+    expect(pill.textContent).toContain('One-Line Install');
 
     const jumpLink = screen.getByTestId('hero-install-jump');
     expect(jumpLink.getAttribute('href')).toBe('#quickstart');
