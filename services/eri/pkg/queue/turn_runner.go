@@ -4,8 +4,6 @@ import (
 	"context"
 	"fmt"
 	"log"
-	"slices"
-	"strings"
 	"time"
 
 	restate "github.com/restatedev/sdk-go"
@@ -42,7 +40,7 @@ const (
 // turnSteps is the narrow set of WorkerPool step functions the TurnRunner journals.
 type turnSteps interface {
 	RecordBurstStarted(ctx context.Context, threadID string, ids []string) (StartedTurn, error)
-	PrepareBurstTurn(ctx context.Context, threadID, turnID string, ids []string, gated bool) (TurnPrep, error)
+	PrepareBurstTurn(ctx context.Context, threadID, turnID string, ids []string) (TurnPrep, error)
 	RunBurstAttempt(ctx context.Context, in AttemptInput) (AttemptResult, error)
 	RecordBurstOutcome(ctx context.Context, ids []string, summary AttemptSummary) error
 	RunBurstPostTurnHook(ctx context.Context, threadID string, ids []string, attempted bool, outcome TurnOutcome, hookMetadata map[string]string) error
@@ -99,7 +97,7 @@ func ReflectTurnRunner(svc *TurnRunnerService) restate.ServiceDefinition {
 
 // RunBurst runs one burst turn of a ThreadSession key.
 func (s *TurnRunnerService) RunBurst(ctx restate.Context, req BurstTurnRequest) (TurnRunResult, error) {
-	subj := burstRunner{steps: s.steps, threadID: req.ThreadID, ids: normalizeStepIDs(req.MessageIDs), gated: req.Gated}
+	subj := burstRunner{steps: s.steps, threadID: req.ThreadID, ids: normalizeStepIDs(req.MessageIDs)}
 	return s.drive(ctx, subj, ThreadSessionServiceName(s.agentName), req.ThreadID, req.TurnID)
 }
 
@@ -133,7 +131,6 @@ type namedStep struct {
 // turnProgress is what the handler knows about the turn so far.
 type turnProgress struct {
 	ids          []string
-	promptIDs    []string
 	attempted    bool
 	outcome      TurnOutcome
 	delayMs      int64
@@ -146,7 +143,6 @@ type burstRunner struct {
 	steps    turnSteps
 	threadID string
 	ids      []string
-	gated    bool
 }
 
 func (b burstRunner) inputIDs() []string { return b.ids }
@@ -156,7 +152,7 @@ func (b burstRunner) recordStarted(ctx context.Context) (StartedTurn, error) {
 }
 
 func (b burstRunner) prep(ctx context.Context, turnID string, ids []string) (TurnPrep, error) {
-	return b.steps.PrepareBurstTurn(ctx, b.threadID, turnID, ids, b.gated)
+	return b.steps.PrepareBurstTurn(ctx, b.threadID, turnID, ids)
 }
 
 func (b burstRunner) attemptInput(turnID string, ids []string, prep TurnPrep, ordinal int) AttemptInput {
@@ -227,22 +223,9 @@ func (d dispatchRunner) afterSteps(t turnProgress) []namedStep {
 	if !t.attempted || dispatchOutcomeStatus(t.outcome) == "" {
 		return nil
 	}
-	ids := t.ids
-	if len(ids) == 0 {
-		ids = []string{d.dispatchID}
-	}
-	out := make([]namedStep, 0, len(ids))
-	for i, id := range ids {
-		stepName := StepPublishDispatchOut
-		if i > 0 {
-			stepName = fmt.Sprintf("%s-%d", StepPublishDispatchOut, i+1)
-		}
-		targetID := id
-		out = append(out, namedStep{name: stepName, fn: func(ctx context.Context) error {
-			return d.steps.PublishDispatchOutcome(ctx, targetID, t.outcome)
-		}})
-	}
-	return out
+	return []namedStep{{name: StepPublishDispatchOut, fn: func(ctx context.Context) error {
+		return d.steps.PublishDispatchOutcome(ctx, d.dispatchID, t.outcome)
+	}}}
 }
 
 func (d dispatchRunner) stop(ctx context.Context, turnID string, ids []string) error {
@@ -398,7 +381,10 @@ func (s *TurnRunnerService) runAttempts(ctx restate.Context, subj runnerSubject,
 		}
 		t.attempted = true
 		t.last = res
-		t.mergeDrained(res, &runIn)
+		if len(res.DrainedIDs) > 0 {
+			t.ids = normalizeStepIDs(append(t.ids, res.DrainedIDs...))
+			in.IDs = normalizeStepIDs(append(in.IDs, res.DrainedIDs...))
+		}
 		type step struct {
 			action  attemptAction
 			next    AttemptInput
@@ -425,44 +411,6 @@ func (s *TurnRunnerService) runAttempts(ctx restate.Context, subj runnerSubject,
 	}
 }
 
-func (t *turnProgress) mergeDrained(res AttemptResult, runIn *AttemptInput) {
-	if len(res.DrainedIDs) > 0 {
-		t.ids = normalizeStepIDs(append(t.ids, res.DrainedIDs...))
-		runIn.IDs = normalizeStepIDs(append(runIn.IDs, res.DrainedIDs...))
-	}
-	if len(res.DrainedItems) > 0 {
-		for _, item := range res.DrainedItems {
-			if item.ID != "" && !slices.Contains(t.promptIDs, item.ID) {
-				t.promptIDs = append(t.promptIDs, item.ID)
-				if p := strings.TrimSpace(item.Prompt); p != "" {
-					runIn.Prep.Prompt += "\n\n" + p
-				}
-			}
-		}
-		return
-	}
-	mergeLegacyDrainedPrompts(res, t, runIn)
-}
-
-func mergeLegacyDrainedPrompts(res AttemptResult, t *turnProgress, runIn *AttemptInput) {
-	for i, p := range res.DrainedPrompts {
-		id := ""
-		if i < len(res.DrainedIDs) {
-			id = res.DrainedIDs[i]
-		}
-		if id != "" && !slices.Contains(t.promptIDs, id) {
-			t.promptIDs = append(t.promptIDs, id)
-			if p = strings.TrimSpace(p); p != "" {
-				runIn.Prep.Prompt += "\n\n" + p
-			}
-		} else if id == "" {
-			if p = strings.TrimSpace(p); p != "" && !strings.Contains(runIn.Prep.Prompt, p) {
-				runIn.Prep.Prompt += "\n\n" + p
-			}
-		}
-	}
-}
-
 // outcomeSummary is the record-outcome input for the turn so far.
 func outcomeSummary(t turnProgress) AttemptSummary {
 	summary := AttemptSummary{
@@ -484,7 +432,7 @@ func endOnTerminal(ctx restate.Context, subj runnerSubject, coordinator, key, tu
 	if len(prog) > 0 {
 		t = prog[0]
 	}
-	ids := normalizeStepIDs(append(subj.inputIDs(), t.ids...))
+	ids := subj.inputIDs()
 	outcome := OutcomeFailed
 	var stepErr error
 	if isRestateCancel(cause) {

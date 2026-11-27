@@ -66,14 +66,8 @@ type turnExecution struct {
 	turnID                                                                                      string
 	steerMu                                                                                     sync.Mutex
 	steeringClosed                                                                              bool
-	pendingDrainIDs                                                                             []string
 	drainedIDs                                                                                  []string
-	drainedPrompts                                                                              []string
-	drainedItems                                                                                []DrainedPrompt
-	promptDrainedIDs                                                                            []string
-	steeredMessages                                                                             []db.Message
 	steeredDispatches                                                                           []db.Dispatch
-	ingressGated                                                                                bool
 }
 
 func (te *turnExecution) touchSessionIDLocked(id string) {
@@ -108,59 +102,7 @@ func (te *turnExecution) enqueueTranscriptPublish() {
 }
 
 func (te *turnExecution) isDispatch() bool {
-	if te == nil {
-		return false
-	}
-	te.activeSessionMu.Lock()
-	defer te.activeSessionMu.Unlock()
-	return te.dispatch != nil
-}
-
-func (te *turnExecution) isDispatchLocked() bool {
 	return te != nil && te.dispatch != nil
-}
-
-type turnMatchSnapshot struct {
-	lease            runner.SessionLease
-	activeTurnDaemon string
-	currentSessionID string
-	leaseSessionID   string
-	threadID         string
-	turnID           string
-	isDispatch       bool
-}
-
-func (te *turnExecution) matchSnapshot() turnMatchSnapshot {
-	if te == nil {
-		return turnMatchSnapshot{}
-	}
-	te.activeSessionMu.Lock()
-	defer te.activeSessionMu.Unlock()
-	return turnMatchSnapshot{
-		lease:            te.lease,
-		activeTurnDaemon: te.activeTurnDaemon,
-		currentSessionID: te.currentSessionID,
-		leaseSessionID:   te.leaseSessionID,
-		threadID:         te.threadID,
-		turnID:           te.turnID,
-		isDispatch:       te.dispatch != nil,
-	}
-}
-
-func (te *turnExecution) closeSteering() {
-	if te == nil {
-		return
-	}
-	te.steerMu.Lock()
-	te.steeringClosed = true
-	steered := slices.Clone(te.steeredMessages)
-	te.steeredMessages = nil
-	te.steerMu.Unlock()
-	if len(steered) > 0 {
-		te.activeSessionMu.Lock()
-		te.burst = append(te.burst, steered...)
-		te.activeSessionMu.Unlock()
-	}
 }
 
 func (te *turnExecution) leaseKey() string {
@@ -168,16 +110,6 @@ func (te *turnExecution) leaseKey() string {
 		return ""
 	}
 	if te.isDispatch() {
-		return te.threadID
-	}
-	return db.DiscordSessionID(te.threadID)
-}
-
-func (te *turnExecution) leaseKeyLocked() string {
-	if te == nil {
-		return ""
-	}
-	if te.isDispatchLocked() {
 		return te.threadID
 	}
 	return db.DiscordSessionID(te.threadID)
@@ -289,10 +221,7 @@ func (te *turnExecution) finalizeBurstMessages(msgs []db.Message, msgStatus, msg
 		} else {
 			te.updateDispatchStatus(te.dispatch.ID, msgStatus, msgOutput, telemetry...)
 		}
-		te.steerMu.Lock()
-		steeredDisps := slices.Clone(te.steeredDispatches)
-		te.steerMu.Unlock()
-		for _, d := range steeredDisps {
+		for _, d := range te.steeredDispatches {
 			if isResponse {
 				te.updateDispatchCompleted(d.ID, msgOutput, telemetry...)
 			} else {
@@ -657,20 +586,18 @@ func (te *turnExecution) handleAllAmbientPlan() bool {
 }
 
 func (te *turnExecution) runChannelAmbientTriage() bool {
-	if !te.isIngressGated() {
-		botUserID, botRoleIDs := te.resolveBotIdentity()
-		wakeMode := te.policy.GetWakeMode()
-		hookOverride := te.resolveWakeHookOverride(te.turnCtxValue())
+	botUserID, botRoleIDs := te.resolveBotIdentity()
+	wakeMode := te.policy.GetWakeMode()
+	hookOverride := te.resolveWakeHookOverride(te.turnCtxValue())
 
-		plan := PlanBurstExecution(BurstPlanInput{
-			Burst: te.burst, WakeMode: wakeMode, Threshold: te.policy.GetAmbientWakeThreshold(),
-			BotUserID: botUserID, BotRoleIDs: botRoleIDs, HookOverride: hookOverride, ClassifierFn: te.classifyAmbientMessages,
-		})
-		te.wakeIdx, te.wakeInfos = plan.WakeIndex, plan.WakeInfos
+	plan := PlanBurstExecution(BurstPlanInput{
+		Burst: te.burst, WakeMode: wakeMode, Threshold: te.policy.GetAmbientWakeThreshold(),
+		BotUserID: botUserID, BotRoleIDs: botRoleIDs, HookOverride: hookOverride, ClassifierFn: te.classifyAmbientMessages,
+	})
+	te.wakeIdx, te.wakeInfos = plan.WakeIndex, plan.WakeInfos
 
-		if plan.IsAllAmbient {
-			return te.handleAllAmbientPlan()
-		}
+	if plan.IsAllAmbient {
+		return te.handleAllAmbientPlan()
 	}
 
 	if te.currentSessionID != "" && te.pool.sessionMgr != nil && !te.pool.sessionMgr.SessionExistsOnDisk(te.currentSessionID) {
@@ -695,10 +622,6 @@ func (te *turnExecution) startTurnIndicators() {
 	}
 }
 
-func (te *turnExecution) isIngressGated() bool {
-	return te != nil && te.ingressGated
-}
-
 func (te *turnExecution) evaluateAmbientWake() (shouldExit bool) {
 	if shouldEvaluateAmbientWake(te.policy.Mode, te.isThread, isHTTPClientBurst(te.burst)) {
 		if te.runChannelAmbientTriage() {
@@ -718,6 +641,9 @@ func (te *turnExecution) evaluateAmbientWake() (shouldExit bool) {
 // EvaluateIngressWake evaluates whether an incoming Discord message should wake a turn
 // or be completed immediately (e.g. ignored channel policy or ambient message).
 func (p *WorkerPool) EvaluateIngressWake(ctx context.Context, threadID string, msg db.Message) (shouldEnqueue bool, completedReason string) {
+	if p == nil {
+		return true, ""
+	}
 	te := p.newStepTurnExecution(ctx, threadID, []db.Message{msg})
 	te.resolveChannelPolicy()
 	if !isHTTPClientBurst(te.burst) && te.policy.IsIgnored() {
@@ -917,10 +843,7 @@ func (te *turnExecution) executeLeaseAttemptCtx(runCtx context.Context, currentM
 		te.traceSink = sink
 		// The loopback MCP proxy claims this attempt's execute_tool spans to nest MCP calls
 		// under them; a retry attempt replaces the source.
-		te.activeSessionMu.Lock()
-		daemon := te.activeTurnDaemon
-		te.activeSessionMu.Unlock()
-		te.pool.ActiveTurns().SetToolSpans(daemon, sink)
+		te.pool.ActiveTurns().SetToolSpans(te.activeTurnDaemon, sink)
 		turnCtx := te.buildLeaseTurnContext(runCtx, currentModel, promptToSend, sink)
 		// Setup ends at hand-off: from here the daemon's chat span (and any respawn) takes over.
 		te.endSetupSpan()

@@ -127,7 +127,6 @@ func assertStoreUnavailable(t *testing.T, s Store) {
 	requireErr(t, c1(s.FailMessagesIfActive(ctx, []string{"id"}, "r")), "FailMessagesIfActive")
 	requireErr(t, c1(s.FailMessagesIfPending(ctx, []string{"id"}, "r")), "FailMessagesIfPending")
 	requireErr(t, c1(s.SkipMessagesIfActive(ctx, []string{"id"}, "r")), "SkipMessagesIfActive")
-	requireErr(t, c1(s.SkipMessagesIfPending(ctx, []string{"id"}, "r")), "SkipMessagesIfPending")
 	requireErr(t, c1(s.RequeueProcessingMessages(ctx, []string{"id"}, "r")), "RequeueProcessingMessages")
 	requireErr(t, c1(s.BeginMessageAttempt(ctx, "id", 1)), "BeginMessageAttempt")
 	requireErr(t, c1(s.FailDispatchesIfActive(ctx, []string{"id"}, "r")), "FailDispatchesIfActive")

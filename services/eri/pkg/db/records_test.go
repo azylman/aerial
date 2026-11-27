@@ -242,19 +242,6 @@ func failIfPendingCases(table string) []recordTransitionCase {
 	}
 }
 
-func skipIfPendingCases(table string) []recordTransitionCase {
-	return []recordTransitionCase{
-		{
-			name: "leaves processing and terminal rows untouched", ids: []string{mProc, mPendA, mDone, mFail},
-			wantChanged: []string{mPendA},
-			want: map[string]recordState{
-				mProc: {StatusProcessing, "", 1, 0}, mPendA: {StatusCompleted, failReason, 0, 0}, mDone: {StatusCompleted, "", 1, 0}, mFail: {StatusFailed, oldErr, 0, 0},
-			},
-		},
-		{name: "retryable update failure surfaces", ids: []string{mPendA}, sabotageSQL: failTriggerSQL(table, "UPDATE", "08006"), wantErr: "failed updating " + table + " by id"},
-	}
-}
-
 func TestFailMessagesIfActive(t *testing.T) {
 	t.Parallel()
 	runRecordTransitions(t, (*SQLStore).FailMessagesIfActive, failReason, messageState, ifActiveCases("messages", StatusFailed, "40001"))
@@ -268,11 +255,6 @@ func TestFailMessagesIfPending(t *testing.T) {
 func TestSkipMessagesIfActive(t *testing.T) {
 	t.Parallel()
 	runRecordTransitions(t, (*SQLStore).SkipMessagesIfActive, failReason, messageState, ifActiveCases("messages", StatusCompleted, "23505"))
-}
-
-func TestSkipMessagesIfPending(t *testing.T) {
-	t.Parallel()
-	runRecordTransitions(t, (*SQLStore).SkipMessagesIfPending, failReason, messageState, skipIfPendingCases("messages"))
 }
 
 func TestFailDispatchesIfActive(t *testing.T) {

@@ -9,7 +9,6 @@ import (
 	"log"
 	"net/http"
 	"net/url"
-	"slices"
 	"strings"
 	"time"
 
@@ -26,10 +25,9 @@ const SteerDrainPath = "/internal/turn/drain-pending"
 
 // SteerDrainRequest is the payload sent to POST /internal/turn/drain-pending.
 type SteerDrainRequest struct {
-	DaemonID       string   `json:"daemon_id"`
-	ConversationID string   `json:"conversation_id"`
-	SessionID      string   `json:"session_id"`
-	AckIDs         []string `json:"ack_ids,omitempty"`
+	DaemonID       string `json:"daemon_id"`
+	ConversationID string `json:"conversation_id"`
+	SessionID      string `json:"session_id"`
 }
 
 // SteerDrainResponse is the response returned by POST /internal/turn/drain-pending.
@@ -42,7 +40,7 @@ func writeDrainError(w http.ResponseWriter, status int, msg string) {
 }
 
 func (p *WorkerPool) drainHTTPClient() *http.Client {
-	if p.cfg.DrainHTTPClient != nil {
+	if p != nil && p.cfg.DrainHTTPClient != nil {
 		return p.cfg.DrainHTTPClient
 	}
 	return &http.Client{Timeout: 10 * time.Second}
@@ -50,14 +48,28 @@ func (p *WorkerPool) drainHTTPClient() *http.Client {
 
 // RegisterSteerHandler mounts POST /internal/turn/drain-pending wrapped in httpkit.LoopbackOnly.
 func RegisterSteerHandler(mux *http.ServeMux, pool *WorkerPool) {
+	if mux == nil || pool == nil {
+		return
+	}
 	mux.Handle("POST "+SteerDrainPath, httpkit.LoopbackOnly(http.HandlerFunc(pool.HandleDrainPending)))
 }
 
-func (p *WorkerPool) resolveDrainTarget(w http.ResponseWriter, r *http.Request) (SteerDrainRequest, *turnExecution, bool) {
+// HandleDrainPending drains pending messages or dispatches for the turn currently running under
+// the daemon or conversation identified by req.
+func (p *WorkerPool) HandleDrainPending(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		w.Header().Set("Allow", http.MethodPost)
+		writeDrainError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	if p == nil || p.turns == nil {
+		writeDrainError(w, http.StatusNotFound, "turn registry not available")
+		return
+	}
 	var req SteerDrainRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeDrainError(w, http.StatusBadRequest, fmt.Sprintf("invalid request: %v", err))
-		return req, nil, false
+		return
 	}
 
 	reqDaemonID := strings.TrimSpace(req.DaemonID)
@@ -65,7 +77,7 @@ func (p *WorkerPool) resolveDrainTarget(w http.ResponseWriter, r *http.Request) 
 	reqSessID := strings.TrimSpace(req.SessionID)
 	if reqDaemonID == "" && reqConvID == "" && reqSessID == "" {
 		writeDrainError(w, http.StatusBadRequest, "at least one of daemon_id, conversation_id, or session_id is required")
-		return req, nil, false
+		return
 	}
 
 	te := p.turns.FindExecution(func(candidate *turnExecution) bool {
@@ -73,46 +85,24 @@ func (p *WorkerPool) resolveDrainTarget(w http.ResponseWriter, r *http.Request) 
 	})
 	if te == nil {
 		writeDrainError(w, http.StatusNotFound, "no active turn found")
-		return req, nil, false
-	}
-	return req, te, true
-}
-
-// HandleDrainPending drains pending messages or dispatches for the turn currently running under
-// the daemon or conversation identified by req.
-func (p *WorkerPool) HandleDrainPending(w http.ResponseWriter, r *http.Request) {
-	req, te, ok := p.resolveDrainTarget(w, r)
-	if !ok {
 		return
 	}
 
 	te.steerMu.Lock()
 	defer te.steerMu.Unlock()
 
-	if len(req.AckIDs) > 0 {
-		te.pendingDrainIDs = removeIDs(te.pendingDrainIDs, req.AckIDs)
-		snap := te.matchSnapshot()
-		p.ackRestateDrain(r.Context(), snap, req.AckIDs)
-	}
-
 	if te.steeringClosed || te.finalized.Load() || te.isInterrupted() || r.Context().Err() != nil {
 		writeDrainError(w, http.StatusConflict, "turn steering closed or interrupted")
 		return
 	}
 
-	snap := te.matchSnapshot()
-	coordResp, cErr := p.callRestateDrain(r.Context(), snap, nil)
+	coordResp, cErr := p.callRestateDrain(r.Context(), te)
 	if cErr != nil {
 		writeDrainError(w, http.StatusBadGateway, cErr.Error())
 		return
 	}
 
-	candidates := removeIDs(normalizeStepIDs(append(slices.Clone(te.pendingDrainIDs), coordResp.DrainedIDs...)), te.drainedIDs)
-	te.pendingDrainIDs = candidates
-	if len(candidates) == 0 {
-		if len(coordResp.DrainedIDs) > 0 {
-			p.ackRestateDrain(r.Context(), snap, coordResp.DrainedIDs)
-		}
+	if len(coordResp.DrainedIDs) == 0 {
 		httpkit.WriteJSON(w, http.StatusOK, SteerDrainResponse{Prompts: []string{}})
 		return
 	}
@@ -123,104 +113,35 @@ func (p *WorkerPool) HandleDrainPending(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	prompts, ackIDs, disps, msgs, dErr := p.drainTurnCandidates(r.Context(), s, snap, candidates)
-	if dErr != nil {
-		writeDrainError(w, http.StatusInternalServerError, dErr.Error())
-		return
-	}
-	if len(prompts) == 0 {
-		if len(ackIDs) > 0 {
-			te.pendingDrainIDs = removeIDs(te.pendingDrainIDs, ackIDs)
-			p.ackRestateDrain(r.Context(), snap, ackIDs)
-		}
-		httpkit.WriteJSON(w, http.StatusOK, SteerDrainResponse{Prompts: []string{}})
+	if te.isDispatch() {
+		prompts := p.drainDispatchTurn(r.Context(), te, s, coordResp.DrainedIDs)
+		httpkit.WriteJSON(w, http.StatusOK, SteerDrainResponse{Prompts: prompts})
 		return
 	}
 
-	if !writeDrainResponse(w, prompts) {
+	prompts, bErr := p.drainBurstTurn(r.Context(), te, s, coordResp.DrainedIDs)
+	if bErr != nil {
+		writeDrainError(w, http.StatusInternalServerError, bErr.Error())
 		return
 	}
-	if !te.canDeliverDrain(r.Context()) {
-		return
-	}
-
-	p.commitDrainPending(r.Context(), te, snap, disps, msgs, prompts, ackIDs)
+	httpkit.WriteJSON(w, http.StatusOK, SteerDrainResponse{Prompts: prompts})
 }
 
-func (te *turnExecution) canDeliverDrain(ctx context.Context) bool {
-	return ctx.Err() == nil && !te.steeringClosed && !te.finalized.Load() && !te.isInterrupted()
-}
-
-func (p *WorkerPool) drainTurnCandidates(ctx context.Context, s db.Store, snap turnMatchSnapshot, candidates []string) ([]string, []string, []db.Dispatch, []db.Message, error) {
-	if snap.isDispatch {
-		prompts, ackIDs, disps, dErr := p.drainDispatchTurn(ctx, s, snap.turnID, candidates)
-		return prompts, ackIDs, disps, nil, dErr
-	}
-	prompts, ackIDs, msgs, dErr := p.drainBurstTurn(ctx, s, snap.turnID, candidates)
-	return prompts, ackIDs, nil, msgs, dErr
-}
-
-func writeDrainResponse(w http.ResponseWriter, prompts []string) bool {
-	respBytes, err := json.Marshal(SteerDrainResponse{Prompts: prompts})
-	if err != nil {
-		writeDrainError(w, http.StatusInternalServerError, err.Error())
-		return false
-	}
-	w.Header().Set("Content-Type", "application/json")
-	if _, err := w.Write(respBytes); err != nil {
-		return false
-	}
-	if flusher, ok := w.(http.Flusher); ok {
-		flusher.Flush()
-	}
-	return true
-}
-
-func (p *WorkerPool) commitDrainPending(ctx context.Context, te *turnExecution, snap turnMatchSnapshot, disps []db.Dispatch, msgs []db.Message, prompts, ackIDs []string) {
-	if snap.isDispatch {
-		te.steeredDispatches = append(te.steeredDispatches, disps...)
-		for _, d := range disps {
-			pText := strings.TrimSpace(d.Prompt)
-			te.drainedItems = append(te.drainedItems, DrainedPrompt{ID: d.ID, Prompt: pText})
-			if pText != "" {
-				te.drainedPrompts = append(te.drainedPrompts, pText)
-			}
-		}
-	} else {
-		te.steeredMessages = append(te.steeredMessages, msgs...)
-		for _, m := range msgs {
-			te.drainedItems = append(te.drainedItems, DrainedPrompt{ID: m.ID, Prompt: prompts[0]})
-		}
-		te.drainedPrompts = append(te.drainedPrompts, prompts...)
-	}
-	for _, id := range ackIDs {
-		te.drainedIDs = normalizeStepIDs(append(te.drainedIDs, id))
-	}
-	te.pendingDrainIDs = removeIDs(te.pendingDrainIDs, ackIDs)
-	p.ackRestateDrain(ctx, snap, ackIDs)
-}
-
-func (p *WorkerPool) ackRestateDrain(ctx context.Context, snap turnMatchSnapshot, ackIDs []string) {
-	if _, err := p.callRestateDrain(ctx, snap, ackIDs); err != nil {
-		log.Printf("[SteerHandler] Warning acknowledging drained IDs: %v", err)
-	}
-}
-
-func (p *WorkerPool) callRestateDrain(ctx context.Context, snap turnMatchSnapshot, ackIDs []string) (DrainPendingResponse, error) {
+func (p *WorkerPool) callRestateDrain(ctx context.Context, te *turnExecution) (DrainPendingResponse, error) {
 	ingressURL := p.resolveRestateIngressURL()
 	if ingressURL == "" {
 		ingressURL = "http://restate.aerial:8080"
 	}
 	agentName := p.cfg.AgentName
 	var serviceName string
-	if snap.isDispatch {
+	if te.isDispatch() {
 		serviceName = DispatchSessionServiceName(agentName)
 	} else {
 		serviceName = ThreadSessionServiceName(agentName)
 	}
-	targetURL := fmt.Sprintf("%s/%s/%s/DrainPending", ingressURL, serviceName, url.PathEscape(snap.threadID))
+	targetURL := fmt.Sprintf("%s/%s/%s/DrainPending", ingressURL, serviceName, url.PathEscape(te.threadID))
 
-	bodyBytes, err := json.Marshal(DrainPendingRequest{TurnID: snap.turnID, AckIDs: normalizeStepIDs(ackIDs)})
+	bodyBytes, err := json.Marshal(DrainPendingRequest{TurnID: te.turnID})
 	if err != nil {
 		return DrainPendingResponse{}, err
 	}
@@ -253,31 +174,24 @@ func (p *WorkerPool) callRestateDrain(ctx context.Context, snap turnMatchSnapsho
 	return coordResp, nil
 }
 
-func (*WorkerPool) drainDispatchTurn(ctx context.Context, s db.Store, turnID string, drainedIDs []string) ([]string, []string, []db.Dispatch, error) {
-	if rErr := recordTurnOwnedIDs(ctx, s, turnID, drainedIDs); rErr != nil {
-		return nil, nil, nil, rErr
-	}
-	var (
-		prompts []string
-		ackIDs  []string
-		disps   []db.Dispatch
-	)
+func (*WorkerPool) drainDispatchTurn(ctx context.Context, te *turnExecution, s db.Store, drainedIDs []string) []string {
+	var prompts []string
 	for _, id := range drainedIDs {
-		if _, cErr := s.ClaimPendingDispatch(ctx, id); cErr != nil {
+		claimed, cErr := s.ClaimPendingDispatch(ctx, id)
+		if cErr != nil {
 			log.Printf("[SteerHandler] Error claiming pending dispatch %s: %v", id, cErr)
-			return nil, ackIDs, disps, fmt.Errorf("claim pending dispatch %s: %w", id, cErr)
-		}
-		d, gErr := s.GetDispatch(ctx, id)
-		if gErr != nil {
-			log.Printf("[SteerHandler] Error getting dispatch %s: %v", id, gErr)
-			return nil, ackIDs, disps, fmt.Errorf("get dispatch %s: %w", id, gErr)
-		}
-		if d == nil || d.Status != db.StatusProcessing {
-			ackIDs = normalizeStepIDs(append(ackIDs, id))
 			continue
 		}
-		disps = append(disps, *d)
-		ackIDs = normalizeStepIDs(append(ackIDs, d.ID))
+		if !claimed {
+			continue
+		}
+		d, gErr := s.GetDispatch(ctx, id)
+		if gErr != nil || d == nil {
+			log.Printf("[SteerHandler] Error getting dispatch %s: %v", id, gErr)
+			continue
+		}
+		te.steeredDispatches = append(te.steeredDispatches, *d)
+		te.drainedIDs = append(te.drainedIDs, d.ID)
 		if pText := strings.TrimSpace(d.Prompt); pText != "" {
 			prompts = append(prompts, pText)
 		}
@@ -285,55 +199,62 @@ func (*WorkerPool) drainDispatchTurn(ctx context.Context, s db.Store, turnID str
 	if prompts == nil {
 		prompts = []string{}
 	}
-	return prompts, ackIDs, disps, nil
+	return prompts
 }
 
-func (p *WorkerPool) drainBurstTurn(ctx context.Context, s db.Store, turnID string, drainedIDs []string) ([]string, []string, []db.Message, error) {
-	if rErr := recordTurnOwnedIDs(ctx, s, turnID, drainedIDs); rErr != nil {
-		return nil, nil, nil, rErr
-	}
+func (p *WorkerPool) drainBurstTurn(ctx context.Context, te *turnExecution, s db.Store, drainedIDs []string) ([]string, error) {
+	var claimedIDs []string
 	for _, id := range drainedIDs {
-		if _, cErr := s.ClaimPendingMessage(ctx, id); cErr != nil {
+		claimed, cErr := s.ClaimPendingMessage(ctx, id)
+		if cErr != nil {
 			log.Printf("[SteerHandler] Error claiming pending message %s: %v", id, cErr)
-			return nil, nil, nil, fmt.Errorf("claim pending message %s: %w", id, cErr)
+			continue
+		}
+		if claimed {
+			claimedIDs = append(claimedIDs, id)
 		}
 	}
-	rows, err := messagesByIDOrdered(ctx, s, drainedIDs)
+	if len(claimedIDs) == 0 {
+		return []string{}, nil
+	}
+	rows, err := messagesByIDOrdered(ctx, s, claimedIDs)
 	if err != nil {
-		return nil, nil, nil, err
+		return nil, err
 	}
-	var activeRows []db.Message
+	te.burst = append(te.burst, rows...)
 	for _, row := range rows {
-		if row.Status == db.StatusProcessing {
-			activeRows = append(activeRows, row)
+		te.drainedIDs = append(te.drainedIDs, row.ID)
+	}
+	var tz string
+	if p.appCfg != nil {
+		if cur := p.appCfg.Current(); cur != nil {
+			tz = cur.Timezone
 		}
 	}
-	ackIDs := normalizeStepIDs(drainedIDs)
-	if len(activeRows) == 0 {
-		return []string{}, ackIDs, nil, nil
-	}
-	coalesced := CoalesceBurstPrompt(activeRows, p.currentTimezone())
+	coalesced := CoalesceBurstPrompt(rows, tz)
 	var prompts []string
 	if strings.TrimSpace(coalesced) != "" {
 		prompts = append(prompts, coalesced)
 	} else {
 		prompts = []string{}
 	}
-	return prompts, ackIDs, activeRows, nil
+	return prompts, nil
 }
 
 func matchTurnExecution(te *turnExecution, daemonID, conversationID, sessionID string) bool {
-	snap := te.matchSnapshot()
+	if te == nil {
+		return false
+	}
 	var owner runner.ActiveTurnOwner
-	if snap.lease != nil {
-		if o, ok := snap.lease.(runner.ActiveTurnOwner); ok {
+	if te.lease != nil {
+		if o, ok := te.lease.(runner.ActiveTurnOwner); ok {
 			owner = o
 		}
 	}
 
 	// Primary match: DaemonID
 	if daemonID != "" {
-		if snap.activeTurnDaemon == daemonID {
+		if te.activeTurnDaemon == daemonID {
 			return true
 		}
 		if owner != nil && owner.ActiveTurn().DaemonID == daemonID {
@@ -342,13 +263,21 @@ func matchTurnExecution(te *turnExecution, daemonID, conversationID, sessionID s
 	}
 
 	// Fallback match: ConversationID or SessionID
+	te.activeSessionMu.Lock()
+	currSess := te.currentSessionID
+	leaseSess := te.leaseSessionID
+	te.activeSessionMu.Unlock()
+
 	var ownerConv string
 	if owner != nil {
 		ownerConv = owner.ActiveTurn().ConversationID
 	}
 
 	matchesTarget := func(target string) bool {
-		return target == snap.currentSessionID || target == snap.leaseSessionID || (ownerConv != "" && target == ownerConv)
+		if target == "" {
+			return false
+		}
+		return target == currSess || target == leaseSess || (ownerConv != "" && target == ownerConv)
 	}
 
 	if conversationID != "" && matchesTarget(conversationID) {

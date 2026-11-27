@@ -1371,7 +1371,17 @@ func wallClockResetIn(t *testing.T, d time.Duration) string {
 func TestWorkerPool_EvaluateIngressWake(t *testing.T) {
 	t.Parallel()
 
-	// 1. Ignored channel returns false, "[IGNORE]" and invokes OnMessageCompleted
+	// 1. Nil pool returns true, ""
+	var nilPool *WorkerPool
+	should, reason := nilPool.EvaluateIngressWake(context.Background(), "th-1", db.Message{})
+	if !should {
+		t.Errorf("nilPool: should = false, want true")
+	}
+	if reason != "" {
+		t.Errorf("nilPool: reason = %q, want empty", reason)
+	}
+
+	// 2. Ignored channel returns false, "[IGNORE]" and invokes OnMessageCompleted
 	var completedMsgID string
 	var completedStatus string
 	poolIgnored := NewWorkerPool(WorkerPoolConfig{
@@ -1384,7 +1394,7 @@ func TestWorkerPool_EvaluateIngressWake(t *testing.T) {
 		},
 	})
 	msgIgnored := db.Message{ID: "msg-ign-1", ThreadID: "th-ignored", Content: "ignore this"}
-	should, reason := poolIgnored.EvaluateIngressWake(context.Background(), "th-ignored", msgIgnored)
+	should, reason = poolIgnored.EvaluateIngressWake(context.Background(), "th-ignored", msgIgnored)
 	if should {
 		t.Errorf("poolIgnored: should = true, want false")
 	}

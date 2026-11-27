@@ -31,11 +31,8 @@ const CrashLoopCap = 3
 
 // State keys of the coordinator objects.
 const (
-	StateKeyPending  = "pending"
-	StateKeyActive   = "active"
-	StateKeyIngress  = "ingress"
-	StateKeyGated    = "gated"
-	StateKeyDraining = "draining"
+	StateKeyPending = "pending"
+	StateKeyActive  = "active"
 )
 
 // Handler names.
@@ -56,7 +53,6 @@ const (
 // Step names.
 const (
 	StepRecordQueued         = "record-queued"
-	StepGateIngressWake      = "gate-ingress-wake"
 	StepResolveTargetThread  = "resolve-target-thread"
 	StepLookupExisting       = "lookup-existing"
 	StepRecordSkipped        = "record-skipped"
@@ -87,7 +83,6 @@ type BurstTurnRequest struct {
 	ThreadID   string   `json:"thread_id"`
 	TurnID     string   `json:"turn_id"`
 	MessageIDs []string `json:"message_ids"`
-	Gated      bool     `json:"gated,omitempty"`
 }
 
 type DispatchTurnRequest struct {
@@ -116,12 +111,8 @@ type ActiveTurn struct {
 }
 
 type AppendRequest struct {
-	IDs          []string `json:"ids,omitempty"`
-	ReserveID    string   `json:"reserve_id,omitempty"`
-	DropID       string   `json:"drop_id,omitempty"`
-	SkipIfActive bool     `json:"skip_if_active,omitempty"`
-	Gated        bool     `json:"gated,omitempty"`
-	FromIngress  bool     `json:"from_ingress,omitempty"`
+	IDs          []string `json:"ids"`
+	SkipIfActive bool     `json:"skip_if_active"`
 }
 
 type KickRequest struct {
@@ -129,18 +120,11 @@ type KickRequest struct {
 }
 
 type DrainPendingRequest struct {
-	TurnID string   `json:"turn_id"`
-	AckIDs []string `json:"ack_ids,omitempty"`
+	TurnID string `json:"turn_id"`
 }
 
 type DrainPendingResponse struct {
 	DrainedIDs []string `json:"drained_ids,omitempty"`
-}
-
-// DrainedPrompt pairs a drained row ID with its prompt text.
-type DrainedPrompt struct {
-	ID     string `json:"id"`
-	Prompt string `json:"prompt"`
 }
 
 type ClearPendingRequest struct {

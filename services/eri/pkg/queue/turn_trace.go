@@ -262,29 +262,21 @@ func (p *WorkerPool) ActiveTurns() *runner.ActiveTurnRegistry {
 // a different daemon or conversation.
 func (te *turnExecution) registerActiveTurn() {
 	te.clearActiveTurn()
-	te.activeSessionMu.Lock()
-	lease := te.lease
-	te.activeSessionMu.Unlock()
-	owner, ok := lease.(runner.ActiveTurnOwner)
+	owner, ok := te.lease.(runner.ActiveTurnOwner)
 	if !ok || te.turnSpan == nil {
 		return
 	}
 	turn := owner.ActiveTurn()
 	te.pool.ActiveTurns().Set(turn, te.turnSpan.SpanContext())
-	te.activeSessionMu.Lock()
 	te.activeTurnDaemon = turn.DaemonID
-	te.activeSessionMu.Unlock()
 }
 
 // clearActiveTurn removes the turn's registration. It must run before the registered lease is
 // released, or a turn that takes over the daemon could have its fresh entry cleared.
 func (te *turnExecution) clearActiveTurn() {
-	te.activeSessionMu.Lock()
-	daemon := te.activeTurnDaemon
-	te.activeTurnDaemon = ""
-	te.activeSessionMu.Unlock()
-	if daemon != "" {
-		te.pool.ActiveTurns().Clear(daemon)
+	if te.activeTurnDaemon != "" {
+		te.pool.ActiveTurns().Clear(te.activeTurnDaemon)
+		te.activeTurnDaemon = ""
 	}
 }
 

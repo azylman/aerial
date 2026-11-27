@@ -38,14 +38,13 @@ type fakeAttempt struct {
 // fakeTurnSteps is a declarative turnSteps: errs pops one error per call of a method, panics
 // makes a method panic, attempts scripts the run steps in order.
 type fakeTurnSteps struct {
-	mu             sync.Mutex
-	started        StartedTurn
-	prep           TurnPrep
-	attempts       []fakeAttempt
-	errs           map[string][]error
-	panics         map[string]bool
-	max            int
-	attemptPrompts []string
+	mu       sync.Mutex
+	started  StartedTurn
+	prep     TurnPrep
+	attempts []fakeAttempt
+	errs     map[string][]error
+	panics   map[string]bool
+	max      int
 
 	calls    []string
 	attemptN int
@@ -70,9 +69,6 @@ func (f *fakeTurnSteps) attempt(in AttemptInput) (AttemptResult, error) {
 	if in.Resume {
 		resume = " resume"
 	}
-	f.mu.Lock()
-	f.attemptPrompts = append(f.attemptPrompts, in.Prep.Prompt)
-	f.mu.Unlock()
 	if err := f.call("attempt", fmt.Sprintf("ord=%d run=%d%s", in.Ordinal, in.RunIndex, resume)); err != nil {
 		return AttemptResult{}, err
 	}
@@ -94,7 +90,7 @@ func (f *fakeTurnSteps) RecordBurstStarted(context.Context, string, []string) (S
 	return f.started, f.call("started", "")
 }
 
-func (f *fakeTurnSteps) PrepareBurstTurn(context.Context, string, string, []string, bool) (TurnPrep, error) {
+func (f *fakeTurnSteps) PrepareBurstTurn(context.Context, string, string, []string) (TurnPrep, error) {
 	return f.prep, f.call("prep", "")
 }
 
@@ -138,8 +134,8 @@ func (f *fakeTurnSteps) RecordDispatchOutcome(_ context.Context, _ []string, s A
 	return f.call("outcome", string(s.Outcome)+" "+s.Reason)
 }
 
-func (f *fakeTurnSteps) PublishDispatchOutcome(_ context.Context, dispatchID string, o TurnOutcome) error {
-	return f.call("publish", dispatchID+" "+string(o))
+func (f *fakeTurnSteps) PublishDispatchOutcome(_ context.Context, _ string, o TurnOutcome) error {
+	return f.call("publish", string(o))
 }
 
 func (f *fakeTurnSteps) StopDispatchTurn(_ context.Context, _ string, ids []string) error {
@@ -554,13 +550,13 @@ func TestTurnRunnerRunDispatch(t *testing.T) {
 			name: "HappyPathPublishesCompleted", started: claimed(0, "d1"), prep: runPrep(), attempts: []fakeAttempt{attemptOf(AttemptKindSuccess)},
 			wantOutcome: OutcomeCompleted,
 			wantCmds:    []string{"run record-started", "run prep", "run run-1", "run record-outcome", "run publish-dispatch-outcome", doneSend(ds, "session-1", OutcomeCompleted, 0)},
-			wantCalls:   []string{"started", "prep", "attempt ord=1 run=1", "outcome completed", "publish d1 completed"},
+			wantCalls:   []string{"started", "prep", "attempt ord=1 run=1", "outcome completed", "publish completed"},
 		},
 		{
 			name: "TimeoutPublishesTimeout", started: claimed(0, "d1"), prep: runPrep(), attempts: []fakeAttempt{{res: AttemptResult{Kind: AttemptKindTimeout, Reason: "timeout"}}},
 			wantOutcome: OutcomeTimeout,
 			wantCmds:    []string{"run record-started", "run prep", "run run-1", "run record-outcome", "run publish-dispatch-outcome", doneSend(ds, "session-1", OutcomeTimeout, 0)},
-			wantCalls:   []string{"started", "prep", "attempt ord=1 run=1", "outcome timeout timeout", "publish d1 timeout"},
+			wantCalls:   []string{"started", "prep", "attempt ord=1 run=1", "outcome timeout timeout", "publish timeout"},
 		},
 		{
 			name: "RecordedCancelPublishesNothing", started: claimed(0, "d1"), prep: runPrep(), attempts: []fakeAttempt{{res: AttemptResult{Kind: AttemptKindRecorded, Reason: string(OutcomeCancelled)}}},
@@ -585,20 +581,6 @@ func TestTurnRunnerRunDispatch(t *testing.T) {
 			wantOutcome: OutcomeFailed,
 			wantCmds:    []string{"run record-started", "run prep", "run run-1", "run fail-turn", doneSend(ds, "session-1", OutcomeFailed, 0)},
 			wantCalls:   []string{"started", "prep", "attempt ord=1 run=1", "fail d1 integrity violation"},
-		},
-		{
-			name: "DrainedDispatchPublishesOutcomeForBothOnSuccess", started: claimed(0, "d1"), prep: runPrep(),
-			attempts:    []fakeAttempt{{res: AttemptResult{Kind: AttemptKindSuccess, DrainedIDs: []string{"d2"}}}},
-			wantOutcome: OutcomeCompleted,
-			wantCmds:    []string{"run record-started", "run prep", "run run-1", "run record-outcome", "run publish-dispatch-outcome", "run publish-dispatch-outcome-2", doneSend(ds, "session-1", OutcomeCompleted, 0)},
-			wantCalls:   []string{"started", "prep", "attempt ord=1 run=1", "outcome completed", "publish d1 completed", "publish d2 completed"},
-		},
-		{
-			name: "DrainedDispatchFailsBothOnTerminalError", started: claimed(0, "d1"), prep: runPrep(),
-			attempts:    []fakeAttempt{{res: AttemptResult{Kind: AttemptKindRetry, DrainedIDs: []string{"d2"}}}, {err: errRunnerTerminal}},
-			wantOutcome: OutcomeFailed,
-			wantCmds:    []string{"run record-started", "run prep", "run run-1", "sleep 0s", "run run-2", "run fail-turn", doneSend(ds, "session-1", OutcomeFailed, 0)},
-			wantCalls:   []string{"started", "prep", "attempt ord=1 run=1", "attempt ord=2 run=2", "fail d1,d2 integrity violation"},
 		},
 		{
 			name: "AgentScopedCoordinator", agent: "agent-beta", started: StartedTurn{},
@@ -652,102 +634,6 @@ func TestReflectTurnRunner(t *testing.T) {
 			assert.Nil(t, opts.InvocationRetryPolicy)
 		})
 	}
-}
-
-func TestTurnRunner_DrainFollowedBySessionCorruptionRetry_ReplaysDrainedPrompt(t *testing.T) {
-	t.Parallel()
-
-	steps := &fakeTurnSteps{
-		started: claimed(0, "m1"),
-		prep:    TurnPrep{Decision: TurnDecisionRun, Prompt: "initial prompt"},
-		attempts: []fakeAttempt{
-			{
-				res: AttemptResult{
-					Kind:           AttemptKindRetry,
-					DrainedIDs:     []string{"m2"},
-					DrainedPrompts: []string{"steered input text"},
-					Reason:         "session corrupt reset",
-				},
-			},
-			{
-				res: AttemptResult{
-					Kind:           AttemptKindRetry,
-					DrainedIDs:     []string{"m2"},
-					DrainedPrompts: []string{"steered input text"},
-					Reason:         "transient blip",
-				},
-			},
-			{
-				res: AttemptResult{
-					Kind: AttemptKindSuccess,
-				},
-			},
-		},
-	}
-	j := &runnerJournal{t: t}
-	svc := NewTurnRunnerService(steps, "")
-	res, err := svc.RunBurst(j.context(t), BurstTurnRequest{ThreadID: "thread-1", TurnID: "turn-1", MessageIDs: []string{"m1"}})
-	require.NoError(t, err)
-	assert.Equal(t, OutcomeCompleted, res.Outcome)
-
-	require.Len(t, steps.attemptPrompts, 3)
-	assert.Equal(t, "initial prompt", steps.attemptPrompts[0])
-	assert.Equal(t, 1, strings.Count(steps.attemptPrompts[1], "steered input text"))
-	assert.Equal(t, 1, strings.Count(steps.attemptPrompts[2], "steered input text"))
-}
-
-func TestTurnRunner_DrainSubstringPrompt_AppendedAndNotDuplicatedOnRetry(t *testing.T) {
-	t.Parallel()
-
-	steps := &fakeTurnSteps{
-		started: claimed(0, "m1"),
-		prep:    TurnPrep{Decision: TurnDecisionRun, Prompt: "Please run tests now and report"},
-		attempts: []fakeAttempt{
-			{
-				res: AttemptResult{
-					Kind:         AttemptKindRetry,
-					DrainedIDs:   []string{"m2"},
-					DrainedItems: []DrainedPrompt{{ID: "m2", Prompt: "run tests"}},
-					Reason:       "session corrupt reset",
-				},
-			},
-			{
-				res: AttemptResult{
-					Kind:         AttemptKindRetry,
-					DrainedIDs:   []string{"m2"},
-					DrainedItems: []DrainedPrompt{{ID: "m2", Prompt: "run tests"}},
-					Reason:       "transient blip",
-				},
-			},
-			{
-				res: AttemptResult{
-					Kind: AttemptKindSuccess,
-				},
-			},
-		},
-	}
-	j := &runnerJournal{t: t}
-	svc := NewTurnRunnerService(steps, "")
-	res, err := svc.RunBurst(j.context(t), BurstTurnRequest{ThreadID: "thread-1", TurnID: "turn-1", MessageIDs: []string{"m1"}})
-	require.NoError(t, err)
-	assert.Equal(t, OutcomeCompleted, res.Outcome)
-
-	require.Len(t, steps.attemptPrompts, 3)
-	assert.Equal(t, "Please run tests now and report", steps.attemptPrompts[0])
-	// "run tests" was a substring of the initial prompt, and when drained with ID m2, it is appended once to the prompt
-	assert.Equal(t, 2, strings.Count(steps.attemptPrompts[1], "run tests"))
-	assert.True(t, strings.HasSuffix(steps.attemptPrompts[1], "run tests"))
-	// On retry, "run tests" with ID m2 is not duplicated again
-	assert.Equal(t, 2, strings.Count(steps.attemptPrompts[2], "run tests"))
-	assert.Equal(t, steps.attemptPrompts[1], steps.attemptPrompts[2])
-}
-
-func TestIsRestateCancel(t *testing.T) {
-	t.Parallel()
-	assert.False(t, isRestateCancel(nil))
-	assert.False(t, isRestateCancel(errors.New("plain error")))
-	assert.False(t, isRestateCancel(restate.ToTerminalError(errors.New("500"), restate.WithErrorCode(500))))
-	assert.True(t, isRestateCancel(restate.ToTerminalError(errors.New("cancelled"), restate.WithErrorCode(CodeRestateCancelled))))
 }
 
 // runStepName reads the restate.WithName option of a Run call.

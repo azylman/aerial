@@ -370,7 +370,7 @@ func TestPrepareBurstTurn_GuardsAndFaults(t *testing.T) {
 			for i, m := range tc.rows {
 				ids[i] = m.ID
 			}
-			got, err := pool.PrepareBurstTurn(context.Background(), "thread-steps", "turn-1", ids, false)
+			got, err := pool.PrepareBurstTurn(context.Background(), "thread-steps", "turn-1", ids)
 			assertStepErr(t, err, tc.wantErr, false)
 			assertPrep(t, got, prepWant{decision: tc.wantDecision, promptSub: tc.wantPromptSub})
 			assertRows(t, store, tc.wantRows)
@@ -471,7 +471,7 @@ func TestPrepareBurstTurn(t *testing.T) {
 			var got TurnPrep
 			var err error
 			for range tc.runs {
-				got, err = pool.PrepareBurstTurn(context.Background(), "thread-steps", "turn-1", ids, false)
+				got, err = pool.PrepareBurstTurn(context.Background(), "thread-steps", "turn-1", ids)
 			}
 			assertStepErr(t, err, tc.wantErr, false)
 			assertPrep(t, got, prepWant{decision: tc.wantDecision, delayMs: tc.wantDelayMs, promptSub: tc.wantPromptSub, injected: tc.wantInjected, metadata: tc.wantMetadata})
