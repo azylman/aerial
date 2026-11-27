@@ -719,6 +719,7 @@ func TestEnablePRAutoMerge(t *testing.T) {
 		nodeID       string
 		token        string
 		apiURL       string
+		nilClient    bool
 		respStatus   int
 		respBody     string
 		transportErr bool
@@ -727,20 +728,6 @@ func TestEnablePRAutoMerge(t *testing.T) {
 		wantErr      bool
 	}{
 		{
-			name:         "remote url without token returns early",
-			nodeID:       "PR_123",
-			token:        "",
-			apiURL:       "https://api.github.com",
-			wantRequests: 0,
-		},
-		{
-			name:         "remote url containing localhost query without token returns early",
-			nodeID:       "PR_123",
-			token:        "",
-			apiURL:       "https://example.com/?x=localhost",
-			wantRequests: 0,
-		},
-		{
 			name:         "empty node id returns early",
 			nodeID:       "",
 			token:        "tok",
@@ -748,7 +735,25 @@ func TestEnablePRAutoMerge(t *testing.T) {
 			wantRequests: 0,
 		},
 		{
-			name:         "mutation request with token succeeds",
+			name:         "nil http client returns early",
+			nodeID:       "PR_123",
+			token:        "tok",
+			apiURL:       "https://api.github.com",
+			nilClient:    true,
+			wantRequests: 0,
+		},
+		{
+			name:         "mutation request with empty token sends request without auth header",
+			nodeID:       "PR_123",
+			token:        "",
+			apiURL:       "https://api.github.com",
+			respStatus:   http.StatusOK,
+			respBody:     `{"data":{"enablePullRequestAutoMerge":{}}}`,
+			wantRequests: 1,
+			wantAuth:     "",
+		},
+		{
+			name:         "mutation request with explicit token sets bearer header",
 			nodeID:       "PR_123",
 			token:        "secret-token",
 			apiURL:       "https://api.github.com",
@@ -796,27 +801,33 @@ func TestEnablePRAutoMerge(t *testing.T) {
 			var reqCount int
 			var capturedAuth string
 			var capturedPath string
-			client := &http.Client{
-				Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
-					reqCount++
-					capturedAuth = r.Header.Get("Authorization")
-					capturedPath = r.URL.Path
-					if tc.transportErr {
-						return nil, fmt.Errorf("simulated network error")
-					}
-					status := tc.respStatus
-					if status == 0 {
-						status = http.StatusOK
-					}
-					return &http.Response{
-						StatusCode: status,
-						Header:     make(http.Header),
-						Body:       io.NopCloser(strings.NewReader(tc.respBody)),
-						Request:    r,
-					}, nil
-				}),
+			var client *http.Client
+			if !tc.nilClient {
+				client = &http.Client{
+					Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+						reqCount++
+						capturedAuth = r.Header.Get("Authorization")
+						capturedPath = r.URL.Path
+						if tc.transportErr {
+							return nil, fmt.Errorf("simulated network error")
+						}
+						status := tc.respStatus
+						if status == 0 {
+							status = http.StatusOK
+						}
+						return &http.Response{
+							StatusCode: status,
+							Header:     make(http.Header),
+							Body:       io.NopCloser(strings.NewReader(tc.respBody)),
+							Request:    r,
+						}, nil
+					}),
+				}
 			}
 			exec := NewExecutor("", nil, nil, tc.token, "example-owner", client)
+			if tc.nilClient {
+				exec.HTTPClient = nil
+			}
 			exec.GitHubAPIURL = tc.apiURL
 			err := exec.enablePRAutoMerge(context.Background(), tc.nodeID)
 			assert.Equal(t, tc.wantErr, err != nil)
@@ -941,32 +952,6 @@ func TestListOpenPullRequests_Pagination(t *testing.T) {
 			assert.NoError(t, err)
 			assert.Len(t, prs, tc.wantCount)
 			assert.Equal(t, tc.wantPages, requestedPages)
-		})
-	}
-}
-
-func TestIsLoopbackAPIURL(t *testing.T) {
-	t.Parallel()
-	tests := []struct {
-		name string
-		raw  string
-		want bool
-	}{
-		{name: "ipv4 loopback", raw: "http://127.0.0.1:8080", want: true},
-		{name: "ipv4 loopback bare", raw: "http://127.0.0.1", want: true},
-		{name: "localhost", raw: "http://localhost:8080", want: true},
-		{name: "localhost uppercase", raw: "http://LOCALHOST:8080", want: true},
-		{name: "ipv6 loopback", raw: "http://[::1]:8080", want: true},
-		{name: "remote public api", raw: "https://api.github.com", want: false},
-		{name: "query param containing localhost", raw: "https://example.com/?x=localhost", want: false},
-		{name: "subdomain of example", raw: "https://localhost.example.com", want: false},
-		{name: "empty url", raw: "", want: false},
-		{name: "invalid url", raw: "://invalid", want: false},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			assert.Equal(t, tc.want, isLoopbackAPIURL(tc.raw))
 		})
 	}
 }

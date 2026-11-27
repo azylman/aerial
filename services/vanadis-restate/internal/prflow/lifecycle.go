@@ -678,10 +678,13 @@ func (f *Flow) HandlePREventType(ctx context.Context, buildID, chunkID, event st
 	}
 	switch event {
 	case prEventOpened, "synchronize":
-		if event == prEventOpened && f.Exec != nil && f.Store != nil {
+		if err := f.RecordPRHeadRevision(ctx, chunkID, ev); err != nil {
+			return err
+		}
+		if f.Exec != nil && f.Store != nil {
 			f.ensureOpenedPRAutoMerge(ctx, buildID, chunkID, ev.PRNumber)
 		}
-		return f.RecordPRHeadRevision(ctx, chunkID, ev)
+		return nil
 	case "check_updated":
 		return f.HandlePRCheckEvent(ctx, chunkID, event, ev)
 	case "check_failed", "ci_failed":
@@ -920,7 +923,7 @@ func (f *Flow) ResolveOrAttachPRChunk(ctx context.Context, buildID string, ev pu
 		return "", aErr
 	}
 
-	if !strings.EqualFold(strings.TrimSpace(ev.Event), prEventOpened) {
+	if !strings.EqualFold(strings.TrimSpace(ev.Event), prEventOpened) && !strings.EqualFold(strings.TrimSpace(ev.Event), "synchronize") {
 		if eErr := f.Exec.EnsurePRAutoMergeAndContext(ctx, *build, chunks, *targetChunk, ev.PRNumber); eErr != nil {
 			slog.WarnContext(ctx, "[vanadis-restate] ensure pr auto-merge warning", "error", eErr)
 		}

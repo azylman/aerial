@@ -304,23 +304,10 @@ func (e *Executor) enrichPRContext(ctx context.Context, build model.VanadisBuild
 	return nil
 }
 
-func isLoopbackAPIURL(raw string) bool {
-	u, err := url.Parse(raw)
-	if err != nil {
-		return false
-	}
-	h := strings.ToLower(u.Hostname())
-	return h == "127.0.0.1" || h == "localhost" || h == "::1"
-}
-
 func (e *Executor) enablePRAutoMerge(ctx context.Context, nodeID string) error {
-	if nodeID == "" {
+	if e == nil || e.HTTPClient == nil || nodeID == "" {
 		return nil
 	}
-	if e.gitHubToken == "" && !isLoopbackAPIURL(e.GitHubAPIURL) {
-		return nil
-	}
-	graphqlURL := strings.TrimRight(e.GitHubAPIURL, "/") + "/graphql"
 	mutationPayload, mErr := json.Marshal(map[string]any{
 		"query": `mutation($input: EnablePullRequestAutoMergeInput!) {
 			enablePullRequestAutoMerge(input: $input) {
@@ -342,15 +329,11 @@ func (e *Executor) enablePRAutoMerge(ctx context.Context, nodeID string) error {
 	if mErr != nil {
 		return mErr
 	}
-	gReq, gErr := http.NewRequestWithContext(ctx, http.MethodPost, graphqlURL, bytes.NewReader(mutationPayload))
+	gReq, gErr := githubapi.NewRequest(ctx, e.GitHubAPIURL, e.gitHubToken, http.MethodPost, "/graphql", bytes.NewReader(mutationPayload))
 	if gErr != nil {
 		return gErr
 	}
 	gReq.Header.Set("Content-Type", "application/json")
-	gReq.Header.Set("Accept", "application/vnd.github+json")
-	if e.gitHubToken != "" {
-		gReq.Header.Set("Authorization", "Bearer "+e.gitHubToken)
-	}
 	gResp, gDoErr := e.HTTPClient.Do(gReq)
 	if gDoErr != nil {
 		slog.WarnContext(ctx, "[vanadis-restate] enable pull request auto-merge failed", "error", gDoErr)
