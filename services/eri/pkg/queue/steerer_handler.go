@@ -209,28 +209,30 @@ func (p *WorkerPool) reconcileActiveTurnIDs(ctx context.Context, isDispatch bool
 	reqCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
 	defer cancel()
 
-	req, err := http.NewRequestWithContext(reqCtx, http.MethodPost, targetURL, bytes.NewReader([]byte("{}")))
+	req, err := http.NewRequestWithContext(reqCtx, http.MethodPost, targetURL, http.NoBody)
 	if err != nil {
 		return base
 	}
-	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Accept", "application/json")
 
 	resp, err := p.drainHTTPClient().Do(req)
 	if err != nil {
+		log.Printf("[SteerHandler] Error requesting coordinator status from %s: %v", targetURL, err)
 		return base
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		log.Printf("[SteerHandler] Non-2xx coordinator status from %s: %d", targetURL, resp.StatusCode)
 		return base
 	}
 
 	var status CoordinatorStatus
 	if err := json.NewDecoder(resp.Body).Decode(&status); err != nil {
+		log.Printf("[SteerHandler] Error decoding coordinator status from %s: %v", targetURL, err)
 		return base
 	}
-	if status.Active != nil && status.Active.TurnID == turnID && len(status.Active.ItemIDs) > 0 {
+	if status.Active != nil && status.Active.TurnID == turnID {
 		return normalizeStepIDs(append(slices.Clone(baseIDs), status.Active.ItemIDs...))
 	}
 	return base

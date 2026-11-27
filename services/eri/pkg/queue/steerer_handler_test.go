@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -729,17 +730,28 @@ func TestHandleDrainPending_ClaimedAndBlankRecords(t *testing.T) {
 func TestWorkerPool_ReconcileActiveTurnIDs(t *testing.T) {
 	t.Parallel()
 
-	// 1. Nil pool / empty key / empty turnID / unconfigured
+	// 1. Nil pool / unconfigured pool
 	var nilPool *WorkerPool
 	assert.Equal(t, []string{"b1"}, nilPool.reconcileActiveTurnIDs(context.Background(), false, "k", "t", []string{"b1"}))
 
 	poolNoURL := NewWorkerPool(WorkerPoolConfig{})
 	assert.Equal(t, []string{"b1"}, poolNoURL.reconcileActiveTurnIDs(context.Background(), false, "k", "t", []string{"b1"}))
-	assert.Equal(t, []string{"b1"}, poolNoURL.reconcileActiveTurnIDs(context.Background(), false, "", "t", []string{"b1"}))
-	assert.Equal(t, []string{"b1"}, poolNoURL.reconcileActiveTurnIDs(context.Background(), false, "k", "", []string{"b1"}))
 
-	// 2. Restate server returns matching active turn items
+	// 2. Restate server returns matching active turn items; rejects body and Content-Type
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Content-Type") != "" {
+			http.Error(w, "status handler rejects Content-Type", http.StatusBadRequest)
+			return
+		}
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			http.Error(w, "error reading body", http.StatusBadRequest)
+			return
+		}
+		if len(body) > 0 {
+			http.Error(w, "status handler rejects body", http.StatusBadRequest)
+			return
+		}
 		w.Header().Set("Content-Type", "application/json")
 		if strings.Contains(r.URL.Path, "Status") {
 			if strings.Contains(r.URL.Path, "ThreadSession") {
@@ -763,6 +775,10 @@ func TestWorkerPool_ReconcileActiveTurnIDs(t *testing.T) {
 		RestateIngressURL: srv.URL,
 		DrainHTTPClient:   srv.Client(),
 	})
+
+	// Empty key and empty turnID checks against configured pool (must not query or expand)
+	assert.Equal(t, []string{"b1"}, pool.reconcileActiveTurnIDs(context.Background(), false, "", "t-burst", []string{"b1"}))
+	assert.Equal(t, []string{"b1"}, pool.reconcileActiveTurnIDs(context.Background(), false, "thread-key", "", []string{"b1"}))
 
 	gotBurst := pool.reconcileActiveTurnIDs(context.Background(), false, "thread-key", "t-burst", []string{"b1"})
 	assert.Equal(t, []string{"b1", "b2"}, gotBurst)
@@ -795,15 +811,26 @@ func TestWorkerPool_ReconcileActiveTurnIDs(t *testing.T) {
 	badJSONPool := NewWorkerPool(WorkerPoolConfig{RestateIngressURL: badJSONSrv.URL, DrainHTTPClient: badJSONSrv.Client()})
 	assert.Equal(t, []string{"b1"}, badJSONPool.reconcileActiveTurnIDs(context.Background(), false, "thread-key", "t-burst", []string{"b1"}))
 
-	// 6. Active is nil or ItemIDs empty
+	// 6. Active is nil
 	emptyActiveSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		_ = json.NewEncoder(w).Encode(CoordinatorStatus{
-			Active: &ActiveTurn{TurnID: "t-burst", ItemIDs: nil},
+			Active: nil,
 		})
 	}))
 	defer emptyActiveSrv.Close()
 	emptyActivePool := NewWorkerPool(WorkerPoolConfig{RestateIngressURL: emptyActiveSrv.URL, DrainHTTPClient: emptyActiveSrv.Client()})
 	assert.Equal(t, []string{"b1"}, emptyActivePool.reconcileActiveTurnIDs(context.Background(), false, "thread-key", "t-burst", []string{"b1"}))
+
+	// 7. Client transport error
+	closedSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
+	badTransportClient := closedSrv.Client()
+	badTransportURL := closedSrv.URL
+	closedSrv.Close()
+	badTransportPool := NewWorkerPool(WorkerPoolConfig{
+		RestateIngressURL: badTransportURL,
+		DrainHTTPClient:   badTransportClient,
+	})
+	assert.Equal(t, []string{"b1"}, badTransportPool.reconcileActiveTurnIDs(context.Background(), false, "thread-key", "t-burst", []string{"b1"}))
 }
 
 func TestHandleDrainPending_DrainedPromptsPopulated(t *testing.T) {

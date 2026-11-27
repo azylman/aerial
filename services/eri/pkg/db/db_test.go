@@ -548,6 +548,10 @@ func assertDispatchValidationGuards(ctx context.Context, t *testing.T, store Sto
 	if err != nil || recentEmpty != nil {
 		t.Errorf("expected nil, nil for empty session id in GetRecentSessionDispatches")
 	}
+	processingEmpty, err := store.GetProcessingDispatchesBySession(ctx, "")
+	if err != nil || processingEmpty != nil {
+		t.Errorf("expected nil, nil for empty session id in GetProcessingDispatchesBySession")
+	}
 	scannedNil, err := scanDispatches(nil)
 	if err != nil || scannedNil != nil {
 		t.Errorf("expected nil, nil for scanDispatches(nil)")
@@ -572,6 +576,11 @@ func assertDispatchClaim(ctx context.Context, t *testing.T, store Store) {
 	mustOK(t, err, "GetDispatch disp-1")
 	if got.Status != StatusProcessing || got.ErrorMessage != "in flight" {
 		t.Errorf("unexpected processing state: %+v", got)
+	}
+	processing, err := store.GetProcessingDispatchesBySession(ctx, "heartbeat-hb-1")
+	mustOK(t, err, "GetProcessingDispatchesBySession")
+	if len(processing) != 1 || processing[0].ID != "disp-1" {
+		t.Errorf("expected 1 processing dispatch disp-1, got %+v", processing)
 	}
 }
 

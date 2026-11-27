@@ -940,23 +940,39 @@ func TestFailBurstTurn(t *testing.T) {
 func TestStopDispatchTurn(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
-		name       string
-		status     string
-		noStore    bool
-		wantErr    bool
-		wantStatus string
-		wantErrMsg string
+		name        string
+		status      string
+		noStore     bool
+		sabotageSQL string
+		wantErr     bool
+		wantStatus  string
+		wantErrMsg  string
+		liveTurn    bool
 	}{
 		{name: "NoStoreTerminal", status: db.StatusProcessing, noStore: true, wantErr: true},
 		{name: "ActiveRowCancelled", status: db.StatusProcessing, wantStatus: db.StatusFailed, wantErrMsg: CancelledByOperatorReason},
 		{name: "CompletedRowUntouched", status: db.StatusCompleted, wantStatus: db.StatusCompleted},
+		{name: "StoreErrorStopsLiveTurn", status: db.StatusProcessing, sabotageSQL: failTriggerSQL("dispatches", "UPDATE", "40001"), wantErr: true, wantStatus: db.StatusProcessing, liveTurn: true},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			pool, store := stepPool(t, stepFixture{noStore: tc.noStore, disps: []db.Dispatch{{ID: "d1", Source: "test", Prompt: "p", Status: tc.status}}}, WorkerPoolConfig{})
+			pool, store := stepPool(t, stepFixture{noStore: tc.noStore, disps: []db.Dispatch{{ID: "d1", Source: "test", Prompt: "p", Status: tc.status}}, sabotageSQL: tc.sabotageSQL}, WorkerPoolConfig{})
+			if tc.liveTurn {
+				te := &turnExecution{turnID: "turn-d", threadID: "dispatch-d1"}
+				rel, ok := pool.Turns().Begin(context.Background(), "turn-d", te)
+				if !ok {
+					t.Fatal("turn begin failed")
+				}
+				defer rel()
+			}
 			err := pool.StopDispatchTurn(context.Background(), "turn-d", []string{"d1"})
 			assertStepErr(t, err, tc.wantErr, tc.noStore)
+			if tc.liveTurn {
+				if !pool.Turns().Tombstoned("turn-d") {
+					t.Error("expected live turn to be stopped/tombstoned even on store error")
+				}
+			}
 			if tc.noStore {
 				return
 			}
@@ -982,12 +998,14 @@ func TestFailDispatchTurn(t *testing.T) {
 		wantErr      bool
 		wantStatus   string
 		wantSubjects []string
+		liveTurn     bool
 	}{
 		{name: "NoStoreTerminal", status: db.StatusProcessing, ids: []string{"d1"}, noStore: true, wantErr: true},
 		{name: "FailWriteErrorRetryable", status: db.StatusProcessing, ids: []string{"d1"}, sabotageSQL: failTriggerSQL("dispatches", "UPDATE", "40001"), wantErr: true, wantStatus: db.StatusProcessing},
 		{name: "ActiveRowFailedAndPublished", status: db.StatusProcessing, ids: []string{"d1"}, wantStatus: db.StatusFailed, wantSubjects: []string{pubsub.SubjectAerialDispatchPrefix + "failed"}},
 		{name: "CompletedRowPublishesCompleted", status: db.StatusCompleted, ids: []string{"d1"}, wantStatus: db.StatusCompleted, wantSubjects: []string{pubsub.SubjectAerialDispatchPrefix + "completed"}},
 		{name: "MissingRowSkipped", status: db.StatusCompleted, ids: []string{"nope"}, wantStatus: db.StatusCompleted},
+		{name: "StoreErrorStopsLiveTurn", status: db.StatusProcessing, ids: []string{"d1"}, sabotageSQL: failTriggerSQL("dispatches", "UPDATE", "40001"), wantErr: true, wantStatus: db.StatusProcessing, liveTurn: true},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -996,8 +1014,21 @@ func TestFailDispatchTurn(t *testing.T) {
 			defer memBus.Close()
 			bus := &trackingBus{Bus: memBus}
 			pool, store := stepPool(t, stepFixture{noStore: tc.noStore, disps: []db.Dispatch{{ID: "d1", Source: "vanadis", Prompt: "p", Status: tc.status}}, sabotageSQL: tc.sabotageSQL}, WorkerPoolConfig{EventBus: bus})
+			if tc.liveTurn {
+				te := &turnExecution{turnID: "turn-d", threadID: "dispatch-d1"}
+				rel, ok := pool.Turns().Begin(context.Background(), "turn-d", te)
+				if !ok {
+					t.Fatal("turn begin failed")
+				}
+				defer rel()
+			}
 			err := pool.FailDispatchTurn(context.Background(), "turn-d", tc.ids, "integrity violation")
 			assertStepErr(t, err, tc.wantErr, tc.noStore)
+			if tc.liveTurn {
+				if !pool.Turns().Tombstoned("turn-d") {
+					t.Error("expected live turn to be stopped/tombstoned even on store error")
+				}
+			}
 			if !tc.noStore {
 				d, err := store.GetDispatch(context.Background(), "d1")
 				if err != nil {

@@ -7,6 +7,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	restate "github.com/restatedev/sdk-go"
 
@@ -685,5 +686,134 @@ func TestInspectSuccess(t *testing.T) {
 				t.Errorf("inspectSuccess = (%q, %v), want (%q, %v)", gotErr, gotYield, tc.wantErr, tc.wantYield)
 			}
 		})
+	}
+}
+
+func TestRunBurstAttempt_ReplayWithCompletedPrimaryAndProcessingDrained(t *testing.T) {
+	t.Parallel()
+	m1 := db.Message{ID: "m1", ThreadID: "thread-replay", Content: "initial", Status: db.StatusCompleted, ResponseText: "done reply", ConversationID: "sess-1", CreatedAt: time.Now().UTC()}
+	m2 := db.Message{ID: "m2", ThreadID: "thread-replay", Content: "drained extra", Status: db.StatusProcessing, CreatedAt: time.Now().UTC()}
+	fx := stepFixture{msgs: []db.Message{m1, m2}}
+	store := openStepDB(t, fx).store
+	notices := &noticeRecorder{}
+	sr := &scriptedAttemptRunner{}
+	pool := newAttemptPool(t, store, sr, notices, false)
+
+	in := AttemptInput{ThreadID: "thread-replay", TurnID: "turn-r", IDs: []string{"m1"}, Ordinal: 1}
+	got, err := pool.RunBurstAttempt(context.Background(), in)
+	if err != nil {
+		t.Fatalf("RunBurstAttempt failed: %v", err)
+	}
+	if got.Kind != AttemptKindRecorded {
+		t.Errorf("got.Kind = %s, want %s", got.Kind, AttemptKindRecorded)
+	}
+	if len(got.DrainedIDs) != 1 || got.DrainedIDs[0] != "m2" {
+		t.Errorf("got.DrainedIDs = %v, want [m2]", got.DrainedIDs)
+	}
+	if sr.callCount() != 0 {
+		t.Errorf("agent runs = %d, want 0", sr.callCount())
+	}
+	if len(notices.all()) != 0 {
+		t.Errorf("notices = %v, want none", notices.all())
+	}
+	m2Row, err := store.GetMessage(context.Background(), "m2")
+	if err != nil {
+		t.Fatalf("GetMessage(m2): %v", err)
+	}
+	if m2Row == nil || m2Row.Status != db.StatusCompleted || m2Row.ResponseText != "done reply" {
+		t.Errorf("m2 row = %+v, want status COMPLETED with 'done reply'", m2Row)
+	}
+}
+
+func TestRunDispatchAttempt_ReplayWithCompletedPrimaryAndProcessingDrained(t *testing.T) {
+	t.Parallel()
+	d1 := db.Dispatch{ID: "d1", SessionID: "sess-r", Source: "test", Prompt: "initial", Status: db.StatusCompleted, ResponseText: "done dispatch", ConversationID: "sess-r", CreatedAt: time.Now().UTC()}
+	d2 := db.Dispatch{ID: "d2", SessionID: "sess-r", Source: "test", Prompt: "drained dispatch", Status: db.StatusProcessing, CreatedAt: time.Now().UTC()}
+	fx := stepFixture{disps: []db.Dispatch{d1, d2}}
+	store := openStepDB(t, fx).store
+	notices := &noticeRecorder{}
+	sr := &scriptedAttemptRunner{}
+	pool := newAttemptPool(t, store, sr, notices, false)
+
+	in := AttemptInput{SessionKey: "sess-r", TurnID: "turn-rd", IDs: []string{"d1"}, Ordinal: 1}
+	got, err := pool.RunDispatchAttempt(context.Background(), in)
+	if err != nil {
+		t.Fatalf("RunDispatchAttempt failed: %v", err)
+	}
+	if got.Kind != AttemptKindRecorded {
+		t.Errorf("got.Kind = %s, want %s", got.Kind, AttemptKindRecorded)
+	}
+	if len(got.DrainedIDs) != 1 || got.DrainedIDs[0] != "d2" {
+		t.Errorf("got.DrainedIDs = %v, want [d2]", got.DrainedIDs)
+	}
+	if sr.callCount() != 0 {
+		t.Errorf("agent runs = %d, want 0", sr.callCount())
+	}
+	d2Row, err := store.GetDispatch(context.Background(), "d2")
+	if err != nil {
+		t.Fatalf("GetDispatch(d2): %v", err)
+	}
+	if d2Row == nil || d2Row.Status != db.StatusCompleted || d2Row.ResponseText != "done dispatch" {
+		t.Errorf("d2 row = %+v, want status COMPLETED with 'done dispatch'", d2Row)
+	}
+}
+
+func TestRunBurstAttempt_ReplayWithFailedPrimaryAndProcessingDrained(t *testing.T) {
+	t.Parallel()
+	m1 := db.Message{ID: "m1-fail", ThreadID: "thread-fail", Content: "initial", Status: db.StatusFailed, ErrorMessage: "boom", CreatedAt: time.Now().UTC()}
+	m2 := db.Message{ID: "m2-fail", ThreadID: "thread-fail", Content: "drained extra", Status: db.StatusProcessing, CreatedAt: time.Now().UTC()}
+	fx := stepFixture{msgs: []db.Message{m1, m2}}
+	store := openStepDB(t, fx).store
+	notices := &noticeRecorder{}
+	sr := &scriptedAttemptRunner{}
+	pool := newAttemptPool(t, store, sr, notices, false)
+
+	in := AttemptInput{ThreadID: "thread-fail", TurnID: "turn-rf", IDs: []string{"m1-fail"}, Ordinal: 1}
+	got, err := pool.RunBurstAttempt(context.Background(), in)
+	if err != nil {
+		t.Fatalf("RunBurstAttempt failed: %v", err)
+	}
+	if got.Kind != AttemptKindRecorded {
+		t.Errorf("got.Kind = %s, want %s", got.Kind, AttemptKindRecorded)
+	}
+	if len(got.DrainedIDs) != 1 || got.DrainedIDs[0] != "m2-fail" {
+		t.Errorf("got.DrainedIDs = %v, want [m2-fail]", got.DrainedIDs)
+	}
+	m2Row, err := store.GetMessage(context.Background(), "m2-fail")
+	if err != nil {
+		t.Fatalf("GetMessage(m2-fail): %v", err)
+	}
+	if m2Row == nil || m2Row.Status != db.StatusFailed || m2Row.ErrorMessage != "boom" {
+		t.Errorf("m2 row = %+v, want status FAILED with error 'boom'", m2Row)
+	}
+}
+
+func TestRunDispatchAttempt_ReplayWithFailedPrimaryAndProcessingDrained(t *testing.T) {
+	t.Parallel()
+	d1 := db.Dispatch{ID: "d1-fail", SessionID: "sess-rf", Source: "test", Prompt: "initial", Status: db.StatusFailed, ErrorMessage: "disp boom", CreatedAt: time.Now().UTC()}
+	d2 := db.Dispatch{ID: "d2-fail", SessionID: "sess-rf", Source: "test", Prompt: "drained dispatch", Status: db.StatusProcessing, CreatedAt: time.Now().UTC()}
+	fx := stepFixture{disps: []db.Dispatch{d1, d2}}
+	store := openStepDB(t, fx).store
+	notices := &noticeRecorder{}
+	sr := &scriptedAttemptRunner{}
+	pool := newAttemptPool(t, store, sr, notices, false)
+
+	in := AttemptInput{SessionKey: "sess-rf", TurnID: "turn-rdf", IDs: []string{"d1-fail"}, Ordinal: 1}
+	got, err := pool.RunDispatchAttempt(context.Background(), in)
+	if err != nil {
+		t.Fatalf("RunDispatchAttempt failed: %v", err)
+	}
+	if got.Kind != AttemptKindRecorded {
+		t.Errorf("got.Kind = %s, want %s", got.Kind, AttemptKindRecorded)
+	}
+	if len(got.DrainedIDs) != 1 || got.DrainedIDs[0] != "d2-fail" {
+		t.Errorf("got.DrainedIDs = %v, want [d2-fail]", got.DrainedIDs)
+	}
+	d2Row, err := store.GetDispatch(context.Background(), "d2-fail")
+	if err != nil {
+		t.Fatalf("GetDispatch(d2-fail): %v", err)
+	}
+	if d2Row == nil || d2Row.Status != db.StatusFailed || d2Row.ErrorMessage != "disp boom" {
+		t.Errorf("d2 row = %+v, want status FAILED with error 'disp boom'", d2Row)
 	}
 }

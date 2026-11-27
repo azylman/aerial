@@ -600,12 +600,20 @@ func (p *WorkerPool) failActiveBurstRows(ctx context.Context, s db.Store, ids []
 			active = append(active, m)
 		}
 	}
+	threadID := ""
+	if len(active) > 0 {
+		threadID = active[0].ThreadID
+	} else if len(rows) > 0 {
+		threadID = rows[0].ThreadID
+	}
+	if threadID != "" {
+		active, err = recoverBurstProcessingRows(ctx, s, threadID, active)
+		if err != nil {
+			return 0, err
+		}
+	}
 	if len(active) == 0 {
 		return 0, nil
-	}
-	active, err = recoverBurstProcessingRows(ctx, s, active[0].ThreadID, active)
-	if err != nil {
-		return 0, err
 	}
 	reason := summary.failureReason()
 	te := p.newStepTurnExecution(ctx, active[0].ThreadID, active)
@@ -663,15 +671,15 @@ func expandDispatchActiveIDs(ctx context.Context, s db.Store, ids []string) ([]s
 			continue
 		}
 		seenSessions[sess] = true
-		tasks, err := storeCall(ctx, func(c context.Context) ([]db.ActiveTask, error) { return s.GetActiveTasks(c) })
+		processing, err := storeCall(ctx, func(c context.Context) ([]db.Dispatch, error) {
+			return s.GetProcessingDispatchesBySession(c, sess)
+		})
 		if err != nil {
 			return nil, err
 		}
-		for _, t := range tasks {
-			if strings.HasPrefix(t.AuthorID, "dispatch:") && t.Status == db.StatusProcessing && (t.ThreadID == sess || t.SessionID == sess) {
-				if !slices.Contains(expanded, t.ID) {
-					expanded = append(expanded, t.ID)
-				}
+		for _, disp := range processing {
+			if !slices.Contains(expanded, disp.ID) {
+				expanded = append(expanded, disp.ID)
 			}
 		}
 	}
@@ -933,12 +941,12 @@ func (p *WorkerPool) StopDispatchTurn(ctx context.Context, turnID string, ids []
 	if leaseKey != "" {
 		ids = p.reconcileActiveTurnIDs(ctx, true, leaseKey, turnID, ids)
 	}
+	p.turns.Stop(turnID, CancelledByOperatorReason)
 	var expErr error
 	ids, expErr = expandDispatchActiveIDs(ctx, s, ids)
 	if expErr != nil {
 		return expErr
 	}
-	p.turns.Stop(turnID, CancelledByOperatorReason)
 	return p.RecordDispatchOutcome(ctx, normalizeStepIDs(ids), AttemptSummary{Outcome: OutcomeCancelled})
 }
 
@@ -1034,12 +1042,12 @@ func (p *WorkerPool) FailDispatchTurn(ctx context.Context, turnID string, ids []
 	if leaseKey != "" {
 		ids = p.reconcileActiveTurnIDs(ctx, true, leaseKey, turnID, ids)
 	}
+	p.turns.Stop(turnID, reason)
 	var expErr error
 	ids, expErr = expandDispatchActiveIDs(ctx, s, ids)
 	if expErr != nil {
 		return expErr
 	}
-	p.turns.Stop(turnID, reason)
 	ids = normalizeStepIDs(ids)
 	if err := p.RecordDispatchOutcome(ctx, ids, AttemptSummary{Outcome: OutcomeFailed, Reason: reason}); err != nil {
 		return err

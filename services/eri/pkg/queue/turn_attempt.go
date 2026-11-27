@@ -302,7 +302,14 @@ func (p *WorkerPool) runAttempt(ctx context.Context, in AttemptInput, subj attem
 		return AttemptResult{}, err
 	}
 	if len(ids) == 0 {
-		return AttemptResult{Kind: AttemptKindRecorded, Reason: string(recorded), AutoResumes: in.AutoResumes}, nil
+		drainedIDs, drainedPrompts := te.drainedState()
+		return AttemptResult{
+			Kind:           AttemptKindRecorded,
+			Reason:         string(recorded),
+			AutoResumes:    in.AutoResumes,
+			DrainedIDs:     drainedIDs,
+			DrainedPrompts: drainedPrompts,
+		}, nil
 	}
 
 	// (c) Record the attempt start; a re-entry counts a crash.
@@ -786,6 +793,55 @@ func (b burstSubject) recoverExtraBurstRows(ctx context.Context, s db.Store, te 
 	return extraRows, nil
 }
 
+func (b burstSubject) reconcileTerminalLeftoverRows(ctx context.Context, s db.Store, te *turnExecution, rows, extraRows []db.Message, outcome TurnOutcome, failedErrs []string) error {
+	if len(extraRows) == 0 {
+		return nil
+	}
+	tz := b.pool.currentTimezone()
+	var completedMsg *db.Message
+	for _, m := range rows {
+		if m.Status == db.StatusCompleted {
+			completedMsg = &m
+			break
+		}
+	}
+	te.steerMu.Lock()
+	for _, r := range extraRows {
+		te.drainedIDs = append(te.drainedIDs, r.ID)
+		rowPrompt := CoalesceBurstPrompt([]db.Message{r}, tz)
+		if strings.TrimSpace(rowPrompt) == "" {
+			rowPrompt = r.Content
+		}
+		te.drainedPrompts = append(te.drainedPrompts, rowPrompt)
+	}
+	te.steerMu.Unlock()
+
+	for _, r := range extraRows {
+		switch outcome {
+		case OutcomeCompleted:
+			if completedMsg != nil {
+				if _, err := storeCall(ctx, func(c context.Context) (struct{}, error) {
+					return struct{}{}, s.UpdateMessageCompleted(c, r.ID, completedMsg.ResponseText, completedMsg.ConversationID)
+				}); err != nil {
+					return err
+				}
+			}
+		case OutcomeFailed, OutcomeCancelled, OutcomeTimeout:
+			reason := "failed"
+			if len(failedErrs) > 0 {
+				reason = failedErrs[0]
+			}
+			if _, err := storeCall(ctx, func(c context.Context) (struct{}, error) {
+				return struct{}{}, s.UpdateMessageStatus(c, r.ID, db.StatusFailed, reason)
+			}); err != nil {
+				return err
+			}
+		default:
+		}
+	}
+	return nil
+}
+
 func (b burstSubject) load(ctx context.Context, s db.Store, te *turnExecution) ([]string, TurnOutcome, error) {
 	initialIDs := normalizeStepIDs(b.ids)
 	rows, err := messagesByIDOrdered(ctx, s, initialIDs)
@@ -793,20 +849,29 @@ func (b burstSubject) load(ctx context.Context, s db.Store, te *turnExecution) (
 		return nil, "", err
 	}
 	processing, statuses, failedErrs := filterInitialBurstRows(rows)
-	if len(processing) == 0 {
-		return nil, recordedOutcome(statuses, failedErrs), nil
+	if len(rows) > 0 {
+		te.activeSessionMu.Lock()
+		if te.threadID == "" {
+			te.threadID = rows[0].ThreadID
+		}
+		if len(processing) > 0 {
+			te.burst = slices.Clone(processing)
+			te.triggerType = resolveBurstTriggerType(processing[0])
+		}
+		te.activeSessionMu.Unlock()
 	}
-	te.activeSessionMu.Lock()
-	te.burst = slices.Clone(processing)
-	te.triggerType = resolveBurstTriggerType(processing[0])
-	if te.threadID == "" {
-		te.threadID = processing[0].ThreadID
-	}
-	te.activeSessionMu.Unlock()
 
 	extraRows, err := b.recoverExtraBurstRows(ctx, s, te, initialIDs, processing)
 	if err != nil {
 		return nil, "", err
+	}
+
+	if len(processing) == 0 {
+		outcome := recordedOutcome(statuses, failedErrs)
+		if err := b.reconcileTerminalLeftoverRows(ctx, s, te, rows, extraRows, outcome, failedErrs); err != nil {
+			return nil, "", err
+		}
+		return nil, outcome, nil
 	}
 
 	returnedIDs := make([]string, 0, len(processing)+len(extraRows))
@@ -898,14 +963,14 @@ type dispatchSubject struct {
 func (d dispatchSubject) recoverExtraDispatches(ctx context.Context, s db.Store, primaryID, sessionID, leaseKey, turnID string, initialIDs []string) ([]db.Dispatch, error) {
 	allIDs := d.pool.reconcileActiveTurnIDs(ctx, true, leaseKey, turnID, initialIDs)
 	if strings.TrimSpace(sessionID) != "" {
-		tasks, tErr := storeCall(ctx, func(c context.Context) ([]db.ActiveTask, error) { return s.GetActiveTasks(c) })
-		if tErr != nil {
-			return nil, tErr
+		processing, pErr := storeCall(ctx, func(c context.Context) ([]db.Dispatch, error) {
+			return s.GetProcessingDispatchesBySession(c, sessionID)
+		})
+		if pErr != nil {
+			return nil, pErr
 		}
-		for _, t := range tasks {
-			if strings.HasPrefix(t.AuthorID, "dispatch:") && t.Status == db.StatusProcessing && (t.ThreadID == sessionID || t.SessionID == sessionID) {
-				allIDs = append(allIDs, t.ID)
-			}
+		for _, disp := range processing {
+			allIDs = append(allIDs, disp.ID)
 		}
 	}
 	allIDs = normalizeStepIDs(allIDs)
@@ -938,6 +1003,43 @@ func (d dispatchSubject) recoverExtraDispatches(ctx context.Context, s db.Store,
 	return extraDispatches, nil
 }
 
+func (dispatchSubject) reconcileTerminalLeftoverDispatches(ctx context.Context, s db.Store, te *turnExecution, row *db.Dispatch, extraDispatches []db.Dispatch, outcome TurnOutcome, failedErrs []string) error {
+	if len(extraDispatches) == 0 {
+		return nil
+	}
+	te.steerMu.Lock()
+	for _, disp := range extraDispatches {
+		te.drainedIDs = append(te.drainedIDs, disp.ID)
+		te.steeredDispatches = append(te.steeredDispatches, disp)
+		pText := strings.TrimSpace(disp.Prompt)
+		te.drainedPrompts = append(te.drainedPrompts, pText)
+	}
+	te.steerMu.Unlock()
+
+	for _, disp := range extraDispatches {
+		switch outcome {
+		case OutcomeCompleted:
+			if _, err := storeCall(ctx, func(c context.Context) (struct{}, error) {
+				return struct{}{}, s.UpdateDispatchCompleted(c, disp.ID, row.ResponseText, row.ConversationID)
+			}); err != nil {
+				return err
+			}
+		case OutcomeFailed, OutcomeCancelled, OutcomeTimeout:
+			reason := "failed"
+			if len(failedErrs) > 0 {
+				reason = failedErrs[0]
+			}
+			if _, err := storeCall(ctx, func(c context.Context) (struct{}, error) {
+				return struct{}{}, s.UpdateDispatchStatus(c, disp.ID, db.StatusFailed, reason)
+			}); err != nil {
+				return err
+			}
+		default:
+		}
+	}
+	return nil
+}
+
 func (d dispatchSubject) load(ctx context.Context, s db.Store, te *turnExecution) ([]string, TurnOutcome, error) {
 	initialIDs := normalizeStepIDs(d.ids)
 	if len(initialIDs) == 0 {
@@ -949,13 +1051,6 @@ func (d dispatchSubject) load(ctx context.Context, s db.Store, te *turnExecution
 	}
 	if err != nil {
 		return nil, "", err
-	}
-	if row.Status != db.StatusProcessing {
-		var failedErrs []string
-		if row.Status == db.StatusFailed {
-			failedErrs = []string{row.ErrorMessage}
-		}
-		return nil, recordedOutcome([]string{row.Status}, failedErrs), nil
 	}
 	isEphem := strings.TrimSpace(row.SessionID) == ""
 	leaseKey := row.SessionID
@@ -972,6 +1067,18 @@ func (d dispatchSubject) load(ctx context.Context, s db.Store, te *turnExecution
 	extraDispatches, err := d.recoverExtraDispatches(ctx, s, row.ID, row.SessionID, leaseKey, te.turnID, initialIDs)
 	if err != nil {
 		return nil, "", err
+	}
+
+	if row.Status != db.StatusProcessing {
+		var failedErrs []string
+		if row.Status == db.StatusFailed {
+			failedErrs = []string{row.ErrorMessage}
+		}
+		outcome := recordedOutcome([]string{row.Status}, failedErrs)
+		if err := d.reconcileTerminalLeftoverDispatches(ctx, s, te, row, extraDispatches, outcome, failedErrs); err != nil {
+			return nil, "", err
+		}
+		return nil, outcome, nil
 	}
 
 	returnedIDs := []string{row.ID}
