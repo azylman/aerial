@@ -1,3 +1,4 @@
+import type { ReactNode } from 'react';
 import { ArchitectureMap } from './ArchitectureMap';
 import { GlassBoxShowcase } from './GlassBoxShowcase';
 import { FactoryStepper } from './FactoryStepper';
@@ -7,31 +8,32 @@ import { UseCaseGallery, USE_CASE_SCENARIOS } from './UseCaseGallery';
 import { FaqSection, FAQ_ITEMS, type FaqItem } from './FaqSection';
 import { useCopyToClipboard } from '../useCopyToClipboard';
 
-export interface IntegrationBadge {
-  id: string;
-  group: string;
-  label: string;
-}
+export interface PillarSpecRow { id: string; capability: string; tech: string; detail: string }
+export interface PillarCard { id: string; title: string; description: string; specs: readonly PillarSpecRow[] }
 
-export const INTEGRATION_BADGES: readonly IntegrationBadge[] = [
-  // Surfaces
-  { id: 'discord-gateway', group: 'Surfaces', label: 'Discord Gateway' },
-  { id: 'webrtc-kiosk-voice', group: 'Surfaces', label: 'WebRTC & Touch Kiosk Voice' },
-  { id: 'pstn-voice-calls', group: 'Surfaces', label: 'PSTN Phone Calls' },
-  { id: 'console-hud', group: 'Surfaces', label: 'Headful Browser (CDP) & Web HUD' },
-
-  // AI Engines
-  { id: 'claude-code', group: 'AI Engines', label: 'Claude Code' },
-  { id: 'codex-cli', group: 'AI Engines', label: 'Codex CLI' },
-  { id: 'google-antigravity', group: 'AI Engines', label: 'Google Antigravity' },
-  { id: 'local-onnx-speech', group: 'AI Engines', label: 'Local CUDA ONNX Speech' },
-
-  // Core Stack
-  { id: 'k3s-kubernetes', group: 'Core Stack', label: 'Kubernetes (k3s)' },
-  { id: 'restate-durable', group: 'Core Stack', label: 'Restate Durable Execution' },
-  { id: 'cnpg-postgres', group: 'Core Stack', label: 'CloudNativePG Postgres 19' },
-  { id: 'flux-infisical', group: 'Core Stack', label: 'Flux CD & Infisical' },
+export const PILLAR_CARDS: readonly PillarCard[] = [
+  { id: 'platform', title: 'Homelab Application Platform', description: 'Declarative cluster foundation for stateful apps, durable workflows, and unified telemetry.', specs: [
+    { id: 'data-vectors', capability: 'Data & Vectors', tech: 'Postgres 19', detail: 'Managed relational + vector storage' },
+    { id: 'durable-state', capability: 'Durable State', tech: 'Restate + NATS', detail: 'Journaled execution & JetStream' },
+    { id: 'gitops-otel', capability: 'GitOps & OTel', tech: 'Flux + OTel', detail: 'Push deploy + metrics, logs, traces' },
+  ] },
+  { id: 'factory', title: 'Autonomous Software Factory', description: 'End-to-end multi-PR code generation, peer review, verification, and continuous delivery.', specs: [
+    { id: 'dag-builds', capability: 'DAG Builds', tech: 'Vikunja + Restate', detail: 'Cross-repo dependency sequencing' },
+    { id: 'code-review', capability: 'Code & Review', tech: 'Claude + Codex', detail: 'Isolated clones & multi-agent panel' },
+    { id: 'auto-recovery', capability: 'Auto-Recovery', tech: 'GitHub Actions', detail: 'Proactive wakes on failing checks' },
+  ] },
+  { id: 'agent', title: 'AI Agent', description: 'Always-on chat, room voice, and phone operator with browser tools and long-term memory.', specs: [
+    { id: 'voice-chat', capability: 'Voice & Chat', tech: 'Discord + Voice', detail: 'Threads, room audio & phone calls' },
+    { id: 'web-timers', capability: 'Web & Timers', tech: 'CDP + Cron', detail: 'Browser automation & schedules' },
+    { id: 'recall-skills', capability: 'Recall & Skills', tech: 'ACT-R + SKILL.md', detail: 'Semantic memory & modular skills' },
+  ] },
 ] as const;
+
+const PILLAR_ICONS: Readonly<Record<string, ReactNode>> = {
+  platform: <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="7" /><path d="M3.5 15.5c2 2.5 8.5 1.5 14-2s7.5-8.5 5.5-11" /></svg>,
+  factory: <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2" /></svg>,
+  agent: <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><path d="M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3Z" /><path d="M19 10v2a7 7 0 0 1-14 0v-2" /><line x1="12" x2="12" y1="19" y2="22" /></svg>,
+};
 
 export {
   ArchitectureMap,
@@ -110,60 +112,28 @@ export function LandingView() {
         </div>
       </div>
 
-      {/* Supported Surfaces, Engines & Integrations Strip */}
-      <div className="integration-strip" data-testid="integration-strip">
-        <div className="integration-strip-label">Supported Surfaces, Engines & Integrations</div>
-        <div className="integration-badges-grid">
-          {INTEGRATION_BADGES.map((badge) => (
-            <span key={badge.id} className="integration-badge" data-testid={`integration-badge-${badge.id}`}>
-              <span className="badge-group">{badge.group}</span>
-              <span className="badge-separator">•</span>
-              <span className="badge-label">{badge.label}</span>
-            </span>
-          ))}
-        </div>
-      </div>
-
-      {/* 3 Pillar Feature Cards */}
+      {/* 3 Spec-Sheet Pillar Cards */}
       <div className="features-grid" data-testid="pillar-cards">
-        <div className="feature-card">
-          <div className="feature-card-header">
-            <span className="feature-icon" role="img" aria-label="platform">
-              🪐
-            </span>
-            <h2 className="feature-title">Homelab Application Platform</h2>
+        {PILLAR_CARDS.map((pillar) => (
+          <div key={pillar.id} className="feature-card" data-testid={`pillar-card-${pillar.id}`}>
+            <div className="feature-card-header">
+              <span className="feature-icon-box" aria-hidden="true">{PILLAR_ICONS[pillar.id]}</span>
+              <h2 className="feature-title">{pillar.title}</h2>
+            </div>
+            <p className="feature-desc">{pillar.description}</p>
+            <div className="pillar-spec-list">
+              {pillar.specs.map((spec) => (
+                <div key={spec.id} className="pillar-spec-row" data-testid={`pillar-spec-${spec.id}`}>
+                  <div className="pillar-spec-top">
+                    <span className="pillar-spec-capability"><span className="pillar-spec-check" aria-hidden="true">✓</span><span>{spec.capability}</span></span>
+                    <span className="pillar-spec-tech">{spec.tech}</span>
+                  </div>
+                  <div className="pillar-spec-detail">{spec.detail}</div>
+                </div>
+              ))}
+            </div>
           </div>
-          <p className="feature-desc">
-            Kubernetes (k3s) fabric with NGINX Gateway Fabric, CloudNativePG PostgreSQL 19 + pgvector, Restate durable
-            workflow virtual objects, NATS JetStream, and VictoriaMetrics telemetry.
-          </p>
-        </div>
-
-        <div className="feature-card">
-          <div className="feature-card-header">
-            <span className="feature-icon" role="img" aria-label="factory">
-              ⚡
-            </span>
-            <h2 className="feature-title">Autonomous Software Factory</h2>
-          </div>
-          <p className="feature-desc">
-            Vikunja DAG backlog, tiered multi-agent review panel, Restate multi-PR DAG builds,
-            GitHub Actions CI and automated code review gates, and proactive CI failure remediation wakes.
-          </p>
-        </div>
-
-        <div className="feature-card">
-          <div className="feature-card-header">
-            <span className="feature-icon" role="img" aria-label="agent">
-              🛰️
-            </span>
-            <h2 className="feature-title">AI Agent</h2>
-          </div>
-          <p className="feature-desc">
-            Talk over Discord, room voice, or phone calls to automate browser errands, manage calendars, and run persistent
-            schedules with long-term semantic memory and SKILL.md skills.
-          </p>
-        </div>
+        ))}
       </div>
 
       {/* Interactive Use-Case Gallery */}

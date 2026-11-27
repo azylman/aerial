@@ -9,6 +9,7 @@ import {
   FaqSection,
   HERO_INSTALL_COMMAND,
   LandingView,
+  PILLAR_CARDS,
 } from './LandingView';
 import { QuickstartSteps } from './QuickstartSteps';
 import { UseCaseGallery } from './UseCaseGallery';
@@ -18,8 +19,23 @@ describe('LandingView Component', () => {
     cleanup();
   });
 
-  it('renders landing hero, pillar features, and all showcase sections', () => {
+  it('renders landing hero, spec-sheet pillar cards with capability rows, and all showcase sections', () => {
     render(<LandingView />);
+
+    expect(screen.queryByTestId('integration-strip')).toBeNull();
+    const pillarGrid = screen.getByTestId('pillar-cards');
+    expect(PILLAR_CARDS).toHaveLength(3);
+    for (const pillar of PILLAR_CARDS) {
+      const card = within(pillarGrid).getByTestId(`pillar-card-${pillar.id}`);
+      expect(within(card).getByRole('heading', { level: 2, name: pillar.title })).toBeTruthy();
+      expect(card.textContent).toContain(pillar.description);
+      for (const spec of pillar.specs) {
+        const row = within(card).getByTestId(`pillar-spec-${spec.id}`);
+        expect(row.textContent).toContain(spec.capability);
+        expect(row.textContent).toContain(spec.tech);
+        expect(row.textContent).toContain(spec.detail);
+      }
+    }
 
     expect(within(screen.getByTestId('section-use-cases')).getByTestId('use-case-gallery')).toBeTruthy();
     expect(within(screen.getByTestId('section-architecture')).getByTestId('architecture-map')).toBeTruthy();
