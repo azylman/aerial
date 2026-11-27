@@ -337,7 +337,11 @@ func (d *StreamingDaemon) resolveAgyCompletedToolCall(activeTurn *TurnContext, r
 		return call
 	}
 	if derived := d.agyTranscriptPath(convID); derived != "" {
-		subTranscript = derived
+		if _, err := os.Stat(derived); err == nil {
+			subTranscript = derived
+		} else if subTranscript == "" {
+			subTranscript = derived
+		}
 	}
 	call.SubagentConversationID = convID
 	d.inflightMu.Lock()

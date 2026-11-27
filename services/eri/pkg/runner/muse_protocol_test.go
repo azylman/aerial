@@ -1049,3 +1049,62 @@ func TestMuseProtocol_ChildSessionStackFallbackAndUsageDeduplication(t *testing.
 		t.Fatal("expected non-nil turn")
 	}
 }
+
+func TestMuseProtocol_MultipleSubagentsItemUpdatedLeavesChildUnbound(t *testing.T) {
+	t.Parallel()
+
+	inR, inW := io.Pipe()
+	defer closeAll(inR, inW)
+	subscribedSessions := startMuseSubscribeRecorder(inR)
+
+	daemon := &StreamingDaemon{
+		cfg:           DaemonConfig{Engine: "muse"},
+		stdin:         inW,
+		claudeToolIDs: make(map[string]int),
+	}
+	daemon.sessionID = "root-sess"
+
+	sink := newMockTurnSink()
+	turn := enqueueInflightTurn(daemon, "turn-multi-sub", sink)
+
+	// Two subagents start
+	daemon.dispatchMuseJSONRPCLine(`{"jsonrpc":"2.0","method":"item/started","params":{"item":{"id":"sub-item-1","type":"subagent","arguments":{"role":"a"}}}}`)
+	daemon.dispatchMuseJSONRPCLine(`{"jsonrpc":"2.0","method":"item/started","params":{"item":{"id":"sub-item-2","type":"subagent","arguments":{"role":"b"}}}}`)
+
+	daemon.inflightMu.Lock()
+	stackLen := len(turn.museSubagentStack)
+	daemon.inflightMu.Unlock()
+	if stackLen != 2 {
+		t.Fatalf("expected 2 subagents on stack, got %d", stackLen)
+	}
+
+	// Ambiguous item/updated with no item ID while 2 subagents are on the stack must NOT bind childSessionId
+	daemon.dispatchMuseJSONRPCLine(`{"jsonrpc":"2.0","method":"item/updated","params":{"childSessionId":"child-ambiguous"}}`)
+
+	// View/subscribe is still sent for child-ambiguous
+	select {
+	case sub := <-subscribedSessions:
+		if sub.sessionID != "child-ambiguous" {
+			t.Errorf("expected view/subscribe for child-ambiguous, got %s", sub.sessionID)
+		}
+	case <-time.After(time.Second):
+		t.Fatalf("timed out waiting for view/subscribe")
+	}
+
+	daemon.inflightMu.Lock()
+	boundParent := turn.museChildParentID["child-ambiguous"]
+	daemon.inflightMu.Unlock()
+	if boundParent != "" {
+		t.Errorf("expected child-ambiguous to remain unbound when multiple subagents active, got bound to %q", boundParent)
+	}
+
+	// Later explicit item/updated with an ID binds child-ambiguous to sub-item-2
+	daemon.dispatchMuseJSONRPCLine(`{"jsonrpc":"2.0","method":"item/updated","params":{"item":{"id":"sub-item-2","childSessionId":"child-ambiguous"}}}`)
+
+	daemon.inflightMu.Lock()
+	boundParent = turn.museChildParentID["child-ambiguous"]
+	daemon.inflightMu.Unlock()
+	if boundParent != "sub-item-2" {
+		t.Errorf("expected child-ambiguous bound to sub-item-2, got %q", boundParent)
+	}
+}

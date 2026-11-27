@@ -307,3 +307,48 @@ func TestAgySubagentProbeMissingTranscriptDoesNotSynthesizeOK(t *testing.T) {
 		t.Errorf("expected invoke_agent aborted when transcript missing, got code %v desc %q", invokeAgentSpan.Status().Code, invokeAgentSpan.Status().Description)
 	}
 }
+
+func TestAgySubagentResolvePreservesURITranscriptWhenDerivedNotOnDisk(t *testing.T) {
+	t.Parallel()
+	geminiHome := t.TempDir()
+	d := &StreamingDaemon{
+		cfg: DaemonConfig{GeminiHomeDir: geminiHome, SessionID: "parent-sess"},
+	}
+	d.sessionID = "parent-sess"
+
+	customDir := t.TempDir()
+	subID := "child-custom-1"
+	customSubTranscript := filepath.Join(customDir, subID, "transcript.jsonl")
+	if err := os.MkdirAll(filepath.Dir(customSubTranscript), 0o755); err != nil {
+		t.Fatalf("failed creating custom sub dir: %v", err)
+	}
+	if err := os.WriteFile(customSubTranscript, []byte(`{"step_index":1}`), 0o644); err != nil {
+		t.Fatalf("failed writing custom sub transcript: %v", err)
+	}
+
+	parentContent := `{"step_index":2,"type":"PLANNER_RESPONSE","content":"Created the following subagent: {\"conversationId\":\"` + subID + `\",\"logAbsoluteUri\":\"` + customSubTranscript + `\"}"}` + "\n"
+	writeTestTranscript(t, geminiHome, "parent-sess", parentContent)
+
+	activeTurn := &TurnContext{}
+	rec := inFlightToolCall{
+		stepIndex: 2,
+		call: ToolCall{
+			ID:       "call-2",
+			Name:     "invoke_subagent",
+			Subagent: true,
+		},
+	}
+
+	call := d.resolveAgyCompletedToolCall(activeTurn, rec, "ok")
+	if call.SubagentConversationID != subID {
+		t.Errorf("expected SubagentConversationID %q, got %q", subID, call.SubagentConversationID)
+	}
+
+	if len(activeTurn.pendingAgySubagents) != 1 {
+		t.Fatalf("expected 1 pending subagent, got %d", len(activeTurn.pendingAgySubagents))
+	}
+	// The derived candidate path does not exist on disk, so the valid URI path must be preserved
+	if got := activeTurn.pendingAgySubagents[0].transcriptPath; got != customSubTranscript {
+		t.Errorf("expected transcriptPath preserved as %q, got %q", customSubTranscript, got)
+	}
+}

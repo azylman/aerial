@@ -667,10 +667,12 @@ func (d *StreamingDaemon) handleMuseItemUpdated(activeTurn *TurnContext, params 
 	}
 	d.inflightMu.Lock()
 	targetID := itemID
-	if targetID == "" && len(activeTurn.museSubagentStack) > 0 {
-		targetID = activeTurn.museSubagentStack[len(activeTurn.museSubagentStack)-1]
+	if targetID == "" && len(activeTurn.museSubagentStack) == 1 {
+		targetID = activeTurn.museSubagentStack[0]
 	}
-	bindMuseChildSessionLocked(activeTurn, targetID, childSessID)
+	if targetID != "" {
+		bindMuseChildSessionLocked(activeTurn, targetID, childSessID)
+	}
 	d.inflightMu.Unlock()
 
 	d.sendMuseViewSubscribe(activeTurn, childSessID)
