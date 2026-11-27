@@ -423,9 +423,10 @@ func TestHandleDrainPending_BurstTurn(t *testing.T) {
 	t.Parallel()
 
 	store := testStore(t)
-	m1 := db.Message{ID: "msg-steer-1", ThreadID: "thread-steer-burst", Content: "initial prompt", Status: db.StatusProcessing, CreatedAt: time.Now().UTC()}
-	m2 := db.Message{ID: "msg-steer-2", ThreadID: "thread-steer-burst", Content: "steer msg A", Status: db.StatusPending, CreatedAt: time.Now().UTC().Add(time.Second)}
-	m3 := db.Message{ID: "msg-steer-3", ThreadID: "thread-steer-burst", Content: "steer msg B", Status: db.StatusPending, CreatedAt: time.Now().UTC().Add(2 * time.Second)}
+	fixedTime := time.Date(2026, 11, 26, 17, 0, 0, 0, time.UTC)
+	m1 := db.Message{ID: "msg-steer-1", ThreadID: "thread-steer-burst", Content: "initial prompt", Status: db.StatusProcessing, CreatedAt: fixedTime}
+	m2 := db.Message{ID: "msg-steer-2", ThreadID: "thread-steer-burst", Content: "steer msg A", Status: db.StatusPending, CreatedAt: fixedTime.Add(time.Second)}
+	m3 := db.Message{ID: "msg-steer-3", ThreadID: "thread-steer-burst", Content: "steer msg B", Status: db.StatusPending, CreatedAt: fixedTime.Add(2 * time.Second)}
 	seedMessageRows(t, store, []db.Message{m1, m2, m3})
 
 	var restatePathSeen string
@@ -446,6 +447,7 @@ func TestHandleDrainPending_BurstTurn(t *testing.T) {
 		DrainHTTPClient:   srv.Client(),
 		AgentName:         "aerial",
 	})
+	pool.appCfg = config.NewFromData(&config.ConfigData{Timezone: "America/New_York"})
 
 	te := &turnExecution{
 		turnID:           "turn-burst-test",
@@ -473,6 +475,8 @@ func TestHandleDrainPending_BurstTurn(t *testing.T) {
 	require.Len(t, resp.Prompts, 1)
 	assert.Contains(t, resp.Prompts[0], "steer msg A")
 	assert.Contains(t, resp.Prompts[0], "steer msg B")
+	assert.Contains(t, resp.Prompts[0], "at 12:00:01")
+	assert.Contains(t, resp.Prompts[0], "at 12:00:02")
 
 	te.steerMu.Lock()
 	assert.Equal(t, []string{m2.ID, m3.ID}, te.drainedIDs)
@@ -908,9 +912,9 @@ func TestBurstSubjectLoad_CrashReplay_Recovery(t *testing.T) {
 
 	te.steerMu.Lock()
 	assert.ElementsMatch(t, []string{m2.ID, m3.ID}, te.drainedIDs)
-	require.Len(t, te.drainedPrompts, 1)
-	assert.Contains(t, te.drainedPrompts[0], "db processing prompt")
-	assert.Contains(t, te.drainedPrompts[0], "status pending prompt")
+	require.Len(t, te.drainedPrompts, 2)
+	assert.Contains(t, te.drainedPrompts, "db processing prompt")
+	assert.Contains(t, te.drainedPrompts, "status pending prompt")
 	te.steerMu.Unlock()
 
 	// Verify m3 was claimed into PROCESSING in the store
@@ -1042,35 +1046,29 @@ func TestPostCrash_StopAndFailCleanup(t *testing.T) {
 func TestTurnExecution_ApplyDrainedPrompts(t *testing.T) {
 	t.Parallel()
 
+	// 1. Drained prompts with blank values and distinct items
 	te := &turnExecution{
-		drainedPrompts: []string{"", "   ", "prompt 1", "prompt 2"},
+		drainedIDs:     []string{"d1", "d2", "d3", "d4"},
+		drainedPrompts: []string{"", "   ", "continue", "continue"},
 	}
-	te.applyDrainedPrompts("")
-	assert.Equal(t, "prompt 1\n\nprompt 2", te.turnPrompt)
+	te.applyDrainedPrompts(AttemptInput{
+		Prep: TurnPrep{Prompt: "initial"},
+		IDs:  []string{"d0"},
+	})
+	// Identical drained prompts ("continue") from distinct rows must both be included
+	assert.Equal(t, "initial\n\ncontinue\n\ncontinue", te.turnPrompt)
 
+	// 2. Row IDs already in AttemptInput.IDs (e.g. carried into in.IDs across retry) are deduplicated by ID, not substring
 	te2 := &turnExecution{
-		drainedPrompts: []string{"prompt 1", "prompt 2"},
+		drainedIDs:     []string{"d1", "d2"},
+		drainedPrompts: []string{"continue", "different prompt"},
 	}
-	te2.applyDrainedPrompts("initial prompt")
-	assert.Equal(t, "initial prompt\n\nprompt 1\n\nprompt 2", te2.turnPrompt)
-
-	// Existing prompts not duplicated
-	te2.applyDrainedPrompts(te2.turnPrompt)
-	assert.Equal(t, "initial prompt\n\nprompt 1\n\nprompt 2", te2.turnPrompt)
-}
-
-func TestWorkerPool_CurrentTimezone(t *testing.T) {
-	t.Parallel()
-
-	var nilPool *WorkerPool
-	assert.Empty(t, nilPool.currentTimezone())
-
-	poolNilCfg := &WorkerPool{}
-	assert.Empty(t, poolNilCfg.currentTimezone())
-
-	appCfg := config.NewFromData(&config.ConfigData{Timezone: "America/New_York"})
-	poolWithApp := &WorkerPool{appCfg: appCfg}
-	assert.Equal(t, "America/New_York", poolWithApp.currentTimezone())
+	te2.applyDrainedPrompts(AttemptInput{
+		Prep: TurnPrep{Prompt: "initial prompt with continue in it"},
+		IDs:  []string{"d0", "d1"},
+	})
+	// d1 is already in in.IDs, so it is skipped. d2 is not in in.IDs, so it is appended.
+	assert.Equal(t, "initial prompt with continue in it\n\ndifferent prompt", te2.turnPrompt)
 }
 
 func TestPostCrash_StopAndFail_WithLiveExecution(t *testing.T) {

@@ -176,11 +176,10 @@ func (p *WorkerPool) callRestateDrain(ctx context.Context, te *turnExecution) (D
 }
 
 func (p *WorkerPool) currentTimezone() string {
-	if p == nil || p.appCfg == nil {
-		return ""
-	}
-	if cur := p.appCfg.Current(); cur != nil {
-		return cur.Timezone
+	if p.appCfg != nil {
+		if cur := p.appCfg.Current(); cur != nil {
+			return cur.Timezone
+		}
 	}
 	return ""
 }
@@ -286,14 +285,19 @@ func (p *WorkerPool) drainBurstTurn(ctx context.Context, te *turnExecution, s db
 		return nil, err
 	}
 	te.burst = append(te.burst, rows...)
+	tz := p.currentTimezone()
 	for _, row := range rows {
 		te.drainedIDs = append(te.drainedIDs, row.ID)
+		rowPrompt := CoalesceBurstPrompt([]db.Message{row}, tz)
+		if strings.TrimSpace(rowPrompt) == "" {
+			rowPrompt = row.Content
+		}
+		te.drainedPrompts = append(te.drainedPrompts, rowPrompt)
 	}
-	coalesced := CoalesceBurstPrompt(rows, p.currentTimezone())
+	coalesced := CoalesceBurstPrompt(rows, tz)
 	var prompts []string
 	if strings.TrimSpace(coalesced) != "" {
 		prompts = append(prompts, coalesced)
-		te.drainedPrompts = append(te.drainedPrompts, coalesced)
 	} else {
 		prompts = []string{}
 	}

@@ -48,6 +48,7 @@ type fakeTurnSteps struct {
 
 	calls    []string
 	prompts  []string
+	inputs   []AttemptInput
 	attemptN int
 }
 
@@ -75,6 +76,7 @@ func (f *fakeTurnSteps) attempt(in AttemptInput) (AttemptResult, error) {
 	}
 	f.mu.Lock()
 	f.prompts = append(f.prompts, in.Prep.Prompt)
+	f.inputs = append(f.inputs, in)
 	if f.attemptN >= len(f.attempts) {
 		f.mu.Unlock()
 		return AttemptResult{}, errors.New("unscripted attempt")
@@ -562,6 +564,13 @@ func TestTurnRunnerRunDispatch(t *testing.T) {
 			wantCalls:   []string{"started", "prep", "attempt ord=1 run=1", "outcome completed", "publish completed", "publish completed", "publish completed"},
 		},
 		{
+			name: "CrashLoopPublishesFailedForDrainedDispatches", started: claimed(0, "d1"), prep: runPrep(),
+			attempts:    []fakeAttempt{{res: AttemptResult{Kind: AttemptKindTerminal, Reason: "crash loop", DrainedIDs: []string{"d2", "d3"}}}},
+			wantOutcome: OutcomeFailed,
+			wantCmds:    []string{"run record-started", "run prep", "run run-1", "run record-outcome", "run publish-dispatch-outcome", "run publish-dispatch-outcome-2", "run publish-dispatch-outcome-3", doneSend(ds, "session-1", OutcomeFailed, 0)},
+			wantCalls:   []string{"started", "prep", "attempt ord=1 run=1", "outcome failed crash loop", "publish failed", "publish failed", "publish failed"},
+		},
+		{
 			name: "TimeoutPublishesTimeout", started: claimed(0, "d1"), prep: runPrep(), attempts: []fakeAttempt{{res: AttemptResult{Kind: AttemptKindTimeout, Reason: "timeout"}}},
 			wantOutcome: OutcomeTimeout,
 			wantCmds:    []string{"run record-started", "run prep", "run run-1", "run record-outcome", "run publish-dispatch-outcome", doneSend(ds, "session-1", OutcomeTimeout, 0)},
@@ -694,4 +703,37 @@ func TestTurnRunner_EndOnTerminal_IncludesDrainedIDs(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, OutcomeFailed, res.Outcome)
 	assert.Contains(t, steps.callLog(), "fail m1,m2 integrity violation")
+}
+
+func TestTurnRunner_RunAttempts_TwoDrainsFollowedByRetry(t *testing.T) {
+	t.Parallel()
+	steps := &fakeTurnSteps{
+		started: claimed(0, "m1"),
+		prep:    TurnPrep{Decision: TurnDecisionRun, Prompt: "initial prompt"},
+		attempts: []fakeAttempt{
+			{res: AttemptResult{Kind: AttemptKindRetry, BackoffMs: 0, Reason: "transient", DrainedIDs: []string{"m2"}, DrainedPrompts: []string{"steered msg A"}}},
+			{res: AttemptResult{Kind: AttemptKindRetry, BackoffMs: 0, Reason: "transient", DrainedIDs: []string{"m2", "m3"}, DrainedPrompts: []string{"steered msg A", "steered msg B"}}},
+			{res: AttemptResult{Kind: AttemptKindSuccess}},
+		},
+	}
+	j := &runnerJournal{t: t}
+	svc := NewTurnRunnerService(steps, "")
+	res, err := svc.RunBurst(j.context(t), BurstTurnRequest{ThreadID: "thread-1", TurnID: "turn-1", MessageIDs: []string{"m1"}})
+	require.NoError(t, err)
+	assert.Equal(t, OutcomeCompleted, res.Outcome)
+
+	require.Len(t, steps.prompts, 3)
+	assert.Equal(t, "initial prompt", steps.prompts[0])
+	assert.Equal(t, "initial prompt\n\nsteered msg A", steps.prompts[1])
+	assert.Equal(t, "initial prompt\n\nsteered msg A\n\nsteered msg B", steps.prompts[2])
+
+	// Each drained message prompt appears exactly once across retries
+	assert.Equal(t, 1, strings.Count(steps.prompts[2], "steered msg A"))
+	assert.Equal(t, 1, strings.Count(steps.prompts[2], "steered msg B"))
+
+	// Drained IDs are properly set on AttemptInput for the subsequent retry attempt
+	require.Len(t, steps.inputs, 3)
+	assert.Equal(t, []string{"m1"}, steps.inputs[0].IDs)
+	assert.Equal(t, []string{"m1", "m2"}, steps.inputs[1].IDs)
+	assert.Equal(t, []string{"m1", "m2", "m3"}, steps.inputs[2].IDs)
 }

@@ -553,15 +553,18 @@ func (p *WorkerPool) RecordBurstOutcome(ctx context.Context, ids []string, summa
 	return unfinishedMessagesError(ctx, s, ids)
 }
 
-func recoverBurstProcessingRows(ctx context.Context, s db.Store, threadID string, existing []db.Message) []db.Message {
+func recoverBurstProcessingRows(ctx context.Context, s db.Store, threadID string, existing []db.Message) ([]db.Message, error) {
 	if s == nil || strings.TrimSpace(threadID) == "" {
-		return existing
+		return existing, nil
 	}
 	tasks, err := storeCall(ctx, func(c context.Context) ([]db.ActiveTask, error) {
 		return s.GetActiveTasks(c, db.TasksFilter{Statuses: []string{db.StatusProcessing}, ThreadID: threadID, Order: db.TasksOrderAsc})
 	})
-	if err != nil || len(tasks) == 0 {
-		return existing
+	if err != nil {
+		return nil, err
+	}
+	if len(tasks) == 0 {
+		return existing, nil
 	}
 	var extraIDs []string
 	for _, t := range tasks {
@@ -570,11 +573,11 @@ func recoverBurstProcessingRows(ctx context.Context, s db.Store, threadID string
 		}
 	}
 	if len(extraIDs) == 0 {
-		return existing
+		return existing, nil
 	}
 	extraRows, err := messagesByIDOrdered(ctx, s, extraIDs)
-	if err != nil || len(extraRows) == 0 {
-		return existing
+	if err != nil {
+		return nil, err
 	}
 	merged := slices.Clone(existing)
 	for _, r := range extraRows {
@@ -582,7 +585,7 @@ func recoverBurstProcessingRows(ctx context.Context, s db.Store, threadID string
 			merged = append(merged, r)
 		}
 	}
-	return merged
+	return merged, nil
 }
 
 //nolint:contextcheck,nolintlint // the reused turn helpers own their contexts; store calls take ctx.
@@ -600,7 +603,10 @@ func (p *WorkerPool) failActiveBurstRows(ctx context.Context, s db.Store, ids []
 	if len(active) == 0 {
 		return 0, nil
 	}
-	active = recoverBurstProcessingRows(ctx, s, active[0].ThreadID, active)
+	active, err = recoverBurstProcessingRows(ctx, s, active[0].ThreadID, active)
+	if err != nil {
+		return 0, err
+	}
 	reason := summary.failureReason()
 	te := p.newStepTurnExecution(ctx, active[0].ThreadID, active)
 	if prefix := summary.noticePrefix(); prefix != "" {
@@ -634,16 +640,22 @@ func (p *WorkerPool) failActiveBurstRows(ctx context.Context, s db.Store, ids []
 	return len(changed), nil
 }
 
-func expandDispatchActiveIDs(ctx context.Context, s db.Store, ids []string) []string {
+func expandDispatchActiveIDs(ctx context.Context, s db.Store, ids []string) ([]string, error) {
 	ids = normalizeStepIDs(ids)
 	if s == nil || len(ids) == 0 {
-		return ids
+		return ids, nil
 	}
 	expanded := slices.Clone(ids)
 	seenSessions := make(map[string]bool)
 	for _, id := range ids {
 		d, err := storeCall(ctx, func(c context.Context) (*db.Dispatch, error) { return s.GetDispatch(c, id) })
-		if err != nil || d == nil || strings.TrimSpace(d.SessionID) == "" {
+		if errors.Is(err, db.ErrRecordNotFound) || (err == nil && d == nil) {
+			continue
+		}
+		if err != nil {
+			return nil, err
+		}
+		if strings.TrimSpace(d.SessionID) == "" {
 			continue
 		}
 		sess := strings.TrimSpace(d.SessionID)
@@ -652,8 +664,8 @@ func expandDispatchActiveIDs(ctx context.Context, s db.Store, ids []string) []st
 		}
 		seenSessions[sess] = true
 		tasks, err := storeCall(ctx, func(c context.Context) ([]db.ActiveTask, error) { return s.GetActiveTasks(c) })
-		if err != nil || len(tasks) == 0 {
-			continue
+		if err != nil {
+			return nil, err
 		}
 		for _, t := range tasks {
 			if strings.HasPrefix(t.AuthorID, "dispatch:") && t.Status == db.StatusProcessing && (t.ThreadID == sess || t.SessionID == sess) {
@@ -663,10 +675,10 @@ func expandDispatchActiveIDs(ctx context.Context, s db.Store, ids []string) []st
 			}
 		}
 	}
-	return normalizeStepIDs(expanded)
+	return normalizeStepIDs(expanded), nil
 }
 
-func (p *WorkerPool) resolveDispatchOutcomeIDs(ctx context.Context, s db.Store, ids []string) []string {
+func (p *WorkerPool) resolveDispatchOutcomeIDs(ctx context.Context, s db.Store, ids []string) ([]string, error) {
 	var live *turnExecution
 	if p.turns != nil {
 		live = p.turns.FindExecution(func(candidate *turnExecution) bool {
@@ -698,8 +710,7 @@ func (p *WorkerPool) resolveDispatchOutcomeIDs(ctx context.Context, s db.Store, 
 			ids = p.reconcileActiveTurnIDs(ctx, true, leaseKey, turnID, ids)
 		}
 	}
-	ids = expandDispatchActiveIDs(ctx, s, ids)
-	return normalizeStepIDs(ids)
+	return expandDispatchActiveIDs(ctx, s, ids)
 }
 
 func recordSingleDispatchFailure(ctx context.Context, s db.Store, id string, summary AttemptSummary) error {
@@ -732,7 +743,10 @@ func (p *WorkerPool) RecordDispatchOutcome(ctx context.Context, ids []string, su
 	if summary.Outcome == OutcomeReschedule || len(ids) == 0 {
 		return nil
 	}
-	ids = p.resolveDispatchOutcomeIDs(ctx, s, ids)
+	ids, err = p.resolveDispatchOutcomeIDs(ctx, s, ids)
+	if err != nil {
+		return err
+	}
 	for _, id := range ids {
 		if err := recordSingleDispatchFailure(ctx, s, id, summary); err != nil {
 			return err
@@ -918,7 +932,11 @@ func (p *WorkerPool) StopDispatchTurn(ctx context.Context, turnID string, ids []
 	if leaseKey != "" {
 		ids = p.reconcileActiveTurnIDs(ctx, true, leaseKey, turnID, ids)
 	}
-	ids = expandDispatchActiveIDs(ctx, s, ids)
+	var expErr error
+	ids, expErr = expandDispatchActiveIDs(ctx, s, ids)
+	if expErr != nil {
+		return expErr
+	}
 	p.turns.Stop(turnID, CancelledByOperatorReason)
 	return p.RecordDispatchOutcome(ctx, normalizeStepIDs(ids), AttemptSummary{Outcome: OutcomeCancelled})
 }
@@ -1015,7 +1033,11 @@ func (p *WorkerPool) FailDispatchTurn(ctx context.Context, turnID string, ids []
 	if leaseKey != "" {
 		ids = p.reconcileActiveTurnIDs(ctx, true, leaseKey, turnID, ids)
 	}
-	ids = expandDispatchActiveIDs(ctx, s, ids)
+	var expErr error
+	ids, expErr = expandDispatchActiveIDs(ctx, s, ids)
+	if expErr != nil {
+		return expErr
+	}
 	p.turns.Stop(turnID, reason)
 	ids = normalizeStepIDs(ids)
 	if err := p.RecordDispatchOutcome(ctx, ids, AttemptSummary{Outcome: OutcomeFailed, Reason: reason}); err != nil {

@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"slices"
 	"strings"
 	"time"
 
@@ -376,6 +377,49 @@ func nextAttempt(in AttemptInput, res AttemptResult, maxAttempts int) (attemptAc
 	}
 }
 
+func appendPrompt(dst *string, prompt string) {
+	if *dst == "" {
+		*dst = prompt
+	} else {
+		*dst += "\n\n" + prompt
+	}
+}
+
+func mergeDrainedAttempt(runIn *AttemptInput, res AttemptResult, t *turnProgress) {
+	if len(res.DrainedIDs) > 0 {
+		mergeDrainedIDs(runIn, res, t)
+		return
+	}
+	if len(res.DrainedPrompts) > 0 {
+		mergeDrainedPromptsOnly(runIn, res)
+	}
+}
+
+func mergeDrainedIDs(runIn *AttemptInput, res AttemptResult, t *turnProgress) {
+	for i, id := range res.DrainedIDs {
+		if slices.Contains(runIn.IDs, id) {
+			continue
+		}
+		runIn.IDs = append(runIn.IDs, id)
+		if i < len(res.DrainedPrompts) {
+			if dp := strings.TrimSpace(res.DrainedPrompts[i]); dp != "" {
+				appendPrompt(&runIn.Prep.Prompt, dp)
+			}
+		}
+	}
+	t.ids = normalizeStepIDs(append(t.ids, res.DrainedIDs...))
+	runIn.IDs = normalizeStepIDs(runIn.IDs)
+}
+
+func mergeDrainedPromptsOnly(runIn *AttemptInput, res AttemptResult) {
+	for _, dp := range res.DrainedPrompts {
+		dp = strings.TrimSpace(dp)
+		if dp != "" && !strings.Contains(runIn.Prep.Prompt, dp) {
+			appendPrompt(&runIn.Prep.Prompt, dp)
+		}
+	}
+}
+
 // runAttempts runs run-1..run-n: one lease execution per step inside restate.RunAsync, with
 // restate.Sleep(BackoffMs) before the next ordinal.
 func (s *TurnRunnerService) runAttempts(ctx restate.Context, subj runnerSubject, turnID string, started StartedTurn, prep TurnPrep, t *turnProgress) error {
@@ -398,23 +442,9 @@ func (s *TurnRunnerService) runAttempts(ctx restate.Context, subj runnerSubject,
 		}
 		t.attempted = true
 		t.last = res
-		if len(res.DrainedIDs) > 0 {
-			t.ids = normalizeStepIDs(append(t.ids, res.DrainedIDs...))
-			in.IDs = normalizeStepIDs(append(in.IDs, res.DrainedIDs...))
-		}
-		if len(res.DrainedPrompts) > 0 {
-			for _, dp := range res.DrainedPrompts {
-				trimmed := strings.TrimSpace(dp)
-				if trimmed != "" && !strings.Contains(runIn.Prep.Prompt, dp) {
-					if runIn.Prep.Prompt == "" {
-						runIn.Prep.Prompt = dp
-					} else {
-						runIn.Prep.Prompt += "\n\n" + dp
-					}
-				}
-			}
-			in.Prep.Prompt = runIn.Prep.Prompt
-		}
+		mergeDrainedAttempt(&runIn, res, t)
+		in.IDs = slices.Clone(runIn.IDs)
+		in.Prep.Prompt = runIn.Prep.Prompt
 		type step struct {
 			action  attemptAction
 			next    AttemptInput

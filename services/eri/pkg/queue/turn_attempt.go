@@ -346,7 +346,14 @@ func beginAttemptRows(ctx context.Context, s db.Store, te *turnExecution, subj a
 	if err := subj.recordFailure(ctx, s, te, ids, summary); err != nil {
 		return AttemptResult{}, true, err
 	}
-	return AttemptResult{Kind: AttemptKindTerminal, Reason: crashLoopReason, AutoResumes: in.AutoResumes}, true, nil
+	drainedIDs, drainedPrompts := te.drainedState()
+	return AttemptResult{
+		Kind:           AttemptKindTerminal,
+		Reason:         crashLoopReason,
+		AutoResumes:    in.AutoResumes,
+		DrainedIDs:     drainedIDs,
+		DrainedPrompts: drainedPrompts,
+	}, true, nil
 }
 
 // attemptRun is the raw result of one lease execution.
@@ -360,13 +367,25 @@ type attemptRun struct {
 	poolMissing bool
 }
 
-func (te *turnExecution) applyDrainedPrompts(initialPrompt string) {
-	te.turnPrompt = initialPrompt
+func (te *turnExecution) drainedState() (ids []string, prompts []string) {
 	te.steerMu.Lock()
 	defer te.steerMu.Unlock()
-	for _, dp := range te.drainedPrompts {
-		trimmed := strings.TrimSpace(dp)
-		if trimmed == "" || strings.Contains(te.turnPrompt, dp) {
+	return slices.Clone(te.drainedIDs), slices.Clone(te.drainedPrompts)
+}
+
+func (te *turnExecution) applyDrainedPrompts(in AttemptInput) {
+	te.turnPrompt = in.Prep.Prompt
+	te.steerMu.Lock()
+	defer te.steerMu.Unlock()
+	for i, id := range te.drainedIDs {
+		if slices.Contains(in.IDs, id) {
+			continue
+		}
+		var dp string
+		if i < len(te.drainedPrompts) {
+			dp = strings.TrimSpace(te.drainedPrompts[i])
+		}
+		if dp == "" {
 			continue
 		}
 		if te.turnPrompt == "" {
@@ -383,7 +402,7 @@ func (p *WorkerPool) executeAttempt(ctx context.Context, s db.Store, te *turnExe
 	cfg := te.resolveAttemptConfig(ctx, in.Ordinal)
 	model := cfg.model
 	te.turnModel = model
-	te.applyDrainedPrompts(in.Prep.Prompt)
+	te.applyDrainedPrompts(in)
 	te.injectedHookContext = in.Prep.InjectedContext
 	te.turnAttempted = true
 	te.hookMetadata = hookMetadataAny(in.Prep.HookMetadata)
@@ -404,7 +423,14 @@ func (p *WorkerPool) executeAttempt(ctx context.Context, s db.Store, te *turnExe
 	}()
 
 	if te.checkGlobalQuotaLockout(cfg.apiKey, model) {
-		return AttemptResult{Kind: AttemptKindTerminal, Reason: "global quota pause active", AutoResumes: in.AutoResumes}, nil
+		drainedIDs, drainedPrompts := te.drainedState()
+		return AttemptResult{
+			Kind:           AttemptKindTerminal,
+			Reason:         "global quota pause active",
+			AutoResumes:    in.AutoResumes,
+			DrainedIDs:     drainedIDs,
+			DrainedPrompts: drainedPrompts,
+		}, nil
 	}
 
 	defer te.enqueueTranscriptPublish()
@@ -789,15 +815,17 @@ func (b burstSubject) load(ctx context.Context, s db.Store, te *turnExecution) (
 	}
 
 	if len(extraRows) > 0 {
+		tz := b.pool.currentTimezone()
 		te.steerMu.Lock()
 		for _, r := range extraRows {
 			te.drainedIDs = append(te.drainedIDs, r.ID)
 			te.burst = append(te.burst, r)
 			returnedIDs = append(returnedIDs, r.ID)
-		}
-		coalesced := CoalesceBurstPrompt(extraRows, b.pool.currentTimezone())
-		if strings.TrimSpace(coalesced) != "" {
-			te.drainedPrompts = append(te.drainedPrompts, coalesced)
+			rowPrompt := CoalesceBurstPrompt([]db.Message{r}, tz)
+			if strings.TrimSpace(rowPrompt) == "" {
+				rowPrompt = r.Content
+			}
+			te.drainedPrompts = append(te.drainedPrompts, rowPrompt)
 		}
 		te.steerMu.Unlock()
 	}
