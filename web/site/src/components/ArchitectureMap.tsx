@@ -148,7 +148,7 @@ export const TOPOLOGY_NODES: readonly TopologyNode[] = [
     role: 'Stateless Ingress & Multi-Engine Worker',
     ports: 'Stateless HTTP Ingress & Restate Worker',
     description:
-      'A stateless HTTP ingress front door pairs with a durable worker to execute coding engines under security guardrails.',
+      'A stateless HTTP ingress front door pairs with a durable worker to run Claude Code, Codex, and Google Antigravity (Claude, GPT, and Gemini) under security guardrails.',
     chapterId: 'multimodal-agent',
     chapterTitle: 'The Multimodal AI Agent',
     x: 655,

@@ -8,7 +8,7 @@ Where standard GitOps homelabs stop at cluster infrastructure, standalone coding
 
 1. **Self-Hosted Application Platform**: Gives your homelab a declarative Kubernetes compute fabric, LAN and edge gateway routing, centralized secret management, durable workflow state machines, persistent event streaming, relational and vector storage, and unified metrics, logs, and distributed tracing.
 2. **Autonomous Software Factory**: Runs a lights-out, spec-to-production delivery loop (*DAG Backlog → Multi-Agent Plan & Review → Durable Multi-PR Rollout → GitHub Actions CI & LLM Review → Self-Healing Flux GitOps*) directly on the platform's primitives—taking features from dependency-tracked issues through isolated scratch Pull Requests, GitHub Actions CI and automated code review, and push-driven GitOps rollouts with proactive CI failure remediation.
-3. **AI Agent**: Connects your agent directly to your everyday workflows, homelab, and software factory over Discord, real-time voice, and phone calls—automating browser errands, calendars, and persistent cron/heartbeat/event-watch schedules with hybrid semantic memory, **Model Context Protocol (MCP)** connectors, and custom `SKILL.md` workflows.
+3. **AI Agent**: Runs pluggable agent harnesses (**Claude Code**, **OpenAI Codex**, and **Google Antigravity** across **Claude**, **GPT**, and **Gemini** models) connected to your everyday workflows, homelab, and software factory over Discord, real-time voice, and phone calls—automating browser errands, calendars, and persistent cron/heartbeat/event-watch schedules with hybrid semantic memory, **Model Context Protocol (MCP)** connectors, and custom `SKILL.md` workflows.
 
 ---
 
@@ -23,7 +23,7 @@ Where standard GitOps homelabs stop at cluster infrastructure, standalone coding
 | **Secrets Governance** | **Infisical** + **External Secrets Operator** (centralized vault syncing scoped Kubernetes Secrets in-memory with zero plaintext disk persistence) |
 | **Observability** | **VictoriaMetrics** (TSDB) + **`vmalert`** (MAD anomaly and alert rules), **Fluent Bit** + **VictoriaLogs** (LogsQL log analytics, 60-day retention), **VictoriaTraces** (OTLP distributed tracing, 30-day retention), **Grafana**, **Headlamp** (Kubernetes/Flux UI), and **Prometheus Exporters** (**Kubelet / cAdvisor**, **Node Exporter**, **CloudNativePG**) |
 | **Software Factory & GitOps** | **Vikunja** (DAG issue and backlog graph), **GitHub Actions CI & Automated Code Review** (`check_run`, `workflow_run`, `pull_request`, and `push` webhooks with automated RoboRev review gates), **Ariga Atlas** (declarative SQL schema migrations), and **Flux CD** (webhook-driven push GitOps) |
-| **Agent Core & Memory** | Configurable CLI execution engines (**`agy`**, **Claude Code**, **Codex**, **Muse**), **Hybrid RRF (`pgvector` + FTS) & ACT-R Memory** (semantic fact retrieval, temporal decay, and procedural skill synthesis), **Streamable HTTP MCP Servers**, **`SKILL.md` Workflows** (`agentskills.io`), and **AgentsView** (web transcript and trace inspector) |
+| **Agent Core & Memory** | Configurable CLI execution engines (**Claude Code**, **OpenAI Codex**, and **Google Antigravity (`agy`)**), **Hybrid RRF (`pgvector` + FTS) & ACT-R Memory** (semantic fact retrieval, temporal decay, and procedural skill synthesis), **Streamable HTTP MCP Servers**, **`SKILL.md` Workflows** (`agentskills.io`), and **AgentsView** (web transcript and trace inspector) |
 | **Voice, Telephony & Browser Automation** | **Discord Gateway/REST**, **Real-Time Voice** (with optional STT/TTS sidecars), **Twilio PSTN** (inbound/outbound voice calls), **Kernel Browser** (headful CDP browser control), **1Password CLI** (scoped vault credential retrieval), and **Stripe Link** (`@stripe/link-cli` one-time virtual payment tokens) |
 
 ---
@@ -130,7 +130,7 @@ azylman/aerial (Engine Repo)              your-aerial-config (Private Overlay Re
 ┌──────────────────────────────────────────────────────────────────────────────────────────────────┐
 │                              AGENT EXECUTION CORE & DURABLE WORKER                               │
 │  • Stateless HTTP Ingress Front Door                                                             │
-│  • Multi-Engine Restate Worker (agy, Claude Code, Codex, Muse)                                   │
+│  • Multi-Engine Restate Worker (Claude Code, Codex, Google Antigravity)                          │
 │  • Durable Restate sessions (ThreadSession, DispatchSession, TurnRunner, VoiceSession)           │
 │  • Autonomous Subagent Orchestrator & SDD Planning Engine                                        │
 │  • Self-Healing GitOps Worker (Proactive CI/CD & RoboRev Remediation)                            │
@@ -169,7 +169,7 @@ azylman/aerial (Engine Repo)              your-aerial-config (Private Overlay Re
 ### Defense-in-Depth Agent Guardrails
 
 - **Read-Only Repository & Credential Mounts (`:ro`)**: Live repositories (`/share/aerial`, `/share/aerial-config`), OAuth credentials, and secret bundles are mounted read-only at the container boundary, forcing all changes through isolated scratch clones (`scripts/aerial-pr.sh init`) and reviewed Pull Requests.
-- **Child-Process Secret Scrubbing**: Database passwords, GitHub PATs, Discord tokens, and API keys are stripped from the child process environment before spawning `agy`, Claude Code, Codex, or Muse so the agent acts strictly through typed MCP servers.
+- **Child-Process Secret Scrubbing**: Database passwords, GitHub PATs, Discord tokens, and API keys are stripped from the child process environment before spawning Claude Code, OpenAI Codex, and Google Antigravity (`agy`) so the agent acts strictly through typed MCP servers.
 - **Compiled Pre-Tool Hook Interceptors**: Go pre-tool hooks inspect every agent tool call before execution to block read-only or live-SSH mutations, scan staged git diffs for leaked secrets or private IPs, prevent foreground polling loops, and bound filesystem and telemetry queries.
 - **Outbound & Log Secret Redaction**: Outbound Discord messages and log streams pass through exact and derived-encoding (`base64`, URL, hex, JSON-escaped) secret redaction.
 

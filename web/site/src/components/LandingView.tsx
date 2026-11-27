@@ -19,13 +19,13 @@ export const PILLAR_CARDS: readonly PillarCard[] = [
   ] },
   { id: 'factory', title: 'Autonomous Software Factory', description: 'End-to-end multi-PR code generation, peer review, verification, and continuous delivery.', specs: [
     { id: 'dag-builds', capability: 'DAG Builds', tech: 'Vikunja + Restate', detail: 'Cross-repo dependency sequencing' },
-    { id: 'code-review', capability: 'Code & Review', tech: 'Claude + Codex', detail: 'Isolated clones & multi-agent panel' },
+    { id: 'code-review', capability: 'Code & Review', tech: 'Git + RoboRev', detail: 'Isolated clones & multi-agent panel' },
     { id: 'auto-recovery', capability: 'Auto-Recovery', tech: 'GitHub Actions', detail: 'Proactive wakes on failing checks' },
   ] },
   { id: 'agent', title: 'AI Agent', description: 'Always-on chat, room voice, and phone operator with browser tools and long-term memory.', specs: [
+    { id: 'agent-harnesses', capability: 'Agent Harnesses', tech: 'Claude • GPT • Gemini', detail: 'Claude Code, Codex & Antigravity' },
     { id: 'voice-chat', capability: 'Voice & Chat', tech: 'Discord + Voice', detail: 'Threads, room audio & phone calls' },
-    { id: 'web-timers', capability: 'Web & Timers', tech: 'CDP + Cron', detail: 'Browser automation & schedules' },
-    { id: 'recall-skills', capability: 'Recall & Skills', tech: 'ACT-R + SKILL.md', detail: 'Semantic memory & modular skills' },
+    { id: 'tools-memory', capability: 'Tools & Memory', tech: 'CDP • Cron • ACT-R', detail: 'Browser, timers, memory & skills' },
   ] },
 ] as const;
 
