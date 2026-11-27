@@ -93,11 +93,48 @@ func assertAttachOutcome(t *testing.T, tc executePRAttachTestCase, st *store.Sto
 	}
 }
 
-// Inspect the callback error before the SDK can retry the journaled operation.
-func TestExecutePRAttachment(t *testing.T) {
-	t.Parallel()
+func stubGitHubOpenPR() *executor.GitHubPullRequest {
+	mergedFalse := false
+	return &executor.GitHubPullRequest{
+		Number: 101,
+		NodeID: "PR_kwDO123",
+		State:  "open",
+		Merged: &mergedFalse,
+		Head: struct {
+			SHA  string `json:"sha"`
+			Ref  string `json:"ref"`
+			Repo *struct {
+				Fork     bool   `json:"fork"`
+				FullName string `json:"full_name"`
+			} `json:"repo"`
+		}{
+			SHA: "head-sha-123",
+			Ref: "feat/branch",
+			Repo: &struct {
+				Fork     bool   `json:"fork"`
+				FullName string `json:"full_name"`
+			}{
+				Fork:     false,
+				FullName: "example-owner/aerial",
+			},
+		},
+		Base: struct {
+			Repo *struct {
+				FullName string `json:"full_name"`
+			} `json:"repo"`
+		}{
+			Repo: &struct {
+				FullName string `json:"full_name"`
+			}{
+				FullName: "example-owner/aerial",
+			},
+		},
+	}
+}
+
+func stubGitHubMergedPR() *executor.GitHubPullRequest {
 	mergedTrue := true
-	githubMergedPR := &executor.GitHubPullRequest{
+	return &executor.GitHubPullRequest{
 		Number: 101,
 		State:  "closed",
 		Merged: &mergedTrue,
@@ -113,6 +150,47 @@ func TestExecutePRAttachment(t *testing.T) {
 		},
 		MergeCommitSHA: "merge-sha-456",
 	}
+}
+
+func newAttachHTTPServer(tc executePRAttachTestCase, graphQLHit *atomic.Bool) *httptest.Server {
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if r.Method == http.MethodPost && r.URL.Path == "/graphql" {
+			graphQLHit.Store(true)
+			w.WriteHeader(http.StatusOK)
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"data": map[string]any{
+					"enablePullRequestAutoMerge": map[string]any{
+						"pullRequest": map[string]any{
+							"autoMergeRequest": map[string]any{
+								"enabledAt":   "2026-11-26T00:00:00Z",
+								"mergeMethod": "SQUASH",
+							},
+						},
+					},
+				},
+			})
+			return
+		}
+		if tc.githubStatus != 0 {
+			w.WriteHeader(tc.githubStatus)
+			_ = json.NewEncoder(w).Encode(map[string]string{"message": "error"})
+			return
+		}
+		if tc.prResponse != nil {
+			_ = json.NewEncoder(w).Encode(tc.prResponse)
+			return
+		}
+		w.WriteHeader(http.StatusNotFound)
+		_ = json.NewEncoder(w).Encode(map[string]string{"message": "Not Found"})
+	}))
+}
+
+// Inspect the callback error before the SDK can retry the journaled operation.
+func TestExecutePRAttachment(t *testing.T) {
+	t.Parallel()
+	githubOpenPR := stubGitHubOpenPR()
+	githubMergedPR := stubGitHubMergedPR()
 
 	tests := []executePRAttachTestCase{
 		{name: "missing action repo", req: attachRequest("c1", ""), mode: "action", repo: "", closed: false, wantCode: 400, wantMessage: "repo is required", wantErr: true},
@@ -161,6 +239,15 @@ func TestExecutePRAttachment(t *testing.T) {
 			wantBuildStatus: statusRunning,
 		},
 		{
+			name:            "open pr enables auto-merge via graphql",
+			req:             attachRequest("c1", "aerial"),
+			mode:            "pr",
+			repo:            "aerial",
+			prResponse:      githubOpenPR,
+			wantChunkStatus: statusPROpened,
+			wantBuildStatus: statusRunning,
+		},
+		{
 			name:            "github merged transitions chunk to merged",
 			req:             attachRequest("c1", "aerial"),
 			mode:            "pr",
@@ -195,20 +282,8 @@ func TestExecutePRAttachment(t *testing.T) {
 			if tc.busErr != nil {
 				bus = &pubsubtest.FaultBus{PublishErr: tc.busErr}
 			}
-			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				w.Header().Set("Content-Type", "application/json")
-				if tc.githubStatus != 0 {
-					w.WriteHeader(tc.githubStatus)
-					_ = json.NewEncoder(w).Encode(map[string]string{"message": "error"})
-					return
-				}
-				if tc.prResponse != nil {
-					_ = json.NewEncoder(w).Encode(tc.prResponse)
-					return
-				}
-				w.WriteHeader(http.StatusNotFound)
-				_ = json.NewEncoder(w).Encode(map[string]string{"message": "Not Found"})
-			}))
+			var graphQLHit atomic.Bool
+			srv := newAttachHTTPServer(tc, &graphQLHit)
 			defer srv.Close()
 			exec := executor.NewExecutor(t.TempDir(), eri, bus, "token", "example-owner", nil)
 			exec.GitHubAPIURL = srv.URL
@@ -220,6 +295,9 @@ func TestExecutePRAttachment(t *testing.T) {
 			})
 			resp, err := bo.executePRAttachment(restate.WithMockContext(mc), tc.req)
 			assertAttachOutcome(t, tc, st, resp, err)
+			if tc.prResponse == githubOpenPR {
+				assert.True(t, graphQLHit.Load(), "expected graphql endpoint to be hit for auto-merge")
+			}
 		})
 	}
 }
