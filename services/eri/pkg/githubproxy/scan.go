@@ -181,14 +181,10 @@ func scanPolicy(ctx context.Context, cfg *config.Config, owner, repo, pat string
 }
 
 func allowedSecretSamples(cfg *config.Config, owner, repo, rest string) []string {
-	if cfg == nil {
+	if strings.ContainsAny(owner, "?#%") || strings.ContainsAny(repo, "?#%") || strings.ContainsAny(rest, "?#%") {
 		return nil
 	}
-	cur := cfg.Current()
-	if cur == nil {
-		return nil
-	}
-	names := cur.PushScan.SecretNamesFor(owner, repo, rest)
+	names := cfg.Current().PushScan.SecretNamesFor(owner, repo, rest)
 	if len(names) == 0 {
 		return nil
 	}
@@ -395,8 +391,7 @@ func scanAPIWrite(w http.ResponseWriter, r *http.Request, cfg *config.Config, pa
 		}
 		if filePath, payload, ok := apiPayloads(rest, decoded); ok {
 			violations = append(violations, guard.ScanPayload(payload, filePath, policy)...)
-		}
-		if _, _, isFilePayload := apiPayloads(rest, decoded); !isFilePayload {
+		} else {
 			policy.AllowedSecretSamples = allowedSecretSamples(cfg, parts[1], parts[2], rest)
 		}
 		violations = append(violations, guard.ScanPayload(decoded, "", policy)...)

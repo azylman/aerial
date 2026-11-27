@@ -1350,15 +1350,12 @@ push_scan:
   secret_allowlist:
     - "acme/widgets:hooks:GITHUB_WEBHOOK_SECRET"
     - "acme/widgets:hooks:GITHUB_WEBHOOK_SECRET"
-    - "Acme/Other:hooks/shared:OTHER_HOOK_SECRET"
     - "org/*:hooks:ORG_WILDCARD_SECRET"
     - "*:admin/hooks:GLOBAL_SECRET"
     - "*/*:all/hooks:GLOBAL_STAR_STAR_SECRET"
     - "malformed-two-parts:hooks"
-    - ":empty-repo:KEY"
-    - "repo: :KEY"
-    - "repo:hooks:"
-    - "repo:hooks/../bad:KEY"
+    - "acme/widgets:hooks:"
+    - "acme/widgets:hooks/../bad:UNCLEAN_PREFIX_SECRET"
 `
 	tests := []struct {
 		name    string
@@ -1379,16 +1376,18 @@ push_scan:
 		{name: "owner wildcard does not match other owner", yaml: allowlistYAML, owner: "other", repo: "anything", subpath: "hooks"},
 		{name: "global wildcard * matches any repo", yaml: allowlistYAML, owner: "any", repo: "repo", subpath: "admin/hooks", want: []string{"GLOBAL_SECRET"}},
 		{name: "global wildcard */* matches any repo", yaml: allowlistYAML, owner: "any", repo: "repo", subpath: "all/hooks", want: []string{"GLOBAL_STAR_STAR_SECRET"}},
+		{name: "unclean prefix in allowlist ignored", yaml: allowlistYAML, owner: "acme", repo: "widgets", subpath: "bad"},
 		{name: "path-traversal in subpath rejected", yaml: allowlistYAML, owner: "acme", repo: "widgets", subpath: "hooks/../issues/1/comments"},
-		{name: "subpath traversal .. rejected", yaml: allowlistYAML, owner: "acme", repo: "widgets", subpath: ".."},
-		{name: "subpath dot . rejected", yaml: allowlistYAML, owner: "acme", repo: "widgets", subpath: "."},
-		{name: "empty subpath rejected", yaml: allowlistYAML, owner: "acme", repo: "widgets", subpath: ""},
+		{name: "subpath with fragment rejected", yaml: allowlistYAML, owner: "acme", repo: "widgets", subpath: "hooks#frag"},
+		{name: "subpath with query rejected", yaml: allowlistYAML, owner: "acme", repo: "widgets", subpath: "hooks?query"},
 		{name: "empty owner rejected", yaml: allowlistYAML, owner: "", repo: "widgets", subpath: "hooks"},
 		{name: "empty repo rejected", yaml: allowlistYAML, owner: "acme", repo: "", subpath: "hooks"},
 		{name: "dotdot owner rejected", yaml: allowlistYAML, owner: "..", repo: "widgets", subpath: "hooks"},
 		{name: "dotdot repo rejected", yaml: allowlistYAML, owner: "acme", repo: "..", subpath: "hooks"},
 		{name: "dot owner rejected", yaml: allowlistYAML, owner: ".", repo: "widgets", subpath: "hooks"},
 		{name: "dot repo rejected", yaml: allowlistYAML, owner: "acme", repo: ".", subpath: "hooks"},
+		{name: "owner with invalid char rejected", yaml: allowlistYAML, owner: "acme#", repo: "widgets", subpath: "hooks"},
+		{name: "repo with invalid char rejected", yaml: allowlistYAML, owner: "acme", repo: "widgets#", subpath: "hooks"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {

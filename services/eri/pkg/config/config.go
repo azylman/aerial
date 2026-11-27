@@ -428,11 +428,11 @@ func (p PushScanConfig) PrefixesFor(owner, repo string) []string {
 func (p PushScanConfig) SecretNamesFor(owner, repo, apiSubpath string) []string {
 	owner = strings.TrimSpace(owner)
 	repo = strings.TrimSpace(repo)
-	if owner == "" || repo == "" || owner == "." || owner == ".." || repo == "." || repo == ".." {
+	if !isValidGitHubName(owner) || !isValidGitHubName(repo) {
 		return nil
 	}
 	cleanSubpath := strings.Trim(strings.TrimSpace(apiSubpath), "/")
-	if cleanSubpath == "" || cleanSubpath == "." || strings.HasPrefix(cleanSubpath, "..") || stdpath.Clean(cleanSubpath) != cleanSubpath {
+	if cleanSubpath == "" || cleanSubpath == "." || strings.HasPrefix(cleanSubpath, "..") || stdpath.Clean(cleanSubpath) != cleanSubpath || strings.ContainsAny(cleanSubpath, "?#%") {
 		return nil
 	}
 
@@ -465,6 +465,20 @@ func (p PushScanConfig) SecretNamesFor(owner, repo, apiSubpath string) []string 
 	return out
 }
 
+func isValidGitHubName(s string) bool {
+	if s == "" || s == "." || s == ".." || len(s) > 100 {
+		return false
+	}
+	for i := range len(s) {
+		c := s[i]
+		if (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '-' || c == '_' || c == '.' {
+			continue
+		}
+		return false
+	}
+	return true
+}
+
 func matchRepoPattern(pattern, ownerLower, repoLower string) bool {
 	p := strings.ToLower(pattern)
 	if p == "*" || p == "*/*" {
@@ -477,6 +491,9 @@ func matchRepoPattern(pattern, ownerLower, repoLower string) bool {
 }
 
 func matchSubpathPrefix(cleanSubpath, cleanSubpathLower, rawPrefix string) bool {
+	if strings.ContainsAny(rawPrefix, "?#%") {
+		return false
+	}
 	cleanPrefix := stdpath.Clean(rawPrefix)
 	if cleanPrefix == "." || strings.HasPrefix(cleanPrefix, "..") || stdpath.Clean(rawPrefix) != rawPrefix {
 		return false
