@@ -386,7 +386,7 @@ func (d *StreamingDaemon) probePendingAgySubagentsOnStep(activeTurn *TurnContext
 		}
 		summary, parsed := parseAgySubagentTranscript(sub.transcriptPath, sub.parentCallID, sub.conversationID)
 		if !parsed {
-			summary = SubagentTraceSummary{ParentCallID: sub.parentCallID, ConversationID: sub.conversationID, Status: "ok"}
+			continue
 		}
 		completedIDs = append(completedIDs, sub.conversationID)
 		summaries = append(summaries, summary)

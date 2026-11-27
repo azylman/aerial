@@ -429,9 +429,13 @@ func extractToolParamsMap(item map[string]any) map[string]any {
 	return paramsMap
 }
 
+func (d *StreamingDaemon) nextSubscribeRPCID() int {
+	return 100 + int(d.subscribeRPCID.Add(1))
+}
+
 func (d *StreamingDaemon) sendMuseViewSubscribe(activeTurn *TurnContext, childSessID string) {
 	childSessID = strings.TrimSpace(childSessID)
-	if childSessID == "" || activeTurn == nil {
+	if childSessID == "" || activeTurn == nil || d == nil {
 		return
 	}
 	d.inflightMu.Lock()
@@ -447,7 +451,7 @@ func (d *StreamingDaemon) sendMuseViewSubscribe(activeTurn *TurnContext, childSe
 
 	req := codexRPCRequest{
 		JSONRPC: codexRPCVersion,
-		ID:      100,
+		ID:      d.nextSubscribeRPCID(),
 		Method:  "view/subscribe",
 		Params: map[string]any{
 			fieldCommandID: uuidV7(),

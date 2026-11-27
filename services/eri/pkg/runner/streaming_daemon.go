@@ -182,6 +182,7 @@ type StreamingDaemon struct {
 	claudeToolIDs  map[string]int
 	seenMemoryIDs  map[string]bool
 	lastStdoutNano atomic.Int64
+	subscribeRPCID atomic.Int64
 	closeCh        chan struct{}
 	readerWg       sync.WaitGroup
 	stderrWg       sync.WaitGroup

@@ -844,8 +844,13 @@ func TestMuseProtocol_ExtractRPCErrorMessage(t *testing.T) {
 	}
 }
 
-func startMuseSubscribeRecorder(inR io.Reader) <-chan string {
-	subscribedSessions := make(chan string, 4)
+type museSubscribeRequest struct {
+	sessionID string
+	rpcID     int
+}
+
+func startMuseSubscribeRecorder(inR io.Reader) <-chan museSubscribeRequest {
+	subscribed := make(chan museSubscribeRequest, 4)
 	go func() {
 		scanner := bufio.NewScanner(inR)
 		for scanner.Scan() {
@@ -855,12 +860,12 @@ func startMuseSubscribeRecorder(inR io.Reader) <-chan string {
 			}
 			if p, ok := req.Params.(map[string]any); ok {
 				if sid, ok := p[fieldSessionID].(string); ok {
-					subscribedSessions <- sid
+					subscribed <- museSubscribeRequest{sessionID: sid, rpcID: req.ID}
 				}
 			}
 		}
 	}()
-	return subscribedSessions
+	return subscribed
 }
 
 func assertMuseSubagentSinkOutcome(t *testing.T, sink *mockTurnSink) {
@@ -913,16 +918,21 @@ func TestMuseProtocol_SubagentNestingAndViewSubscribe(t *testing.T) {
 	daemon.dispatchMuseJSONRPCLine(`{"jsonrpc":"2.0","method":"item/updated","params":{"childSessionId":"child-2"}}`)
 
 	var gotSubs []string
+	var gotIDs []int
 	for range 2 {
 		select {
-		case sid := <-subscribedSessions:
-			gotSubs = append(gotSubs, sid)
+		case sub := <-subscribedSessions:
+			gotSubs = append(gotSubs, sub.sessionID)
+			gotIDs = append(gotIDs, sub.rpcID)
 		case <-time.After(time.Second):
 			t.Fatalf("timed out waiting for view/subscribe")
 		}
 	}
 	if len(gotSubs) != 2 || gotSubs[0] != "child-1" || gotSubs[1] != "child-2" {
 		t.Errorf("unexpected view/subscribe sessions: %v", gotSubs)
+	}
+	if len(gotIDs) != 2 || gotIDs[0] == gotIDs[1] || gotIDs[0] <= 0 || gotIDs[1] <= 0 {
+		t.Errorf("expected unique positive JSON-RPC IDs, got %v", gotIDs)
 	}
 
 	// 2. Child non-tool items (agentMessage, reasoning, reminderChild) must be ignored

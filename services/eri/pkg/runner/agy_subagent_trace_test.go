@@ -241,3 +241,69 @@ func TestAgySubagentTurnEndAbortWithoutWakeup(t *testing.T) {
 		t.Errorf("expected invoke_agent aborted when no wakeup message, got code %v desc %q", invokeAgentSpan.Status().Code, invokeAgentSpan.Status().Description)
 	}
 }
+
+func TestAgySubagentProbeMissingTranscriptDoesNotSynthesizeOK(t *testing.T) {
+	t.Parallel()
+	homeDir := t.TempDir()
+	d := &StreamingDaemon{cfg: DaemonConfig{GeminiHomeDir: homeDir, SessionID: "parent-sess"}}
+	d.sessionID = "parent-sess"
+
+	parentPath := writeTestTranscript(t, homeDir, "parent-sess",
+		`{"step_index":4,"type":"SYSTEM_MESSAGE","content":"[Message] sender=sub-missing content=LGTM"}`+"\n",
+	)
+	if parentPath == "" {
+		t.Fatal("expected non-empty parent transcript path")
+	}
+
+	rec := tracetest.NewSpanRecorder()
+	tp := sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(rec))
+	turnCtx, turnSpan := tp.Tracer("test").Start(context.Background(), "turn")
+	traceSink := NewTracingTurnSink(turnCtx, newMockTurnSink())
+	traceSink.OnToolCall(ToolCall{ID: "step-2", Name: "invoke_subagent", Subagent: true})
+	traceSink.OnToolCompleted(ToolCall{ID: "step-2", Name: "invoke_subagent", Subagent: true, SubagentConversationID: "sub-missing"}, "native", time.Millisecond, "ok")
+
+	turn := &TurnContext{
+		Sink: traceSink,
+		pendingAgySubagents: []pendingAgySubagent{{
+			parentCallID:   "step-2",
+			conversationID: "sub-missing",
+			transcriptPath: filepath.Join(homeDir, "nonexistent-transcript.jsonl"),
+			stepIndex:      2,
+		}},
+	}
+
+	// Probe on step 5 update where wakeup was seen in parent transcript, but child transcript is missing
+	d.probePendingAgySubagentsOnStep(turn, stepUpdateFields{hasStepIdx: true, stepIdx: 5})
+
+	// Subagent must remain pending (not completed as synthetic OK)
+	d.inflightMu.Lock()
+	pendingCount := len(turn.pendingAgySubagents)
+	d.inflightMu.Unlock()
+	if pendingCount != 1 {
+		t.Fatalf("expected subagent to remain pending on missing transcript, got %d", pendingCount)
+	}
+
+	// invoke_agent span must still be open (only execute_tool invoke_subagent ended)
+	if ended := rec.Ended(); len(ended) != 1 || ended[0].Name() != "execute_tool invoke_subagent" {
+		t.Fatalf("expected only execute_tool invoke_subagent ended, got %v", spanNames(ended))
+	}
+
+	// Complete turn: since transcript never materialized, invoke_agent aborts on closeTurn
+	d.completePendingAgySubagents(turn)
+	traceSink.OnResult(&TurnResult{})
+	turnSpan.End()
+
+	var invokeAgentSpan sdktrace.ReadOnlySpan
+	for _, s := range rec.Ended() {
+		if s.Name() == "invoke_agent" {
+			invokeAgentSpan = s
+			break
+		}
+	}
+	if invokeAgentSpan == nil {
+		t.Fatalf("expected invoke_agent span")
+	}
+	if invokeAgentSpan.Status().Code != codes.Error || invokeAgentSpan.Status().Description != "aborted" {
+		t.Errorf("expected invoke_agent aborted when transcript missing, got code %v desc %q", invokeAgentSpan.Status().Code, invokeAgentSpan.Status().Description)
+	}
+}
