@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"slices"
 	"strings"
 	"time"
 
@@ -223,32 +224,50 @@ func marshalMuseTurnStart(sessionID, payloadPrompt, effort string) ([]byte, erro
 	return json.Marshal(req)
 }
 
-func isChildMuseSession(params map[string]any, rootSessionID string) bool {
+func isMuseReminderChild(params map[string]any) bool {
 	if params == nil {
 		return false
 	}
-	root := strings.TrimSpace(rootSessionID)
-	sessID := extractFirstString(params, "sessionId", "session_id")
-	if sessID != "" && root != "" && sessID != root {
+	if extractFirstString(params, "kind") == "reminderChild" {
 		return true
 	}
 	if item, ok := params["item"].(map[string]any); ok && item != nil {
-		if itemSessID := extractFirstString(item, "sessionId", "session_id"); itemSessID != "" && root != "" && itemSessID != root {
-			return true
-		}
-		if kind := extractFirstString(item, "kind"); kind == "reminderChild" {
-			return true
-		}
-	}
-	if kind := extractFirstString(params, "kind"); kind == "reminderChild" {
-		return true
+		return extractFirstString(item, "kind") == "reminderChild"
 	}
 	return false
 }
 
+func extractMuseChildSessionID(params map[string]any, rootSessionID string) string {
+	if params == nil {
+		return ""
+	}
+	root := strings.TrimSpace(rootSessionID)
+	if root == "" {
+		return ""
+	}
+	if sessID := extractFirstString(params, "sessionId", "session_id"); sessID != "" && sessID != root {
+		return sessID
+	}
+	if item, ok := params["item"].(map[string]any); ok && item != nil {
+		if itemSessID := extractFirstString(item, "sessionId", "session_id"); itemSessID != "" && itemSessID != root {
+			return itemSessID
+		}
+	}
+	return ""
+}
+
+func isMuseSubagentTool(toolName string) bool {
+	switch strings.ToLower(strings.TrimSpace(toolName)) {
+	case itemTypeSubagent, canonicalToolSubagent, "agent", "task":
+		return true
+	default:
+		return false
+	}
+}
+
 func isMuseToolItemType(itemType string) bool {
 	switch itemType {
-	case itemTypeToolCall, codexToolMCP, codexToolCommandExecution:
+	case itemTypeToolCall, codexToolMCP, codexToolCommandExecution, itemTypeSubagent:
 		return true
 	default:
 		return false
@@ -410,67 +429,156 @@ func extractToolParamsMap(item map[string]any) map[string]any {
 	return paramsMap
 }
 
-func (d *StreamingDaemon) handleMuseToolCall(activeTurn *TurnContext, item map[string]any, itemType, itemID string, stepIdx int) {
-	var (
-		canonicalTool string
-		detail        string
-		server        string
-		tool          string
-		paramsMap     map[string]any
-	)
+func (d *StreamingDaemon) sendMuseViewSubscribe(activeTurn *TurnContext, childSessID string) {
+	childSessID = strings.TrimSpace(childSessID)
+	if childSessID == "" || activeTurn == nil {
+		return
+	}
+	d.inflightMu.Lock()
+	if activeTurn.museSubscribedChildren == nil {
+		activeTurn.museSubscribedChildren = make(map[string]bool)
+	}
+	if activeTurn.museSubscribedChildren[childSessID] {
+		d.inflightMu.Unlock()
+		return
+	}
+	activeTurn.museSubscribedChildren[childSessID] = true
+	d.inflightMu.Unlock()
 
+	req := codexRPCRequest{
+		JSONRPC: codexRPCVersion,
+		ID:      100,
+		Method:  "view/subscribe",
+		Params: map[string]any{
+			fieldCommandID: uuidV7(),
+			fieldSessionID: childSessID,
+		},
+	}
+	data, err := json.Marshal(req)
+	if err != nil {
+		return
+	}
+	data = append(data, '\n')
+
+	d.stdinMu.Lock()
+	defer d.stdinMu.Unlock()
+	if d.stdin == nil || d.closed.Load() {
+		return
+	}
+	if _, writeErr := d.stdin.Write(data); writeErr != nil {
+		log.Printf("eri: [muse] view/subscribe write failed for %s: %v", childSessID, writeErr)
+	}
+}
+
+func bindMuseChildSessionLocked(activeTurn *TurnContext, itemID, childSessID string) {
+	if itemID == "" || childSessID == "" {
+		return
+	}
+	if activeTurn.museChildParentID == nil {
+		activeTurn.museChildParentID = make(map[string]string)
+	}
+	if activeTurn.museItemChildSession == nil {
+		activeTurn.museItemChildSession = make(map[string]string)
+	}
+	activeTurn.museChildParentID[childSessID] = itemID
+	if activeTurn.museItemChildSession[itemID] == "" {
+		activeTurn.museItemChildSession[itemID] = childSessID
+	}
+}
+
+type parsedMuseToolItem struct {
+	canonicalTool string
+	detail        string
+	server        string
+	tool          string
+	paramsMap     map[string]any
+	isSubagent    bool
+}
+
+func parseMuseToolItem(item map[string]any, itemType string) parsedMuseToolItem {
+	var p parsedMuseToolItem
 	switch itemType {
 	case codexToolMCP:
-		server = extractFirstString(item, "server", "serverName", "server_name")
-		tool = extractFirstString(item, "tool", "toolName", "tool_name")
-		canonicalTool = tool
-		paramsMap = extractToolParamsMap(item)
-		detail = ExtractToolDetail(tool, paramsMap, "")
+		p.server = extractFirstString(item, "server", "serverName", "server_name")
+		p.tool = extractFirstString(item, "tool", "toolName", "tool_name")
+		p.canonicalTool = p.tool
+		p.paramsMap = extractToolParamsMap(item)
+		p.detail = ExtractToolDetail(p.tool, p.paramsMap, "")
 	case codexToolCommandExecution:
-		canonicalTool = canonicalToolBash
+		p.canonicalTool = canonicalToolBash
 		cmd := extractFirstString(item, "command", "cmd", "commandLine", "command_line")
-		paramsMap = map[string]any{"command": cmd}
-		detail = ExtractToolDetail(canonicalTool, paramsMap, cmd)
+		p.paramsMap = map[string]any{"command": cmd}
+		p.detail = ExtractToolDetail(p.canonicalTool, p.paramsMap, cmd)
+	case itemTypeSubagent:
+		p.tool = extractFirstString(item, "tool", "toolName", "tool_name")
+		if p.tool == "" {
+			p.tool = itemTypeSubagent
+		}
+		p.canonicalTool = p.tool
+		p.paramsMap = extractToolParamsMap(item)
+		p.detail = extractFirstString(item, "name", "agent", "role", "description")
+		if p.detail == "" {
+			p.detail = ExtractToolDetail(canonicalToolSubagent, p.paramsMap, "")
+		}
+		p.isSubagent = true
 	case itemTypeToolCall:
-		tool = extractFirstString(item, "tool", "toolName", "tool_name", "name")
-		server = extractFirstString(item, "server", "serverName", "server_name")
-		canonicalTool = tool
-		paramsMap = extractToolParamsMap(item)
-		detail = ExtractToolDetail(tool, paramsMap, "")
+		p.tool = extractFirstString(item, "tool", "toolName", "tool_name", "name")
+		p.server = extractFirstString(item, "server", "serverName", "server_name")
+		p.canonicalTool = p.tool
+		p.paramsMap = extractToolParamsMap(item)
+		p.detail = ExtractToolDetail(p.tool, p.paramsMap, "")
+		p.isSubagent = isMuseSubagentTool(p.tool)
 	}
-
-	if server == "" && tool != "" {
-		resolvedTool, resolvedServer := ExtractMCPToolInfo(tool, paramsMap)
+	if p.server == "" && p.tool != "" && !p.isSubagent {
+		resolvedTool, resolvedServer := ExtractMCPToolInfo(p.tool, p.paramsMap)
 		if resolvedServer != mcpServerNative && resolvedServer != mcpServerUnknown {
-			canonicalTool = resolvedTool
-			server = resolvedServer
+			p.canonicalTool = resolvedTool
+			p.server = resolvedServer
 		}
 	}
+	return p
+}
 
+func (d *StreamingDaemon) handleMuseToolCall(activeTurn *TurnContext, item map[string]any, itemType, itemID, parentID string, stepIdx int) {
+	p := parseMuseToolItem(item, itemType)
+
+	childSessID := extractFirstString(item, "childSessionId", "child_session_id")
 	d.inflightMu.Lock()
-	activeTurn.codexResponseText = ""
+	if parentID == "" {
+		activeTurn.codexResponseText = ""
+	}
 	if d.claudeToolIDs == nil {
 		d.claudeToolIDs = make(map[string]int)
 	}
 	if itemID != "" {
 		d.claudeToolIDs[itemID] = stepIdx
+		if p.isSubagent {
+			activeTurn.museSubagentStack = append(activeTurn.museSubagentStack, itemID)
+			bindMuseChildSessionLocked(activeTurn, itemID, childSessID)
+		}
 	}
 	d.inflightMu.Unlock()
 
+	if p.isSubagent && childSessID != "" {
+		d.sendMuseViewSubscribe(activeTurn, childSessID)
+	}
+
 	call := ToolCall{
 		ID:        itemID,
-		Name:      canonicalTool,
-		Command:   detail,
-		MCPServer: server,
-		MCPTool:   tool,
+		ParentID:  parentID,
+		Name:      p.canonicalTool,
+		Command:   p.detail,
+		Subagent:  p.isSubagent,
+		MCPServer: p.server,
+		MCPTool:   p.tool,
 	}
-	isNewStart := d.recordToolStart(stepIdx, true, call, server)
-	call.MCPServer, call.MCPTool = mcpCallTarget(canonicalTool, server)
-	activatedSkill, hasSkill := extractActivatedSkill(canonicalTool, paramsMap, detail)
+	isNewStart := d.recordToolStart(stepIdx, true, call, p.server)
+	call.MCPServer, call.MCPTool = mcpCallTarget(p.canonicalTool, p.server)
+	activatedSkill, hasSkill := extractActivatedSkill(p.canonicalTool, p.paramsMap, p.detail)
 
 	if isNewStart && activeTurn.Sink != nil {
 		callForSink := call
-		if canonicalTool == detail {
+		if p.canonicalTool == p.detail {
 			callForSink.Command = ""
 		}
 		activeTurn.Sink.OnToolCall(callForSink)
@@ -480,7 +588,7 @@ func (d *StreamingDaemon) handleMuseToolCall(activeTurn *TurnContext, item map[s
 	}
 }
 
-func (d *StreamingDaemon) handleMuseItemStarted(activeTurn *TurnContext, params map[string]any) {
+func (d *StreamingDaemon) handleMuseItemStarted(activeTurn *TurnContext, params map[string]any, parentID string) {
 	if params == nil {
 		return
 	}
@@ -491,15 +599,20 @@ func (d *StreamingDaemon) handleMuseItemStarted(activeTurn *TurnContext, params 
 		item = params
 	}
 
+	itemType := extractFirstString(item, fieldType, "kind")
+	itemID := extractFirstString(item, "id", "itemId", "item_id")
+	if parentID != "" && !isMuseToolItemType(itemType) {
+		return
+	}
+
 	d.mu.Lock()
 	d.stepCount++
 	stepIdx := d.stepCount
 	d.mu.Unlock()
 
-	d.notifyStepBoundary(activeTurn, stepIdx)
-
-	itemType := extractFirstString(item, fieldType, "kind")
-	itemID := extractFirstString(item, "id", "itemId", "item_id")
+	if parentID == "" {
+		d.notifyStepBoundary(activeTurn, stepIdx)
+	}
 
 	d.inflightMu.Lock()
 	if activeTurn.itemTypes == nil {
@@ -528,9 +641,35 @@ func (d *StreamingDaemon) handleMuseItemStarted(activeTurn *TurnContext, params 
 		if isNew && activeTurn.Sink != nil {
 			activeTurn.Sink.OnThinking()
 		}
-	case itemTypeToolCall, codexToolMCP, codexToolCommandExecution:
-		d.handleMuseToolCall(activeTurn, item, itemType, itemID, stepIdx)
+	case itemTypeToolCall, codexToolMCP, codexToolCommandExecution, itemTypeSubagent:
+		d.handleMuseToolCall(activeTurn, item, itemType, itemID, parentID, stepIdx)
 	}
+}
+
+func (d *StreamingDaemon) handleMuseItemUpdated(activeTurn *TurnContext, params map[string]any) {
+	if params == nil {
+		return
+	}
+	var item map[string]any
+	if it, ok := params["item"].(map[string]any); ok && it != nil {
+		item = it
+	} else {
+		item = params
+	}
+	itemID := extractFirstString(item, "id", "itemId", "item_id")
+	childSessID := extractFirstString(item, "childSessionId", "child_session_id")
+	if childSessID == "" {
+		return
+	}
+	d.inflightMu.Lock()
+	targetID := itemID
+	if targetID == "" && len(activeTurn.museSubagentStack) > 0 {
+		targetID = activeTurn.museSubagentStack[len(activeTurn.museSubagentStack)-1]
+	}
+	bindMuseChildSessionLocked(activeTurn, targetID, childSessID)
+	d.inflightMu.Unlock()
+
+	d.sendMuseViewSubscribe(activeTurn, childSessID)
 }
 
 func (d *StreamingDaemon) handleMuseItemDelta(activeTurn *TurnContext, params map[string]any, method string) {
@@ -583,53 +722,98 @@ func (d *StreamingDaemon) handleMuseItemDelta(activeTurn *TurnContext, params ma
 	}
 }
 
-func (d *StreamingDaemon) handleMuseItemCompleted(activeTurn *TurnContext, params map[string]any) {
-	if params == nil {
-		return
-	}
-	var item map[string]any
-	if it, ok := params["item"].(map[string]any); ok && it != nil {
-		item = it
-	} else {
-		item = params
-	}
-
-	itemType := extractFirstString(item, fieldType, "kind")
-	itemID := extractFirstString(item, "id", "itemId", "item_id")
-
-	if itemType == itemTypeAgentMessage {
-		text := extractCodexAgentMessageText(item)
-		if text != "" {
-			d.inflightMu.Lock()
-			activeTurn.codexResponseText = text
-			d.inflightMu.Unlock()
+func removeMuseSubagentStackItem(stack []string, itemID string) []string {
+	for i, id := range slices.Backward(stack) {
+		if id == itemID {
+			return append(stack[:i], stack[i+1:]...)
 		}
-		return
 	}
+	return stack
+}
 
-	d.inflightMu.Lock()
-	stepIdx, hasStep := d.claudeToolIDs[itemID]
+func (d *StreamingDaemon) finishMuseCompletedItemStateLocked(activeTurn *TurnContext, itemID, childSessID string) (stepIdx int, hasStep, seenChildUsage bool) {
+	stepIdx, hasStep = d.claudeToolIDs[itemID]
 	if hasStep {
 		delete(d.claudeToolIDs, itemID)
 	}
-	d.inflightMu.Unlock()
-
-	if !hasStep && !isMuseToolItemType(itemType) {
-		return
+	if itemID != "" {
+		activeTurn.museSubagentStack = removeMuseSubagentStackItem(activeTurn.museSubagentStack, itemID)
+		if childSessID == "" && activeTurn.museItemChildSession != nil {
+			childSessID = activeTurn.museItemChildSession[itemID]
+		}
+		for cID, pID := range activeTurn.museChildParentID {
+			if pID == itemID {
+				seenChildUsage = seenChildUsage || (activeTurn.museSeenChildUsage != nil && activeTurn.museSeenChildUsage[cID])
+				delete(activeTurn.museChildParentID, cID)
+			}
+		}
+		delete(activeTurn.museItemChildSession, itemID)
 	}
+	if childSessID != "" {
+		seenChildUsage = seenChildUsage || (activeTurn.museSeenChildUsage != nil && activeTurn.museSeenChildUsage[childSessID])
+		delete(activeTurn.museChildParentID, childSessID)
+	}
+	return stepIdx, hasStep, seenChildUsage
+}
 
-	status := "ok"
+func extractMuseCompletedToolStatusAndName(item map[string]any, itemType string) (status, canonicalTool string) {
+	status = "ok"
 	if itemStatus := extractFirstString(item, fieldStatus); itemStatus == statusFailed || itemStatus == statusError || itemStatus == statusCancelled {
 		status = statusError
 	}
 	if isError, ok := item["is_error"].(bool); ok && isError {
 		status = statusError
 	}
-
-	canonicalTool := extractFirstString(item, "tool", "toolName", "name")
-	if canonicalTool == "" && itemType == codexToolCommandExecution {
+	canonicalTool = extractFirstString(item, "tool", "toolName", "name")
+	switch {
+	case canonicalTool == "" && itemType == codexToolCommandExecution:
 		canonicalTool = canonicalToolBash
+	case canonicalTool == "" && itemType == itemTypeSubagent:
+		canonicalTool = itemTypeSubagent
 	}
+	return status, canonicalTool
+}
+
+func (d *StreamingDaemon) handleMuseItemCompleted(activeTurn *TurnContext, params map[string]any, parentID string) {
+	if params == nil {
+		return
+	}
+	item := params
+	if it, ok := params["item"].(map[string]any); ok && it != nil {
+		item = it
+	}
+
+	itemType := extractFirstString(item, fieldType, "kind")
+	itemID := extractFirstString(item, "id", "itemId", "item_id")
+
+	if itemType == itemTypeAgentMessage {
+		if parentID == "" {
+			if text := extractCodexAgentMessageText(item); text != "" {
+				d.inflightMu.Lock()
+				activeTurn.codexResponseText = text
+				d.inflightMu.Unlock()
+				clearCodexSinkPurgedFlag(activeTurn.Sink)
+			}
+		}
+		return
+	}
+
+	childSessID := extractFirstString(item, "childSessionId", "child_session_id")
+	d.inflightMu.Lock()
+	stepIdx, hasStep, seenChildUsage := d.finishMuseCompletedItemStateLocked(activeTurn, itemID, childSessID)
+	d.inflightMu.Unlock()
+
+	if !hasStep && !isMuseToolItemType(itemType) {
+		return
+	}
+
+	if !seenChildUsage {
+		if inTok, outTok, cachedTok := extractMuseUsage(item); inTok > 0 || outTok > 0 || cachedTok > 0 {
+			d.handleMuseTokenUsage(activeTurn, item)
+		}
+	}
+
+	status, canonicalTool := extractMuseCompletedToolStatusAndName(item, itemType)
 	fields := stepUpdateFields{
 		isToolEnd:     true,
 		toolEndStatus: status,
@@ -688,6 +872,25 @@ func extractRPCErrorMessage(raw map[string]any) string {
 	return msg
 }
 
+func (d *StreamingDaemon) resolveMuseChildParentID(activeTurn *TurnContext, childSessID string, markUsage bool) string {
+	d.inflightMu.Lock()
+	defer d.inflightMu.Unlock()
+	var parentID string
+	if activeTurn.museChildParentID != nil {
+		parentID = activeTurn.museChildParentID[childSessID]
+	}
+	if parentID == "" && len(activeTurn.museSubagentStack) > 0 {
+		parentID = activeTurn.museSubagentStack[len(activeTurn.museSubagentStack)-1]
+	}
+	if parentID != "" && markUsage && childSessID != "" {
+		if activeTurn.museSeenChildUsage == nil {
+			activeTurn.museSeenChildUsage = make(map[string]bool)
+		}
+		activeTurn.museSeenChildUsage[childSessID] = true
+	}
+	return parentID
+}
+
 func (d *StreamingDaemon) dispatchMuseJSONRPCLine(trimmed string) {
 	if trimmed == "" {
 		return
@@ -725,19 +928,38 @@ func (d *StreamingDaemon) dispatchMuseJSONRPCLine(trimmed string) {
 		params = p
 	}
 
-	if isChildMuseSession(params, d.SessionID()) {
+	if isMuseReminderChild(params) {
+		return
+	}
+
+	var parentID string
+	if childSessID := extractMuseChildSessionID(params, d.SessionID()); childSessID != "" {
+		parentID = d.resolveMuseChildParentID(activeTurn, childSessID, method == methodSessionTokenUsage)
+		if parentID == "" {
+			return
+		}
+		switch method {
+		case methodItemStarted:
+			d.handleMuseItemStarted(activeTurn, params, parentID)
+		case methodItemCompleted:
+			d.handleMuseItemCompleted(activeTurn, params, parentID)
+		case methodSessionTokenUsage:
+			d.handleMuseTokenUsage(activeTurn, params)
+		}
 		return
 	}
 
 	switch method {
-	case "session/tokenUsage":
+	case methodSessionTokenUsage:
 		d.handleMuseTokenUsage(activeTurn, params)
 	case methodItemStarted:
-		d.handleMuseItemStarted(activeTurn, params)
+		d.handleMuseItemStarted(activeTurn, params, "")
+	case methodItemUpdated:
+		d.handleMuseItemUpdated(activeTurn, params)
 	case "item/delta", methodAgentMessageDelta, methodReasoningTextDelta, methodReasoningSummary:
 		d.handleMuseItemDelta(activeTurn, params, method)
 	case methodItemCompleted:
-		d.handleMuseItemCompleted(activeTurn, params)
+		d.handleMuseItemCompleted(activeTurn, params, "")
 	case methodTurnCompleted:
 		d.handleMuseTurnCompleted(activeTurn, params)
 	}

@@ -99,6 +99,7 @@ func (d *StreamingDaemon) rescueWedgedTurn(activeTurn *TurnContext, rescued stri
 		Duration:       time.Since(activeTurn.CreatedAt),
 	}
 	d.fillStreamUsage(activeTurn, res)
+	d.completePendingAgySubagents(activeTurn)
 	activeTurn.Sink.OnResult(res)
 }
 

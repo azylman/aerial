@@ -48,6 +48,10 @@ type ToolCall struct {
 	Command string
 	// Subagent marks calls that spawn a subagent (Claude Agent/Task, agy invoke_subagent).
 	Subagent bool
+	// SubagentConversationID is the spawned child conversation ID when an async subagent
+	// launch completes (e.g. agy invoke_subagent), keeping the invoke_agent span open until
+	// the child conversation finishes.
+	SubagentConversationID string
 	// MCPServer and MCPTool name the MCP server and tool an MCP call targets (agy's
 	// call_mcp_tool keeps Name "call_mcp_tool"). Both are empty for non-MCP tools.
 	MCPServer string
@@ -84,11 +88,18 @@ type TurnContext struct {
 	streamMessageByParent map[string]string
 	// sawModelReply records that a real (model-produced) assistant message arrived this turn, and
 	// syntheticReply holds the latest Claude CLI-authored one; guarded by inflightMu.
-	sawModelReply        bool
-	syntheticReply       *claudeSyntheticReply
-	seenReasoningItemIDs map[string]bool
-	codexResponseText    string
-	itemTypes            map[string]string
+	sawModelReply          bool
+	syntheticReply         *claudeSyntheticReply
+	seenReasoningItemIDs   map[string]bool
+	codexResponseText      string
+	itemTypes              map[string]string
+	museSubagentStack      []string
+	museChildParentID      map[string]string
+	museItemChildSession   map[string]string
+	museSeenChildUsage     map[string]bool
+	museSubscribedChildren map[string]bool
+	pendingAgySubagents    []pendingAgySubagent
+	lastAgyProbeStep       int
 }
 
 // ClaudeSyntheticModel is the message.model of assistant messages the Claude CLI writes itself.
@@ -136,7 +147,13 @@ type inFlightToolCall struct {
 
 // completion is the ToolCall reported to sinks when this call ends: same identity, canonical name.
 func (r inFlightToolCall) completion() ToolCall {
-	return ToolCall{ID: r.call.ID, ParentID: r.call.ParentID, Name: r.call.Name, Subagent: r.call.Subagent}
+	return ToolCall{
+		ID:                     r.call.ID,
+		ParentID:               r.call.ParentID,
+		Name:                   r.call.Name,
+		Subagent:               r.call.Subagent,
+		SubagentConversationID: r.call.SubagentConversationID,
+	}
 }
 
 // StreamingDaemon manages a long-lived streaming agy subprocess, its lifecycle state,
@@ -552,6 +569,7 @@ func (d *StreamingDaemon) tryRescueTurnOnEOF(turn *TurnContext) bool {
 	log.Printf("[StreamingDaemon] Recovered substantive response directly from session %s transcript after unexpected EOF", d.SessionID())
 	res := &TurnResult{ConversationID: d.SessionID(), Response: strings.TrimSpace(rescued), Duration: time.Since(turn.CreatedAt)}
 	d.fillStreamUsage(turn, res)
+	d.completePendingAgySubagents(turn)
 	turn.Sink.OnResult(res)
 	return true
 }

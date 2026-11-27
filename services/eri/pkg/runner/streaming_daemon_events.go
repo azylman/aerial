@@ -148,8 +148,8 @@ func applyStepUpdateSubmap(f *stepUpdateFields, su map[string]any) {
 	case statusUpperError:
 		f.toolEndStatus = statusError
 	}
-	f.isSubagent = typ == "subagent"
-	if typ == "tool_call" || typ == "tool" || typ == "subagent" {
+	f.isSubagent = typ == itemTypeSubagent
+	if typ == "tool_call" || typ == "tool" || typ == itemTypeSubagent {
 		f.isToolStart = f.toolEndStatus == ""
 		f.isToolEnd = f.toolEndStatus != ""
 	}
@@ -367,8 +367,10 @@ func (d *StreamingDaemon) handleStepUpdateEvent(activeTurn *TurnContext, raw map
 		activeTurn.Sink.OnSkillActivated(activatedSkill, "discord")
 	}
 	if isToolEnd && hasCompletedRecord {
-		activeTurn.Sink.OnToolCompleted(completedRecord.completion(), completedRecord.mcpServer, time.Since(completedRecord.startedAt), f.toolEndStatus)
+		completedCall := d.resolveAgyCompletedToolCall(activeTurn, completedRecord, f.toolEndStatus)
+		activeTurn.Sink.OnToolCompleted(completedCall, completedRecord.mcpServer, time.Since(completedRecord.startedAt), f.toolEndStatus)
 	}
+	d.probePendingAgySubagentsOnStep(activeTurn, f)
 	if delta := extractStepTextDelta(raw, f.su); delta != "" {
 		activeTurn.Sink.OnTextDelta(delta)
 	}
@@ -469,6 +471,7 @@ func (d *StreamingDaemon) tryRescueTurnOnResult(activeTurn *TurnContext, raw map
 	res := &TurnResult{ConversationID: d.SessionID(), Response: strings.TrimSpace(rescued), Stderr: errMsg, Duration: time.Since(activeTurn.CreatedAt)}
 	populateUsage(res, raw)
 	d.fillStreamUsage(activeTurn, res)
+	d.completePendingAgySubagents(activeTurn)
 	activeTurn.Sink.OnResult(res)
 	return true
 }
@@ -522,6 +525,7 @@ func (d *StreamingDaemon) deliverResultToSink(activeTurn *TurnContext, raw map[s
 	res := &TurnResult{ConversationID: d.SessionID(), Response: respStr, Stderr: errMsg, Duration: time.Since(activeTurn.CreatedAt)}
 	populateUsage(res, raw)
 	d.fillStreamUsage(activeTurn, res)
+	d.completePendingAgySubagents(activeTurn)
 	activeTurn.Sink.OnResult(res)
 }
 

@@ -94,13 +94,37 @@ type ToolSpanSource interface {
 // invoke_agent span; calls whose ParentID names this call start under it. MCP calls carry
 // their server and tool so the loopback MCP proxy can claim the span for the matching request.
 type openToolSpan struct {
-	id        string
-	name      string
-	mcpServer string
-	mcpTool   string
-	claimed   bool
-	span      trace.Span
-	agent     trace.Span
+	id             string
+	name           string
+	mcpServer      string
+	mcpTool        string
+	subagentConvID string
+	claimed        bool
+	span           trace.Span
+	agent          trace.Span
+	agentStartedAt time.Time
+}
+
+// SubagentToolStep describes one tool invocation backfilled from an async subagent transcript.
+type SubagentToolStep struct {
+	Name      string
+	MCPServer string
+	Status    string
+	StartTime time.Time
+	EndTime   time.Time
+}
+
+// SubagentTraceSummary holds the parsed steps and token usage of a completed async subagent conversation.
+type SubagentTraceSummary struct {
+	ParentCallID   string
+	ConversationID string
+	Model          string
+	Status         string
+	ErrorMsg       string
+	Usage          AgyUsage
+	ChatStart      time.Time
+	ChatEnd        time.Time
+	Steps          []SubagentToolStep
 }
 
 // claimTimer starts the ClaimToolSpan wait timer, returning its channel and stop function.
@@ -123,13 +147,14 @@ type TracingTurnSink struct {
 	turn     trace.Span // parent of the chat and top-level tool spans
 	newTimer claimTimer // starts the ClaimToolSpan wait; tests inject a fake clock
 
-	mu     sync.Mutex
-	chat   trace.Span
-	open   []*openToolSpan // start order, for FIFO correlation of ID-less calls
-	opened chan struct{}   // closed (and replaced) whenever a tool span opens
-	closed bool
-	usage  AgyUsage      // usage recorded on the chat span; set when the turn closes
-	done   chan struct{} // closed once the turn has closed
+	mu        sync.Mutex
+	chat      trace.Span
+	open      []*openToolSpan // start order, for FIFO correlation of ID-less calls
+	subagents []*openToolSpan // async subagent spans whose execute_tool ended while invoke_agent stays open
+	opened    chan struct{}   // closed (and replaced) whenever a tool span opens
+	closed    bool
+	usage     AgyUsage      // usage recorded on the chat span; set when the turn closes
+	done      chan struct{} // closed once the turn has closed
 }
 
 var (
@@ -325,6 +350,7 @@ func (s *TracingTurnSink) startToolSpan(call ToolCall) {
 		span: s.startUnder(parent, OperationExecuteTool+" "+call.Name, attrs...),
 	}
 	if call.Subagent {
+		ts.agentStartedAt = time.Now()
 		ts.agent = s.startUnder(ts.span, OperationInvokeAgent, AttrGenAIOperationName.String(OperationInvokeAgent))
 	}
 	s.open = append(s.open, ts)
@@ -335,6 +361,11 @@ func (s *TracingTurnSink) startToolSpan(call ToolCall) {
 func (s *TracingTurnSink) endToolSpan(call ToolCall, mcpServer, status string) {
 	s.mu.Lock()
 	ts := s.takeLocked(call)
+	keepSubagentOpen := ts != nil && ts.agent != nil && call.SubagentConversationID != "" && status == "ok" && !s.closed
+	if keepSubagentOpen {
+		ts.subagentConvID = call.SubagentConversationID
+		s.subagents = append(s.subagents, ts)
+	}
 	s.mu.Unlock()
 	if ts == nil {
 		return
@@ -347,7 +378,116 @@ func (s *TracingTurnSink) endToolSpan(call ToolCall, mcpServer, status string) {
 	if mcpServer != "" {
 		ts.span.SetAttributes(AttrMCPServer.String(mcpServer))
 	}
+	if keepSubagentOpen {
+		ts.agent.SetAttributes(AttrGenAIConversationID.String(call.SubagentConversationID))
+		if status != "" {
+			ts.span.SetAttributes(AttrToolStatus.String(status))
+		}
+		ts.span.End()
+		return
+	}
 	finishToolSpan(ts, status)
+}
+
+func clampSpanTime(t, floor time.Time) time.Time {
+	if t.IsZero() || (!floor.IsZero() && t.Before(floor)) {
+		return floor
+	}
+	return t
+}
+
+// CompleteAsyncSubagent backfills child tool and chat spans under an open async subagent's
+// invoke_agent span and closes invoke_agent.
+func (s *TracingTurnSink) CompleteAsyncSubagent(summary SubagentTraceSummary) {
+	s.mu.Lock()
+	ts := s.takeSubagentLocked(summary.ParentCallID, summary.ConversationID)
+	s.mu.Unlock()
+	if ts == nil || ts.agent == nil {
+		return
+	}
+	if summary.ConversationID != "" {
+		ts.agent.SetAttributes(AttrGenAIConversationID.String(summary.ConversationID))
+	}
+	floor := ts.agentStartedAt
+	if floor.IsZero() {
+		floor = time.Now()
+	}
+	chatStart := clampSpanTime(summary.ChatStart, floor)
+	chatEnd := clampSpanTime(summary.ChatEnd, chatStart)
+	parentCtx := trace.ContextWithSpan(context.Background(), ts.agent)
+	for _, st := range summary.Steps {
+		s.emitBackfilledToolSpan(parentCtx, st, chatStart, &chatEnd)
+	}
+	s.emitBackfilledChatSpan(parentCtx, summary, chatStart, chatEnd)
+	if summary.Status != "" && summary.Status != "ok" {
+		msg := summary.ErrorMsg
+		if msg == "" {
+			msg = summary.Status
+		}
+		ts.agent.SetStatus(codes.Error, msg)
+	}
+	ts.agent.End(trace.WithTimestamp(chatEnd))
+}
+
+func (s *TracingTurnSink) emitBackfilledToolSpan(parentCtx context.Context, st SubagentToolStep, chatStart time.Time, chatEnd *time.Time) {
+	start := clampSpanTime(st.StartTime, chatStart)
+	end := clampSpanTime(st.EndTime, start)
+	if end.After(*chatEnd) {
+		*chatEnd = end
+	}
+	attrs := []attribute.KeyValue{
+		AttrGenAIOperationName.String(OperationExecuteTool),
+		AttrGenAIToolName.String(st.Name),
+	}
+	if st.MCPServer != "" {
+		attrs = append(attrs, AttrMCPServer.String(st.MCPServer))
+	}
+	if st.Status != "" {
+		attrs = append(attrs, AttrToolStatus.String(st.Status))
+	}
+	_, sp := s.tracer.Start(parentCtx, OperationExecuteTool+" "+st.Name, trace.WithTimestamp(start), trace.WithAttributes(attrs...))
+	if st.Status != "" && st.Status != "ok" {
+		sp.SetStatus(codes.Error, st.Status)
+	}
+	sp.End(trace.WithTimestamp(end))
+}
+
+func (s *TracingTurnSink) emitBackfilledChatSpan(parentCtx context.Context, summary SubagentTraceSummary, chatStart, chatEnd time.Time) {
+	chatAttrs := []attribute.KeyValue{AttrGenAIOperationName.String(OperationChat)}
+	if summary.Model != "" {
+		chatAttrs = append(chatAttrs, AttrGenAIRequestModel.String(summary.Model))
+		if prov := ProviderForModel(summary.Model); prov != "" {
+			chatAttrs = append(chatAttrs, AttrGenAIProviderName.String(prov))
+		}
+	}
+	chatAttrs = append(chatAttrs, UsageAttributes(summary.Usage)...)
+	_, chatSpan := s.tracer.Start(parentCtx, OperationChat, trace.WithTimestamp(chatStart), trace.WithAttributes(chatAttrs...))
+	if summary.Status != "" && summary.Status != "ok" {
+		msg := summary.ErrorMsg
+		if msg == "" {
+			msg = summary.Status
+		}
+		chatSpan.SetStatus(codes.Error, msg)
+	}
+	chatSpan.End(trace.WithTimestamp(chatEnd))
+}
+
+func (s *TracingTurnSink) takeSubagentLocked(parentCallID, convID string) *openToolSpan {
+	match := slices.IndexFunc(s.subagents, func(ts *openToolSpan) bool {
+		if convID != "" && ts.subagentConvID == convID {
+			return true
+		}
+		return parentCallID != "" && ts.id == parentCallID
+	})
+	if match < 0 && len(s.subagents) > 0 && parentCallID == "" && convID == "" {
+		match = 0
+	}
+	if match < 0 {
+		return nil
+	}
+	ts := s.subagents[match]
+	s.subagents = slices.Delete(s.subagents, match, match+1)
+	return ts
 }
 
 func finishToolSpan(ts *openToolSpan, status string) {
@@ -369,6 +509,11 @@ func finishToolSpan(ts *openToolSpan, status string) {
 func (s *TracingTurnSink) findByIDLocked(id string) *openToolSpan {
 	for _, ts := range s.open {
 		if ts.id == id {
+			return ts
+		}
+	}
+	for _, ts := range s.subagents {
+		if ts.id == id || ts.subagentConvID == id {
 			return ts
 		}
 	}
@@ -419,8 +564,8 @@ func (s *TracingTurnSink) closeTurn(code codes.Code, msg string, usage *AgyUsage
 	if usage != nil {
 		s.usage = *usage
 	}
-	open, chat := s.open, s.chat
-	s.open, s.chat = nil, nil
+	open, subagents, chat := s.open, s.subagents, s.chat
+	s.open, s.subagents, s.chat = nil, nil, nil
 	s.mu.Unlock()
 	if s.done != nil {
 		defer close(s.done)
@@ -428,6 +573,12 @@ func (s *TracingTurnSink) closeTurn(code codes.Code, msg string, usage *AgyUsage
 
 	for _, ts := range slices.Backward(open) {
 		finishToolSpan(ts, toolStatusAbortedOnTurnClose)
+	}
+	for _, ts := range slices.Backward(subagents) {
+		if ts.agent != nil {
+			ts.agent.SetStatus(codes.Error, toolStatusAbortedOnTurnClose)
+			ts.agent.End()
+		}
 	}
 	if chat == nil {
 		chat = s.startUnder(s.turn, OperationChat, AttrGenAIOperationName.String(OperationChat))
