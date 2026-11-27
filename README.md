@@ -193,7 +193,7 @@ Where standalone coding agent orchestrators run in local `tmux` sessions without
 1. **Dependency-Aware DAG Backlog (Vikunja + Issue Tracker MCP)**: Features, multi-stage epics, and deferred discoveries are tracked as a directed acyclic graph (DAG) in **Vikunja** backed by PostgreSQL 19 (`pgvector` + full-text hybrid RRF search), exposing an unblocked `ready` queue so the agent never loses context across sessions.
 2. **Ephemeral Scratch Clones & Multi-Agent Review**: Code, schema, and manifest changes are authored in isolated scratch clones (`scripts/aerial-pr.sh init [repo]`), audited by parallel multi-agent review panels, and verified locally (`./scripts/verify.sh --staged`) before submission.
 3. **Durable Multi-PR Build Pipelines (Restate + NATS JetStream)**: Multi-PR and cross-repository rollouts (such as shipping an upstream engine feature before enabling downstream config) are enqueued as a single DAG build (`scripts/aerial-build.sh enqueue`). **Restate** durable Virtual Objects (`Build`, `BuildRouter`) and **NATS JetStream** (`aerial.pr.>`) coordinate ordered chunk execution and GitHub auto-merge (`SQUASH`).
-4. **GitHub Actions CI & Automated Code Review**: Pull Requests trigger GitHub Actions CI test/coverage workflows and automated code reviews. **The webhook router** and **Restate build state machines** process GitHub `check_run`, `workflow_run`, `pull_request`, and `push` webhooks from any repository.
+4. **GitHub Actions CI & Automated Code Review**: Pull Requests trigger GitHub Actions CI test and coverage suites, Ariga Atlas declarative SQL schema linting, and automated **RoboRev** code review gates across repositories.
 5. **Event-Driven Push GitOps & Self-Healing (Edge Router + Flux CD + Restate)**: Authenticated GitHub push and CI webhooks flow through `edge-gateway` to **the webhook router**, which forwards events to Restate `PRObject` and `RepoObject` on **Restate build state machines**. In turn, **Restate build state machines** update `ConfigMap/aerial-image-tags` in `flux-system`, trigger immediate **Flux CD** Kustomization reconciliation, publish `aerial.pr.>` facts onto **NATS JetStream** to advance dependent build chunks, and, if CI checks fail or **RoboRev** review checks request changes, wake **the execution worker** with the failure context and review findings to remediate the branch.
 
 ---
@@ -223,22 +223,6 @@ Modern developer platforms typically fall into one of three silos: infrastructur
 | **Memory & Knowledge** | None (infrastructure only) | Repository context, workspace notes, or session history | Vector search, markdown memory files, or dynamic skill synthesis | **ACT-R cognitive memory decay + PostgreSQL 19 hybrid RRF (`pgvector` + FTS) + procedural skill synthesis** |
 | **Multi-Modal Interaction** | Web UI dashboards | CLI terminal or local web sandbox UI | Discord/Telegram chat, with available voice/telephony or browser plugins | **Discord Gateway, real-time voice, PSTN phone calls, and headful browser automation** |
 | **Security & Guardrails** | Standard Linux/RBAC permissions | Container environment isolation, OS-level sandboxes, or workspace boundaries | Direct host tool execution, permission prompts, or container isolation | **Defense-in-depth: `:ro` repository mounts, child-process secret scrubbing, and pre-tool compiled interceptors** |
-
-### 1. Homelab & Self-Hosted PaaS (*home-ops, khuedoan/homelab, Coolify, Dokploy*)
-Traditional homelab platforms provide robust GitOps infrastructure, ingress routing, and container orchestration, but treat applications as static targets deployed by humans. Aerial provides the same declarative foundation—**Two-Repository Flux GitOps**, single-node vanilla `k3s` bootstrap, NGINX Gateway Fabric, CloudNativePG PostgreSQL 19, and full Victoria telemetry—while embedding a durable execution fabric (**Restate + NATS JetStream**) and an autonomous agent that authors, tests, and ships its own software onto the cluster.
-
-### 2. Autonomous Software Factories (*Gas Town, Beads, StrongDM Attractor, OpenHands*)
-Autonomous coding tools excel at local code authoring, interactive debugging, and pipeline execution within development sandboxes. Where standalone orchestrators typically leave the bridge between code completion and live cluster operations to external scripts or human operators, Aerial connects the development loop directly to production:
-- **Persistent Platform Backlog**: An integrated Vikunja DAG issue graph backed by PostgreSQL 19 with hybrid RRF vector and text search, ensuring unblocked `ready` work survives process rotations.
-- **Durable Multi-PR State Machines**: Restate Virtual Objects (`Build`, `BuildRouter`, `PRObject`) coordinating ordered cross-repository migrations with automatic branch dependency tracking and auto-merge.
-- **Closed-Loop CI & GitOps Remediation**: Webhook delivery triggering push-driven Flux CD deployments, paired with automatic agent wakeups to remediate failing CI checks and RoboRev review findings.
-
-### 3. Self-Hosted AI Agents (*Hermes Agent, OpenClaw*)
-General-purpose self-hosted assistants offer flexible chat interfaces, extensible plugin ecosystems, and local scheduling. Aerial builds on these concepts by unifying the agent runtime with a full Kubernetes homelab platform and software factory:
-- **Glass-Box Web Observability**: Unified web surfaces including live session transcripts and tool traces in `agentsview`, queue and turn metrics in `console`, durable virtual object state in `restate`, and deep log/metric inspection in Grafana and VictoriaLogs.
-- **Cognitive Memory Architecture**: Semantic fact extraction, temporal decay modeled on cognitive ACT-R theory, and procedural skill synthesis.
-- **Persistent Multi-Modal Scheduling**: Robust cron, silent heartbeat polling, and external event watches wired directly into cluster lifecycle events.
-- **Defense-in-Depth Containment**: Read-only mounts (`:ro`) for core source repositories and secrets, child-process environment sanitization, and Go pre-tool hook interceptors validating tool calls before invocation.
 
 ---
 
