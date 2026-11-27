@@ -47,6 +47,8 @@ type fakeTurnSteps struct {
 	max      int
 
 	calls    []string
+	inputs   []AttemptInput
+	prompts  []string
 	attemptN int
 }
 
@@ -73,6 +75,8 @@ func (f *fakeTurnSteps) attempt(in AttemptInput) (AttemptResult, error) {
 		return AttemptResult{}, err
 	}
 	f.mu.Lock()
+	f.inputs = append(f.inputs, in)
+	f.prompts = append(f.prompts, in.Prep.Prompt)
 	if f.attemptN >= len(f.attempts) {
 		f.mu.Unlock()
 		return AttemptResult{}, errors.New("unscripted attempt")
@@ -134,8 +138,8 @@ func (f *fakeTurnSteps) RecordDispatchOutcome(_ context.Context, _ []string, s A
 	return f.call("outcome", string(s.Outcome)+" "+s.Reason)
 }
 
-func (f *fakeTurnSteps) PublishDispatchOutcome(_ context.Context, _ string, o TurnOutcome) error {
-	return f.call("publish", string(o))
+func (f *fakeTurnSteps) PublishDispatchOutcome(_ context.Context, id string, o TurnOutcome) error {
+	return f.call("publish", id+" "+string(o))
 }
 
 func (f *fakeTurnSteps) StopDispatchTurn(_ context.Context, _ string, ids []string) error {
@@ -544,6 +548,14 @@ func TestTurnRunnerRunBurst(t *testing.T) {
 			assert.Equal(t, TurnRunResult{TurnID: "turn-1", Outcome: tc.wantOutcome}, res)
 			assert.Equal(t, tc.wantCmds, j.log())
 			assert.Equal(t, tc.wantCalls, steps.callLog())
+			if tc.name == "DrainedIDsCarriedAcrossRetryAndReportedInOnTurnDone" {
+				require.Len(t, steps.inputs, 2)
+				assert.Equal(t, []string{"m1", "m2"}, steps.inputs[0].IDs)
+				assert.Equal(t, []string{"m1", "m2", "m3"}, steps.inputs[1].IDs)
+				require.Len(t, steps.prompts, 2)
+				assert.Equal(t, "p", steps.prompts[0])
+				assert.Equal(t, "p\n\nsteer m3", steps.prompts[1])
+			}
 		})
 	}
 }
@@ -567,13 +579,13 @@ func TestTurnRunnerRunDispatch(t *testing.T) {
 			name: "HappyPathPublishesCompleted", started: claimed(0, "d1"), prep: runPrep(), attempts: []fakeAttempt{attemptOf(AttemptKindSuccess)},
 			wantOutcome: OutcomeCompleted,
 			wantCmds:    []string{"run record-started", "run prep", "run run-1", "run record-outcome", "run publish-dispatch-outcome", doneSend(ds, "session-1", OutcomeCompleted, 0)},
-			wantCalls:   []string{"started", "prep", "attempt ord=1 run=1", "outcome completed", "publish completed"},
+			wantCalls:   []string{"started", "prep", "attempt ord=1 run=1", "outcome completed", "publish d1 completed"},
 		},
 		{
 			name: "TimeoutPublishesTimeout", started: claimed(0, "d1"), prep: runPrep(), attempts: []fakeAttempt{{res: AttemptResult{Kind: AttemptKindTimeout, Reason: "timeout"}}},
 			wantOutcome: OutcomeTimeout,
 			wantCmds:    []string{"run record-started", "run prep", "run run-1", "run record-outcome", "run publish-dispatch-outcome", doneSend(ds, "session-1", OutcomeTimeout, 0)},
-			wantCalls:   []string{"started", "prep", "attempt ord=1 run=1", "outcome timeout timeout", "publish timeout"},
+			wantCalls:   []string{"started", "prep", "attempt ord=1 run=1", "outcome timeout timeout", "publish d1 timeout"},
 		},
 		{
 			name: "RecordedCancelPublishesNothing", started: claimed(0, "d1"), prep: runPrep(), attempts: []fakeAttempt{{res: AttemptResult{Kind: AttemptKindRecorded, Reason: string(OutcomeCancelled)}}},
@@ -610,7 +622,7 @@ func TestTurnRunnerRunDispatch(t *testing.T) {
 			attempts:    []fakeAttempt{{res: AttemptResult{Kind: AttemptKindSuccess, DrainedIDs: []string{"d2"}}}},
 			wantOutcome: OutcomeCompleted,
 			wantCmds:    []string{"run record-started", "run prep", "run run-1", "run record-outcome", "run publish-dispatch-outcome", doneSend(ds, "session-1", OutcomeCompleted, 0, "d1", "d2")},
-			wantCalls:   []string{"started", "prep", "attempt ord=1 run=1", "outcome completed", "publish completed", "publish completed"},
+			wantCalls:   []string{"started", "prep", "attempt ord=1 run=1", "outcome completed", "publish d1 completed", "publish d2 completed"},
 		},
 	}
 	for _, tc := range tests {
@@ -671,4 +683,54 @@ func runStepName(opts []restate.RunOption) string {
 		}
 	}
 	return ""
+}
+
+func TestTurnRunner_RunAttempts_PropagatesDrainedPrompts(t *testing.T) {
+	t.Parallel()
+	steps := &fakeTurnSteps{
+		started: claimed(0, "m1"),
+		prep:    TurnPrep{Decision: TurnDecisionRun, Prompt: "initial prompt"},
+		attempts: []fakeAttempt{
+			{res: AttemptResult{Kind: AttemptKindRetry, BackoffMs: 0, Reason: "transient", DrainedIDs: []string{"m2"}, DrainedPrompts: []string{"steered extra prompt"}}},
+			{res: AttemptResult{Kind: AttemptKindSuccess}},
+		},
+	}
+	j := &runnerJournal{t: t}
+	svc := NewTurnRunnerService(steps, "")
+	res, err := svc.RunBurst(j.context(t), BurstTurnRequest{ThreadID: "thread-1", TurnID: "turn-1", MessageIDs: []string{"m1"}})
+	require.NoError(t, err)
+	assert.Equal(t, OutcomeCompleted, res.Outcome)
+	require.Len(t, steps.prompts, 2)
+	assert.Equal(t, "initial prompt", steps.prompts[0])
+	assert.Equal(t, "initial prompt\n\nsteered extra prompt", steps.prompts[1])
+	require.Len(t, steps.inputs, 2)
+	assert.Equal(t, []string{"m1", "m2"}, steps.inputs[1].IDs)
+}
+
+func TestTurnRunner_RunAttempts_TwoDrainsFollowedByRetry(t *testing.T) {
+	t.Parallel()
+	steps := &fakeTurnSteps{
+		started: claimed(0, "m1"),
+		prep:    TurnPrep{Decision: TurnDecisionRun, Prompt: "initial prompt"},
+		attempts: []fakeAttempt{
+			{res: AttemptResult{Kind: AttemptKindRetry, BackoffMs: 0, Reason: "transient", DrainedIDs: []string{"m2"}, DrainedPrompts: []string{"steered msg A"}}},
+			{res: AttemptResult{Kind: AttemptKindRetry, BackoffMs: 0, Reason: "transient", DrainedIDs: []string{"m2", "m3"}, DrainedPrompts: []string{"steered msg A", "steered msg B"}}},
+			{res: AttemptResult{Kind: AttemptKindSuccess}},
+		},
+	}
+	j := &runnerJournal{t: t}
+	svc := NewTurnRunnerService(steps, "")
+	res, err := svc.RunBurst(j.context(t), BurstTurnRequest{ThreadID: "thread-1", TurnID: "turn-1", MessageIDs: []string{"m1"}})
+	require.NoError(t, err)
+	assert.Equal(t, OutcomeCompleted, res.Outcome)
+
+	require.Len(t, steps.prompts, 3)
+	assert.Equal(t, "initial prompt", steps.prompts[0])
+	assert.Equal(t, "initial prompt\n\nsteered msg A", steps.prompts[1])
+	assert.Equal(t, "initial prompt\n\nsteered msg A\n\nsteered msg B", steps.prompts[2])
+
+	require.Len(t, steps.inputs, 3)
+	assert.Equal(t, []string{"m1"}, steps.inputs[0].IDs)
+	assert.Equal(t, []string{"m1", "m2"}, steps.inputs[1].IDs)
+	assert.Equal(t, []string{"m1", "m2", "m3"}, steps.inputs[2].IDs)
 }

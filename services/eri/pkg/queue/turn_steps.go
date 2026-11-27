@@ -733,6 +733,17 @@ func (p *WorkerPool) PublishDispatchOutcome(ctx context.Context, dispatchID stri
 	if d == nil {
 		return nil
 	}
+	// A dispatch must only publish the outcome that matches its final database status:
+	// - db.StatusCompleted publishes OutcomeCompleted.
+	// - db.StatusFailed publishes OutcomeFailed or OutcomeTimeout.
+	// Drained rows that were already terminal or not transitioned by this turn must not
+	// emit conflicting lifecycle events.
+	if status == string(OutcomeCompleted) && d.Status != db.StatusCompleted {
+		return nil
+	}
+	if status != string(OutcomeCompleted) && d.Status != db.StatusFailed {
+		return nil
+	}
 	if p.EventBus() == nil {
 		if d.Source == "vanadis" {
 			log.Printf("[TurnRunner] Warning: cannot publish dispatch outcome for dispatch %s (status %s): event bus is nil", d.ID, status)

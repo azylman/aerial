@@ -768,6 +768,41 @@ func (burstSubject) traceItems(te *turnExecution) []queuedTurnItem {
 	return items
 }
 
+func reconcileTerminalDispatches(ctx context.Context, s db.Store, row *db.Dispatch, extraIDs []string, outcome TurnOutcome, failedErrs []string) error {
+	for _, extraID := range extraIDs {
+		extra, extraErr := storeCall(ctx, func(c context.Context) (*db.Dispatch, error) { return s.GetDispatch(c, extraID) })
+		if errors.Is(extraErr, db.ErrRecordNotFound) || (extraErr == nil && extra == nil) {
+			continue
+		}
+		if extraErr != nil {
+			return extraErr
+		}
+		if !isActiveStatus(extra.Status) {
+			continue
+		}
+		switch outcome {
+		case OutcomeCompleted:
+			if _, err := storeCall(ctx, func(c context.Context) (struct{}, error) {
+				return struct{}{}, s.UpdateDispatchCompleted(c, extra.ID, row.ResponseText, row.ConversationID)
+			}); err != nil {
+				return err
+			}
+		case OutcomeFailed, OutcomeCancelled, OutcomeTimeout:
+			reason := "failed"
+			if len(failedErrs) > 0 {
+				reason = failedErrs[0]
+			}
+			if _, err := storeCall(ctx, func(c context.Context) (struct{}, error) {
+				return struct{}{}, s.UpdateDispatchStatus(c, extra.ID, db.StatusFailed, reason)
+			}); err != nil {
+				return err
+			}
+		case OutcomeReschedule, OutcomeEmpty:
+		}
+	}
+	return nil
+}
+
 // dispatchSubject runs attempts over one dispatch row.
 type dispatchSubject struct {
 	pool *WorkerPool
@@ -791,7 +826,11 @@ func (d dispatchSubject) load(ctx context.Context, s db.Store, te *turnExecution
 		if row.Status == db.StatusFailed {
 			failedErrs = []string{row.ErrorMessage}
 		}
-		return nil, recordedOutcome([]string{row.Status}, failedErrs), nil
+		outcome := recordedOutcome([]string{row.Status}, failedErrs)
+		if err := reconcileTerminalDispatches(ctx, s, row, ids[1:], outcome, failedErrs); err != nil {
+			return nil, "", err
+		}
+		return nil, outcome, nil
 	}
 	activeIDs := []string{row.ID}
 	var steered []db.Dispatch

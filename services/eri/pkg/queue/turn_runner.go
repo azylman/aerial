@@ -343,14 +343,24 @@ func nextAttempt(in AttemptInput, res AttemptResult, maxAttempts int) (attemptAc
 	next.AutoResumes = res.AutoResumes
 	next.Usage = res.Telemetry.Usage
 	next.Prep.SessionID = res.SessionID
-	if len(res.DrainedIDs) > 0 {
-		next.IDs = normalizeStepIDs(append(slices.Clone(in.IDs), res.DrainedIDs...))
-	}
-	for _, p := range res.DrainedPrompts {
-		if p = strings.TrimSpace(p); p != "" {
-			next.Prep.Prompt = strings.TrimSpace(next.Prep.Prompt) + "\n\n" + p
+	for i, id := range res.DrainedIDs {
+		if !slices.Contains(in.IDs, id) {
+			next.IDs = append(next.IDs, id)
+			if i < len(res.DrainedPrompts) {
+				if p := strings.TrimSpace(res.DrainedPrompts[i]); p != "" {
+					next.Prep.Prompt = strings.TrimSpace(next.Prep.Prompt) + "\n\n" + p
+				}
+			}
 		}
 	}
+	if len(res.DrainedIDs) == 0 {
+		for _, p := range res.DrainedPrompts {
+			if p = strings.TrimSpace(p); p != "" {
+				next.Prep.Prompt = strings.TrimSpace(next.Prep.Prompt) + "\n\n" + p
+			}
+		}
+	}
+	next.IDs = normalizeStepIDs(next.IDs)
 	switch res.Kind {
 	case AttemptKindSuccess:
 		return actionDone, in, OutcomeCompleted, nil

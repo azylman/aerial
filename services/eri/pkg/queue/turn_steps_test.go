@@ -778,6 +778,7 @@ func TestPublishDispatchOutcome(t *testing.T) {
 	tests := []struct {
 		name         string
 		outcome      TurnOutcome
+		dispStatus   string
 		runs         int
 		wantSubjects []string
 		dispatchID   string
@@ -785,15 +786,17 @@ func TestPublishDispatchOutcome(t *testing.T) {
 		closeDB      bool
 		wantErr      bool
 	}{
-		{name: "FailedPublishesWithError", outcome: OutcomeFailed, runs: 1, wantSubjects: []string{pubsub.SubjectAerialDispatchPrefix + "failed"}},
+		{name: "FailedPublishesWithError", outcome: OutcomeFailed, dispStatus: db.StatusFailed, runs: 1, wantSubjects: []string{pubsub.SubjectAerialDispatchPrefix + "failed"}},
 		{name: "ReplayPublishesSameMsgID", outcome: OutcomeCompleted, runs: 2, wantSubjects: []string{pubsub.SubjectAerialDispatchPrefix + "completed", pubsub.SubjectAerialDispatchPrefix + "completed"}},
 		{name: "MissingDispatchSkipped", outcome: OutcomeCompleted, runs: 1, dispatchID: "nope"},
 		{name: "NoBusSkipped", outcome: OutcomeCompleted, runs: 1, noBus: true},
 		{name: "ReadErrorRetryable", outcome: OutcomeCompleted, runs: 1, closeDB: true, wantErr: true},
 		{name: "CompletedPublishes", outcome: OutcomeCompleted, runs: 1, wantSubjects: []string{pubsub.SubjectAerialDispatchPrefix + "completed"}},
-		{name: "TimeoutPublishes", outcome: OutcomeTimeout, runs: 1, wantSubjects: []string{pubsub.SubjectAerialDispatchPrefix + "timeout"}},
+		{name: "TimeoutPublishes", outcome: OutcomeTimeout, dispStatus: db.StatusFailed, runs: 1, wantSubjects: []string{pubsub.SubjectAerialDispatchPrefix + "timeout"}},
 		{name: "CancelledSkipped", outcome: OutcomeCancelled, runs: 1},
 		{name: "EmptySkipped", outcome: OutcomeEmpty, runs: 1},
+		{name: "DrainedFailedDispatchInCompletedTurnSkipped", outcome: OutcomeCompleted, dispStatus: db.StatusFailed, runs: 1, wantSubjects: nil},
+		{name: "DrainedCompletedDispatchInFailedTurnSkipped", outcome: OutcomeFailed, dispStatus: db.StatusCompleted, runs: 1, wantSubjects: nil},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -805,7 +808,11 @@ func TestPublishDispatchOutcome(t *testing.T) {
 			if tc.noBus {
 				cfg.EventBus = nil
 			}
-			cfg.Store = openStepDB(t, stepFixture{disps: []db.Dispatch{{ID: "d1", Source: "vanadis", Prompt: "p", Status: db.StatusCompleted, DurationMs: 10}}, closeDB: tc.closeDB}).store
+			dispStatus := db.StatusCompleted
+			if tc.dispStatus != "" {
+				dispStatus = tc.dispStatus
+			}
+			cfg.Store = openStepDB(t, stepFixture{disps: []db.Dispatch{{ID: "d1", Source: "vanadis", Prompt: "p", Status: dispStatus, DurationMs: 10}}, closeDB: tc.closeDB}).store
 			pool := NewWorkerPool(cfg)
 			id := "d1"
 			if tc.dispatchID != "" {

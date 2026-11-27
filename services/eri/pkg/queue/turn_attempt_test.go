@@ -9,6 +9,8 @@ import (
 	"testing"
 
 	restate "github.com/restatedev/sdk-go"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 
 	"github.com/azylman/aerial/services/eri/pkg/config"
 	"github.com/azylman/aerial/services/eri/pkg/db"
@@ -668,6 +670,34 @@ func runDispatchAttemptCase(t *testing.T, tc dispatchAttemptCase) {
 	if n := notices.all(); len(n) != 0 {
 		t.Errorf("dispatch deliveries = %q, want none", n)
 	}
+}
+
+func TestRunDispatchAttempt_ReplayReconcilesPendingExtraDispatch(t *testing.T) {
+	t.Parallel()
+	fx := stepFixture{
+		disps: []db.Dispatch{
+			{ID: "d1", Source: "test", Prompt: "initial", Status: db.StatusCompleted, ResponseText: "done d1", ConversationID: "conv-1"},
+			{ID: "d2", Source: "test", Prompt: "steered", Status: db.StatusPending},
+		},
+	}
+	store := openStepDB(t, fx).store
+	pool := newAttemptPool(t, store, &scriptedAttemptRunner{}, &noticeRecorder{}, false)
+	ids := []string{"d1", "d2"}
+	got, err := pool.RunDispatchAttempt(context.Background(), AttemptInput{SessionKey: "dispatch-d1", TurnID: "turn-d", IDs: ids, Prep: TurnPrep{Decision: TurnDecisionRun, Prompt: "p"}, Ordinal: 1})
+	require.NoError(t, err)
+	assert.Equal(t, AttemptKindRecorded, got.Kind)
+	assert.Equal(t, string(OutcomeCompleted), got.Reason)
+
+	// After RunDispatchAttempt, d2 should now be terminal (COMPLETED with d1's response/convID)
+	d2, err := store.GetDispatch(context.Background(), "d2")
+	require.NoError(t, err)
+	assert.Equal(t, db.StatusCompleted, d2.Status)
+	assert.Equal(t, "done d1", d2.ResponseText)
+	assert.Equal(t, "conv-1", d2.ConversationID)
+
+	// And RecordDispatchOutcome should succeed without unfinishedDispatchError
+	err = pool.RecordDispatchOutcome(context.Background(), ids, AttemptSummary{Outcome: OutcomeCompleted})
+	require.NoError(t, err)
 }
 
 func TestInspectSuccess(t *testing.T) {
