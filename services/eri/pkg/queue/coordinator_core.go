@@ -27,6 +27,7 @@ type coordinatorStore interface {
 	InsertMessage(ctx context.Context, msg db.Message) error
 	GetMessage(ctx context.Context, id string) (*db.Message, error)
 	InsertDispatch(ctx context.Context, d db.Dispatch) (bool, error)
+	GetDispatch(ctx context.Context, id string) (*db.Dispatch, error)
 	FailMessagesIfActive(ctx context.Context, ids []string, reason string) ([]string, error)
 	FailMessagesIfPending(ctx context.Context, ids []string, reason string) ([]string, error)
 	FailDispatchesIfActive(ctx context.Context, ids []string, reason string) ([]string, error)
@@ -45,6 +46,7 @@ type coordinatorRecords interface {
 	turnCap() int
 	failIfPending(ctx context.Context, ids []string, reason string) ([]string, error)
 	markSkipped(ctx context.Context, id string) error
+	pendingItemIDs(ctx context.Context, ids []string) ([]string, error)
 }
 
 // coordinatorState is the decoded state of one coordinator key.
@@ -234,7 +236,21 @@ func (c *coordinatorCore) onTurnDone(ctx restate.ObjectContext, req TurnDoneRequ
 		reschedule(ctx, st, req)
 		return nil
 	}
+	activeIDs := st.active.ItemIDs
 	st.active = nil
+	if len(activeIDs) > 0 && c.records != nil {
+		stillPending, rErr := restate.Run(ctx, func(rc restate.RunContext) ([]string, error) {
+			return storeCall(rc, func(sc context.Context) ([]string, error) {
+				return c.records.pendingItemIDs(sc, activeIDs)
+			})
+		}, restate.WithName("check-pending-active-items"))
+		if rErr != nil {
+			return coordinatorError(rErr)
+		}
+		if len(stillPending) > 0 {
+			st.pending = prependIDs(stillPending, st.pending)
+		}
+	}
 	c.startNext(ctx, st)
 	return nil
 }

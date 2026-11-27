@@ -747,13 +747,16 @@ func filterInitialBurstRows(rows []db.Message) (processing []db.Message, statuse
 
 func (b burstSubject) recoverExtraBurstRows(ctx context.Context, s db.Store, te *turnExecution, initialIDs []string, processing []db.Message) ([]db.Message, error) {
 	allIDs := b.pool.reconcileActiveTurnIDs(ctx, false, te.threadID, te.turnID, initialIDs)
-	for _, id := range allIDs {
-		if slices.Contains(initialIDs, id) {
-			continue
-		}
-		_, cErr := storeCall(ctx, func(c context.Context) (bool, error) { return s.ClaimPendingMessage(c, id) })
-		if cErr != nil {
-			return nil, cErr
+	isTerminal := len(processing) == 0
+	if !isTerminal {
+		for _, id := range allIDs {
+			if slices.Contains(initialIDs, id) {
+				continue
+			}
+			_, cErr := storeCall(ctx, func(c context.Context) (bool, error) { return s.ClaimPendingMessage(c, id) })
+			if cErr != nil {
+				return nil, cErr
+			}
 		}
 	}
 
@@ -960,7 +963,7 @@ type dispatchSubject struct {
 	ids  []string
 }
 
-func (d dispatchSubject) recoverExtraDispatches(ctx context.Context, s db.Store, primaryID, sessionID, leaseKey, turnID string, initialIDs []string) ([]db.Dispatch, error) {
+func (d dispatchSubject) recoverExtraDispatches(ctx context.Context, s db.Store, primaryID, sessionID, leaseKey, turnID string, initialIDs []string, isTerminal bool) ([]db.Dispatch, error) {
 	allIDs := d.pool.reconcileActiveTurnIDs(ctx, true, leaseKey, turnID, initialIDs)
 	if strings.TrimSpace(sessionID) != "" {
 		processing, pErr := storeCall(ctx, func(c context.Context) ([]db.Dispatch, error) {
@@ -987,7 +990,7 @@ func (d dispatchSubject) recoverExtraDispatches(ctx context.Context, s db.Store,
 		if gErr != nil {
 			return nil, gErr
 		}
-		if disp.Status == db.StatusPending {
+		if !isTerminal && disp.Status == db.StatusPending {
 			claimed, cErr := storeCall(ctx, func(c context.Context) (bool, error) { return s.ClaimPendingDispatch(c, extraID) })
 			if cErr != nil {
 				return nil, cErr
@@ -1064,7 +1067,8 @@ func (d dispatchSubject) load(ctx context.Context, s db.Store, te *turnExecution
 	te.triggerType = "dispatch:" + row.Source
 	te.activeSessionMu.Unlock()
 
-	extraDispatches, err := d.recoverExtraDispatches(ctx, s, row.ID, row.SessionID, leaseKey, te.turnID, initialIDs)
+	isTerminal := row.Status != db.StatusProcessing
+	extraDispatches, err := d.recoverExtraDispatches(ctx, s, row.ID, row.SessionID, leaseKey, te.turnID, initialIDs, isTerminal)
 	if err != nil {
 		return nil, "", err
 	}

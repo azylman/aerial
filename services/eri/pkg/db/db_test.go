@@ -577,6 +577,25 @@ func assertDispatchClaim(ctx context.Context, t *testing.T, store Store) {
 	if got.Status != StatusProcessing || got.ErrorMessage != "in flight" {
 		t.Errorf("unexpected processing state: %+v", got)
 	}
+
+	// Add a PROCESSING dispatch in a different session and a non-PROCESSING (PENDING) dispatch in heartbeat-hb-1
+	dOther := Dispatch{
+		ID:        "disp-other-proc",
+		Source:    "heartbeat",
+		SessionID: "heartbeat-other-sess",
+		Prompt:    "Prompt for other session",
+	}
+	mustInsertDispatch(ctx, t, store, dOther, "InsertDispatch disp-other-proc")
+	mustOK(t, store.UpdateDispatchStatus(ctx, "disp-other-proc", "PROCESSING", ""), "UpdateDispatchStatus disp-other-proc")
+
+	dPending := Dispatch{
+		ID:        "disp-hb1-pending",
+		Source:    "heartbeat",
+		SessionID: "heartbeat-hb-1",
+		Prompt:    "Prompt for pending in same session",
+	}
+	mustInsertDispatch(ctx, t, store, dPending, "InsertDispatch disp-hb1-pending")
+
 	processing, err := store.GetProcessingDispatchesBySession(ctx, "heartbeat-hb-1")
 	mustOK(t, err, "GetProcessingDispatchesBySession")
 	if len(processing) != 1 || processing[0].ID != "disp-1" {
@@ -675,4 +694,51 @@ func TestDispatchLifecycle(t *testing.T) {
 	assertDispatchRecent(ctx, t, store)
 	assertDispatchPendingAndMessageCompleted(ctx, t, store)
 	assertDispatchValidationGuards(ctx, t, store)
+}
+
+func TestGetProcessingDispatchesBySession_Filters(t *testing.T) {
+	t.Parallel()
+	store := NewSQLStore(newTestDB(t))
+	ctx := context.Background()
+
+	d1 := Dispatch{
+		ID:        "disp-target-proc",
+		Source:    "heartbeat",
+		SessionID: "sess-target",
+		Prompt:    "target proc",
+	}
+	mustInsertDispatch(ctx, t, store, d1, "InsertDispatch d1")
+	mustOK(t, store.UpdateDispatchStatus(ctx, d1.ID, "PROCESSING", ""), "UpdateDispatchStatus d1")
+
+	d2 := Dispatch{
+		ID:        "disp-target-pend",
+		Source:    "heartbeat",
+		SessionID: "sess-target",
+		Prompt:    "target pend",
+	}
+	mustInsertDispatch(ctx, t, store, d2, "InsertDispatch d2")
+
+	d3 := Dispatch{
+		ID:        "disp-target-comp",
+		Source:    "heartbeat",
+		SessionID: "sess-target",
+		Prompt:    "target comp",
+	}
+	mustInsertDispatch(ctx, t, store, d3, "InsertDispatch d3")
+	mustOK(t, store.UpdateDispatchCompleted(ctx, d3.ID, "completed", ""), "UpdateDispatchCompleted d3")
+
+	d4 := Dispatch{
+		ID:        "disp-other-proc",
+		Source:    "heartbeat",
+		SessionID: "sess-other",
+		Prompt:    "other proc",
+	}
+	mustInsertDispatch(ctx, t, store, d4, "InsertDispatch d4")
+	mustOK(t, store.UpdateDispatchStatus(ctx, d4.ID, "PROCESSING", ""), "UpdateDispatchStatus d4")
+
+	processing, err := store.GetProcessingDispatchesBySession(ctx, "sess-target")
+	mustOK(t, err, "GetProcessingDispatchesBySession")
+	if len(processing) != 1 || processing[0].ID != d1.ID {
+		t.Fatalf("expected only %s in processing dispatches, got %+v", d1.ID, processing)
+	}
 }

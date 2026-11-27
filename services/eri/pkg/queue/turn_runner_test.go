@@ -564,13 +564,6 @@ func TestTurnRunnerRunDispatch(t *testing.T) {
 			wantCalls:   []string{"started", "prep", "attempt ord=1 run=1", "outcome completed", "publish completed", "publish completed", "publish completed"},
 		},
 		{
-			name: "CrashLoopPublishesFailedForDrainedDispatches", started: claimed(0, "d1"), prep: runPrep(),
-			attempts:    []fakeAttempt{{res: AttemptResult{Kind: AttemptKindTerminal, Reason: "crash loop", DrainedIDs: []string{"d2", "d3"}}}},
-			wantOutcome: OutcomeFailed,
-			wantCmds:    []string{"run record-started", "run prep", "run run-1", "run record-outcome", "run publish-dispatch-outcome", "run publish-dispatch-outcome-2", "run publish-dispatch-outcome-3", doneSend(ds, "session-1", OutcomeFailed, 0)},
-			wantCalls:   []string{"started", "prep", "attempt ord=1 run=1", "outcome failed crash loop", "publish failed", "publish failed", "publish failed"},
-		},
-		{
 			name: "TimeoutPublishesTimeout", started: claimed(0, "d1"), prep: runPrep(), attempts: []fakeAttempt{{res: AttemptResult{Kind: AttemptKindTimeout, Reason: "timeout"}}},
 			wantOutcome: OutcomeTimeout,
 			wantCmds:    []string{"run record-started", "run prep", "run run-1", "run record-outcome", "run publish-dispatch-outcome", doneSend(ds, "session-1", OutcomeTimeout, 0)},

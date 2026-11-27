@@ -167,10 +167,19 @@ func TestDispatchCoordinator_OnTurnDone(t *testing.T) {
 	tests := []struct {
 		name      string
 		state     coordinatorState
+		rows      []db.Dispatch
 		req       TurnDoneRequest
 		wantState coordinatorState
 		wantSends []sentCall
 	}{
+		{
+			name:      "CompletedRequeuesPendingActiveItem",
+			state:     st(nil, &ActiveTurn{TurnID: "t0", ItemIDs: []string{"d1", "d2"}, RunnerInvocationID: "inv-0"}),
+			rows:      []db.Dispatch{dispRow("d1", dcKey, db.StatusCompleted), dispRow("d2", dcKey, db.StatusPending)},
+			req:       TurnDoneRequest{TurnID: "t0", Outcome: OutcomeCompleted},
+			wantState: st(nil, startedDispatch("d2")),
+			wantSends: []sentCall{runDispatch("d2")},
+		},
 		{name: "StaleTurnFenced", state: st([]string{"d2"}, running), req: TurnDoneRequest{TurnID: "t9", Outcome: OutcomeCompleted}, wantState: st([]string{"d2"}, running)},
 		{name: "CompletedStartsNext", state: st([]string{"d2"}, running), req: TurnDoneRequest{TurnID: "t0", Outcome: OutcomeCompleted}, wantState: st(nil, startedDispatch("d2")), wantSends: []sentCall{runDispatch("d2")}},
 		{name: "RescheduleRestartsAtFront", state: st([]string{"d2"}, running), req: TurnDoneRequest{TurnID: "t0", Outcome: OutcomeReschedule, RescheduleDelayMs: 1000}, wantState: st([]string{"d2"}, startedDispatch("d1")), wantSends: []sentCall{runDispatch("d1")}},
@@ -178,8 +187,12 @@ func TestDispatchCoordinator_OnTurnDone(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
+			var store coordinatorStore
+			if len(tc.rows) > 0 {
+				store = seedStore(t, nil, tc.rows, "")
+			}
 			h := newCoordHarness(t, dcKey, tcInv, tc.state)
-			require.NoError(t, NewDispatchCoordinator(nil, "aerial").OnTurnDone(h.objectCtx(), tc.req))
+			require.NoError(t, NewDispatchCoordinator(store, "aerial").OnTurnDone(h.objectCtx(), tc.req))
 			assert.Equal(t, tc.wantState, h.snapshot(t))
 			assert.Equal(t, tc.wantSends, h.sends)
 		})

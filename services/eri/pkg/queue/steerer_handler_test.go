@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -738,7 +739,9 @@ func TestWorkerPool_ReconcileActiveTurnIDs(t *testing.T) {
 	assert.Equal(t, []string{"b1"}, poolNoURL.reconcileActiveTurnIDs(context.Background(), false, "k", "t", []string{"b1"}))
 
 	// 2. Restate server returns matching active turn items; rejects body and Content-Type
+	var reqCount atomic.Int32
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		reqCount.Add(1)
 		if r.Header.Get("Content-Type") != "" {
 			http.Error(w, "status handler rejects Content-Type", http.StatusBadRequest)
 			return
@@ -778,7 +781,9 @@ func TestWorkerPool_ReconcileActiveTurnIDs(t *testing.T) {
 
 	// Empty key and empty turnID checks against configured pool (must not query or expand)
 	assert.Equal(t, []string{"b1"}, pool.reconcileActiveTurnIDs(context.Background(), false, "", "t-burst", []string{"b1"}))
+	assert.Equal(t, int32(0), reqCount.Load())
 	assert.Equal(t, []string{"b1"}, pool.reconcileActiveTurnIDs(context.Background(), false, "thread-key", "", []string{"b1"}))
+	assert.Equal(t, int32(0), reqCount.Load())
 
 	gotBurst := pool.reconcileActiveTurnIDs(context.Background(), false, "thread-key", "t-burst", []string{"b1"})
 	assert.Equal(t, []string{"b1", "b2"}, gotBurst)
@@ -1129,17 +1134,58 @@ func TestDrainDispatchTurn_BlankPromptAlignment(t *testing.T) {
 	assert.Equal(t, "initial prompt\n\nactionable steer prompt", te.turnPrompt)
 }
 
+type recoveryHidingStore struct {
+	db.Store
+
+	hiddenBurstIDs    map[string]bool
+	hiddenDispatchIDs map[string]bool
+}
+
+func (s *recoveryHidingStore) GetActiveTasks(ctx context.Context, filter ...db.TasksFilter) ([]db.ActiveTask, error) {
+	tasks, err := s.Store.GetActiveTasks(ctx, filter...)
+	if err != nil {
+		return nil, err
+	}
+	var filtered []db.ActiveTask
+	for _, t := range tasks {
+		if !s.hiddenBurstIDs[t.ID] {
+			filtered = append(filtered, t)
+		}
+	}
+	return filtered, nil
+}
+
+func (s *recoveryHidingStore) GetProcessingDispatchesBySession(ctx context.Context, sessionID string) ([]db.Dispatch, error) {
+	disps, err := s.Store.GetProcessingDispatchesBySession(ctx, sessionID)
+	if err != nil {
+		return nil, err
+	}
+	var filtered []db.Dispatch
+	for _, d := range disps {
+		if !s.hiddenDispatchIDs[d.ID] {
+			filtered = append(filtered, d)
+		}
+	}
+	return filtered, nil
+}
+
 func TestPostCrash_StopAndFail_WithLiveExecution(t *testing.T) {
 	t.Parallel()
 
 	store := testStore(t)
-	pool := NewWorkerPool(WorkerPoolConfig{Store: store})
+	hidingStore := &recoveryHidingStore{
+		Store:             store,
+		hiddenBurstIDs:    make(map[string]bool),
+		hiddenDispatchIDs: make(map[string]bool),
+	}
+	pool := NewWorkerPool(WorkerPoolConfig{Store: hidingStore})
 
-	// Live burst execution with drainedIDs
+	// 1. Live burst execution with drainedIDs under StopBurstTurn; hidingStore hides m2 from GetActiveTasks
 	th := "thread-live-stop"
 	m1 := db.Message{ID: "m-live-1", ThreadID: th, Status: db.StatusProcessing, CreatedAt: time.Now().UTC()}
 	m2 := db.Message{ID: "m-live-2", ThreadID: th, Status: db.StatusProcessing, CreatedAt: time.Now().UTC().Add(time.Second)}
 	seedMessageRows(t, store, []db.Message{m1, m2})
+	hidingStore.hiddenBurstIDs[m2.ID] = true
 
 	teBurst := &turnExecution{
 		turnID:     "turn-live-burst",
@@ -1159,11 +1205,12 @@ func TestPostCrash_StopAndFail_WithLiveExecution(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, db.StatusFailed, gotM2.Status)
 
-	// Live dispatch execution with drainedIDs
+	// 2. Live dispatch execution with drainedIDs under StopDispatchTurn; hidingStore hides d2 from GetProcessingDispatchesBySession
 	sess := "sess-live-disp"
 	d1 := db.Dispatch{ID: "d-live-1", SessionID: sess, Status: db.StatusProcessing, CreatedAt: time.Now().UTC()}
 	d2 := db.Dispatch{ID: "d-live-2", SessionID: sess, Status: db.StatusProcessing, CreatedAt: time.Now().UTC().Add(time.Second)}
 	seedDispatchRows(t, store, []db.Dispatch{d1, d2})
+	hidingStore.hiddenDispatchIDs[d2.ID] = true
 
 	teDisp := &turnExecution{
 		turnID:     "turn-live-disp",
@@ -1183,4 +1230,59 @@ func TestPostCrash_StopAndFail_WithLiveExecution(t *testing.T) {
 	gotD2, err := store.GetDispatch(context.Background(), d2.ID)
 	require.NoError(t, err)
 	assert.Equal(t, db.StatusFailed, gotD2.Status)
+
+	// 3. Live burst execution with drainedIDs under FailBurstTurn
+	thFail := "thread-live-fail"
+	m3 := db.Message{ID: "m-live-3", ThreadID: thFail, Status: db.StatusProcessing, CreatedAt: time.Now().UTC()}
+	m4 := db.Message{ID: "m-live-4", ThreadID: thFail, Status: db.StatusProcessing, CreatedAt: time.Now().UTC().Add(time.Second)}
+	seedMessageRows(t, store, []db.Message{m3, m4})
+	hidingStore.hiddenBurstIDs[m4.ID] = true
+
+	teBurstFail := &turnExecution{
+		turnID:     "turn-live-burst-fail",
+		threadID:   thFail,
+		drainedIDs: []string{m4.ID},
+	}
+	relBurstFail, ok := pool.turns.Begin(context.Background(), teBurstFail.turnID, teBurstFail)
+	require.True(t, ok)
+	defer relBurstFail()
+
+	err = pool.FailBurstTurn(context.Background(), teBurstFail.turnID, []string{m3.ID}, "burst crash terminal")
+	require.NoError(t, err)
+	gotM3, err := store.GetMessage(context.Background(), m3.ID)
+	require.NoError(t, err)
+	assert.Equal(t, db.StatusFailed, gotM3.Status)
+	assert.Equal(t, "burst crash terminal", gotM3.ErrorMessage)
+	gotM4, err := store.GetMessage(context.Background(), m4.ID)
+	require.NoError(t, err)
+	assert.Equal(t, db.StatusFailed, gotM4.Status)
+	assert.Equal(t, "burst crash terminal", gotM4.ErrorMessage)
+
+	// 4. Live dispatch execution with drainedIDs under FailDispatchTurn
+	sessFail := "sess-live-disp-fail"
+	d3 := db.Dispatch{ID: "d-live-3", SessionID: sessFail, Status: db.StatusProcessing, CreatedAt: time.Now().UTC()}
+	d4 := db.Dispatch{ID: "d-live-4", SessionID: sessFail, Status: db.StatusProcessing, CreatedAt: time.Now().UTC().Add(time.Second)}
+	seedDispatchRows(t, store, []db.Dispatch{d3, d4})
+	hidingStore.hiddenDispatchIDs[d4.ID] = true
+
+	teDispFail := &turnExecution{
+		turnID:     "turn-live-disp-fail",
+		threadID:   sessFail,
+		dispatch:   &d3,
+		drainedIDs: []string{d4.ID},
+	}
+	relDispFail, ok := pool.turns.Begin(context.Background(), teDispFail.turnID, teDispFail)
+	require.True(t, ok)
+	defer relDispFail()
+
+	err = pool.FailDispatchTurn(context.Background(), teDispFail.turnID, []string{d3.ID}, "disp crash terminal")
+	require.NoError(t, err)
+	gotD3, err := store.GetDispatch(context.Background(), d3.ID)
+	require.NoError(t, err)
+	assert.Equal(t, db.StatusFailed, gotD3.Status)
+	assert.Equal(t, "disp crash terminal", gotD3.ErrorMessage)
+	gotD4, err := store.GetDispatch(context.Background(), d4.ID)
+	require.NoError(t, err)
+	assert.Equal(t, db.StatusFailed, gotD4.Status)
+	assert.Equal(t, "disp crash terminal", gotD4.ErrorMessage)
 }
