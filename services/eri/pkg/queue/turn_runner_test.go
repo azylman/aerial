@@ -38,15 +38,19 @@ type fakeAttempt struct {
 // fakeTurnSteps is a declarative turnSteps: errs pops one error per call of a method, panics
 // makes a method panic, attempts scripts the run steps in order.
 type fakeTurnSteps struct {
-	mu       sync.Mutex
-	started  StartedTurn
-	prep     TurnPrep
-	attempts []fakeAttempt
-	errs     map[string][]error
-	panics   map[string]bool
-	max      int
+	mu           sync.Mutex
+	started      StartedTurn
+	prep         TurnPrep
+	attempts     []fakeAttempt
+	errs         map[string][]error
+	panics       map[string]bool
+	pendingItems []string
+	pendingErr   error
+	max          int
 
 	calls    []string
+	prompts  []string
+	inputs   []AttemptInput
 	attemptN int
 }
 
@@ -73,6 +77,8 @@ func (f *fakeTurnSteps) attempt(in AttemptInput) (AttemptResult, error) {
 		return AttemptResult{}, err
 	}
 	f.mu.Lock()
+	f.prompts = append(f.prompts, in.Prep.Prompt)
+	f.inputs = append(f.inputs, in)
 	if f.attemptN >= len(f.attempts) {
 		f.mu.Unlock()
 		return AttemptResult{}, errors.New("unscripted attempt")
@@ -110,6 +116,15 @@ func (f *fakeTurnSteps) RefreshBurstThreadSummary(context.Context, string, []str
 	return f.call("summary", "")
 }
 
+func (f *fakeTurnSteps) ReconcilePendingBurstItems(context.Context, string, string, []string) ([]string, error) {
+	if err := f.call("reconcile-pending", ""); err != nil {
+		return nil, err
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.pendingItems, f.pendingErr
+}
+
 func (f *fakeTurnSteps) StopBurstTurn(_ context.Context, _ string, ids []string) error {
 	return f.call("stop", strings.Join(ids, ","))
 }
@@ -134,8 +149,17 @@ func (f *fakeTurnSteps) RecordDispatchOutcome(_ context.Context, _ []string, s A
 	return f.call("outcome", string(s.Outcome)+" "+s.Reason)
 }
 
-func (f *fakeTurnSteps) PublishDispatchOutcome(_ context.Context, _ string, o TurnOutcome) error {
-	return f.call("publish", string(o))
+func (f *fakeTurnSteps) PublishDispatchOutcome(_ context.Context, id string, o TurnOutcome) error {
+	return f.call("publish", id+" "+string(o))
+}
+
+func (f *fakeTurnSteps) ReconcilePendingDispatchItems(context.Context, string, string, []string) ([]string, error) {
+	if err := f.call("reconcile-pending", ""); err != nil {
+		return nil, err
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.pendingItems, f.pendingErr
 }
 
 func (f *fakeTurnSteps) StopDispatchTurn(_ context.Context, _ string, ids []string) error {
@@ -297,8 +321,16 @@ func (j *runnerJournal) finishOrphans() {
 	}
 }
 
-func doneSend(service, key string, outcome TurnOutcome, delayMs int64) string {
-	return fmt.Sprintf(`send %s/%s/OnTurnDone {"turn_id":"turn-1","outcome":"%s","reschedule_delay_ms":%d}`, service, key, outcome, delayMs)
+func doneSend(service, key string, outcome TurnOutcome, delayMs int64, requeueIDs ...[]string) string {
+	req := TurnDoneRequest{TurnID: "turn-1", Outcome: outcome, RescheduleDelayMs: delayMs}
+	if len(requeueIDs) > 0 && len(requeueIDs[0]) > 0 {
+		req.RequeueIDs = requeueIDs[0]
+	}
+	b, err := json.Marshal(req)
+	if err != nil {
+		panic(err)
+	}
+	return fmt.Sprintf("send %s/%s/OnTurnDone %s", service, key, string(b))
 }
 
 func runPrep() TurnPrep { return TurnPrep{Decision: TurnDecisionRun, Prompt: "p"} }
@@ -316,20 +348,21 @@ func retryAfter(ms int64) fakeAttempt {
 // turnRunnerBurstCase is one RunBurst row: the scripted steps and journal, and the expected
 // Restate commands and step calls.
 type turnRunnerBurstCase struct {
-	name        string
-	agent       string
-	started     StartedTurn
-	prep        TurnPrep
-	attempts    []fakeAttempt
-	errs        map[string][]error
-	panics      map[string]bool
-	cancelSteps map[string]bool
-	cancelRuns  map[int]bool
-	cancelSleep bool
-	wantOutcome TurnOutcome
-	wantErr     bool
-	wantCmds    []string
-	wantCalls   []string
+	name         string
+	agent        string
+	started      StartedTurn
+	prep         TurnPrep
+	attempts     []fakeAttempt
+	errs         map[string][]error
+	panics       map[string]bool
+	cancelSteps  map[string]bool
+	cancelRuns   map[int]bool
+	cancelSleep  bool
+	pendingItems []string
+	wantOutcome  TurnOutcome
+	wantErr      bool
+	wantCmds     []string
+	wantCalls    []string
 }
 
 const runnerTS = "ThreadSession"
@@ -338,8 +371,8 @@ var turnRunnerBurstCases = []turnRunnerBurstCase{
 	{
 		name: "HappyPathStepOrder", started: claimed(0, "m1", "m2"), prep: runPrep(), attempts: []fakeAttempt{attemptOf(AttemptKindSuccess)},
 		wantOutcome: OutcomeCompleted,
-		wantCmds:    []string{"run record-started", "run prep", "run run-1", "run record-outcome", "run post-turn-hook", "run refresh-thread-summary", doneSend(runnerTS, "thread-1", OutcomeCompleted, 0)},
-		wantCalls:   []string{"started", "prep", "attempt ord=1 run=1", "outcome completed", "hook completed", "summary"},
+		wantCmds:    []string{"run record-started", "run prep", "run run-1", "run record-outcome", "run post-turn-hook", "run refresh-thread-summary", "run reconcile-pending", doneSend(runnerTS, "thread-1", OutcomeCompleted, 0)},
+		wantCalls:   []string{"started", "prep", "attempt ord=1 run=1", "outcome completed", "hook completed", "summary", "reconcile-pending"},
 	},
 	{
 		name: "EmptyClaimReportsEmpty", started: StartedTurn{},
@@ -356,27 +389,27 @@ var turnRunnerBurstCases = []turnRunnerBurstCase{
 	{
 		name: "PrepFinishedRunsNoAgent", started: claimed(0, "m1"), prep: TurnPrep{Decision: TurnDecisionFinished, Reason: "ignored"},
 		wantOutcome: OutcomeCompleted,
-		wantCmds:    []string{"run record-started", "run prep", doneSend(runnerTS, "thread-1", OutcomeCompleted, 0)},
-		wantCalls:   []string{"started", "prep"},
+		wantCmds:    []string{"run record-started", "run prep", "run reconcile-pending", doneSend(runnerTS, "thread-1", OutcomeCompleted, 0)},
+		wantCalls:   []string{"started", "prep", "reconcile-pending"},
 	},
 	{
 		name: "RetrySleepsBackoffThenNextOrdinal", started: claimed(0, "m1"), prep: runPrep(), attempts: []fakeAttempt{retryAfter(2000), attemptOf(AttemptKindSuccess)},
 		wantOutcome: OutcomeCompleted,
-		wantCmds:    []string{"run record-started", "run prep", "run run-1", "sleep 2s", "run run-2", "run record-outcome", "run post-turn-hook", "run refresh-thread-summary", doneSend(runnerTS, "thread-1", OutcomeCompleted, 0)},
-		wantCalls:   []string{"started", "prep", "attempt ord=1 run=1", "attempt ord=2 run=2", "outcome completed", "hook completed", "summary"},
+		wantCmds:    []string{"run record-started", "run prep", "run run-1", "sleep 2s", "run run-2", "run record-outcome", "run post-turn-hook", "run refresh-thread-summary", "run reconcile-pending", doneSend(runnerTS, "thread-1", OutcomeCompleted, 0)},
+		wantCalls:   []string{"started", "prep", "attempt ord=1 run=1", "attempt ord=2 run=2", "outcome completed", "hook completed", "summary", "reconcile-pending"},
 	},
 	{
 		name: "OrdinalsStartAfterPersistedRetries", started: claimed(1, "m1"), prep: runPrep(), attempts: []fakeAttempt{attemptOf(AttemptKindSuccess)},
 		wantOutcome: OutcomeCompleted,
-		wantCmds:    []string{"run record-started", "run prep", "run run-1", "run record-outcome", "run post-turn-hook", "run refresh-thread-summary", doneSend(runnerTS, "thread-1", OutcomeCompleted, 0)},
-		wantCalls:   []string{"started", "prep", "attempt ord=2 run=1", "outcome completed", "hook completed", "summary"},
+		wantCmds:    []string{"run record-started", "run prep", "run run-1", "run record-outcome", "run post-turn-hook", "run refresh-thread-summary", "run reconcile-pending", doneSend(runnerTS, "thread-1", OutcomeCompleted, 0)},
+		wantCalls:   []string{"started", "prep", "attempt ord=2 run=1", "outcome completed", "hook completed", "summary", "reconcile-pending"},
 	},
 	{
 		name: "ResumeKeepsOrdinal", started: claimed(0, "m1"), prep: runPrep(),
 		attempts:    []fakeAttempt{{res: AttemptResult{Kind: AttemptKindResume, AutoResumes: 1}}, attemptOf(AttemptKindSuccess)},
 		wantOutcome: OutcomeCompleted,
-		wantCmds:    []string{"run record-started", "run prep", "run run-1", "run run-2", "run record-outcome", "run post-turn-hook", "run refresh-thread-summary", doneSend(runnerTS, "thread-1", OutcomeCompleted, 0)},
-		wantCalls:   []string{"started", "prep", "attempt ord=1 run=1", "attempt ord=1 run=2 resume", "outcome completed", "hook completed", "summary"},
+		wantCmds:    []string{"run record-started", "run prep", "run run-1", "run run-2", "run record-outcome", "run post-turn-hook", "run refresh-thread-summary", "run reconcile-pending", doneSend(runnerTS, "thread-1", OutcomeCompleted, 0)},
+		wantCalls:   []string{"started", "prep", "attempt ord=1 run=1", "attempt ord=1 run=2 resume", "outcome completed", "hook completed", "summary", "reconcile-pending"},
 	},
 	{
 		name: "TimeoutEndsAfterOneOrdinal", started: claimed(0, "m1"), prep: runPrep(),
@@ -409,15 +442,29 @@ var turnRunnerBurstCases = []turnRunnerBurstCase{
 		name: "RetryableStartRetriesUnderDefaultPolicy", started: claimed(0, "m1"), prep: TurnPrep{Decision: TurnDecisionFinished},
 		errs:        map[string][]error{"started": {errRunnerRetryable}},
 		wantOutcome: OutcomeCompleted,
-		wantCmds:    []string{"run record-started", "retry record-started", "run prep", doneSend(runnerTS, "thread-1", OutcomeCompleted, 0)},
-		wantCalls:   []string{"started", "started", "prep"},
+		wantCmds:    []string{"run record-started", "retry record-started", "run prep", "run reconcile-pending", doneSend(runnerTS, "thread-1", OutcomeCompleted, 0)},
+		wantCalls:   []string{"started", "started", "prep", "reconcile-pending"},
 	},
 	{
 		name: "M2CheckRetriesUntilRowsTerminal", started: claimed(0, "m1"), prep: runPrep(), attempts: []fakeAttempt{attemptOf(AttemptKindSuccess)},
 		errs:        map[string][]error{"outcome": {errRunnerRetryable}},
 		wantOutcome: OutcomeCompleted,
-		wantCmds:    []string{"run record-started", "run prep", "run run-1", "run record-outcome", "retry record-outcome", "run post-turn-hook", "run refresh-thread-summary", doneSend(runnerTS, "thread-1", OutcomeCompleted, 0)},
-		wantCalls:   []string{"started", "prep", "attempt ord=1 run=1", "outcome completed", "outcome completed", "hook completed", "summary"},
+		wantCmds:    []string{"run record-started", "run prep", "run run-1", "run record-outcome", "retry record-outcome", "run post-turn-hook", "run refresh-thread-summary", "run reconcile-pending", doneSend(runnerTS, "thread-1", OutcomeCompleted, 0)},
+		wantCalls:   []string{"started", "prep", "attempt ord=1 run=1", "outcome completed", "outcome completed", "hook completed", "summary", "reconcile-pending"},
+	},
+	{
+		name: "CompletedRequeuesPendingActiveItems", started: claimed(0, "m1"), prep: runPrep(), attempts: []fakeAttempt{attemptOf(AttemptKindSuccess)},
+		pendingItems: []string{"m2"},
+		wantOutcome:  OutcomeCompleted,
+		wantCmds:     []string{"run record-started", "run prep", "run run-1", "run record-outcome", "run post-turn-hook", "run refresh-thread-summary", "run reconcile-pending", doneSend(runnerTS, "thread-1", OutcomeCompleted, 0, []string{"m2"})},
+		wantCalls:    []string{"started", "prep", "attempt ord=1 run=1", "outcome completed", "hook completed", "summary", "reconcile-pending"},
+	},
+	{
+		name: "ReconcilePendingErrorStillSendsTurnDone", started: claimed(0, "m1"), prep: runPrep(), attempts: []fakeAttempt{attemptOf(AttemptKindSuccess)},
+		errs:        map[string][]error{"reconcile-pending": {errRunnerTerminal}},
+		wantOutcome: OutcomeCompleted,
+		wantCmds:    []string{"run record-started", "run prep", "run run-1", "run record-outcome", "run post-turn-hook", "run refresh-thread-summary", "run reconcile-pending", doneSend(runnerTS, "thread-1", OutcomeCompleted, 0)},
+		wantCalls:   []string{"started", "prep", "attempt ord=1 run=1", "outcome completed", "hook completed", "summary", "reconcile-pending"},
 	},
 	{
 		name: "CancelAtPrepStopsTurn", started: claimed(0, "m1", "m2"), cancelSteps: map[string]bool{StepPrep: true},
@@ -519,7 +566,14 @@ func TestTurnRunnerRunBurst(t *testing.T) {
 	for _, tc := range turnRunnerBurstCases {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			steps := &fakeTurnSteps{started: tc.started, prep: tc.prep, attempts: tc.attempts, errs: maps.Clone(tc.errs), panics: tc.panics}
+			steps := &fakeTurnSteps{
+				started:      tc.started,
+				prep:         tc.prep,
+				attempts:     tc.attempts,
+				errs:         maps.Clone(tc.errs),
+				panics:       tc.panics,
+				pendingItems: tc.pendingItems,
+			}
 			j := &runnerJournal{t: t, cancelSteps: tc.cancelSteps, cancelRuns: tc.cancelRuns, cancelSleep: tc.cancelSleep}
 			svc := NewTurnRunnerService(steps, tc.agent)
 			res, err := svc.RunBurst(j.context(t), BurstTurnRequest{ThreadID: "thread-1", TurnID: "turn-1", MessageIDs: []string{"m1", "m2"}})
@@ -535,28 +589,36 @@ func TestTurnRunnerRunDispatch(t *testing.T) {
 	t.Parallel()
 	const ds = "DispatchSession"
 	tests := []struct {
-		name        string
-		agent       string
-		started     StartedTurn
-		prep        TurnPrep
-		attempts    []fakeAttempt
-		errs        map[string][]error
-		cancelSteps map[string]bool
-		wantOutcome TurnOutcome
-		wantCmds    []string
-		wantCalls   []string
+		name         string
+		agent        string
+		started      StartedTurn
+		prep         TurnPrep
+		attempts     []fakeAttempt
+		errs         map[string][]error
+		cancelSteps  map[string]bool
+		pendingItems []string
+		wantOutcome  TurnOutcome
+		wantCmds     []string
+		wantCalls    []string
 	}{
 		{
 			name: "HappyPathPublishesCompleted", started: claimed(0, "d1"), prep: runPrep(), attempts: []fakeAttempt{attemptOf(AttemptKindSuccess)},
 			wantOutcome: OutcomeCompleted,
-			wantCmds:    []string{"run record-started", "run prep", "run run-1", "run record-outcome", "run publish-dispatch-outcome", doneSend(ds, "session-1", OutcomeCompleted, 0)},
-			wantCalls:   []string{"started", "prep", "attempt ord=1 run=1", "outcome completed", "publish completed"},
+			wantCmds:    []string{"run record-started", "run prep", "run run-1", "run record-outcome", "run publish-dispatch-outcome", "run reconcile-pending", doneSend(ds, "session-1", OutcomeCompleted, 0)},
+			wantCalls:   []string{"started", "prep", "attempt ord=1 run=1", "outcome completed", "publish d1 completed", "reconcile-pending"},
+		},
+		{
+			name: "HappyPathPublishesMultipleDrainedDispatches", started: claimed(0, "d1"), prep: runPrep(),
+			attempts:    []fakeAttempt{{res: AttemptResult{Kind: AttemptKindSuccess, DrainedIDs: []string{"d2", "d3"}}}},
+			wantOutcome: OutcomeCompleted,
+			wantCmds:    []string{"run record-started", "run prep", "run run-1", "run record-outcome", "run publish-dispatch-outcome", "run publish-dispatch-outcome-2", "run publish-dispatch-outcome-3", "run reconcile-pending", doneSend(ds, "session-1", OutcomeCompleted, 0)},
+			wantCalls:   []string{"started", "prep", "attempt ord=1 run=1", "outcome completed", "publish d1 completed", "publish d2 completed", "publish d3 completed", "reconcile-pending"},
 		},
 		{
 			name: "TimeoutPublishesTimeout", started: claimed(0, "d1"), prep: runPrep(), attempts: []fakeAttempt{{res: AttemptResult{Kind: AttemptKindTimeout, Reason: "timeout"}}},
 			wantOutcome: OutcomeTimeout,
 			wantCmds:    []string{"run record-started", "run prep", "run run-1", "run record-outcome", "run publish-dispatch-outcome", doneSend(ds, "session-1", OutcomeTimeout, 0)},
-			wantCalls:   []string{"started", "prep", "attempt ord=1 run=1", "outcome timeout timeout", "publish timeout"},
+			wantCalls:   []string{"started", "prep", "attempt ord=1 run=1", "outcome timeout timeout", "publish d1 timeout"},
 		},
 		{
 			name: "RecordedCancelPublishesNothing", started: claimed(0, "d1"), prep: runPrep(), attempts: []fakeAttempt{{res: AttemptResult{Kind: AttemptKindRecorded, Reason: string(OutcomeCancelled)}}},
@@ -567,8 +629,8 @@ func TestTurnRunnerRunDispatch(t *testing.T) {
 		{
 			name: "PrepFinishedPublishesNothing", started: claimed(0, "d1"), prep: TurnPrep{Decision: TurnDecisionFinished},
 			wantOutcome: OutcomeCompleted,
-			wantCmds:    []string{"run record-started", "run prep", doneSend(ds, "session-1", OutcomeCompleted, 0)},
-			wantCalls:   []string{"started", "prep"},
+			wantCmds:    []string{"run record-started", "run prep", "run reconcile-pending", doneSend(ds, "session-1", OutcomeCompleted, 0)},
+			wantCalls:   []string{"started", "prep", "reconcile-pending"},
 		},
 		{
 			name: "CancelStopsWithoutPublishing", started: claimed(0, "d1"), cancelSteps: map[string]bool{StepPrep: true},
@@ -588,11 +650,24 @@ func TestTurnRunnerRunDispatch(t *testing.T) {
 			wantCmds:    []string{"run record-started", doneSend("DispatchSession-agent-beta", "session-1", OutcomeEmpty, 0)},
 			wantCalls:   []string{"started"},
 		},
+		{
+			name: "CompletedRequeuesPendingActiveItems", started: claimed(0, "d1"), prep: runPrep(), attempts: []fakeAttempt{attemptOf(AttemptKindSuccess)},
+			pendingItems: []string{"d2"},
+			wantOutcome:  OutcomeCompleted,
+			wantCmds:     []string{"run record-started", "run prep", "run run-1", "run record-outcome", "run publish-dispatch-outcome", "run reconcile-pending", doneSend(ds, "session-1", OutcomeCompleted, 0, []string{"d2"})},
+			wantCalls:    []string{"started", "prep", "attempt ord=1 run=1", "outcome completed", "publish d1 completed", "reconcile-pending"},
+		},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			steps := &fakeTurnSteps{started: tc.started, prep: tc.prep, attempts: tc.attempts, errs: maps.Clone(tc.errs)}
+			steps := &fakeTurnSteps{
+				started:      tc.started,
+				prep:         tc.prep,
+				attempts:     tc.attempts,
+				errs:         maps.Clone(tc.errs),
+				pendingItems: tc.pendingItems,
+			}
 			j := &runnerJournal{t: t, cancelSteps: tc.cancelSteps}
 			svc := NewTurnRunnerService(steps, tc.agent)
 			res, err := svc.RunDispatch(j.context(t), DispatchTurnRequest{SessionKey: "session-1", TurnID: "turn-1", DispatchID: "d1"})
@@ -647,4 +722,73 @@ func runStepName(opts []restate.RunOption) string {
 		}
 	}
 	return ""
+}
+
+func TestTurnRunner_RunAttempts_PropagatesDrainedPrompts(t *testing.T) {
+	t.Parallel()
+	steps := &fakeTurnSteps{
+		started: claimed(0, "m1"),
+		prep:    TurnPrep{Decision: TurnDecisionRun, Prompt: "initial prompt"},
+		attempts: []fakeAttempt{
+			{res: AttemptResult{Kind: AttemptKindRetry, BackoffMs: 0, Reason: "transient", DrainedIDs: []string{"m2"}, DrainedPrompts: []string{"steered extra prompt"}}},
+			{res: AttemptResult{Kind: AttemptKindSuccess}},
+		},
+	}
+	j := &runnerJournal{t: t}
+	svc := NewTurnRunnerService(steps, "")
+	res, err := svc.RunBurst(j.context(t), BurstTurnRequest{ThreadID: "thread-1", TurnID: "turn-1", MessageIDs: []string{"m1"}})
+	require.NoError(t, err)
+	assert.Equal(t, OutcomeCompleted, res.Outcome)
+	require.Len(t, steps.prompts, 2)
+	assert.Equal(t, "initial prompt", steps.prompts[0])
+	assert.Equal(t, "initial prompt\n\nsteered extra prompt", steps.prompts[1])
+	require.Len(t, steps.inputs, 2)
+	assert.Equal(t, []string{"m1", "m2"}, steps.inputs[1].IDs)
+}
+
+func TestTurnRunner_EndOnTerminal_IncludesDrainedIDs(t *testing.T) {
+	t.Parallel()
+	steps := &fakeTurnSteps{
+		started: claimed(0, "m1"),
+		prep:    TurnPrep{Decision: TurnDecisionRun, Prompt: "initial prompt"},
+		attempts: []fakeAttempt{
+			{res: AttemptResult{Kind: AttemptKindRetry, BackoffMs: 0, Reason: "transient", DrainedIDs: []string{"m2"}}},
+			{err: errRunnerTerminal},
+		},
+	}
+	j := &runnerJournal{t: t}
+	svc := NewTurnRunnerService(steps, "")
+	res, err := svc.RunBurst(j.context(t), BurstTurnRequest{ThreadID: "thread-1", TurnID: "turn-1", MessageIDs: []string{"m1"}})
+	require.NoError(t, err)
+	assert.Equal(t, OutcomeFailed, res.Outcome)
+	assert.Contains(t, steps.callLog(), "fail m1,m2 integrity violation")
+}
+
+func TestTurnRunner_RunAttempts_TwoDrainsFollowedByRetry(t *testing.T) {
+	t.Parallel()
+	steps := &fakeTurnSteps{
+		started: claimed(0, "m1"),
+		prep:    TurnPrep{Decision: TurnDecisionRun, Prompt: "initial prompt"},
+		attempts: []fakeAttempt{
+			{res: AttemptResult{Kind: AttemptKindRetry, BackoffMs: 0, Reason: "transient", DrainedIDs: []string{"m2"}, DrainedPrompts: []string{"steered msg A"}}},
+			{res: AttemptResult{Kind: AttemptKindRetry, BackoffMs: 0, Reason: "transient", DrainedIDs: []string{"m2", "m3"}, DrainedPrompts: []string{"steered msg A", "steered msg B"}}},
+			{res: AttemptResult{Kind: AttemptKindSuccess}},
+		},
+	}
+	j := &runnerJournal{t: t}
+	svc := NewTurnRunnerService(steps, "")
+	res, err := svc.RunBurst(j.context(t), BurstTurnRequest{ThreadID: "thread-1", TurnID: "turn-1", MessageIDs: []string{"m1"}})
+	require.NoError(t, err)
+	assert.Equal(t, OutcomeCompleted, res.Outcome)
+
+	require.Len(t, steps.prompts, 3)
+	assert.Equal(t, "initial prompt", steps.prompts[0])
+	assert.Equal(t, "initial prompt\n\nsteered msg A", steps.prompts[1])
+	assert.Equal(t, "initial prompt\n\nsteered msg A\n\nsteered msg B", steps.prompts[2])
+
+	// Drained IDs are properly set on AttemptInput for the subsequent retry attempt
+	require.Len(t, steps.inputs, 3)
+	assert.Equal(t, []string{"m1"}, steps.inputs[0].IDs)
+	assert.Equal(t, []string{"m1", "m2"}, steps.inputs[1].IDs)
+	assert.Equal(t, []string{"m1", "m2", "m3"}, steps.inputs[2].IDs)
 }

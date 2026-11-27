@@ -9,6 +9,7 @@ import (
 	"log"
 	"net/http"
 	"net/url"
+	"slices"
 	"strings"
 	"time"
 
@@ -174,6 +175,69 @@ func (p *WorkerPool) callRestateDrain(ctx context.Context, te *turnExecution) (D
 	return coordResp, nil
 }
 
+func (p *WorkerPool) currentTimezone() string {
+	if p.appCfg != nil {
+		if cur := p.appCfg.Current(); cur != nil {
+			return cur.Timezone
+		}
+	}
+	return ""
+}
+
+// reconcileActiveTurnIDs checks coordinator Status for active turn items and merges them with baseIDs.
+func (p *WorkerPool) reconcileActiveTurnIDs(ctx context.Context, isDispatch bool, key, turnID string, baseIDs []string) []string {
+	base := normalizeStepIDs(baseIDs)
+	if p == nil || strings.TrimSpace(key) == "" || strings.TrimSpace(turnID) == "" {
+		return base
+	}
+	ingressURL := p.resolveRestateIngressURL()
+	if ingressURL == "" && p.cfg.DrainHTTPClient == nil {
+		return base
+	}
+	if ingressURL == "" {
+		ingressURL = "http://restate.aerial:8080"
+	}
+	agentName := p.cfg.AgentName
+	var serviceName string
+	if isDispatch {
+		serviceName = DispatchSessionServiceName(agentName)
+	} else {
+		serviceName = ThreadSessionServiceName(agentName)
+	}
+	targetURL := fmt.Sprintf("%s/%s/%s/Status", ingressURL, serviceName, url.PathEscape(key))
+
+	reqCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
+	defer cancel()
+
+	req, err := http.NewRequestWithContext(reqCtx, http.MethodPost, targetURL, http.NoBody)
+	if err != nil {
+		return base
+	}
+	req.Header.Set("Accept", "application/json")
+
+	resp, err := p.drainHTTPClient().Do(req)
+	if err != nil {
+		log.Printf("[SteerHandler] Error requesting coordinator status from %s: %v", targetURL, err)
+		return base
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		log.Printf("[SteerHandler] Non-2xx coordinator status from %s: %d", targetURL, resp.StatusCode)
+		return base
+	}
+
+	var status CoordinatorStatus
+	if err := json.NewDecoder(resp.Body).Decode(&status); err != nil {
+		log.Printf("[SteerHandler] Error decoding coordinator status from %s: %v", targetURL, err)
+		return base
+	}
+	if status.Active != nil && status.Active.TurnID == turnID {
+		return normalizeStepIDs(append(slices.Clone(baseIDs), status.Active.ItemIDs...))
+	}
+	return base
+}
+
 func (*WorkerPool) drainDispatchTurn(ctx context.Context, te *turnExecution, s db.Store, drainedIDs []string) []string {
 	var prompts []string
 	for _, id := range drainedIDs {
@@ -192,9 +256,11 @@ func (*WorkerPool) drainDispatchTurn(ctx context.Context, te *turnExecution, s d
 		}
 		te.steeredDispatches = append(te.steeredDispatches, *d)
 		te.drainedIDs = append(te.drainedIDs, d.ID)
-		if pText := strings.TrimSpace(d.Prompt); pText != "" {
+		pText := strings.TrimSpace(d.Prompt)
+		if pText != "" {
 			prompts = append(prompts, pText)
 		}
+		te.drainedPrompts = append(te.drainedPrompts, pText)
 	}
 	if prompts == nil {
 		prompts = []string{}
@@ -222,14 +288,14 @@ func (p *WorkerPool) drainBurstTurn(ctx context.Context, te *turnExecution, s db
 		return nil, err
 	}
 	te.burst = append(te.burst, rows...)
+	tz := p.currentTimezone()
 	for _, row := range rows {
 		te.drainedIDs = append(te.drainedIDs, row.ID)
-	}
-	var tz string
-	if p.appCfg != nil {
-		if cur := p.appCfg.Current(); cur != nil {
-			tz = cur.Timezone
+		rowPrompt := CoalesceBurstPrompt([]db.Message{row}, tz)
+		if strings.TrimSpace(rowPrompt) == "" {
+			rowPrompt = row.Content
 		}
+		te.drainedPrompts = append(te.drainedPrompts, rowPrompt)
 	}
 	coalesced := CoalesceBurstPrompt(rows, tz)
 	var prompts []string

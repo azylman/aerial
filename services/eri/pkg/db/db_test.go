@@ -548,6 +548,10 @@ func assertDispatchValidationGuards(ctx context.Context, t *testing.T, store Sto
 	if err != nil || recentEmpty != nil {
 		t.Errorf("expected nil, nil for empty session id in GetRecentSessionDispatches")
 	}
+	processingEmpty, err := store.GetProcessingDispatchesBySession(ctx, "")
+	if err != nil || processingEmpty != nil {
+		t.Errorf("expected nil, nil for empty session id in GetProcessingDispatchesBySession")
+	}
 	scannedNil, err := scanDispatches(nil)
 	if err != nil || scannedNil != nil {
 		t.Errorf("expected nil, nil for scanDispatches(nil)")
@@ -666,4 +670,51 @@ func TestDispatchLifecycle(t *testing.T) {
 	assertDispatchRecent(ctx, t, store)
 	assertDispatchPendingAndMessageCompleted(ctx, t, store)
 	assertDispatchValidationGuards(ctx, t, store)
+}
+
+func TestGetProcessingDispatchesBySession_Filters(t *testing.T) {
+	t.Parallel()
+	store := NewSQLStore(newTestDB(t))
+	ctx := context.Background()
+
+	d1 := Dispatch{
+		ID:        "disp-target-proc",
+		Source:    "heartbeat",
+		SessionID: "sess-target",
+		Prompt:    "target proc",
+	}
+	mustInsertDispatch(ctx, t, store, d1, "InsertDispatch d1")
+	mustOK(t, store.UpdateDispatchStatus(ctx, d1.ID, "PROCESSING", ""), "UpdateDispatchStatus d1")
+
+	d2 := Dispatch{
+		ID:        "disp-target-pend",
+		Source:    "heartbeat",
+		SessionID: "sess-target",
+		Prompt:    "target pend",
+	}
+	mustInsertDispatch(ctx, t, store, d2, "InsertDispatch d2")
+
+	d3 := Dispatch{
+		ID:        "disp-target-comp",
+		Source:    "heartbeat",
+		SessionID: "sess-target",
+		Prompt:    "target comp",
+	}
+	mustInsertDispatch(ctx, t, store, d3, "InsertDispatch d3")
+	mustOK(t, store.UpdateDispatchCompleted(ctx, d3.ID, "completed", ""), "UpdateDispatchCompleted d3")
+
+	d4 := Dispatch{
+		ID:        "disp-other-proc",
+		Source:    "heartbeat",
+		SessionID: "sess-other",
+		Prompt:    "other proc",
+	}
+	mustInsertDispatch(ctx, t, store, d4, "InsertDispatch d4")
+	mustOK(t, store.UpdateDispatchStatus(ctx, d4.ID, "PROCESSING", ""), "UpdateDispatchStatus d4")
+
+	processing, err := store.GetProcessingDispatchesBySession(ctx, "sess-target")
+	mustOK(t, err, "GetProcessingDispatchesBySession")
+	if len(processing) != 1 || processing[0].ID != d1.ID {
+		t.Fatalf("expected only %s in processing dispatches, got %+v", d1.ID, processing)
+	}
 }

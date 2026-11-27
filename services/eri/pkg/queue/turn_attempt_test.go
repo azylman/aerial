@@ -2,13 +2,18 @@ package queue
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	restate "github.com/restatedev/sdk-go"
+	"github.com/stretchr/testify/assert"
 
 	"github.com/azylman/aerial/services/eri/pkg/config"
 	"github.com/azylman/aerial/services/eri/pkg/db"
@@ -223,8 +228,17 @@ func TestRunBurstAttempt_GuardsAndStoreFaults(t *testing.T) {
 			wantKind: AttemptKindAborted, wantCode: CodeQueueConflict, wantReason: CancelledByOperatorReason, wantRows: rowA(db.StatusProcessing, "", 0, 0),
 		},
 		{
-			name: "CrashLoopCapFails", rows: []db.Message{stepMsg("a", db.StatusProcessing, 1, 2)}, scripts: []attemptScript{replyScript("must not run")},
-			wantKind: AttemptKindTerminal, wantReason: crashLoopReason, wantRows: rowA(db.StatusFailed, crashLoopReason, 1, 3), wantNotices: []string{"NOTICE: execution failed: crash loop"},
+			name:     "CrashLoopCapFails",
+			rows:     []db.Message{stepMsg("a", db.StatusProcessing, 1, 2), stepMsg("b", db.StatusProcessing, 0, 0)},
+			inputIDs: []string{"a"},
+			scripts:  []attemptScript{replyScript("must not run")},
+			wantKind: AttemptKindTerminal, wantReason: crashLoopReason,
+			wantRows: map[string]rowWant{
+				"a": {status: db.StatusFailed, errText: crashLoopReason, retry: 1, restart: 3},
+				"b": {status: db.StatusFailed, errText: crashLoopReason, retry: 1, restart: 0},
+			},
+			wantDrainedIDs: []string{"b"},
+			wantNotices:    []string{"NOTICE: execution failed: crash loop"},
 		},
 		{
 			name: "ReadErrorRetryable", rows: fresh, closeDB: true,
@@ -252,18 +266,20 @@ func TestRunBurstAttempt_GuardsAndStoreFaults(t *testing.T) {
 }
 
 type burstGuardCase struct {
-	name        string
-	rows        []db.Message
-	scripts     []attemptScript
-	orphan      bool
-	preStop     bool
-	sabotageSQL string
-	closeDB     bool
-	wantKind    string
-	wantReason  string
-	wantCode    int
-	wantRows    map[string]rowWant
-	wantNotices []string
+	name           string
+	rows           []db.Message
+	inputIDs       []string
+	scripts        []attemptScript
+	orphan         bool
+	preStop        bool
+	sabotageSQL    string
+	closeDB        bool
+	wantKind       string
+	wantReason     string
+	wantCode       int
+	wantRows       map[string]rowWant
+	wantNotices    []string
+	wantDrainedIDs []string
 }
 
 func runBurstGuardCase(t *testing.T, tc burstGuardCase) {
@@ -278,9 +294,12 @@ func runBurstGuardCase(t *testing.T, tc burstGuardCase) {
 	if tc.preStop {
 		pool.Turns().Stop("turn-1", "operator stop")
 	}
-	ids := make([]string, len(tc.rows))
-	for i, m := range tc.rows {
-		ids[i] = m.ID
+	ids := tc.inputIDs
+	if len(ids) == 0 {
+		ids = make([]string, len(tc.rows))
+		for i, m := range tc.rows {
+			ids[i] = m.ID
+		}
 	}
 	in := AttemptInput{ThreadID: "thread-steps", TurnID: "turn-1", IDs: ids, Prep: TurnPrep{Decision: TurnDecisionRun, Prompt: "answer the user"}, Ordinal: 1}
 	seq := runAttemptSequence(ctx, t, pool, store, in, 1, tc.orphan)
@@ -289,6 +308,9 @@ func runBurstGuardCase(t *testing.T, tc burstGuardCase) {
 	wantKinds := []string{tc.wantKind}
 	if strings.Join(kinds, ",") != strings.Join(wantKinds, ",") || (tc.wantReason != "" && last.Reason != tc.wantReason) {
 		t.Errorf("kinds = %v (last reason %q), want %v (reason %q)", kinds, last.Reason, wantKinds, tc.wantReason)
+	}
+	if tc.wantDrainedIDs != nil {
+		assert.Equal(t, tc.wantDrainedIDs, last.DrainedIDs)
 	}
 	wantCalls := 0
 	if len(tc.scripts) > 0 && tc.wantKind == AttemptKindSuccess {
@@ -685,5 +707,222 @@ func TestInspectSuccess(t *testing.T) {
 				t.Errorf("inspectSuccess = (%q, %v), want (%q, %v)", gotErr, gotYield, tc.wantErr, tc.wantYield)
 			}
 		})
+	}
+}
+
+func TestRunBurstAttempt_ReplayWithCompletedPrimaryAndProcessingDrained(t *testing.T) {
+	t.Parallel()
+	m1 := db.Message{ID: "m1", ThreadID: "thread-replay", Content: "initial", Status: db.StatusCompleted, ResponseText: "done reply", ConversationID: "sess-1", CreatedAt: time.Now().UTC()}
+	m2 := db.Message{ID: "m2", ThreadID: "thread-replay", Content: "drained extra", Status: db.StatusProcessing, CreatedAt: time.Now().UTC()}
+	fx := stepFixture{msgs: []db.Message{m1, m2}}
+	store := openStepDB(t, fx).store
+	notices := &noticeRecorder{}
+	sr := &scriptedAttemptRunner{}
+	pool := newAttemptPool(t, store, sr, notices, false)
+
+	in := AttemptInput{ThreadID: "thread-replay", TurnID: "turn-r", IDs: []string{"m1"}, Ordinal: 1}
+	got, err := pool.RunBurstAttempt(context.Background(), in)
+	if err != nil {
+		t.Fatalf("RunBurstAttempt failed: %v", err)
+	}
+	if got.Kind != AttemptKindRecorded {
+		t.Errorf("got.Kind = %s, want %s", got.Kind, AttemptKindRecorded)
+	}
+	if len(got.DrainedIDs) != 1 || got.DrainedIDs[0] != "m2" {
+		t.Errorf("got.DrainedIDs = %v, want [m2]", got.DrainedIDs)
+	}
+	if sr.callCount() != 0 {
+		t.Errorf("agent runs = %d, want 0", sr.callCount())
+	}
+	if len(notices.all()) != 0 {
+		t.Errorf("notices = %v, want none", notices.all())
+	}
+	m2Row, err := store.GetMessage(context.Background(), "m2")
+	if err != nil {
+		t.Fatalf("GetMessage(m2): %v", err)
+	}
+	if m2Row == nil || m2Row.Status != db.StatusCompleted || m2Row.ResponseText != "done reply" {
+		t.Errorf("m2 row = %+v, want status COMPLETED with 'done reply'", m2Row)
+	}
+}
+
+func TestRunDispatchAttempt_ReplayWithCompletedPrimaryAndProcessingDrained(t *testing.T) {
+	t.Parallel()
+	d1 := db.Dispatch{ID: "d1", SessionID: "sess-r", Source: "test", Prompt: "initial", Status: db.StatusCompleted, ResponseText: "done dispatch", ConversationID: "sess-r", CreatedAt: time.Now().UTC()}
+	d2 := db.Dispatch{ID: "d2", SessionID: "sess-r", Source: "test", Prompt: "drained dispatch", Status: db.StatusProcessing, CreatedAt: time.Now().UTC()}
+	fx := stepFixture{disps: []db.Dispatch{d1, d2}}
+	store := openStepDB(t, fx).store
+	notices := &noticeRecorder{}
+	sr := &scriptedAttemptRunner{}
+	pool := newAttemptPool(t, store, sr, notices, false)
+
+	in := AttemptInput{SessionKey: "sess-r", TurnID: "turn-rd", IDs: []string{"d1"}, Ordinal: 1}
+	got, err := pool.RunDispatchAttempt(context.Background(), in)
+	if err != nil {
+		t.Fatalf("RunDispatchAttempt failed: %v", err)
+	}
+	if got.Kind != AttemptKindRecorded {
+		t.Errorf("got.Kind = %s, want %s", got.Kind, AttemptKindRecorded)
+	}
+	if len(got.DrainedIDs) != 1 || got.DrainedIDs[0] != "d2" {
+		t.Errorf("got.DrainedIDs = %v, want [d2]", got.DrainedIDs)
+	}
+	if sr.callCount() != 0 {
+		t.Errorf("agent runs = %d, want 0", sr.callCount())
+	}
+	d2Row, err := store.GetDispatch(context.Background(), "d2")
+	if err != nil {
+		t.Fatalf("GetDispatch(d2): %v", err)
+	}
+	if d2Row == nil || d2Row.Status != db.StatusCompleted || d2Row.ResponseText != "done dispatch" {
+		t.Errorf("d2 row = %+v, want status COMPLETED with 'done dispatch'", d2Row)
+	}
+}
+
+func TestRunBurstAttempt_ReplayWithFailedPrimaryAndProcessingDrained(t *testing.T) {
+	t.Parallel()
+	m1 := db.Message{ID: "m1-fail", ThreadID: "thread-fail", Content: "initial", Status: db.StatusFailed, ErrorMessage: "boom", CreatedAt: time.Now().UTC()}
+	m2 := db.Message{ID: "m2-fail", ThreadID: "thread-fail", Content: "drained extra", Status: db.StatusProcessing, CreatedAt: time.Now().UTC()}
+	fx := stepFixture{msgs: []db.Message{m1, m2}}
+	store := openStepDB(t, fx).store
+	notices := &noticeRecorder{}
+	sr := &scriptedAttemptRunner{}
+	pool := newAttemptPool(t, store, sr, notices, false)
+
+	in := AttemptInput{ThreadID: "thread-fail", TurnID: "turn-rf", IDs: []string{"m1-fail"}, Ordinal: 1}
+	got, err := pool.RunBurstAttempt(context.Background(), in)
+	if err != nil {
+		t.Fatalf("RunBurstAttempt failed: %v", err)
+	}
+	if got.Kind != AttemptKindRecorded {
+		t.Errorf("got.Kind = %s, want %s", got.Kind, AttemptKindRecorded)
+	}
+	if len(got.DrainedIDs) != 1 || got.DrainedIDs[0] != "m2-fail" {
+		t.Errorf("got.DrainedIDs = %v, want [m2-fail]", got.DrainedIDs)
+	}
+	m2Row, err := store.GetMessage(context.Background(), "m2-fail")
+	if err != nil {
+		t.Fatalf("GetMessage(m2-fail): %v", err)
+	}
+	if m2Row == nil || m2Row.Status != db.StatusFailed || m2Row.ErrorMessage != "boom" {
+		t.Errorf("m2 row = %+v, want status FAILED with error 'boom'", m2Row)
+	}
+}
+
+func TestRunDispatchAttempt_ReplayWithFailedPrimaryAndProcessingDrained(t *testing.T) {
+	t.Parallel()
+	d1 := db.Dispatch{ID: "d1-fail", SessionID: "sess-rf", Source: "test", Prompt: "initial", Status: db.StatusFailed, ErrorMessage: "disp boom", CreatedAt: time.Now().UTC()}
+	d2 := db.Dispatch{ID: "d2-fail", SessionID: "sess-rf", Source: "test", Prompt: "drained dispatch", Status: db.StatusProcessing, CreatedAt: time.Now().UTC()}
+	fx := stepFixture{disps: []db.Dispatch{d1, d2}}
+	store := openStepDB(t, fx).store
+	notices := &noticeRecorder{}
+	sr := &scriptedAttemptRunner{}
+	pool := newAttemptPool(t, store, sr, notices, false)
+
+	in := AttemptInput{SessionKey: "sess-rf", TurnID: "turn-rdf", IDs: []string{"d1-fail"}, Ordinal: 1}
+	got, err := pool.RunDispatchAttempt(context.Background(), in)
+	if err != nil {
+		t.Fatalf("RunDispatchAttempt failed: %v", err)
+	}
+	if got.Kind != AttemptKindRecorded {
+		t.Errorf("got.Kind = %s, want %s", got.Kind, AttemptKindRecorded)
+	}
+	if len(got.DrainedIDs) != 1 || got.DrainedIDs[0] != "d2-fail" {
+		t.Errorf("got.DrainedIDs = %v, want [d2-fail]", got.DrainedIDs)
+	}
+	d2Row, err := store.GetDispatch(context.Background(), "d2-fail")
+	if err != nil {
+		t.Fatalf("GetDispatch(d2-fail): %v", err)
+	}
+	if d2Row == nil || d2Row.Status != db.StatusFailed || d2Row.ErrorMessage != "disp boom" {
+		t.Errorf("d2 row = %+v, want status FAILED with error 'disp boom'", d2Row)
+	}
+}
+
+func TestRunBurstAttempt_ReplayWithCompletedPrimaryAndPendingStatusDrained_StaysPending(t *testing.T) {
+	t.Parallel()
+	m1 := db.Message{ID: "m1", ThreadID: "thread-replay-pend", Content: "initial", Status: db.StatusCompleted, ResponseText: "done reply", ConversationID: "sess-1", CreatedAt: time.Now().UTC()}
+	m2 := db.Message{ID: "m2", ThreadID: "thread-replay-pend", Content: "drained pending", Status: db.StatusPending, CreatedAt: time.Now().UTC()}
+	fx := stepFixture{msgs: []db.Message{m1, m2}}
+	store := openStepDB(t, fx).store
+	notices := &noticeRecorder{}
+	sr := &scriptedAttemptRunner{}
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(CoordinatorStatus{
+			Active: &ActiveTurn{TurnID: "turn-r-pend", ItemIDs: []string{m1.ID, m2.ID}},
+		})
+	}))
+	defer srv.Close()
+
+	pool := newAttemptPool(t, store, sr, notices, false)
+	pool.cfg.RestateIngressURL = srv.URL
+	pool.cfg.DrainHTTPClient = srv.Client()
+
+	in := AttemptInput{ThreadID: "thread-replay-pend", TurnID: "turn-r-pend", IDs: []string{"m1"}, Ordinal: 1}
+	got, err := pool.RunBurstAttempt(context.Background(), in)
+	if err != nil {
+		t.Fatalf("RunBurstAttempt failed: %v", err)
+	}
+	if got.Kind != AttemptKindRecorded {
+		t.Errorf("got.Kind = %s, want %s", got.Kind, AttemptKindRecorded)
+	}
+	if len(got.DrainedIDs) != 0 {
+		t.Errorf("got.DrainedIDs = %v, want empty", got.DrainedIDs)
+	}
+	if sr.callCount() != 0 {
+		t.Errorf("agent runs = %d, want 0", sr.callCount())
+	}
+	m2Row, err := store.GetMessage(context.Background(), "m2")
+	if err != nil {
+		t.Fatalf("GetMessage(m2): %v", err)
+	}
+	if m2Row == nil || m2Row.Status != db.StatusPending {
+		t.Errorf("m2 row = %+v, want status PENDING", m2Row)
+	}
+}
+
+func TestRunDispatchAttempt_ReplayWithCompletedPrimaryAndPendingStatusDrained_StaysPending(t *testing.T) {
+	t.Parallel()
+	d1 := db.Dispatch{ID: "d1", SessionID: "sess-r-pend", Source: "test", Prompt: "initial", Status: db.StatusCompleted, ResponseText: "done dispatch", ConversationID: "sess-r-pend", CreatedAt: time.Now().UTC()}
+	d2 := db.Dispatch{ID: "d2", SessionID: "sess-r-pend", Source: "test", Prompt: "drained pending dispatch", Status: db.StatusPending, CreatedAt: time.Now().UTC()}
+	fx := stepFixture{disps: []db.Dispatch{d1, d2}}
+	store := openStepDB(t, fx).store
+	notices := &noticeRecorder{}
+	sr := &scriptedAttemptRunner{}
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(CoordinatorStatus{
+			Active: &ActiveTurn{TurnID: "turn-rd-pend", ItemIDs: []string{d1.ID, d2.ID}},
+		})
+	}))
+	defer srv.Close()
+
+	pool := newAttemptPool(t, store, sr, notices, false)
+	pool.cfg.RestateIngressURL = srv.URL
+	pool.cfg.DrainHTTPClient = srv.Client()
+
+	in := AttemptInput{SessionKey: "sess-r-pend", TurnID: "turn-rd-pend", IDs: []string{"d1"}, Ordinal: 1}
+	got, err := pool.RunDispatchAttempt(context.Background(), in)
+	if err != nil {
+		t.Fatalf("RunDispatchAttempt failed: %v", err)
+	}
+	if got.Kind != AttemptKindRecorded {
+		t.Errorf("got.Kind = %s, want %s", got.Kind, AttemptKindRecorded)
+	}
+	if len(got.DrainedIDs) != 0 {
+		t.Errorf("got.DrainedIDs = %v, want empty", got.DrainedIDs)
+	}
+	if sr.callCount() != 0 {
+		t.Errorf("agent runs = %d, want 0", sr.callCount())
+	}
+	d2Row, err := store.GetDispatch(context.Background(), "d2")
+	if err != nil {
+		t.Fatalf("GetDispatch(d2): %v", err)
+	}
+	if d2Row == nil || d2Row.Status != db.StatusPending {
+		t.Errorf("d2 row = %+v, want status PENDING", d2Row)
 	}
 }

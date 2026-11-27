@@ -237,7 +237,7 @@ func (te *turnExecution) probeCandidateSessionID(candidateID, stdout, stderr str
 	if candidateID != "" {
 		return candidateID
 	}
-	leaseKey := te.leaseKey()
+	leaseKey := te.leaseKeyLocked()
 	if te.isEphemeral {
 		if s := daemonSessionID(te.activePool, leaseKey); s != "" {
 			return s

@@ -229,3 +229,21 @@ func (s *SQLStore) GetRecentSessionDispatches(ctx context.Context, sessionID str
 	}
 	return scanDispatches(rows)
 }
+
+func (s *SQLStore) GetProcessingDispatchesBySession(ctx context.Context, sessionID string) ([]Dispatch, error) {
+	if err := s.checkDB(); err != nil {
+		return nil, err
+	}
+	if strings.TrimSpace(sessionID) == "" {
+		return nil, nil
+	}
+	queryCtx, cancel := withTimeout(ctx, 5*time.Second)
+	defer cancel()
+
+	query := fmt.Sprintf("SELECT %s FROM dispatches WHERE agent = $1 AND session_id = $2 AND status = 'PROCESSING' ORDER BY created_at ASC", dispatchSelectCols)
+	rows, err := s.db.QueryContext(queryCtx, query, s.effectiveAgent(), strings.TrimSpace(sessionID))
+	if err != nil {
+		return nil, fmt.Errorf("failed to query processing dispatches: %w", err)
+	}
+	return scanDispatches(rows)
+}

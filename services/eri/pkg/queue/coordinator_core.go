@@ -27,6 +27,7 @@ type coordinatorStore interface {
 	InsertMessage(ctx context.Context, msg db.Message) error
 	GetMessage(ctx context.Context, id string) (*db.Message, error)
 	InsertDispatch(ctx context.Context, d db.Dispatch) (bool, error)
+	GetDispatch(ctx context.Context, id string) (*db.Dispatch, error)
 	FailMessagesIfActive(ctx context.Context, ids []string, reason string) ([]string, error)
 	FailMessagesIfPending(ctx context.Context, ids []string, reason string) ([]string, error)
 	FailDispatchesIfActive(ctx context.Context, ids []string, reason string) ([]string, error)
@@ -234,7 +235,19 @@ func (c *coordinatorCore) onTurnDone(ctx restate.ObjectContext, req TurnDoneRequ
 		reschedule(ctx, st, req)
 		return nil
 	}
+	activeIDs := st.active.ItemIDs
 	st.active = nil
+	if len(req.RequeueIDs) > 0 {
+		var toRequeue []string
+		for _, id := range req.RequeueIDs {
+			if slices.Contains(activeIDs, id) && !slices.Contains(st.pending, id) {
+				toRequeue = append(toRequeue, id)
+			}
+		}
+		if len(toRequeue) > 0 {
+			st.pending = prependIDs(toRequeue, st.pending)
+		}
+	}
 	c.startNext(ctx, st)
 	return nil
 }
