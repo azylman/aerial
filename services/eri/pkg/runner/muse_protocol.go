@@ -803,6 +803,10 @@ func (d *StreamingDaemon) handleMuseItemCompleted(activeTurn *TurnContext, param
 	stepIdx, hasStep, seenChildUsage := d.finishMuseCompletedItemStateLocked(activeTurn, itemID, childSessID)
 	d.inflightMu.Unlock()
 
+	if parentID != "" && !hasStep {
+		return
+	}
+
 	if !hasStep && !isMuseToolItemType(itemType) {
 		return
 	}
@@ -879,10 +883,16 @@ func (d *StreamingDaemon) resolveMuseChildParentID(activeTurn *TurnContext, chil
 	if activeTurn.museChildParentID != nil {
 		parentID = activeTurn.museChildParentID[childSessID]
 	}
-	if parentID == "" && len(activeTurn.museSubagentStack) > 0 {
-		parentID = activeTurn.museSubagentStack[len(activeTurn.museSubagentStack)-1]
+	if parentID == "" && len(activeTurn.museSubagentStack) == 1 {
+		parentID = activeTurn.museSubagentStack[0]
+		if childSessID != "" {
+			if activeTurn.museChildParentID == nil {
+				activeTurn.museChildParentID = make(map[string]string)
+			}
+			activeTurn.museChildParentID[childSessID] = parentID
+		}
 	}
-	if parentID != "" && markUsage && childSessID != "" {
+	if markUsage && childSessID != "" {
 		if activeTurn.museSeenChildUsage == nil {
 			activeTurn.museSeenChildUsage = make(map[string]bool)
 		}
@@ -936,6 +946,9 @@ func (d *StreamingDaemon) dispatchMuseJSONRPCLine(trimmed string) {
 	if childSessID := extractMuseChildSessionID(params, d.SessionID()); childSessID != "" {
 		parentID = d.resolveMuseChildParentID(activeTurn, childSessID, method == methodSessionTokenUsage)
 		if parentID == "" {
+			if method == methodSessionTokenUsage {
+				d.handleMuseTokenUsage(activeTurn, params)
+			}
 			return
 		}
 		switch method {

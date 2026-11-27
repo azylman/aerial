@@ -504,17 +504,14 @@ func TestTracingTurnSink_CompleteAsyncSubagent(t *testing.T) {
 			events: []sinkEvent{
 				{start: true, call: ToolCall{ID: "step-5", Name: "invoke_subagent", Subagent: true}},
 				{call: ToolCall{ID: "step-5", Name: "invoke_subagent", Subagent: true, SubagentConversationID: "sub-conv-2"}, server: "native", status: "ok"},
-				{start: true, call: ToolCall{ID: "child-mcp", ParentID: "sub-conv-2", Name: "get_me"}},
-				{call: ToolCall{ID: "child-mcp", ParentID: "sub-conv-2", Name: "get_me"}, server: "github", status: "ok"},
 			},
 			turnErr: errors.New("turn aborted"),
 			want: []wantSpan{
 				{name: "execute_tool invoke_subagent", parent: "turn", code: codes.Unset},
-				{name: "execute_tool get_me", parent: "invoke_agent", code: codes.Unset},
 				{name: "invoke_agent", parent: "execute_tool invoke_subagent", code: codes.Error, desc: "aborted", attrs: []attribute.KeyValue{AttrGenAIConversationID.String("sub-conv-2")}},
 				{name: "chat", parent: "turn", code: codes.Error, desc: "turn aborted"},
 			},
-			innerOK: 4,
+			innerOK: 2,
 		},
 		{
 			name: "async subagent completion with error status marks child chat and invoke_agent error",

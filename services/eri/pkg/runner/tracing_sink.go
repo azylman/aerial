@@ -512,11 +512,6 @@ func (s *TracingTurnSink) findByIDLocked(id string) *openToolSpan {
 			return ts
 		}
 	}
-	for _, ts := range s.subagents {
-		if ts.id == id || ts.subagentConvID == id {
-			return ts
-		}
-	}
 	return nil
 }
 

@@ -67,8 +67,19 @@ func parseCreatedSubagentBlock(content string) (convID, transcriptPath string) {
 		return "", ""
 	}
 	convID = strings.TrimSpace(payload.ConversationID)
+	if convID == "" || strings.Contains(convID, "..") || strings.ContainsAny(convID, `/\`) {
+		return "", ""
+	}
 	uri := strings.TrimSpace(payload.LogAbsoluteURI)
 	uri = strings.TrimPrefix(uri, "file://")
+	if uri != "" {
+		cleanURI := filepath.Clean(uri)
+		if strings.Contains(cleanURI, "..") || !strings.Contains(cleanURI, convID) {
+			uri = ""
+		} else {
+			uri = cleanURI
+		}
+	}
 	return convID, uri
 }
 
@@ -101,7 +112,13 @@ func scanParentTranscriptSteps(parentTranscriptPath string, visit func(parentTra
 }
 
 func extractAgySubagentFromParentTranscript(parentTranscriptPath string, stepIndex int) (convID, transcriptPath string) {
+	if stepIndex <= 0 {
+		return "", ""
+	}
 	scanParentTranscriptSteps(parentTranscriptPath, func(line parentTranscriptStep) bool {
+		if line.StepIndex != stepIndex {
+			return false
+		}
 		if !strings.Contains(line.Content, "Created the following subagent:") {
 			return false
 		}
@@ -110,7 +127,7 @@ func extractAgySubagentFromParentTranscript(parentTranscriptPath string, stepInd
 			return false
 		}
 		convID, transcriptPath = id, path
-		return stepIndex > 0 && line.StepIndex == stepIndex
+		return true
 	})
 	return convID, transcriptPath
 }
@@ -319,8 +336,8 @@ func (d *StreamingDaemon) resolveAgyCompletedToolCall(activeTurn *TurnContext, r
 	if convID == "" {
 		return call
 	}
-	if subTranscript == "" {
-		subTranscript = d.agyTranscriptPath(convID)
+	if derived := d.agyTranscriptPath(convID); derived != "" {
+		subTranscript = derived
 	}
 	call.SubagentConversationID = convID
 	d.inflightMu.Lock()
@@ -408,8 +425,15 @@ func (d *StreamingDaemon) completePendingAgySubagents(activeTurn *TurnContext) {
 	activeTurn.pendingAgySubagents = nil
 	d.inflightMu.Unlock()
 
+	parentTranscript := d.agyTranscriptPath(d.SessionID())
 	for _, sub := range pending {
 		if summary, parsed := parseAgySubagentTranscript(sub.transcriptPath, sub.parentCallID, sub.conversationID); parsed {
+			if !parentTranscriptHasSubagentSender(parentTranscript, sub.conversationID, sub.stepIndex) {
+				if summary.Status == "ok" || summary.Status == "" {
+					summary.Status = toolStatusAbortedOnTurnClose
+					summary.ErrorMsg = toolStatusAbortedOnTurnClose
+				}
+			}
 			asyncSink.CompleteAsyncSubagent(summary)
 		}
 	}

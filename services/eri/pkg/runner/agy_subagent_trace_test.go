@@ -120,7 +120,9 @@ func TestStreamingDaemon_AgyAsyncSubagentTraceLifecycle(t *testing.T) {
 		sessionID:     parentID,
 		inFlightTools: make(map[int]inFlightToolCall),
 	}
-	turn := enqueueInflightTurn(daemon, "turn-agy-sub", wrappedSink)
+	if turn := enqueueInflightTurn(daemon, "turn-agy-sub", wrappedSink); turn == nil {
+		t.Fatal("expected non-nil turn")
+	}
 
 	// 1. invoke_subagent starts and completes at step 3
 	daemon.dispatchNDJSONLine(`{"event":"step_update","step_update":{"state":"RUNNING","type":"subagent","step_index":3,"tool_name":"invoke_subagent","tool_info":{"parameters":{"Role":"Reviewer"}}}}`)
@@ -148,10 +150,9 @@ func TestStreamingDaemon_AgyAsyncSubagentTraceLifecycle(t *testing.T) {
 		{name: "chat", parent: "turn", code: codes.Unset, attrs: []attribute.KeyValue{AttrGenAIUsageInputTokens.Int(800), AttrGenAIUsageOutputTokens.Int(50)}},
 	}
 	assertTracingTurnSpans(t, tracingTurnSinkCase{want: want}, rec.Ended())
-	_ = turn
 }
 
-func TestAgySubagentTranscriptResolutionAndFallback(t *testing.T) {
+func TestAgySubagentTranscriptResolution(t *testing.T) {
 	t.Parallel()
 	d := &StreamingDaemon{cfg: DaemonConfig{GeminiHomeDir: ""}}
 	if p := d.agyTranscriptPath("conv-1"); p != "" {
@@ -186,9 +187,24 @@ func TestAgySubagentTranscriptResolutionAndFallback(t *testing.T) {
 		t.Errorf("expected false on missing subagent transcript")
 	}
 
-	// Verify fallback completion at turn end when SYSTEM_MESSAGE was not probed on step_update
+	// Check that a transcript containing only an earlier subagent block returns empty for a later step
+	earlierTranscript := filepath.Join(t.TempDir(), "transcript.jsonl")
+	if err := os.WriteFile(earlierTranscript, []byte(`{"step_index":3,"type":"PLANNER_RESPONSE","content":"Created the following subagent: {\"conversationId\":\"old-child\",\"logAbsoluteUri\":\"/tmp/old.jsonl\"}"}`+"\n"), 0o644); err != nil {
+		t.Fatalf("failed writing earlier transcript: %v", err)
+	}
+	if id, p := extractAgySubagentFromParentTranscript(earlierTranscript, 5); id != "" || p != "" {
+		t.Errorf("expected empty conversation ID and path when step_index does not match, got %q %q", id, p)
+	}
+}
+
+func TestAgySubagentTurnEndAbortWithoutWakeup(t *testing.T) {
+	t.Parallel()
+	d := &StreamingDaemon{cfg: DaemonConfig{GeminiHomeDir: t.TempDir()}}
+
+	// Verify fallback completion at turn end when SYSTEM_MESSAGE was not probed on step_update.
+	// A child transcript with no wakeup message in parent transcript must mark invoke_agent aborted.
 	subID := "sub-fallback-end"
-	subPath := writeTestTranscript(t, d.cfg.GeminiHomeDir, subID, `{"step_index":1,"type":"PLANNER_RESPONSE","status":"DONE","created_at":"2026-11-27T06:20:00Z","model":"gemini-4-argon-medium","input_tokens":50,"output_tokens":10}`+"\n")
+	subPath := writeTestTranscript(t, d.cfg.GeminiHomeDir, subID, `{"step_index":1,"type":"PLANNER_RESPONSE","status":"DONE","created_at":"2026-11-27T06:20:00Z","model":"gemini-4-argon-medium","tool_calls":[{"name":"bash","args":{"command":"ls"}}],"input_tokens":50,"output_tokens":10}`+"\n")
 	rec := tracetest.NewSpanRecorder()
 	tp := sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(rec))
 	turnCtx, turnSpan := tp.Tracer("test").Start(context.Background(), "turn")
@@ -208,7 +224,20 @@ func TestAgySubagentTranscriptResolutionAndFallback(t *testing.T) {
 	d.completePendingAgySubagents(turn)
 	traceSink.OnResult(&TurnResult{})
 	turnSpan.End()
-	if len(rec.Ended()) != 5 {
-		t.Errorf("expected 5 spans ended (tool, child chat, invoke_agent, parent chat, turn), got %d: %v", len(rec.Ended()), spanNames(rec.Ended()))
+	if len(rec.Ended()) != 6 {
+		t.Errorf("expected 6 spans ended (parent tool, child bash, child chat, invoke_agent, parent chat, turn), got %d: %v", len(rec.Ended()), spanNames(rec.Ended()))
+	}
+	var invokeAgentSpan sdktrace.ReadOnlySpan
+	for _, s := range rec.Ended() {
+		if s.Name() == "invoke_agent" {
+			invokeAgentSpan = s
+			break
+		}
+	}
+	if invokeAgentSpan == nil {
+		t.Fatalf("expected invoke_agent span")
+	}
+	if invokeAgentSpan.Status().Code != codes.Error || invokeAgentSpan.Status().Description != "aborted" {
+		t.Errorf("expected invoke_agent aborted when no wakeup message, got code %v desc %q", invokeAgentSpan.Status().Code, invokeAgentSpan.Status().Description)
 	}
 }

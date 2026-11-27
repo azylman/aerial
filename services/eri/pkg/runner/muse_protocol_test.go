@@ -948,3 +948,94 @@ func TestMuseProtocol_SubagentNestingAndViewSubscribe(t *testing.T) {
 	assertMuseSubagentSinkOutcome(t, sink)
 	_ = turn
 }
+
+func TestMuseProtocol_ChildUnmatchedCompletionIgnored(t *testing.T) {
+	t.Parallel()
+
+	daemon := &StreamingDaemon{
+		cfg:           DaemonConfig{Engine: "muse"},
+		claudeToolIDs: make(map[string]int),
+		inFlightTools: make(map[int]inFlightToolCall),
+	}
+	daemon.sessionID = "root-sess"
+
+	sink := newMockTurnSink()
+	turn := enqueueInflightTurn(daemon, "turn-unmatched", sink)
+
+	// 1 subagent starts
+	daemon.dispatchMuseJSONRPCLine(`{"jsonrpc":"2.0","method":"item/started","params":{"item":{"id":"sub-item-1","type":"subagent","childSessionId":"child-sess"}}}`)
+
+	// Only sub-item-1 is in flight
+	daemon.inflightMu.Lock()
+	inFlightCount := len(daemon.inFlightTools)
+	daemon.inflightMu.Unlock()
+	if inFlightCount != 1 {
+		t.Fatalf("expected 1 in-flight tool, got %d", inFlightCount)
+	}
+
+	// Send child commandExecution completion that had no start
+	daemon.dispatchMuseJSONRPCLine(`{"jsonrpc":"2.0","method":"item/completed","params":{"sessionId":"child-sess","item":{"id":"ghost-cmd","type":"commandExecution","status":"completed"}}}`)
+
+	// Confirm sub-item-1 stays open in flight
+	daemon.inflightMu.Lock()
+	inFlightCount = len(daemon.inFlightTools)
+	daemon.inflightMu.Unlock()
+	if inFlightCount != 1 {
+		t.Fatalf("expected sub-item-1 to stay in flight, got %d in flight", inFlightCount)
+	}
+	sink.mu.Lock()
+	completedCalls := len(sink.completions)
+	sink.mu.Unlock()
+	if completedCalls != 0 {
+		t.Errorf("expected 0 completed calls on sink, got %d", completedCalls)
+	}
+
+	// sub-item-1 completes normally
+	daemon.dispatchMuseJSONRPCLine(`{"jsonrpc":"2.0","method":"item/completed","params":{"item":{"id":"sub-item-1","type":"subagent","status":"completed"}}}`)
+	sink.mu.Lock()
+	completedCalls = len(sink.completions)
+	sink.mu.Unlock()
+	if completedCalls != 1 {
+		t.Errorf("expected sub-item-1 to complete, got %d completions", completedCalls)
+	}
+	if turn == nil {
+		t.Fatal("expected non-nil turn")
+	}
+}
+
+func TestMuseProtocol_ChildSessionStackFallbackAndUsageDeduplication(t *testing.T) {
+	t.Parallel()
+
+	daemon := &StreamingDaemon{
+		cfg:           DaemonConfig{Engine: "muse"},
+		claudeToolIDs: make(map[string]int),
+	}
+	daemon.sessionID = "root-sess"
+
+	sink := newMockTurnSink()
+	turn := enqueueInflightTurn(daemon, "turn-fallback", sink)
+
+	// 1 subagent with no childSessionId
+	daemon.dispatchMuseJSONRPCLine(`{"jsonrpc":"2.0","method":"item/started","params":{"item":{"id":"sub-item-1","type":"subagent","arguments":{"role":"researcher"}}}}`)
+
+	// Child token usage arrives for child-sess without an explicit childSessionId on start
+	daemon.dispatchMuseJSONRPCLine(`{"jsonrpc":"2.0","method":"session/tokenUsage","params":{"sessionId":"child-sess","usage":{"inputTokens":100,"outputTokens":20,"cachedTokens":30}}}`)
+
+	// Parent subagent completes with the same usage payload
+	daemon.dispatchMuseJSONRPCLine(`{"jsonrpc":"2.0","method":"item/completed","params":{"item":{"id":"sub-item-1","type":"subagent","status":"completed","usage":{"inputTokens":100,"outputTokens":20,"cachedTokens":30}}}}`)
+
+	daemon.dispatchMuseJSONRPCLine(`{"jsonrpc":"2.0","method":"turn/completed","params":{"status":"completed"}}`)
+
+	sink.mu.Lock()
+	defer sink.mu.Unlock()
+	if sink.result == nil {
+		t.Fatalf("expected turn result")
+	}
+	wantUsage := AgyUsage{InputTokens: 70, CacheReadTokens: 30, OutputTokens: 20, TotalTokens: 120}
+	if wantUsage != sink.result.Usage {
+		t.Errorf("usage = %+v, want %+v", sink.result.Usage, wantUsage)
+	}
+	if turn == nil {
+		t.Fatal("expected non-nil turn")
+	}
+}
