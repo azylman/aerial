@@ -81,6 +81,14 @@ func MaskTokenSample(tok string) string {
 // (including their Base64 and URL-escaped variants) found in input, deduplicated and ordered longest-first.
 // Returns nil if input is empty or no tokens match.
 func MatchSensitiveTokens(input string) []string {
+	return MatchSensitiveTokensExcept(input, nil)
+}
+
+// MatchSensitiveTokensExcept returns masked diagnostic samples of any registered sensitive tokens
+// (including their Base64 and URL-escaped variants) found in input, excluding any tokens that
+// match an entry in allowedValues or its direct variants.
+// Returns nil if input is empty or no unexempted tokens match.
+func MatchSensitiveTokensExcept(input string, allowedValues []string) []string {
 	if input == "" {
 		return nil
 	}
@@ -88,12 +96,28 @@ func MatchSensitiveTokens(input string) []string {
 	if len(tokens) == 0 {
 		return nil
 	}
+	var allowedSet map[string]bool
+	if len(allowedValues) > 0 {
+		allowedSet = make(map[string]bool)
+		for _, a := range allowedValues {
+			trimmed := strings.TrimSpace(a)
+			if trimmed == "" {
+				continue
+			}
+			for _, variant := range appendSingleTokenVariants(nil, trimmed) {
+				allowedSet[variant] = true
+			}
+		}
+	}
 	var matches []string
 	seen := make(map[string]bool)
 	remaining := input
 	for _, tok := range tokens {
 		if tok != "" && strings.Contains(remaining, tok) {
 			remaining = strings.ReplaceAll(remaining, tok, "")
+			if allowedSet != nil && allowedSet[tok] {
+				continue
+			}
 			sample := MaskTokenSample(tok)
 			if !seen[sample] {
 				seen[sample] = true

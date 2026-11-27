@@ -1343,6 +1343,67 @@ func TestPushScanConfig_PrefixesFor(t *testing.T) {
 	}
 }
 
+func TestPushScanConfig_SecretNamesFor(t *testing.T) {
+	t.Parallel()
+	const allowlistYAML = `
+push_scan:
+  secret_allowlist:
+    - "acme/widgets:hooks:GITHUB_WEBHOOK_SECRET"
+    - "acme/widgets:hooks:GITHUB_WEBHOOK_SECRET"
+    - "org/*:hooks:ORG_WILDCARD_SECRET"
+    - "*:admin/hooks:GLOBAL_SECRET"
+    - "*/*:all/hooks:GLOBAL_STAR_STAR_SECRET"
+    - "malformed-two-parts:hooks"
+    - "acme/widgets:hooks:"
+    - "acme/widgets:hooks/../bad:UNCLEAN_PREFIX_SECRET"
+`
+	tests := []struct {
+		name    string
+		yaml    string
+		owner   string
+		repo    string
+		subpath string
+		want    []string
+	}{
+		{name: "absent key defaults empty", yaml: "model: m\n", owner: "acme", repo: "widgets", subpath: "hooks"},
+		{name: "exact owner/repo match", yaml: allowlistYAML, owner: "acme", repo: "widgets", subpath: "hooks", want: []string{"GITHUB_WEBHOOK_SECRET"}},
+		{name: "exact owner/repo case-insensitive", yaml: allowlistYAML, owner: "Acme", repo: "Widgets", subpath: "hooks", want: []string{"GITHUB_WEBHOOK_SECRET"}},
+		{name: "subpath boundary nested match", yaml: allowlistYAML, owner: "acme", repo: "widgets", subpath: "hooks/123/config", want: []string{"GITHUB_WEBHOOK_SECRET"}},
+		{name: "subpath leading and trailing slashes stripped", yaml: allowlistYAML, owner: "acme", repo: "widgets", subpath: "/hooks/713429223/", want: []string{"GITHUB_WEBHOOK_SECRET"}},
+		{name: "subpath non-boundary prefix not matched", yaml: allowlistYAML, owner: "acme", repo: "widgets", subpath: "hooks-extra"},
+		{name: "subpath prefix in middle not matched", yaml: allowlistYAML, owner: "acme", repo: "widgets", subpath: "contents/hooks"},
+		{name: "owner wildcard matches repo under owner", yaml: allowlistYAML, owner: "org", repo: "anything", subpath: "hooks", want: []string{"ORG_WILDCARD_SECRET"}},
+		{name: "owner wildcard does not match other owner", yaml: allowlistYAML, owner: "other", repo: "anything", subpath: "hooks"},
+		{name: "global wildcard * matches any repo", yaml: allowlistYAML, owner: "any", repo: "repo", subpath: "admin/hooks", want: []string{"GLOBAL_SECRET"}},
+		{name: "global wildcard */* matches any repo", yaml: allowlistYAML, owner: "any", repo: "repo", subpath: "all/hooks", want: []string{"GLOBAL_STAR_STAR_SECRET"}},
+		{name: "unclean prefix in allowlist ignored", yaml: allowlistYAML, owner: "acme", repo: "widgets", subpath: "bad"},
+		{name: "path-traversal in subpath rejected", yaml: allowlistYAML, owner: "acme", repo: "widgets", subpath: "hooks/../issues/1/comments"},
+		{name: "subpath with fragment rejected", yaml: allowlistYAML, owner: "acme", repo: "widgets", subpath: "hooks/123#frag"},
+		{name: "subpath with query rejected", yaml: allowlistYAML, owner: "acme", repo: "widgets", subpath: "hooks/123?query"},
+		{name: "empty owner rejected", yaml: allowlistYAML, owner: "", repo: "widgets", subpath: "admin/hooks"},
+		{name: "empty repo rejected", yaml: allowlistYAML, owner: "acme", repo: "", subpath: "admin/hooks"},
+		{name: "dotdot owner rejected", yaml: allowlistYAML, owner: "..", repo: "widgets", subpath: "admin/hooks"},
+		{name: "dotdot repo rejected", yaml: allowlistYAML, owner: "acme", repo: "..", subpath: "admin/hooks"},
+		{name: "dot owner rejected", yaml: allowlistYAML, owner: ".", repo: "widgets", subpath: "admin/hooks"},
+		{name: "dot repo rejected", yaml: allowlistYAML, owner: "acme", repo: ".", subpath: "admin/hooks"},
+		{name: "owner with invalid char rejected", yaml: allowlistYAML, owner: "acme#", repo: "widgets", subpath: "admin/hooks"},
+		{name: "repo with invalid char rejected", yaml: allowlistYAML, owner: "acme", repo: "widgets#", subpath: "admin/hooks"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			var cd ConfigData
+			if err := yaml.Unmarshal([]byte(tc.yaml), &cd); err != nil {
+				t.Fatalf("unmarshal: %v", err)
+			}
+			cloned := cloneConfigData(&cd)
+			if got := cloned.PushScan.SecretNamesFor(tc.owner, tc.repo, tc.subpath); fmt.Sprint(got) != fmt.Sprint(tc.want) {
+				t.Fatalf("SecretNamesFor(%q, %q, %q) = %v, want %v", tc.owner, tc.repo, tc.subpath, got, tc.want)
+			}
+		})
+	}
+}
+
 func TestEgressScanConfig_Blocks(t *testing.T) {
 	t.Parallel()
 	const blocklist = "egress_scan:\n  blocked_mcp:\n    - \" Discord \"\n    - \"github/Add_Issue_Comment\"\n    - \"\"\n    - \"/orphan_tool\"\n"

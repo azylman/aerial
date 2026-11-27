@@ -10,6 +10,9 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
@@ -56,7 +59,15 @@ func newEchoUpstream(t *testing.T) *httptest.Server {
 }
 
 func cfgWithPAT(pat string) *config.Config {
-	return config.NewFromData(&config.ConfigData{GitHubPAT: pat})
+	return config.NewFromData(&config.ConfigData{
+		GitHubPAT: pat,
+		PushScan: config.PushScanConfig{
+			SecretAllowlist: []string{
+				"acme/private-repo:hooks:GITHUB_WEBHOOK_SECRET",
+				"org/*:hooks:GITHUB_WEBHOOK_SECRET",
+			},
+		},
+	})
 }
 
 func TestRegister(t *testing.T) {
@@ -379,10 +390,72 @@ func gzipped(b []byte) string {
 	return buf.String()
 }
 
+type scanWriteTestCase struct {
+	name        string
+	method      string
+	target      string
+	encoding    string
+	body        string
+	wantStatus  int
+	wantEcho    bool
+	wantBody    string
+	wantSubstrs []string
+}
+
+func runScanWriteCase(t *testing.T, tc scanWriteTestCase) {
+	t.Helper()
+	mux := http.NewServeMux()
+	Register(mux, cfgWithPAT("dummy-proxy-pat"))
+	req := httptest.NewRequest(tc.method, tc.target, strings.NewReader(tc.body))
+	req.RemoteAddr = "127.0.0.1:5000"
+	if tc.encoding != "" {
+		req.Header.Set("Content-Encoding", tc.encoding)
+	}
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+	if rec.Code != tc.wantStatus {
+		t.Fatalf("status = %d, want %d (body: %q)", rec.Code, tc.wantStatus, rec.Body.String())
+	}
+	if got := rec.Header().Get("X-Upstream") == "echo"; got != tc.wantEcho {
+		t.Fatalf("forwarded = %v, want %v (body: %q)", got, tc.wantEcho, rec.Body.String())
+	}
+	if tc.wantEcho {
+		var echo upstreamEcho
+		// The echo upstream JSON-encodes the body, which maps invalid UTF-8
+		// bytes to U+FFFD; apply the same mapping to the expectation.
+		if err := json.Unmarshal(rec.Body.Bytes(), &echo); err != nil || echo.Body != jsonLossy(tc.wantBody) {
+			t.Fatalf("upstream body = %q (err %v), want %q", echo.Body, err, tc.wantBody)
+		}
+	}
+	for _, s := range tc.wantSubstrs {
+		if !strings.Contains(rec.Body.String(), s) {
+			t.Errorf("body %q missing %q", rec.Body.String(), s)
+		}
+	}
+	if strings.Contains(rec.Body.String(), proxySecret) && !tc.wantEcho {
+		t.Errorf("rejection leaked the raw secret: %q", rec.Body.String())
+	}
+}
+
 func TestScanWrites(t *testing.T) {
 	sanitizer.ResetSensitiveTokensForTest()
-	sanitizer.RegisterSensitiveTokens(proxySecret)
+	sameMaskSecret := "du-different-token-secret-value"
+	shortSecret := "shrt"
+	nestedPass := "dbpass1234"
+	connURL := "postgres://user:dbpass1234@localhost:5432/db"
+	sanitizer.RegisterSensitiveTokens(proxySecret, sameMaskSecret, shortSecret, connURL, nestedPass)
 	t.Cleanup(sanitizer.ResetSensitiveTokensForTest)
+
+	origSharedSecrets := config.SharedSecretsPath
+	tmpSecrets := t.TempDir()
+	config.SharedSecretsPath = tmpSecrets
+	t.Cleanup(func() {
+		config.SharedSecretsPath = origSharedSecrets
+	})
+	if err := os.WriteFile(filepath.Join(tmpSecrets, "GITHUB_WEBHOOK_SECRET"), []byte(proxySecret), 0o600); err != nil {
+		t.Fatalf("write secret file: %v", err)
+	}
+
 	upstream := newEchoUpstream(t)
 	t.Setenv("GITHUB_API_URL", upstream.URL)
 	t.Setenv("AERIAL_GITHUB_GIT_UPSTREAM", upstream.URL)
@@ -391,17 +464,7 @@ func TestScanWrites(t *testing.T) {
 	secretBlob := "key: " + proxySecret + "\n"
 	contentsBody := `{"message":"add","content":"` + base64.StdEncoding.EncodeToString([]byte(secretBlob)) + `"}`
 
-	tests := []struct {
-		name        string
-		method      string
-		target      string
-		encoding    string
-		body        string
-		wantStatus  int
-		wantEcho    bool
-		wantBody    string
-		wantSubstrs []string
-	}{
+	tests := []scanWriteTestCase{
 		{
 			name: "clean push forwarded with original bytes", method: http.MethodPost, target: "/internal/github-git/acme/private-repo.git/git-receive-pack",
 			body: cleanPush, wantStatus: http.StatusOK, wantEcho: true, wantBody: cleanPush,
@@ -476,42 +539,70 @@ func TestScanWrites(t *testing.T) {
 			name: "clean api write forwarded", method: http.MethodPatch, target: "/internal/github-api/repos/acme/repo/pulls/2",
 			body: `{"title":"hi"}`, wantStatus: http.StatusOK, wantEcho: true, wantBody: `{"title":"hi"}`,
 		},
+		{
+			name: "webhook config patch with allowlisted secret forwarded", method: http.MethodPatch, target: "/internal/github-api/repos/acme/private-repo/hooks/123/config",
+			body: `{"secret":"` + proxySecret + `"}`, wantStatus: http.StatusOK, wantEcho: true, wantBody: `{"secret":"` + proxySecret + `"}`,
+		},
+		{
+			name: "secret with same mask as allowlisted secret is rejected", method: http.MethodPatch, target: "/internal/github-api/repos/acme/private-repo/hooks/123/config",
+			body: `{"secret":"` + sameMaskSecret + `"}`, wantStatus: http.StatusUnprocessableEntity, wantSubstrs: []string{"InfisicalSecret"},
+		},
+		{
+			name: "same mask secret alongside allowlisted secret is rejected", method: http.MethodPatch, target: "/internal/github-api/repos/acme/private-repo/hooks/123/config",
+			body: `{"secret":"` + proxySecret + `","other":"` + sameMaskSecret + `"}`, wantStatus: http.StatusUnprocessableEntity, wantSubstrs: []string{"InfisicalSecret"},
+		},
+		{
+			name: "unrelated short secret on allowlisted route is rejected", method: http.MethodPatch, target: "/internal/github-api/repos/acme/private-repo/hooks/123/config",
+			body: `{"secret":"` + shortSecret + `"}`, wantStatus: http.StatusUnprocessableEntity, wantSubstrs: []string{"InfisicalSecret"},
+		},
+		{
+			name: "nested secret on allowlisted route is rejected", method: http.MethodPatch, target: "/internal/github-api/repos/acme/private-repo/hooks/123/config",
+			body: `{"password":"` + nestedPass + `"}`, wantStatus: http.StatusUnprocessableEntity, wantSubstrs: []string{"InfisicalSecret"},
+		},
+		{
+			name: "wildcard pattern webhook config patch forwarded", method: http.MethodPatch, target: "/internal/github-api/repos/org/repo/hooks/123/config",
+			body: `{"secret":"` + proxySecret + `"}`, wantStatus: http.StatusOK, wantEcho: true, wantBody: `{"secret":"` + proxySecret + `"}`,
+		},
+		{
+			name: "repo with hash rejected from secret exemption", method: http.MethodPatch, target: "/internal/github-api/repos/org/repo%23/hooks",
+			body: `{"description":"` + proxySecret + `"}`, wantStatus: http.StatusUnprocessableEntity, wantSubstrs: []string{"InfisicalSecret"},
+		},
+		{
+			name: "repo with question mark rejected from secret exemption", method: http.MethodPatch, target: "/internal/github-api/repos/org/repo%3F/hooks",
+			body: `{"description":"` + proxySecret + `"}`, wantStatus: http.StatusUnprocessableEntity, wantSubstrs: []string{"InfisicalSecret"},
+		},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			mux := http.NewServeMux()
-			Register(mux, cfgWithPAT("dummy-proxy-pat"))
-			req := httptest.NewRequest(tc.method, tc.target, strings.NewReader(tc.body))
-			req.RemoteAddr = "127.0.0.1:5000"
-			if tc.encoding != "" {
-				req.Header.Set("Content-Encoding", tc.encoding)
-			}
-			rec := httptest.NewRecorder()
-			mux.ServeHTTP(rec, req)
-			if rec.Code != tc.wantStatus {
-				t.Fatalf("status = %d, want %d (body: %q)", rec.Code, tc.wantStatus, rec.Body.String())
-			}
-			if got := rec.Header().Get("X-Upstream") == "echo"; got != tc.wantEcho {
-				t.Fatalf("forwarded = %v, want %v (body: %q)", got, tc.wantEcho, rec.Body.String())
-			}
-			if tc.wantEcho {
-				var echo upstreamEcho
-				// The echo upstream JSON-encodes the body, which maps invalid UTF-8
-				// bytes to U+FFFD; apply the same mapping to the expectation.
-				if err := json.Unmarshal(rec.Body.Bytes(), &echo); err != nil || echo.Body != jsonLossy(tc.wantBody) {
-					t.Fatalf("upstream body = %q (err %v), want %q", echo.Body, err, tc.wantBody)
-				}
-			}
-			for _, s := range tc.wantSubstrs {
-				if !strings.Contains(rec.Body.String(), s) {
-					t.Errorf("body %q missing %q", rec.Body.String(), s)
-				}
-			}
-			if strings.Contains(rec.Body.String(), proxySecret) && !tc.wantEcho {
-				t.Errorf("rejection leaked the raw secret: %q", rec.Body.String())
-			}
+			runScanWriteCase(t, tc)
 		})
+	}
+}
+
+func TestAllowedSecretValues(t *testing.T) {
+	origShared := config.SharedSecretsPath
+	tmp := t.TempDir()
+	config.SharedSecretsPath = tmp
+	t.Cleanup(func() { config.SharedSecretsPath = origShared })
+
+	if err := os.WriteFile(filepath.Join(tmp, "CASE_INSENSITIVE_KEY"), []byte("case-secret-value-9999"), 0o600); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+
+	cfg := config.NewFromData(&config.ConfigData{
+		PushScan: config.PushScanConfig{
+			SecretAllowlist: []string{
+				"acme/widgets:hooks:case_insensitive_key",
+				"acme/widgets:hooks:MISSING_KEY",
+			},
+		},
+	})
+
+	got := allowedSecretValues(cfg, "acme", "widgets", "hooks")
+	want := []string{"case-secret-value-9999"}
+	if !slices.Equal(got, want) {
+		t.Fatalf("allowedSecretValues() = %v, want %v", got, want)
 	}
 }
 

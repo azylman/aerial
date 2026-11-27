@@ -7,6 +7,8 @@ import (
 	"log"
 	"maps"
 	"os"
+	stdpath "path"
+	"slices"
 	"strconv"
 	"strings"
 	"sync/atomic"
@@ -401,6 +403,9 @@ type PushScanConfig struct {
 	// regex hits under a listed prefix are dropped. Registered secret values are
 	// never allowlisted.
 	RegexAllowlist []string `yaml:"regex_allowlist,omitempty" json:"regex_allowlist,omitempty"`
+	// SecretAllowlist entries are "<repo-pattern>:<subpath-prefix>:<SECRET_KEY>";
+	// registered secret values matching the key are allowed on matching GitHub API subpaths.
+	SecretAllowlist []string `yaml:"secret_allowlist,omitempty" json:"secret_allowlist,omitempty"`
 }
 
 // PrefixesFor returns the allowlisted path prefixes for owner/repo, matching
@@ -416,6 +421,86 @@ func (p PushScanConfig) PrefixesFor(owner, repo string) []string {
 		}
 	}
 	return out
+}
+
+// SecretNamesFor returns the allowlisted secret keys for owner, repo, and apiSubpath.
+// Each entry in p.SecretAllowlist has the form "<repo-pattern>:<subpath-prefix>:<SECRET_KEY>".
+func (p PushScanConfig) SecretNamesFor(owner, repo, apiSubpath string) []string {
+	owner = strings.TrimSpace(owner)
+	repo = strings.TrimSpace(repo)
+	if !isValidGitHubName(owner) || !isValidGitHubName(repo) {
+		return nil
+	}
+	cleanSubpath := strings.Trim(strings.TrimSpace(apiSubpath), "/")
+	if cleanSubpath == "" || cleanSubpath == "." || strings.HasPrefix(cleanSubpath, "..") || stdpath.Clean(cleanSubpath) != cleanSubpath || strings.ContainsAny(cleanSubpath, "?#%") {
+		return nil
+	}
+
+	ownerLower := strings.ToLower(owner)
+	repoLower := strings.ToLower(repo)
+	cleanSubpathLower := strings.ToLower(cleanSubpath)
+
+	var out []string
+	for _, entry := range p.SecretAllowlist {
+		parts := strings.SplitN(strings.TrimSpace(entry), ":", 3)
+		if len(parts) < 3 {
+			continue
+		}
+		repoPattern := strings.TrimSpace(parts[0])
+		rawPrefix := strings.Trim(strings.TrimSpace(parts[1]), "/")
+		secretKey := strings.TrimSpace(parts[2])
+		if repoPattern == "" || rawPrefix == "" || secretKey == "" {
+			continue
+		}
+		if !matchRepoPattern(repoPattern, ownerLower, repoLower) {
+			continue
+		}
+		if !matchSubpathPrefix(cleanSubpath, cleanSubpathLower, rawPrefix) {
+			continue
+		}
+		if !slices.Contains(out, secretKey) {
+			out = append(out, secretKey)
+		}
+	}
+	return out
+}
+
+func isValidGitHubName(s string) bool {
+	if s == "" || s == "." || s == ".." || len(s) > 100 {
+		return false
+	}
+	for i := range len(s) {
+		c := s[i]
+		if (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '-' || c == '_' || c == '.' {
+			continue
+		}
+		return false
+	}
+	return true
+}
+
+func matchRepoPattern(pattern, ownerLower, repoLower string) bool {
+	p := strings.ToLower(pattern)
+	if p == "*" || p == "*/*" {
+		return true
+	}
+	if patOwner, ok := strings.CutSuffix(p, "/*"); ok {
+		return patOwner == ownerLower
+	}
+	return p == ownerLower+"/"+repoLower
+}
+
+func matchSubpathPrefix(cleanSubpath, cleanSubpathLower, rawPrefix string) bool {
+	if strings.ContainsAny(rawPrefix, "?#%") {
+		return false
+	}
+	cleanPrefix := stdpath.Clean(rawPrefix)
+	if cleanPrefix == "." || strings.HasPrefix(cleanPrefix, "..") || stdpath.Clean(rawPrefix) != rawPrefix {
+		return false
+	}
+	cleanPrefixLower := strings.ToLower(cleanPrefix)
+	return cleanSubpath == cleanPrefix || strings.HasPrefix(cleanSubpath, cleanPrefix+"/") ||
+		cleanSubpathLower == cleanPrefixLower || strings.HasPrefix(cleanSubpathLower, cleanPrefixLower+"/")
 }
 
 // EgressScanConfig lists MCP destinations that are never a legitimate place
@@ -633,7 +718,10 @@ func (c *ConfigData) UnmarshalYAML(value *yaml.Node) error {
 		IndexerURL:    strings.TrimRight(strings.TrimSpace(raw.Transcripts.IndexerURL), "/"),
 		MaxBatchBytes: raw.Transcripts.MaxBatchBytes,
 	}
-	c.PushScan = PushScanConfig{RegexAllowlist: cloneStringSlice(raw.PushScan.RegexAllowlist)}
+	c.PushScan = PushScanConfig{
+		RegexAllowlist:  cloneStringSlice(raw.PushScan.RegexAllowlist),
+		SecretAllowlist: cloneStringSlice(raw.PushScan.SecretAllowlist),
+	}
 	c.EgressScan = EgressScanConfig{BlockedMCP: normalizeBlockedMCP(raw.EgressScan.BlockedMCP)}
 	if err := ParseTurnTimeoutMinutes(raw.TurnTimeoutMinutes); err != nil {
 		return err
@@ -768,6 +856,7 @@ func cloneConfigData(src *ConfigData) *ConfigData {
 	dst := *src
 	dst.AdminUsers = cloneStringSlice(src.AdminUsers)
 	dst.PushScan.RegexAllowlist = cloneStringSlice(src.PushScan.RegexAllowlist)
+	dst.PushScan.SecretAllowlist = cloneStringSlice(src.PushScan.SecretAllowlist)
 	dst.EgressScan.BlockedMCP = cloneStringSlice(src.EgressScan.BlockedMCP)
 	if src.Channels != nil {
 		dst.Channels = make(map[string]ChannelPolicy, len(src.Channels))

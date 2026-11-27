@@ -647,3 +647,38 @@ func TestSensitiveTokenCount_TableDriven(t *testing.T) {
 		})
 	}
 }
+
+func TestMatchSensitiveTokensExcept_TableDriven(t *testing.T) {
+	ResetSensitiveTokensForTest()
+	defer ResetSensitiveTokensForTest()
+
+	secretA := "allowed_secret_12345"
+	secretC := "al_same_mask_diff_45"
+	shortA := "shrt"
+	shortB := "sh99"
+	rawURI := "postgresql://aerial_user:dbpass_9876@db.net:5432/db"
+
+	RegisterSensitiveTokens(secretA, secretC, shortA, shortB, rawURI, "dbpass_9876")
+
+	tests := []struct {
+		name    string
+		input   string
+		allowed []string
+		want    []string
+	}{
+		{name: "empty input", input: "", allowed: []string{secretA}},
+		{name: "allowed secret exempted", input: "secret is " + secretA, allowed: []string{secretA}},
+		{name: "same mask secret not exempted", input: "secret is " + secretC, allowed: []string{secretA}, want: []string{MaskTokenSample(secretC)}},
+		{name: "allowed and same mask both present yields same mask hit", input: secretA + " and " + secretC, allowed: []string{secretA}, want: []string{MaskTokenSample(secretC)}},
+		{name: "short allowed secret exempted while other short secret hits", input: shortA + " and " + shortB, allowed: []string{shortA}, want: []string{"[REDACTED]"}},
+		{name: "nested password not exempted when standing alone", input: "pass dbpass_9876", allowed: []string{rawURI}, want: []string{MaskTokenSample("dbpass_9876")}},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := MatchSensitiveTokensExcept(tc.input, tc.allowed)
+			if !slices.Equal(got, tc.want) {
+				t.Fatalf("MatchSensitiveTokensExcept() = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
