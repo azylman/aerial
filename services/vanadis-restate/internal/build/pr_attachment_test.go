@@ -95,11 +95,12 @@ func assertAttachOutcome(t *testing.T, tc executePRAttachTestCase, st *store.Sto
 
 func stubGitHubOpenPR() *executor.GitHubPullRequest {
 	mergedFalse := false
-	return &executor.GitHubPullRequest{
-		Number: 101,
-		NodeID: "PR_kwDO123",
-		State:  "open",
-		Merged: &mergedFalse,
+	pr := &executor.GitHubPullRequest{
+		Number:            101,
+		NodeID:            "PR_kwDO123",
+		State:             "open",
+		Merged:            &mergedFalse,
+		AuthorAssociation: "OWNER",
 		Head: struct {
 			SHA  string `json:"sha"`
 			Ref  string `json:"ref"`
@@ -130,6 +131,8 @@ func stubGitHubOpenPR() *executor.GitHubPullRequest {
 			},
 		},
 	}
+	pr.User.Login = "example-owner"
+	return pr
 }
 
 func stubGitHubMergedPR() *executor.GitHubPullRequest {
