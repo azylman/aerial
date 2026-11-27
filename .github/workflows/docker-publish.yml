@@ -506,15 +506,6 @@ jobs:
           echo "::error::RoboRev reported actionable findings (>= medium severity)."
           exit 1
 
-      - name: Enable Auto-Merge on Review Pass
-        if: success() && github.event_name == 'pull_request'
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          PR_URL: ${{ github.event.pull_request.html_url }}
-        run: |
-          export GH_TOKEN="${GITHUB_PAT:-${GH_TOKEN}}"
-          gh pr merge --auto --squash "$PR_URL" || true
-
   build-gate:
     permissions:
       contents: read
