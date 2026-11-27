@@ -63,7 +63,6 @@ const (
 	StepPostTurnHook         = "post-turn-hook"
 	StepRefreshThreadSummary = "refresh-thread-summary"
 	StepPublishDispatchOut   = "publish-dispatch-outcome"
-	StepReconcilePending     = "reconcile-pending"
 	StepStopTurn             = "stop-turn"
 	StepFailTurn             = "fail-turn"
 )
@@ -96,7 +95,7 @@ type TurnDoneRequest struct {
 	TurnID            string      `json:"turn_id"`
 	Outcome           TurnOutcome `json:"outcome"`
 	RescheduleDelayMs int64       `json:"reschedule_delay_ms"`
-	RequeueIDs        []string    `json:"requeue_ids,omitempty"`
+	HandledIDs        []string    `json:"handled_ids,omitempty"`
 }
 
 type TurnRunResult struct {

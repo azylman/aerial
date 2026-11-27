@@ -9,7 +9,6 @@ import (
 	"log"
 	"net/http"
 	"net/url"
-	"slices"
 	"strings"
 	"time"
 
@@ -175,92 +174,23 @@ func (p *WorkerPool) callRestateDrain(ctx context.Context, te *turnExecution) (D
 	return coordResp, nil
 }
 
-func (p *WorkerPool) currentTimezone() string {
-	if p.appCfg != nil {
-		if cur := p.appCfg.Current(); cur != nil {
-			return cur.Timezone
-		}
-	}
-	return ""
-}
-
-// reconcileActiveTurnIDs checks coordinator Status for active turn items and merges them with baseIDs.
-func (p *WorkerPool) reconcileActiveTurnIDs(ctx context.Context, isDispatch bool, key, turnID string, baseIDs []string) []string {
-	base := normalizeStepIDs(baseIDs)
-	if p == nil || strings.TrimSpace(key) == "" || strings.TrimSpace(turnID) == "" {
-		return base
-	}
-	ingressURL := p.resolveRestateIngressURL()
-	if ingressURL == "" && p.cfg.DrainHTTPClient == nil {
-		return base
-	}
-	if ingressURL == "" {
-		ingressURL = "http://restate.aerial:8080"
-	}
-	agentName := p.cfg.AgentName
-	var serviceName string
-	if isDispatch {
-		serviceName = DispatchSessionServiceName(agentName)
-	} else {
-		serviceName = ThreadSessionServiceName(agentName)
-	}
-	targetURL := fmt.Sprintf("%s/%s/%s/Status", ingressURL, serviceName, url.PathEscape(key))
-
-	reqCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
-	defer cancel()
-
-	req, err := http.NewRequestWithContext(reqCtx, http.MethodPost, targetURL, http.NoBody)
-	if err != nil {
-		return base
-	}
-	req.Header.Set("Accept", "application/json")
-
-	resp, err := p.drainHTTPClient().Do(req)
-	if err != nil {
-		log.Printf("[SteerHandler] Error requesting coordinator status from %s: %v", targetURL, err)
-		return base
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		log.Printf("[SteerHandler] Non-2xx coordinator status from %s: %d", targetURL, resp.StatusCode)
-		return base
-	}
-
-	var status CoordinatorStatus
-	if err := json.NewDecoder(resp.Body).Decode(&status); err != nil {
-		log.Printf("[SteerHandler] Error decoding coordinator status from %s: %v", targetURL, err)
-		return base
-	}
-	if status.Active != nil && status.Active.TurnID == turnID {
-		return normalizeStepIDs(append(slices.Clone(baseIDs), status.Active.ItemIDs...))
-	}
-	return base
-}
-
 func (*WorkerPool) drainDispatchTurn(ctx context.Context, te *turnExecution, s db.Store, drainedIDs []string) []string {
 	var prompts []string
 	for _, id := range drainedIDs {
-		claimed, cErr := s.ClaimPendingDispatch(ctx, id)
-		if cErr != nil {
-			log.Printf("[SteerHandler] Error claiming pending dispatch %s: %v", id, cErr)
-			continue
-		}
-		if !claimed {
-			continue
-		}
 		d, gErr := s.GetDispatch(ctx, id)
 		if gErr != nil || d == nil {
 			log.Printf("[SteerHandler] Error getting dispatch %s: %v", id, gErr)
 			continue
 		}
-		te.steeredDispatches = append(te.steeredDispatches, *d)
 		te.drainedIDs = append(te.drainedIDs, d.ID)
-		pText := strings.TrimSpace(d.Prompt)
-		if pText != "" {
-			prompts = append(prompts, pText)
+		if d.Status != db.StatusPending {
+			continue
 		}
-		te.drainedPrompts = append(te.drainedPrompts, pText)
+		te.steeredDispatches = append(te.steeredDispatches, *d)
+		if pText := strings.TrimSpace(d.Prompt); pText != "" {
+			prompts = append(prompts, pText)
+			te.drainedPrompts = append(te.drainedPrompts, pText)
+		}
 	}
 	if prompts == nil {
 		prompts = []string{}
@@ -269,38 +199,32 @@ func (*WorkerPool) drainDispatchTurn(ctx context.Context, te *turnExecution, s d
 }
 
 func (p *WorkerPool) drainBurstTurn(ctx context.Context, te *turnExecution, s db.Store, drainedIDs []string) ([]string, error) {
-	var claimedIDs []string
-	for _, id := range drainedIDs {
-		claimed, cErr := s.ClaimPendingMessage(ctx, id)
-		if cErr != nil {
-			log.Printf("[SteerHandler] Error claiming pending message %s: %v", id, cErr)
-			continue
-		}
-		if claimed {
-			claimedIDs = append(claimedIDs, id)
-		}
-	}
-	if len(claimedIDs) == 0 {
-		return []string{}, nil
-	}
-	rows, err := messagesByIDOrdered(ctx, s, claimedIDs)
+	rows, err := messagesByIDOrdered(ctx, s, drainedIDs)
 	if err != nil {
 		return nil, err
 	}
-	te.burst = append(te.burst, rows...)
-	tz := p.currentTimezone()
+	var pendingRows []db.Message
 	for _, row := range rows {
 		te.drainedIDs = append(te.drainedIDs, row.ID)
-		rowPrompt := CoalesceBurstPrompt([]db.Message{row}, tz)
-		if strings.TrimSpace(rowPrompt) == "" {
-			rowPrompt = row.Content
+		if row.Status == db.StatusPending {
+			pendingRows = append(pendingRows, row)
 		}
-		te.drainedPrompts = append(te.drainedPrompts, rowPrompt)
 	}
-	coalesced := CoalesceBurstPrompt(rows, tz)
+	if len(pendingRows) == 0 {
+		return []string{}, nil
+	}
+	te.burst = append(te.burst, pendingRows...)
+	var tz string
+	if p.appCfg != nil {
+		if cur := p.appCfg.Current(); cur != nil {
+			tz = cur.Timezone
+		}
+	}
+	coalesced := CoalesceBurstPrompt(pendingRows, tz)
 	var prompts []string
 	if strings.TrimSpace(coalesced) != "" {
 		prompts = append(prompts, coalesced)
+		te.drainedPrompts = append(te.drainedPrompts, coalesced)
 	} else {
 		prompts = []string{}
 	}

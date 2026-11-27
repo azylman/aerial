@@ -64,7 +64,6 @@ type DispatchStore interface {
 	UpdateDispatchStatus(ctx context.Context, id, status, errorMsg string, telemetry ...TurnTelemetry) error
 	UpdateDispatchCompleted(ctx context.Context, id, responseText, conversationID string, telemetry ...TurnTelemetry) error
 	GetRecentSessionDispatches(ctx context.Context, sessionID string, limit int) ([]Dispatch, error)
-	GetProcessingDispatchesBySession(ctx context.Context, sessionID string) ([]Dispatch, error)
 	FailDispatchesIfActive(ctx context.Context, ids []string, reason string) ([]string, error)
 	FailDispatchesIfPending(ctx context.Context, ids []string, reason string) ([]string, error)
 	SkipDispatchesIfActive(ctx context.Context, ids []string, reason string) ([]string, error)

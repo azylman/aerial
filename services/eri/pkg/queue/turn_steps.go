@@ -2,7 +2,6 @@ package queue
 
 import (
 	"context"
-	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -554,41 +553,6 @@ func (p *WorkerPool) RecordBurstOutcome(ctx context.Context, ids []string, summa
 	return unfinishedMessagesError(ctx, s, ids)
 }
 
-func recoverBurstProcessingRows(ctx context.Context, s db.Store, threadID string, existing []db.Message) ([]db.Message, error) {
-	if strings.TrimSpace(threadID) == "" {
-		return existing, nil
-	}
-	tasks, err := storeCall(ctx, func(c context.Context) ([]db.ActiveTask, error) {
-		return s.GetActiveTasks(c, db.TasksFilter{Statuses: []string{db.StatusProcessing}, ThreadID: threadID, Order: db.TasksOrderAsc})
-	})
-	if err != nil {
-		return nil, err
-	}
-	if len(tasks) == 0 {
-		return existing, nil
-	}
-	var extraIDs []string
-	for _, t := range tasks {
-		if !slices.ContainsFunc(existing, func(m db.Message) bool { return m.ID == t.ID }) {
-			extraIDs = append(extraIDs, t.ID)
-		}
-	}
-	if len(extraIDs) == 0 {
-		return existing, nil
-	}
-	extraRows, err := messagesByIDOrdered(ctx, s, extraIDs)
-	if err != nil {
-		return nil, err
-	}
-	merged := slices.Clone(existing)
-	for _, r := range extraRows {
-		if isActiveStatus(r.Status) && !slices.ContainsFunc(merged, func(m db.Message) bool { return m.ID == r.ID }) {
-			merged = append(merged, r)
-		}
-	}
-	return merged, nil
-}
-
 //nolint:contextcheck,nolintlint // the reused turn helpers own their contexts; store calls take ctx.
 func (p *WorkerPool) failActiveBurstRows(ctx context.Context, s db.Store, ids []string, summary AttemptSummary) (int, error) {
 	rows, err := messagesByIDOrdered(ctx, s, ids)
@@ -599,18 +563,6 @@ func (p *WorkerPool) failActiveBurstRows(ctx context.Context, s db.Store, ids []
 	for _, m := range rows {
 		if isActiveStatus(m.Status) {
 			active = append(active, m)
-		}
-	}
-	threadID := ""
-	if len(active) > 0 {
-		threadID = active[0].ThreadID
-	} else if len(rows) > 0 {
-		threadID = rows[0].ThreadID
-	}
-	if threadID != "" {
-		active, err = recoverBurstProcessingRows(ctx, s, threadID, active)
-		if err != nil {
-			return 0, err
 		}
 	}
 	if len(active) == 0 {
@@ -649,99 +601,6 @@ func (p *WorkerPool) failActiveBurstRows(ctx context.Context, s db.Store, ids []
 	return len(changed), nil
 }
 
-func expandDispatchActiveIDs(ctx context.Context, s db.Store, ids []string) ([]string, error) {
-	ids = normalizeStepIDs(ids)
-	if len(ids) == 0 {
-		return ids, nil
-	}
-	expanded := slices.Clone(ids)
-	seenSessions := make(map[string]bool)
-	for _, id := range ids {
-		d, err := storeCall(ctx, func(c context.Context) (*db.Dispatch, error) { return s.GetDispatch(c, id) })
-		if errors.Is(err, db.ErrRecordNotFound) || (err == nil && d == nil) {
-			continue
-		}
-		if err != nil {
-			return nil, err
-		}
-		if strings.TrimSpace(d.SessionID) == "" {
-			continue
-		}
-		sess := strings.TrimSpace(d.SessionID)
-		if seenSessions[sess] {
-			continue
-		}
-		seenSessions[sess] = true
-		processing, err := storeCall(ctx, func(c context.Context) ([]db.Dispatch, error) {
-			return s.GetProcessingDispatchesBySession(c, sess)
-		})
-		if err != nil {
-			return nil, err
-		}
-		for _, disp := range processing {
-			if !slices.Contains(expanded, disp.ID) {
-				expanded = append(expanded, disp.ID)
-			}
-		}
-	}
-	return normalizeStepIDs(expanded), nil
-}
-
-func (p *WorkerPool) resolveDispatchOutcomeIDs(ctx context.Context, s db.Store, ids []string) ([]string, error) {
-	var live *turnExecution
-	if p.turns != nil {
-		live = p.turns.FindExecution(func(candidate *turnExecution) bool {
-			if candidate == nil {
-				return false
-			}
-			dispID := candidate.dispatchIDValue()
-			if dispID != "" && slices.Contains(ids, dispID) {
-				return true
-			}
-			candidate.steerMu.Lock()
-			defer candidate.steerMu.Unlock()
-			for _, id := range ids {
-				if slices.Contains(candidate.drainedIDs, id) {
-					return true
-				}
-			}
-			return false
-		})
-	}
-	if live != nil {
-		live.steerMu.Lock()
-		if len(live.drainedIDs) > 0 {
-			ids = append(ids, live.drainedIDs...)
-		}
-		turnID := live.turnID
-		live.steerMu.Unlock()
-		leaseKey := live.leaseKey()
-		if turnID != "" && leaseKey != "" {
-			ids = p.reconcileActiveTurnIDs(ctx, true, leaseKey, turnID, ids)
-		}
-	}
-	return expandDispatchActiveIDs(ctx, s, ids)
-}
-
-func recordSingleDispatchFailure(ctx context.Context, s db.Store, id string, summary AttemptSummary) error {
-	reason := summary.failureReason()
-	telemetry := summary.telemetry()
-	if recordsFailure(summary.Outcome) {
-		changed, err := storeCall(ctx, func(c context.Context) ([]string, error) { return s.FailDispatchesIfActive(c, []string{id}, reason) })
-		if err != nil {
-			return err
-		}
-		if telemetry != nil && slices.Contains(changed, id) {
-			if _, err := storeCall(ctx, func(c context.Context) (struct{}, error) {
-				return struct{}{}, s.UpdateDispatchStatus(c, id, db.StatusFailed, reason, telemetry...)
-			}); err != nil {
-				return err
-			}
-		}
-	}
-	return unfinishedDispatchError(ctx, s, id)
-}
-
 // RecordDispatchOutcome records a dispatch's non-success outcome (dispatches deliver no notice),
 // then checks the row is terminal (M2).
 func (p *WorkerPool) RecordDispatchOutcome(ctx context.Context, ids []string, summary AttemptSummary) error {
@@ -753,12 +612,23 @@ func (p *WorkerPool) RecordDispatchOutcome(ctx context.Context, ids []string, su
 	if summary.Outcome == OutcomeReschedule || len(ids) == 0 {
 		return nil
 	}
-	ids, err = p.resolveDispatchOutcomeIDs(ctx, s, ids)
-	if err != nil {
-		return err
-	}
+	reason := summary.failureReason()
+	telemetry := summary.telemetry()
 	for _, id := range ids {
-		if err := recordSingleDispatchFailure(ctx, s, id, summary); err != nil {
+		if recordsFailure(summary.Outcome) {
+			changed, err := storeCall(ctx, func(c context.Context) ([]string, error) { return s.FailDispatchesIfActive(c, []string{id}, reason) })
+			if err != nil {
+				return err
+			}
+			if telemetry != nil && slices.Contains(changed, id) {
+				if _, err := storeCall(ctx, func(c context.Context) (struct{}, error) {
+					return struct{}{}, s.UpdateDispatchStatus(c, id, db.StatusFailed, reason, telemetry...)
+				}); err != nil {
+					return err
+				}
+			}
+		}
+		if err := unfinishedDispatchError(ctx, s, id); err != nil {
 			return err
 		}
 	}
@@ -863,6 +733,17 @@ func (p *WorkerPool) PublishDispatchOutcome(ctx context.Context, dispatchID stri
 	if d == nil {
 		return nil
 	}
+	// A dispatch must only publish the outcome that matches its final database status:
+	// - db.StatusCompleted publishes OutcomeCompleted.
+	// - db.StatusFailed publishes OutcomeFailed or OutcomeTimeout.
+	// Drained rows that were already terminal or not transitioned by this turn must not
+	// emit conflicting lifecycle events.
+	if status == string(OutcomeCompleted) && d.Status != db.StatusCompleted {
+		return nil
+	}
+	if status != string(OutcomeCompleted) && d.Status != db.StatusFailed {
+		return nil
+	}
 	if p.EventBus() == nil {
 		if d.Source == "vanadis" {
 			log.Printf("[TurnRunner] Warning: cannot publish dispatch outcome for dispatch %s (status %s): event bus is nil", d.ID, status)
@@ -891,23 +772,12 @@ func (p *WorkerPool) StopBurstTurn(ctx context.Context, turnID string, ids []str
 	if err != nil {
 		return err
 	}
-	ids = normalizeStepIDs(ids)
-	var threadID string
 	if live := p.turns.LiveExecution(turnID); live != nil {
 		live.steerMu.Lock()
 		if len(live.drainedIDs) > 0 {
 			ids = append(ids, live.drainedIDs...)
 		}
 		live.steerMu.Unlock()
-		threadID = live.threadIDValue()
-	}
-	if threadID == "" && len(ids) > 0 {
-		if rows, mErr := messagesByIDOrdered(ctx, s, ids); mErr == nil && len(rows) > 0 {
-			threadID = rows[0].ThreadID
-		}
-	}
-	if threadID != "" {
-		ids = p.reconcileActiveTurnIDs(ctx, false, threadID, turnID, ids)
 	}
 	p.turns.Stop(turnID, CancelledByOperatorReason)
 	_, err = p.failActiveBurstRows(ctx, s, normalizeStepIDs(ids), AttemptSummary{Outcome: OutcomeCancelled})
@@ -916,38 +786,17 @@ func (p *WorkerPool) StopBurstTurn(ctx context.Context, turnID string, ids []str
 
 // StopDispatchTurn is the stop-turn step of a cancelled dispatch; cancelled dispatches publish nothing.
 func (p *WorkerPool) StopDispatchTurn(ctx context.Context, turnID string, ids []string) error {
-	s, err := p.stepStore()
-	if err != nil {
+	if _, err := p.stepStore(); err != nil {
 		return err
 	}
-	ids = normalizeStepIDs(ids)
-	var leaseKey string
 	if live := p.turns.LiveExecution(turnID); live != nil {
 		live.steerMu.Lock()
 		if len(live.drainedIDs) > 0 {
 			ids = append(ids, live.drainedIDs...)
 		}
 		live.steerMu.Unlock()
-		leaseKey = live.leaseKey()
-	}
-	if leaseKey == "" && len(ids) > 0 {
-		if d, dErr := storeCall(ctx, func(c context.Context) (*db.Dispatch, error) { return s.GetDispatch(c, ids[0]) }); dErr == nil && d != nil {
-			if strings.TrimSpace(d.SessionID) != "" {
-				leaseKey = d.SessionID
-			} else {
-				leaseKey = "dispatch-" + d.ID
-			}
-		}
-	}
-	if leaseKey != "" {
-		ids = p.reconcileActiveTurnIDs(ctx, true, leaseKey, turnID, ids)
 	}
 	p.turns.Stop(turnID, CancelledByOperatorReason)
-	var expErr error
-	ids, expErr = expandDispatchActiveIDs(ctx, s, ids)
-	if expErr != nil {
-		return expErr
-	}
 	return p.RecordDispatchOutcome(ctx, normalizeStepIDs(ids), AttemptSummary{Outcome: OutcomeCancelled})
 }
 
@@ -967,24 +816,6 @@ func (p *WorkerPool) FailBurstTurn(ctx context.Context, turnID string, ids []str
 	s, err := p.stepStore()
 	if err != nil {
 		return err
-	}
-	ids = normalizeStepIDs(ids)
-	var threadID string
-	if live := p.turns.LiveExecution(turnID); live != nil {
-		live.steerMu.Lock()
-		if len(live.drainedIDs) > 0 {
-			ids = append(ids, live.drainedIDs...)
-		}
-		live.steerMu.Unlock()
-		threadID = live.threadIDValue()
-	}
-	if threadID == "" && len(ids) > 0 {
-		if rows, mErr := messagesByIDOrdered(ctx, s, ids); mErr == nil && len(rows) > 0 {
-			threadID = rows[0].ThreadID
-		}
-	}
-	if threadID != "" {
-		ids = p.reconcileActiveTurnIDs(ctx, false, threadID, turnID, ids)
 	}
 	p.turns.Stop(turnID, reason)
 	ids = normalizeStepIDs(ids)
@@ -1021,34 +852,7 @@ func (p *WorkerPool) FailDispatchTurn(ctx context.Context, turnID string, ids []
 	if err != nil {
 		return err
 	}
-	ids = normalizeStepIDs(ids)
-	var leaseKey string
-	if live := p.turns.LiveExecution(turnID); live != nil {
-		live.steerMu.Lock()
-		if len(live.drainedIDs) > 0 {
-			ids = append(ids, live.drainedIDs...)
-		}
-		live.steerMu.Unlock()
-		leaseKey = live.leaseKey()
-	}
-	if leaseKey == "" && len(ids) > 0 {
-		if d, dErr := storeCall(ctx, func(c context.Context) (*db.Dispatch, error) { return s.GetDispatch(c, ids[0]) }); dErr == nil && d != nil {
-			if strings.TrimSpace(d.SessionID) != "" {
-				leaseKey = d.SessionID
-			} else {
-				leaseKey = "dispatch-" + d.ID
-			}
-		}
-	}
-	if leaseKey != "" {
-		ids = p.reconcileActiveTurnIDs(ctx, true, leaseKey, turnID, ids)
-	}
 	p.turns.Stop(turnID, reason)
-	var expErr error
-	ids, expErr = expandDispatchActiveIDs(ctx, s, ids)
-	if expErr != nil {
-		return expErr
-	}
 	ids = normalizeStepIDs(ids)
 	if err := p.RecordDispatchOutcome(ctx, ids, AttemptSummary{Outcome: OutcomeFailed, Reason: reason}); err != nil {
 		return err
@@ -1070,74 +874,4 @@ func (p *WorkerPool) FailDispatchTurn(ctx context.Context, turnID string, ids []
 		}
 	}
 	return nil
-}
-
-func unhandledCandidates(active, handled []string) []string {
-	var candidates []string
-	for _, id := range active {
-		if !slices.Contains(handled, id) {
-			candidates = append(candidates, id)
-		}
-	}
-	return candidates
-}
-
-func (p *WorkerPool) reconcilePendingTurnItems(ctx context.Context, isDispatch bool, key, turnID string, handledIDs []string, fetchStatus func(context.Context, db.Store, string) (string, error)) ([]string, error) {
-	handled := normalizeStepIDs(handledIDs)
-	candidates := unhandledCandidates(p.reconcileActiveTurnIDs(ctx, isDispatch, key, turnID, handled), handled)
-	if len(candidates) == 0 {
-		return nil, nil
-	}
-	s, err := p.stepStore()
-	if err != nil {
-		return candidates, fmt.Errorf("queue: step store unavailable: %w", err)
-	}
-	var stillPending []string
-	for _, id := range candidates {
-		status, err := fetchStatus(ctx, s, id)
-		if err != nil {
-			if errors.Is(err, sql.ErrNoRows) || errors.Is(err, db.ErrRecordNotFound) {
-				continue
-			}
-			return candidates, fmt.Errorf("queue: check pending status for %s: %w", id, err)
-		}
-		if status == db.StatusPending {
-			stillPending = append(stillPending, id)
-		}
-	}
-	return stillPending, nil
-}
-
-func fetchMessageStatus(ctx context.Context, s db.Store, id string) (string, error) {
-	m, err := storeCall(ctx, func(sc context.Context) (*db.Message, error) { return s.GetMessage(sc, id) })
-	if err != nil {
-		return "", err
-	}
-	if m == nil {
-		return "", db.ErrRecordNotFound
-	}
-	return m.Status, nil
-}
-
-func fetchDispatchStatus(ctx context.Context, s db.Store, id string) (string, error) {
-	d, err := storeCall(ctx, func(sc context.Context) (*db.Dispatch, error) { return s.GetDispatch(sc, id) })
-	if err != nil {
-		return "", err
-	}
-	if d == nil {
-		return "", db.ErrRecordNotFound
-	}
-	return d.Status, nil
-}
-
-// ReconcilePendingBurstItems checks whether any items in the coordinator's active turn were not
-// handled during the turn and remain in PENDING status in the database.
-func (p *WorkerPool) ReconcilePendingBurstItems(ctx context.Context, threadID, turnID string, handledIDs []string) ([]string, error) {
-	return p.reconcilePendingTurnItems(ctx, false, threadID, turnID, handledIDs, fetchMessageStatus)
-}
-
-// ReconcilePendingDispatchItems checks whether any items in the coordinator's active turn were not
-// handled during the turn and remain in PENDING status in the database.
-func (p *WorkerPool) ReconcilePendingDispatchItems(ctx context.Context, sessionKey, turnID string, handledIDs []string) ([]string, error) {
-	return p.reconcilePendingTurnItems(ctx, true, sessionKey, turnID, handledIDs, fetchDispatchStatus)
 }

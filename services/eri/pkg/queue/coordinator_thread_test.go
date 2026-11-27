@@ -395,19 +395,11 @@ func TestThreadCoordinator_OnTurnDone(t *testing.T) {
 	tests := []struct {
 		name        string
 		state       coordinatorState
-		rows        []db.Message
 		req         TurnDoneRequest
 		wantState   coordinatorState
 		wantSends   []sentCall
 		wantCleared bool
 	}{
-		{
-			name:      "CompletedRequeuesPendingActiveItem",
-			state:     st(nil, &ActiveTurn{TurnID: "t0", ItemIDs: []string{"a", "b"}, RunnerInvocationID: "inv-0"}),
-			req:       TurnDoneRequest{TurnID: "t0", Outcome: OutcomeCompleted, RequeueIDs: []string{"b"}},
-			wantState: st(nil, startedTurn("b")),
-			wantSends: []sentCall{runBurst("b")},
-		},
 		{
 			name:      "StaleTurnFenced",
 			state:     st([]string{"c"}, running),
@@ -448,16 +440,19 @@ func TestThreadCoordinator_OnTurnDone(t *testing.T) {
 				&ActiveTurn{TurnID: "t0", ItemIDs: []string{"a", "b"}, RunnerInvocationID: "inv-0", Waiting: true}),
 			wantSends: []sentCall{threadSend(tcKey, HandlerKick, KickRequest{TurnID: "t0"}, 1500*time.Millisecond)},
 		},
+		{
+			name:      "UnhandledDrainedIDsRequeuedAtFront",
+			state:     st([]string{"c"}, running),
+			req:       TurnDoneRequest{TurnID: "t0", Outcome: OutcomeCompleted, HandledIDs: []string{"a"}},
+			wantState: st(nil, startedTurn("b", "c")),
+			wantSends: []sentCall{runBurst("b", "c")},
+		},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			var store coordinatorStore
-			if len(tc.rows) > 0 {
-				store = seedStore(t, tc.rows, nil, "")
-			}
 			h := newCoordHarness(t, tcKey, tcInv, tc.state)
-			require.NoError(t, NewThreadCoordinator(store, nil, "aerial").OnTurnDone(h.objectCtx(), tc.req))
+			require.NoError(t, NewThreadCoordinator(nil, nil, "aerial").OnTurnDone(h.objectCtx(), tc.req))
 			assert.Equal(t, tc.wantState, h.snapshot(t))
 			assert.Equal(t, tc.wantSends, h.sends)
 			assert.Equal(t, tc.wantCleared, h.clearAlls > 0)

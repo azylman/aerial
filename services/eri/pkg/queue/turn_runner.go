@@ -47,7 +47,6 @@ type turnSteps interface {
 	RecordBurstOutcome(ctx context.Context, ids []string, summary AttemptSummary) error
 	RunBurstPostTurnHook(ctx context.Context, threadID string, ids []string, attempted bool, outcome TurnOutcome, hookMetadata map[string]string) error
 	RefreshBurstThreadSummary(ctx context.Context, threadID string, ids []string, outcome TurnOutcome) error
-	ReconcilePendingBurstItems(ctx context.Context, threadID, turnID string, handledIDs []string) ([]string, error)
 	StopBurstTurn(ctx context.Context, turnID string, ids []string) error
 	FailBurstTurn(ctx context.Context, turnID string, ids []string, reason string, hookMetadata ...map[string]string) error
 
@@ -56,7 +55,6 @@ type turnSteps interface {
 	RunDispatchAttempt(ctx context.Context, in AttemptInput) (AttemptResult, error)
 	RecordDispatchOutcome(ctx context.Context, ids []string, summary AttemptSummary) error
 	PublishDispatchOutcome(ctx context.Context, dispatchID string, outcome TurnOutcome) error
-	ReconcilePendingDispatchItems(ctx context.Context, sessionKey, turnID string, handledIDs []string) ([]string, error)
 	StopDispatchTurn(ctx context.Context, turnID string, ids []string) error
 	FailDispatchTurn(ctx context.Context, turnID string, ids []string, reason string) error
 
@@ -122,7 +120,6 @@ type runnerSubject interface {
 	recordOutcome(ctx context.Context, ids []string, summary AttemptSummary) error
 	// afterSteps are the journaled steps run after record-outcome.
 	afterSteps(t turnProgress) []namedStep
-	reconcilePending(ctx context.Context, turnID string, handledIDs []string) ([]string, error)
 	stop(ctx context.Context, turnID string, ids []string) error
 	fail(ctx context.Context, turnID string, ids []string, reason string, hookMetadata ...map[string]string) error
 }
@@ -187,10 +184,6 @@ func (b burstRunner) afterSteps(t turnProgress) []namedStep {
 	return out
 }
 
-func (b burstRunner) reconcilePending(ctx context.Context, turnID string, handledIDs []string) ([]string, error) {
-	return b.steps.ReconcilePendingBurstItems(ctx, b.threadID, turnID, handledIDs)
-}
-
 func (b burstRunner) stop(ctx context.Context, turnID string, ids []string) error {
 	return b.steps.StopBurstTurn(ctx, turnID, ids)
 }
@@ -228,33 +221,22 @@ func (d dispatchRunner) recordOutcome(ctx context.Context, ids []string, summary
 	return d.steps.RecordDispatchOutcome(ctx, ids, summary)
 }
 
-// StepPublishDispatchOutcome is the step name for publishing dispatch outcomes.
-const StepPublishDispatchOutcome = StepPublishDispatchOut
-
 func (d dispatchRunner) afterSteps(t turnProgress) []namedStep {
 	if !t.attempted || dispatchOutcomeStatus(t.outcome) == "" {
 		return nil
 	}
-	ids := normalizeStepIDs(append([]string{d.dispatchID}, t.ids...))
-	steps := make([]namedStep, 0, len(ids))
-	for i, id := range ids {
-		stepName := StepPublishDispatchOutcome
-		if i > 0 {
-			stepName = fmt.Sprintf("%s-%d", StepPublishDispatchOutcome, i+1)
-		}
-		targetID := id
-		steps = append(steps, namedStep{
-			name: stepName,
-			fn: func(ctx context.Context) error {
-				return d.steps.PublishDispatchOutcome(ctx, targetID, t.outcome)
-			},
-		})
+	ids := t.ids
+	if len(ids) == 0 {
+		ids = []string{d.dispatchID}
 	}
-	return steps
-}
-
-func (d dispatchRunner) reconcilePending(ctx context.Context, turnID string, handledIDs []string) ([]string, error) {
-	return d.steps.ReconcilePendingDispatchItems(ctx, d.sessionKey, turnID, handledIDs)
+	return []namedStep{{name: StepPublishDispatchOut, fn: func(ctx context.Context) error {
+		for _, id := range ids {
+			if err := d.steps.PublishDispatchOutcome(ctx, id, t.outcome); err != nil {
+				return err
+			}
+		}
+		return nil
+	}}}
 }
 
 func (d dispatchRunner) stop(ctx context.Context, turnID string, ids []string) error {
@@ -271,23 +253,8 @@ func (s *TurnRunnerService) drive(ctx restate.Context, subj runnerSubject, coord
 	if err := s.executeTurn(ctx, subj, turnID, &t); err != nil {
 		return endOnTerminal(ctx, subj, coordinator, key, turnID, err, t)
 	}
-	var requeueIDs []string
-	if t.outcome == OutcomeCompleted {
-		ids, err := runStep(ctx, StepReconcilePending, func(rc context.Context) ([]string, error) {
-			return subj.reconcilePending(rc, turnID, t.ids)
-		})
-		if err != nil {
-			log.Printf("[TurnRunner] Turn %s for %s/%s: reconcile pending error: %v", turnID, coordinator, key, err)
-		} else {
-			requeueIDs = ids
-		}
-	}
-	sendTurnDone(ctx, coordinator, key, TurnDoneRequest{
-		TurnID:            turnID,
-		Outcome:           t.outcome,
-		RescheduleDelayMs: t.delayMs,
-		RequeueIDs:        requeueIDs,
-	})
+	handledIDs := normalizeStepIDs(append(slices.Clone(subj.inputIDs()), t.ids...))
+	sendTurnDone(ctx, coordinator, key, TurnDoneRequest{TurnID: turnID, Outcome: t.outcome, RescheduleDelayMs: t.delayMs, HandledIDs: handledIDs})
 	return TurnRunResult{TurnID: turnID, Outcome: t.outcome}, nil
 }
 
@@ -376,6 +343,24 @@ func nextAttempt(in AttemptInput, res AttemptResult, maxAttempts int) (attemptAc
 	next.AutoResumes = res.AutoResumes
 	next.Usage = res.Telemetry.Usage
 	next.Prep.SessionID = res.SessionID
+	for i, id := range res.DrainedIDs {
+		if !slices.Contains(in.IDs, id) {
+			next.IDs = append(next.IDs, id)
+			if i < len(res.DrainedPrompts) {
+				if p := strings.TrimSpace(res.DrainedPrompts[i]); p != "" {
+					next.Prep.Prompt = strings.TrimSpace(next.Prep.Prompt) + "\n\n" + p
+				}
+			}
+		}
+	}
+	if len(res.DrainedIDs) == 0 {
+		for _, p := range res.DrainedPrompts {
+			if p = strings.TrimSpace(p); p != "" {
+				next.Prep.Prompt = strings.TrimSpace(next.Prep.Prompt) + "\n\n" + p
+			}
+		}
+	}
+	next.IDs = normalizeStepIDs(next.IDs)
 	switch res.Kind {
 	case AttemptKindSuccess:
 		return actionDone, in, OutcomeCompleted, nil
@@ -404,33 +389,6 @@ func nextAttempt(in AttemptInput, res AttemptResult, maxAttempts int) (attemptAc
 	}
 }
 
-func appendPrompt(dst *string, prompt string) {
-	if *dst == "" {
-		*dst = prompt
-	} else {
-		*dst += "\n\n" + prompt
-	}
-}
-
-func mergeDrainedAttempt(runIn *AttemptInput, res AttemptResult, t *turnProgress) {
-	if len(res.DrainedIDs) == 0 {
-		return
-	}
-	for i, id := range res.DrainedIDs {
-		if slices.Contains(runIn.IDs, id) {
-			continue
-		}
-		runIn.IDs = append(runIn.IDs, id)
-		if i < len(res.DrainedPrompts) {
-			if dp := strings.TrimSpace(res.DrainedPrompts[i]); dp != "" {
-				appendPrompt(&runIn.Prep.Prompt, dp)
-			}
-		}
-	}
-	t.ids = normalizeStepIDs(append(t.ids, res.DrainedIDs...))
-	runIn.IDs = normalizeStepIDs(runIn.IDs)
-}
-
 // runAttempts runs run-1..run-n: one lease execution per step inside restate.RunAsync, with
 // restate.Sleep(BackoffMs) before the next ordinal.
 func (s *TurnRunnerService) runAttempts(ctx restate.Context, subj runnerSubject, turnID string, started StartedTurn, prep TurnPrep, t *turnProgress) error {
@@ -453,9 +411,9 @@ func (s *TurnRunnerService) runAttempts(ctx restate.Context, subj runnerSubject,
 		}
 		t.attempted = true
 		t.last = res
-		mergeDrainedAttempt(&runIn, res, t)
-		in.IDs = slices.Clone(runIn.IDs)
-		in.Prep.Prompt = runIn.Prep.Prompt
+		if len(res.DrainedIDs) > 0 {
+			t.ids = normalizeStepIDs(append(t.ids, res.DrainedIDs...))
+		}
 		type step struct {
 			action  attemptAction
 			next    AttemptInput
@@ -503,7 +461,7 @@ func endOnTerminal(ctx restate.Context, subj runnerSubject, coordinator, key, tu
 	if len(prog) > 0 {
 		t = prog[0]
 	}
-	ids := normalizeStepIDs(append(subj.inputIDs(), t.ids...))
+	ids := normalizeStepIDs(append(slices.Clone(subj.inputIDs()), t.ids...))
 	outcome := OutcomeFailed
 	var stepErr error
 	if isRestateCancel(cause) {
@@ -523,7 +481,7 @@ func endOnTerminal(ctx restate.Context, subj runnerSubject, coordinator, key, tu
 			return struct{}{}, subj.fail(rc, turnID, ids, reason, meta)
 		})
 	}
-	sendTurnDone(ctx, coordinator, key, TurnDoneRequest{TurnID: turnID, Outcome: outcome})
+	sendTurnDone(ctx, coordinator, key, TurnDoneRequest{TurnID: turnID, Outcome: outcome, HandledIDs: ids})
 	if stepErr != nil {
 		log.Printf("[TurnRunner] Turn %s for %s/%s: %s step failed: %v", turnID, coordinator, key, outcome, stepErr)
 		return TurnRunResult{TurnID: turnID, Outcome: outcome}, stepErr
