@@ -37,7 +37,7 @@ Aerial boots out-of-the-box on a single vanilla `k3s` node with no custom node l
 Bootstrap a single-node `k3s` cluster, generate your private `aerial-config` repository from the template, seed secrets, install Flux CD, and launch agent authentication with a single command:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/azylman/aerial/main/scripts/quickstart.sh | \
+set -o pipefail; curl -fsSL https://raw.githubusercontent.com/azylman/aerial/main/scripts/quickstart.sh | \
   GITHUB_PAT="your-github-pat" DISCORD_BOT_TOKEN="your-discord-bot-token" bash
 ```
 

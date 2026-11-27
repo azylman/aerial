@@ -33,20 +33,20 @@ fi
 [[ "$GITHUB_OWNER" =~ ^[A-Za-z0-9._-]+$ ]] || { echo "ERROR: Invalid GITHUB_OWNER '$GITHUB_OWNER'. Must match ^[A-Za-z0-9._-]+$" >&2; exit 1; }
 [[ "$AERIAL_CONFIG_REPO" =~ ^[A-Za-z0-9._-]+$ ]] || { echo "ERROR: Invalid AERIAL_CONFIG_REPO '$AERIAL_CONFIG_REPO'. Must match ^[A-Za-z0-9._-]+$" >&2; exit 1; }
 [[ "$AERIAL_TEMPLATE_REPO" =~ ^[A-Za-z0-9._-]+/[A-Za-z0-9._-]+$ ]] || { echo "ERROR: Invalid AERIAL_TEMPLATE_REPO '$AERIAL_TEMPLATE_REPO'. Must match ^[A-Za-z0-9._-]+/[A-Za-z0-9._-]+$" >&2; exit 1; }
-repo_status=$(curl -sS -o /dev/null -w "%{http_code}" -H "Authorization: token $GITHUB_PAT" -H "Accept: application/vnd.github+json" "$GITHUB_API_URL/repos/$GITHUB_OWNER/$AERIAL_CONFIG_REPO")
+repo_status=$(curl -sS -o /dev/null -w "%{http_code}" -H "Authorization: token $GITHUB_PAT" -H "Accept: application/vnd.github+json" "$GITHUB_API_URL/repos/$GITHUB_OWNER/$AERIAL_CONFIG_REPO" 2>/dev/null || true)
 if [ "$repo_status" = "404" ]; then
   echo "Repository $GITHUB_OWNER/$AERIAL_CONFIG_REPO not found. Generating from template $AERIAL_TEMPLATE_REPO..."
   curl -fsS -X POST -H "Authorization: token $GITHUB_PAT" -H "Accept: application/vnd.github+json" "$GITHUB_API_URL/repos/$AERIAL_TEMPLATE_REPO/generate" -d "{\"owner\":\"$GITHUB_OWNER\",\"name\":\"$AERIAL_CONFIG_REPO\",\"private\":true}" >/dev/null
   echo "Waiting for repository initialization..."; ready=0
   for ((i=1; i<=15; i++)); do
-    commit_status=$(curl -sS -o /dev/null -w "%{http_code}" -H "Authorization: token $GITHUB_PAT" -H "Accept: application/vnd.github+json" "$GITHUB_API_URL/repos/$GITHUB_OWNER/$AERIAL_CONFIG_REPO/commits/main")
+    commit_status=$(curl -sS -o /dev/null -w "%{http_code}" -H "Authorization: token $GITHUB_PAT" -H "Accept: application/vnd.github+json" "$GITHUB_API_URL/repos/$GITHUB_OWNER/$AERIAL_CONFIG_REPO/commits/main" 2>/dev/null || true)
     [ "$commit_status" = "200" ] && { ready=1; break; }
     sleep "$AERIAL_POLL_SLEEP"
   done
   [ "$ready" -eq 1 ] || { echo "ERROR: Timed out waiting for repository $GITHUB_OWNER/$AERIAL_CONFIG_REPO to initialize from template" >&2; exit 1; }
   echo "Repository $GITHUB_OWNER/$AERIAL_CONFIG_REPO initialized successfully."
 elif [ "$repo_status" = "200" ]; then echo "Repository $GITHUB_OWNER/$AERIAL_CONFIG_REPO exists."
-else echo "ERROR: Unexpected HTTP status $repo_status checking $GITHUB_API_URL/repos/$GITHUB_OWNER/$AERIAL_CONFIG_REPO" >&2; exit 1; fi
+else echo "ERROR: Unexpected HTTP status ${repo_status:-failed} checking $GITHUB_API_URL/repos/$GITHUB_OWNER/$AERIAL_CONFIG_REPO" >&2; exit 1; fi
 if ! command -v k3s >/dev/null 2>&1; then
   echo "k3s not found. Installing single-node k3s..."; mkdir -p "$(dirname "$KUBECONFIG")"
   curl -sfL "$K3S_INSTALL_URL" | sh -s - --disable traefik --write-kubeconfig "$KUBECONFIG" --write-kubeconfig-mode 600

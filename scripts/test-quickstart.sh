@@ -15,8 +15,8 @@ done
 echo "$method $url" >> "$TMPD/curl_calls"
 [[ "$url" =~ /user$ ]] && { echo '{"login":"autouser"}'; exit 0; }
 [[ "$url" =~ /generate$ ]] && { echo "$d" > "$TMPD/last_gen"; touch "$TMPD/generated"; exit 0; }
-[[ "$url" =~ /commits/main$ ]] && { [ -f "$TMPD/fail_commits" ] && { [ "$wf" = "%{http_code}" ] && printf "404"; exit 0; }; [ "$wf" = "%{http_code}" ] && printf "200"; exit 0; }
-[[ "$url" =~ /repos/ ]] && { [ -f "$TMPD/repo_exists" ] && code="200" || code="404"; [ "$wf" = "%{http_code}" ] && printf "%s" "$code"; exit 0; }
+[[ "$url" =~ /commits/main$ ]] && { [ -f "$TMPD/transient_commit_fail" ] && { rm -f "$TMPD/transient_commit_fail"; exit 7; }; [ -f "$TMPD/fail_commits" ] && { [ "$wf" = "%{http_code}" ] && printf "404"; exit 0; }; [ "$wf" = "%{http_code}" ] && printf "200"; exit 0; }
+[[ "$url" =~ /repos/ ]] && { [ -f "$TMPD/repo_curl_fail" ] && exit 7; [ -f "$TMPD/repo_exists" ] && code="200" || code="404"; [ "$wf" = "%{http_code}" ] && printf "%s" "$code"; exit 0; }
 if [[ "$url" =~ fake-k3s ]]; then
   cat << K3S_EOF
 #!/bin/sh
@@ -42,7 +42,7 @@ cat << 'KUBECTL_EOF' > "$TMPD/bin/kubectl"
 echo "kubectl $*" >> "$TMPD/kubectl_calls"
 [ "${1:-}" = "get" ] && [ "${2:-}" = "namespace" ] && exit 0
 [ "${1:-}" = "create" ] && [ "${2:-}" = "secret" ] && { printf "kind: Secret\n"; exit 0; }
-[ "${1:-}" = "apply" ] && exit 0
+[ "${1:-}" = "apply" ] && { cat >/dev/null; exit 0; }
 if [ "${1:-}" = "get" ] && [ "${2:-}" = "pod" ]; then
   [ -f "$TMPD/delay" ] && { c=0; [ -f "$TMPD/c" ] && c=$(cat "$TMPD/c"); c=$((c+1)); echo "$c" > "$TMPD/c"; [ "$c" -lt 2 ] && exit 0; }
   printf "eri-restate-7890-test"; exit 0
@@ -71,6 +71,8 @@ rm -f "$TMPD/bin/k3s" "$TMPD/bin/flux"; ck="$TMPD/nested/kube/cfg"
 out3=$(KUBECONFIG="$ck" "$SCRIPT") && assert [ -d "$(dirname "$ck")" ] && assert [ -f "$TMPD/k3s_done" ] && assert [ -f "$TMPD/flux_done" ]
 rm -f "$TMPD/k3s_done" "$TMPD/flux_done"; out4=$("$SCRIPT") && assert [ ! -f "$TMPD/k3s_done" ] && assert [ ! -f "$TMPD/flux_done" ]
 touch "$TMPD/delay" && rm -f "$TMPD/c"; "$SCRIPT" >/dev/null && assert [ "$(cat "$TMPD/c")" -ge 2 ]
+touch "$TMPD/transient_commit_fail" && rm -f "$TMPD/repo_exists"; out5=$("$SCRIPT") && assert grep -q "initialized successfully." <<< "$out5"
+touch "$TMPD/repo_curl_fail" && assert_fail "$SCRIPT"; rm -f "$TMPD/repo_curl_fail"
 AERIAL_SKIP_TTY_EXEC=0 AERIAL_FORCE_TTY_EXEC=1 "$SCRIPT" >/dev/null && assert [ -f "$TMPD/agy_done" ]
 touch "$TMPD/fail_commits" && rm -f "$TMPD/repo_exists" && assert_fail "$SCRIPT"
 echo "ok - quickstart hermetic tests passed"
