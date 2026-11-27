@@ -980,9 +980,8 @@ func (d dispatchSubject) load(ctx context.Context, s db.Store, te *turnExecution
 		for _, disp := range extraDispatches {
 			te.drainedIDs = append(te.drainedIDs, disp.ID)
 			te.steeredDispatches = append(te.steeredDispatches, disp)
-			if pText := strings.TrimSpace(disp.Prompt); pText != "" {
-				te.drainedPrompts = append(te.drainedPrompts, pText)
-			}
+			pText := strings.TrimSpace(disp.Prompt)
+			te.drainedPrompts = append(te.drainedPrompts, pText)
 			returnedIDs = append(returnedIDs, disp.ID)
 		}
 		te.steerMu.Unlock()

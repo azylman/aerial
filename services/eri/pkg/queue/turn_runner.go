@@ -386,16 +386,9 @@ func appendPrompt(dst *string, prompt string) {
 }
 
 func mergeDrainedAttempt(runIn *AttemptInput, res AttemptResult, t *turnProgress) {
-	if len(res.DrainedIDs) > 0 {
-		mergeDrainedIDs(runIn, res, t)
+	if len(res.DrainedIDs) == 0 {
 		return
 	}
-	if len(res.DrainedPrompts) > 0 {
-		mergeDrainedPromptsOnly(runIn, res)
-	}
-}
-
-func mergeDrainedIDs(runIn *AttemptInput, res AttemptResult, t *turnProgress) {
 	for i, id := range res.DrainedIDs {
 		if slices.Contains(runIn.IDs, id) {
 			continue
@@ -409,15 +402,6 @@ func mergeDrainedIDs(runIn *AttemptInput, res AttemptResult, t *turnProgress) {
 	}
 	t.ids = normalizeStepIDs(append(t.ids, res.DrainedIDs...))
 	runIn.IDs = normalizeStepIDs(runIn.IDs)
-}
-
-func mergeDrainedPromptsOnly(runIn *AttemptInput, res AttemptResult) {
-	for _, dp := range res.DrainedPrompts {
-		dp = strings.TrimSpace(dp)
-		if dp != "" && !strings.Contains(runIn.Prep.Prompt, dp) {
-			appendPrompt(&runIn.Prep.Prompt, dp)
-		}
-	}
 }
 
 // runAttempts runs run-1..run-n: one lease execution per step inside restate.RunAsync, with

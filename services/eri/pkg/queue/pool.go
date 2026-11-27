@@ -886,7 +886,7 @@ func (p *WorkerPool) closeTurnExecution(te *turnExecution, reason string) {
 	}
 	te.cancelTurn()
 	te.activeSessionMu.Lock()
-	key := te.leaseKey()
+	key := te.leaseKeyLocked()
 	te.activeSessionMu.Unlock()
 	p.closeSessionDaemons(key, reason)
 }

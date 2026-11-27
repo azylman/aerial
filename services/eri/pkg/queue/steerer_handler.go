@@ -254,10 +254,11 @@ func (*WorkerPool) drainDispatchTurn(ctx context.Context, te *turnExecution, s d
 		}
 		te.steeredDispatches = append(te.steeredDispatches, *d)
 		te.drainedIDs = append(te.drainedIDs, d.ID)
-		if pText := strings.TrimSpace(d.Prompt); pText != "" {
+		pText := strings.TrimSpace(d.Prompt)
+		if pText != "" {
 			prompts = append(prompts, pText)
-			te.drainedPrompts = append(te.drainedPrompts, pText)
 		}
+		te.drainedPrompts = append(te.drainedPrompts, pText)
 	}
 	if prompts == nil {
 		prompts = []string{}

@@ -673,7 +673,7 @@ func TestTurnRunner_RunAttempts_PropagatesDrainedPrompts(t *testing.T) {
 		started: claimed(0, "m1"),
 		prep:    TurnPrep{Decision: TurnDecisionRun, Prompt: "initial prompt"},
 		attempts: []fakeAttempt{
-			{res: AttemptResult{Kind: AttemptKindRetry, BackoffMs: 0, Reason: "transient", DrainedPrompts: []string{"steered extra prompt"}}},
+			{res: AttemptResult{Kind: AttemptKindRetry, BackoffMs: 0, Reason: "transient", DrainedIDs: []string{"m2"}, DrainedPrompts: []string{"steered extra prompt"}}},
 			{res: AttemptResult{Kind: AttemptKindSuccess}},
 		},
 	}
@@ -685,6 +685,8 @@ func TestTurnRunner_RunAttempts_PropagatesDrainedPrompts(t *testing.T) {
 	require.Len(t, steps.prompts, 2)
 	assert.Equal(t, "initial prompt", steps.prompts[0])
 	assert.Equal(t, "initial prompt\n\nsteered extra prompt", steps.prompts[1])
+	require.Len(t, steps.inputs, 2)
+	assert.Equal(t, []string{"m1", "m2"}, steps.inputs[1].IDs)
 }
 
 func TestTurnRunner_EndOnTerminal_IncludesDrainedIDs(t *testing.T) {
@@ -726,10 +728,6 @@ func TestTurnRunner_RunAttempts_TwoDrainsFollowedByRetry(t *testing.T) {
 	assert.Equal(t, "initial prompt", steps.prompts[0])
 	assert.Equal(t, "initial prompt\n\nsteered msg A", steps.prompts[1])
 	assert.Equal(t, "initial prompt\n\nsteered msg A\n\nsteered msg B", steps.prompts[2])
-
-	// Each drained message prompt appears exactly once across retries
-	assert.Equal(t, 1, strings.Count(steps.prompts[2], "steered msg A"))
-	assert.Equal(t, 1, strings.Count(steps.prompts[2], "steered msg B"))
 
 	// Drained IDs are properly set on AttemptInput for the subsequent retry attempt
 	require.Len(t, steps.inputs, 3)

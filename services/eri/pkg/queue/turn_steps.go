@@ -554,7 +554,7 @@ func (p *WorkerPool) RecordBurstOutcome(ctx context.Context, ids []string, summa
 }
 
 func recoverBurstProcessingRows(ctx context.Context, s db.Store, threadID string, existing []db.Message) ([]db.Message, error) {
-	if s == nil || strings.TrimSpace(threadID) == "" {
+	if strings.TrimSpace(threadID) == "" {
 		return existing, nil
 	}
 	tasks, err := storeCall(ctx, func(c context.Context) ([]db.ActiveTask, error) {
@@ -642,7 +642,7 @@ func (p *WorkerPool) failActiveBurstRows(ctx context.Context, s db.Store, ids []
 
 func expandDispatchActiveIDs(ctx context.Context, s db.Store, ids []string) ([]string, error) {
 	ids = normalizeStepIDs(ids)
-	if s == nil || len(ids) == 0 {
+	if len(ids) == 0 {
 		return ids, nil
 	}
 	expanded := slices.Clone(ids)
@@ -685,11 +685,12 @@ func (p *WorkerPool) resolveDispatchOutcomeIDs(ctx context.Context, s db.Store, 
 			if candidate == nil {
 				return false
 			}
-			candidate.steerMu.Lock()
-			defer candidate.steerMu.Unlock()
-			if candidate.dispatch != nil && slices.Contains(ids, candidate.dispatch.ID) {
+			dispID := candidate.dispatchIDValue()
+			if dispID != "" && slices.Contains(ids, dispID) {
 				return true
 			}
+			candidate.steerMu.Lock()
+			defer candidate.steerMu.Unlock()
 			for _, id := range ids {
 				if slices.Contains(candidate.drainedIDs, id) {
 					return true
@@ -704,8 +705,8 @@ func (p *WorkerPool) resolveDispatchOutcomeIDs(ctx context.Context, s db.Store, 
 			ids = append(ids, live.drainedIDs...)
 		}
 		turnID := live.turnID
-		leaseKey := live.leaseKey()
 		live.steerMu.Unlock()
+		leaseKey := live.leaseKey()
 		if turnID != "" && leaseKey != "" {
 			ids = p.reconcileActiveTurnIDs(ctx, true, leaseKey, turnID, ids)
 		}
@@ -889,7 +890,7 @@ func (p *WorkerPool) StopBurstTurn(ctx context.Context, turnID string, ids []str
 			ids = append(ids, live.drainedIDs...)
 		}
 		live.steerMu.Unlock()
-		threadID = live.threadID
+		threadID = live.threadIDValue()
 	}
 	if threadID == "" && len(ids) > 0 {
 		if rows, mErr := messagesByIDOrdered(ctx, s, ids); mErr == nil && len(rows) > 0 {
@@ -966,7 +967,7 @@ func (p *WorkerPool) FailBurstTurn(ctx context.Context, turnID string, ids []str
 			ids = append(ids, live.drainedIDs...)
 		}
 		live.steerMu.Unlock()
-		threadID = live.threadID
+		threadID = live.threadIDValue()
 	}
 	if threadID == "" && len(ids) > 0 {
 		if rows, mErr := messagesByIDOrdered(ctx, s, ids); mErr == nil && len(rows) > 0 {

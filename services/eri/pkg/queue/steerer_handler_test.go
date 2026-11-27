@@ -1071,6 +1071,37 @@ func TestTurnExecution_ApplyDrainedPrompts(t *testing.T) {
 	assert.Equal(t, "initial prompt with continue in it\n\ndifferent prompt", te2.turnPrompt)
 }
 
+func TestDrainDispatchTurn_BlankPromptAlignment(t *testing.T) {
+	t.Parallel()
+
+	store := testStore(t)
+	d1 := db.Dispatch{ID: "disp-blank", SessionID: "sess-align", Prompt: "   ", Status: db.StatusPending, CreatedAt: time.Now().UTC()}
+	d2 := db.Dispatch{ID: "disp-valid", SessionID: "sess-align", Prompt: "actionable steer prompt", Status: db.StatusPending, CreatedAt: time.Now().UTC().Add(time.Second)}
+	seedDispatchRows(t, store, []db.Dispatch{d1, d2})
+
+	pool := NewWorkerPool(WorkerPoolConfig{Store: store})
+	te := &turnExecution{
+		turnID:   "turn-align",
+		threadID: "sess-align",
+	}
+
+	// 1. Draining returns only non-blank prompts in HTTP response, but aligns drainedIDs and drainedPrompts 1:1
+	prompts := pool.drainDispatchTurn(context.Background(), te, store, []string{d1.ID, d2.ID})
+	assert.Equal(t, []string{"actionable steer prompt"}, prompts)
+
+	te.steerMu.Lock()
+	assert.Equal(t, []string{d1.ID, d2.ID}, te.drainedIDs)
+	assert.Equal(t, []string{"", "actionable steer prompt"}, te.drainedPrompts)
+	te.steerMu.Unlock()
+
+	// 2. When in.IDs already contains disp-blank (e.g. from an earlier attempt), disp-valid's prompt is still applied
+	te.applyDrainedPrompts(AttemptInput{
+		Prep: TurnPrep{Prompt: "initial prompt"},
+		IDs:  []string{"d0", d1.ID},
+	})
+	assert.Equal(t, "initial prompt\n\nactionable steer prompt", te.turnPrompt)
+}
+
 func TestPostCrash_StopAndFail_WithLiveExecution(t *testing.T) {
 	t.Parallel()
 
