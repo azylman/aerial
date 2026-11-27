@@ -154,12 +154,14 @@ func (s *BufferingTurnSink) OnStepStarted(stepIndex int) {
 }
 
 func (s *BufferingTurnSink) OnToolCall(call ToolCall) {
-	s.resetIntermediateBuffer()
+	if call.ParentID == "" {
+		s.resetIntermediateBuffer()
+	}
 	runHook2(s.cfg.OnToolCall, call.Name, call.Command)
 }
 
 func (s *BufferingTurnSink) OnToolCompleted(call ToolCall, mcpServer string, duration time.Duration, status string) {
-	if status != "aborted" {
+	if status != "aborted" && call.ParentID == "" {
 		s.resetIntermediateBuffer()
 	}
 	if s.cfg.OnToolCompleted != nil {

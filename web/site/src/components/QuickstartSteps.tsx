@@ -13,13 +13,14 @@ export interface QuickstepItem {
 export const QUICKSTART_STEPS: readonly QuickstepItem[] = [
   {
     id: 1,
-    title: 'Install Single-Node k3s',
+    title: 'Install Single-Node k3s (or Run One-Line Quickstart)',
     badge: 'Vanilla k3s',
     summary:
-      'Install k3s with Traefik disabled and configure standard user permissions for kubeconfig.',
+      'Install k3s with Traefik disabled, or run scripts/quickstart.sh to automate k3s, Flux CD, private config repo generation from azylman/aerial-config-example, bootstrap secrets, and agy authentication in a single command.',
     command:
       'curl -sfL https://get.k3s.io | sh -s - --disable traefik --write-kubeconfig ~/.kube/config --write-kubeconfig-mode 600',
     notes: [
+      'Single-command alternative: GITHUB_PAT="your-pat" DISCORD_BOT_TOKEN="your-token" bash -c "$(curl -fsSL https://raw.githubusercontent.com/azylman/aerial/main/scripts/quickstart.sh)" automates k3s, Flux CD, repo generation, bootstrap secrets, and agy auth.',
       'Deploy without specialized node labels or hardware affinity.',
       'NGINX Gateway Fabric binds standard HTTP and HTTPS ports.',
     ],

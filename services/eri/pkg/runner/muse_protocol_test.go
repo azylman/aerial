@@ -496,9 +496,9 @@ func TestMuseProtocol_IsChildSession(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			got := isChildMuseSession(tc.params, tc.rootSessionID)
+			got := isMuseReminderChild(tc.params) || extractMuseChildSessionID(tc.params, tc.rootSessionID) != ""
 			if got != tc.want {
-				t.Errorf("isChildMuseSession() = %v, want %v", got, tc.want)
+				t.Errorf("child session check = %v, want %v", got, tc.want)
 			}
 		})
 	}
@@ -731,10 +731,10 @@ func TestMuseProtocol_ItemStartedAndErrorExtraction(t *testing.T) {
 	daemon.sessionID = "sess-cov-1"
 
 	// handleMuseItemStarted nil checks
-	daemon.handleMuseItemStarted(nil, nil)
+	daemon.handleMuseItemStarted(nil, nil, "")
 	sink := newMockTurnSink()
 	turn := enqueueInflightTurn(daemon, "turn-cov", sink)
-	daemon.handleMuseItemStarted(turn, nil)
+	daemon.handleMuseItemStarted(turn, nil, "")
 
 	// Reasoning item started + duplicate (must only increment thinking once)
 	daemon.dispatchMuseJSONRPCLine(`{"jsonrpc":"2.0","method":"item/started","params":{"item":{"id":"r-1","type":"reasoning"}}}`)
@@ -841,5 +841,270 @@ func TestMuseProtocol_ExtractRPCErrorMessage(t *testing.T) {
 				t.Errorf("extractRPCErrorMessage() = %q, want %q", got, tc.want)
 			}
 		})
+	}
+}
+
+type museSubscribeRequest struct {
+	sessionID string
+	rpcID     int
+}
+
+func startMuseSubscribeRecorder(inR io.Reader) <-chan museSubscribeRequest {
+	subscribed := make(chan museSubscribeRequest, 4)
+	go func() {
+		scanner := bufio.NewScanner(inR)
+		for scanner.Scan() {
+			var req codexRPCRequest
+			if err := json.Unmarshal(scanner.Bytes(), &req); err != nil || req.Method != "view/subscribe" {
+				continue
+			}
+			if p, ok := req.Params.(map[string]any); ok {
+				if sid, ok := p[fieldSessionID].(string); ok {
+					subscribed <- museSubscribeRequest{sessionID: sid, rpcID: req.ID}
+				}
+			}
+		}
+	}()
+	return subscribed
+}
+
+func assertMuseSubagentSinkOutcome(t *testing.T, sink *mockTurnSink) {
+	t.Helper()
+	sink.mu.Lock()
+	defer sink.mu.Unlock()
+	if len(sink.calls) != 3 {
+		t.Fatalf("expected 3 tool calls, got %d: %+v", len(sink.calls), sink.calls)
+	}
+	if !sink.calls[0].Subagent || sink.calls[0].ID != "sub-item-1" || sink.calls[0].Command != "code-researcher" {
+		t.Errorf("unexpected subagent call 0: %+v", sink.calls[0])
+	}
+	if sink.calls[1].ParentID != "sub-item-1" || sink.calls[1].Name != "bash" {
+		t.Errorf("unexpected child tool call 1: %+v", sink.calls[1])
+	}
+	if !sink.calls[2].Subagent || sink.calls[2].ID != "sub-item-2" {
+		t.Errorf("unexpected subagent call 2: %+v", sink.calls[2])
+	}
+	if sink.result == nil || sink.result.Response != "final parent answer" {
+		t.Fatalf("expected final parent answer, got %+v", sink.result)
+	}
+	wantUsage := AgyUsage{InputTokens: 65, CacheReadTokens: 15, OutputTokens: 40, TotalTokens: 120}
+	if sink.result.Usage != wantUsage {
+		t.Errorf("usage = %+v, want %+v", sink.result.Usage, wantUsage)
+	}
+}
+
+func TestMuseProtocol_SubagentNestingAndViewSubscribe(t *testing.T) {
+	t.Parallel()
+
+	inR, inW := io.Pipe()
+	defer closeAll(inR, inW)
+	subscribedSessions := startMuseSubscribeRecorder(inR)
+
+	daemon := &StreamingDaemon{
+		cfg:           DaemonConfig{Engine: "muse"},
+		stdin:         inW,
+		claudeToolIDs: make(map[string]int),
+	}
+	daemon.sessionID = "root-muse-sub"
+
+	sink := newMockTurnSink()
+	turn := enqueueInflightTurn(daemon, "turn-subagent", sink)
+
+	// 1. Subagent item starts with childSessionId immediately available
+	daemon.dispatchMuseJSONRPCLine(`{"jsonrpc":"2.0","method":"item/started","params":{"item":{"id":"sub-item-1","type":"subagent","childSessionId":"child-1","arguments":{"role":"code-researcher"}}}}`)
+	// Duplicate item/updated for the same childSessionId must not send a second view/subscribe
+	daemon.dispatchMuseJSONRPCLine(`{"jsonrpc":"2.0","method":"item/updated","params":{"item":{"id":"sub-item-1","childSessionId":"child-1"}}}`)
+	// Top-level item/updated without item wrapper and without id falls back to active subagent stack
+	daemon.dispatchMuseJSONRPCLine(`{"jsonrpc":"2.0","method":"item/updated","params":{"childSessionId":"child-2"}}`)
+
+	var gotSubs []string
+	var gotIDs []int
+	for range 2 {
+		select {
+		case sub := <-subscribedSessions:
+			gotSubs = append(gotSubs, sub.sessionID)
+			gotIDs = append(gotIDs, sub.rpcID)
+		case <-time.After(time.Second):
+			t.Fatalf("timed out waiting for view/subscribe")
+		}
+	}
+	if len(gotSubs) != 2 || gotSubs[0] != "child-1" || gotSubs[1] != "child-2" {
+		t.Errorf("unexpected view/subscribe sessions: %v", gotSubs)
+	}
+	if len(gotIDs) != 2 || gotIDs[0] == gotIDs[1] || gotIDs[0] <= 0 || gotIDs[1] <= 0 {
+		t.Errorf("expected unique positive JSON-RPC IDs, got %v", gotIDs)
+	}
+
+	// 2. Child non-tool items (agentMessage, reasoning, reminderChild) must be ignored
+	daemon.dispatchMuseJSONRPCLine(`{"jsonrpc":"2.0","method":"item/started","params":{"sessionId":"child-1","item":{"id":"c-msg","type":"agentMessage"}}}`)
+	daemon.dispatchMuseJSONRPCLine(`{"jsonrpc":"2.0","method":"item/completed","params":{"sessionId":"child-1","item":{"id":"c-msg","type":"agentMessage","text":"child response must not overwrite parent"}}}`)
+	daemon.dispatchMuseJSONRPCLine(`{"jsonrpc":"2.0","method":"item/started","params":{"sessionId":"child-1","item":{"id":"c-rem","kind":"reminderChild","type":"toolCall","tool":"bash"}}}`)
+
+	// 3. Child toolCall started and completed -> routed with ParentID="sub-item-1"
+	daemon.dispatchMuseJSONRPCLine(`{"jsonrpc":"2.0","method":"item/started","params":{"sessionId":"child-1","item":{"id":"c-tool-1","type":"commandExecution","command":"ls"}}}`)
+	daemon.dispatchMuseJSONRPCLine(`{"jsonrpc":"2.0","method":"item/completed","params":{"sessionId":"child-1","item":{"id":"c-tool-1","type":"commandExecution","status":"completed"}}}`)
+
+	// 4. Child tokenUsage is folded once; subsequent item/completed usage for child-1 is skipped to prevent double-counting
+	daemon.dispatchMuseJSONRPCLine(`{"jsonrpc":"2.0","method":"session/tokenUsage","params":{"sessionId":"child-1","usage":{"inputTokens":50,"outputTokens":25,"cachedTokens":10}}}`)
+	daemon.dispatchMuseJSONRPCLine(`{"jsonrpc":"2.0","method":"item/completed","params":{"item":{"id":"sub-item-1","type":"subagent","status":"completed","usage":{"inputTokens":50,"outputTokens":25,"cachedTokens":10}}}}`)
+
+	// 5. Second subagent started via toolCall "subagent" whose usage is only reported on item/completed
+	daemon.dispatchMuseJSONRPCLine(`{"jsonrpc":"2.0","method":"item/started","params":{"item":{"id":"sub-item-2","type":"toolCall","tool":"subagent","arguments":{"role":"reviewer"}}}}`)
+	daemon.dispatchMuseJSONRPCLine(`{"jsonrpc":"2.0","method":"item/completed","params":{"item":{"id":"sub-item-2","type":"toolCall","tool":"subagent","status":"completed","usage":{"inputTokens":30,"outputTokens":15,"cachedTokens":5}}}}`)
+
+	daemon.dispatchMuseJSONRPCLine(`{"jsonrpc":"2.0","method":"item/completed","params":{"item":{"type":"agentMessage","text":"final parent answer"}}}`)
+	daemon.dispatchMuseJSONRPCLine(`{"jsonrpc":"2.0","method":"turn/completed","params":{"status":"completed"}}`)
+
+	assertMuseSubagentSinkOutcome(t, sink)
+	_ = turn
+}
+
+func TestMuseProtocol_ChildUnmatchedCompletionIgnored(t *testing.T) {
+	t.Parallel()
+
+	daemon := &StreamingDaemon{
+		cfg:           DaemonConfig{Engine: "muse"},
+		claudeToolIDs: make(map[string]int),
+		inFlightTools: make(map[int]inFlightToolCall),
+	}
+	daemon.sessionID = "root-sess"
+
+	sink := newMockTurnSink()
+	turn := enqueueInflightTurn(daemon, "turn-unmatched", sink)
+
+	// 1 subagent starts
+	daemon.dispatchMuseJSONRPCLine(`{"jsonrpc":"2.0","method":"item/started","params":{"item":{"id":"sub-item-1","type":"subagent","childSessionId":"child-sess"}}}`)
+
+	// Only sub-item-1 is in flight
+	daemon.inflightMu.Lock()
+	inFlightCount := len(daemon.inFlightTools)
+	daemon.inflightMu.Unlock()
+	if inFlightCount != 1 {
+		t.Fatalf("expected 1 in-flight tool, got %d", inFlightCount)
+	}
+
+	// Send child commandExecution completion that had no start
+	daemon.dispatchMuseJSONRPCLine(`{"jsonrpc":"2.0","method":"item/completed","params":{"sessionId":"child-sess","item":{"id":"ghost-cmd","type":"commandExecution","status":"completed"}}}`)
+
+	// Confirm sub-item-1 stays open in flight
+	daemon.inflightMu.Lock()
+	inFlightCount = len(daemon.inFlightTools)
+	daemon.inflightMu.Unlock()
+	if inFlightCount != 1 {
+		t.Fatalf("expected sub-item-1 to stay in flight, got %d in flight", inFlightCount)
+	}
+	sink.mu.Lock()
+	completedCalls := len(sink.completions)
+	sink.mu.Unlock()
+	if completedCalls != 0 {
+		t.Errorf("expected 0 completed calls on sink, got %d", completedCalls)
+	}
+
+	// sub-item-1 completes normally
+	daemon.dispatchMuseJSONRPCLine(`{"jsonrpc":"2.0","method":"item/completed","params":{"item":{"id":"sub-item-1","type":"subagent","status":"completed"}}}`)
+	sink.mu.Lock()
+	completedCalls = len(sink.completions)
+	sink.mu.Unlock()
+	if completedCalls != 1 {
+		t.Errorf("expected sub-item-1 to complete, got %d completions", completedCalls)
+	}
+	if turn == nil {
+		t.Fatal("expected non-nil turn")
+	}
+}
+
+func TestMuseProtocol_ChildSessionStackFallbackAndUsageDeduplication(t *testing.T) {
+	t.Parallel()
+
+	daemon := &StreamingDaemon{
+		cfg:           DaemonConfig{Engine: "muse"},
+		claudeToolIDs: make(map[string]int),
+	}
+	daemon.sessionID = "root-sess"
+
+	sink := newMockTurnSink()
+	turn := enqueueInflightTurn(daemon, "turn-fallback", sink)
+
+	// 1 subagent with no childSessionId
+	daemon.dispatchMuseJSONRPCLine(`{"jsonrpc":"2.0","method":"item/started","params":{"item":{"id":"sub-item-1","type":"subagent","arguments":{"role":"researcher"}}}}`)
+
+	// Child token usage arrives for child-sess without an explicit childSessionId on start
+	daemon.dispatchMuseJSONRPCLine(`{"jsonrpc":"2.0","method":"session/tokenUsage","params":{"sessionId":"child-sess","usage":{"inputTokens":100,"outputTokens":20,"cachedTokens":30}}}`)
+
+	// Parent subagent completes with the same usage payload
+	daemon.dispatchMuseJSONRPCLine(`{"jsonrpc":"2.0","method":"item/completed","params":{"item":{"id":"sub-item-1","type":"subagent","status":"completed","usage":{"inputTokens":100,"outputTokens":20,"cachedTokens":30}}}}`)
+
+	daemon.dispatchMuseJSONRPCLine(`{"jsonrpc":"2.0","method":"turn/completed","params":{"status":"completed"}}`)
+
+	sink.mu.Lock()
+	defer sink.mu.Unlock()
+	if sink.result == nil {
+		t.Fatalf("expected turn result")
+	}
+	wantUsage := AgyUsage{InputTokens: 70, CacheReadTokens: 30, OutputTokens: 20, TotalTokens: 120}
+	if wantUsage != sink.result.Usage {
+		t.Errorf("usage = %+v, want %+v", sink.result.Usage, wantUsage)
+	}
+	if turn == nil {
+		t.Fatal("expected non-nil turn")
+	}
+}
+
+func TestMuseProtocol_MultipleSubagentsItemUpdatedLeavesChildUnbound(t *testing.T) {
+	t.Parallel()
+
+	inR, inW := io.Pipe()
+	defer closeAll(inR, inW)
+	subscribedSessions := startMuseSubscribeRecorder(inR)
+
+	daemon := &StreamingDaemon{
+		cfg:           DaemonConfig{Engine: "muse"},
+		stdin:         inW,
+		claudeToolIDs: make(map[string]int),
+	}
+	daemon.sessionID = "root-sess"
+
+	sink := newMockTurnSink()
+	turn := enqueueInflightTurn(daemon, "turn-multi-sub", sink)
+
+	// Two subagents start
+	daemon.dispatchMuseJSONRPCLine(`{"jsonrpc":"2.0","method":"item/started","params":{"item":{"id":"sub-item-1","type":"subagent","arguments":{"role":"a"}}}}`)
+	daemon.dispatchMuseJSONRPCLine(`{"jsonrpc":"2.0","method":"item/started","params":{"item":{"id":"sub-item-2","type":"subagent","arguments":{"role":"b"}}}}`)
+
+	daemon.inflightMu.Lock()
+	stackLen := len(turn.museSubagentStack)
+	daemon.inflightMu.Unlock()
+	if stackLen != 2 {
+		t.Fatalf("expected 2 subagents on stack, got %d", stackLen)
+	}
+
+	// Ambiguous item/updated with no item ID while 2 subagents are on the stack must NOT bind childSessionId
+	daemon.dispatchMuseJSONRPCLine(`{"jsonrpc":"2.0","method":"item/updated","params":{"childSessionId":"child-ambiguous"}}`)
+
+	// View/subscribe is still sent for child-ambiguous
+	select {
+	case sub := <-subscribedSessions:
+		if sub.sessionID != "child-ambiguous" {
+			t.Errorf("expected view/subscribe for child-ambiguous, got %s", sub.sessionID)
+		}
+	case <-time.After(time.Second):
+		t.Fatalf("timed out waiting for view/subscribe")
+	}
+
+	daemon.inflightMu.Lock()
+	boundParent := turn.museChildParentID["child-ambiguous"]
+	daemon.inflightMu.Unlock()
+	if boundParent != "" {
+		t.Errorf("expected child-ambiguous to remain unbound when multiple subagents active, got bound to %q", boundParent)
+	}
+
+	// Later explicit item/updated with an ID binds child-ambiguous to sub-item-2
+	daemon.dispatchMuseJSONRPCLine(`{"jsonrpc":"2.0","method":"item/updated","params":{"item":{"id":"sub-item-2","childSessionId":"child-ambiguous"}}}`)
+
+	daemon.inflightMu.Lock()
+	boundParent = turn.museChildParentID["child-ambiguous"]
+	daemon.inflightMu.Unlock()
+	if boundParent != "sub-item-2" {
+		t.Errorf("expected child-ambiguous bound to sub-item-2, got %q", boundParent)
 	}
 }
