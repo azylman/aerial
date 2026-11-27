@@ -1176,6 +1176,38 @@ func TestChunkFailureNotice(t *testing.T) {
 	}
 }
 
+func newAutoMergeServer(t *testing.T, headSHA string, apiError bool, onPatch, onAutomerge func()) *httptest.Server {
+	t.Helper()
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if apiError {
+			w.WriteHeader(http.StatusInternalServerError)
+			_, _ = w.Write([]byte(`{}`))
+			return
+		}
+		switch {
+		case r.Method == http.MethodGet:
+			w.WriteHeader(http.StatusOK)
+			payload := fmt.Sprintf(`{"state":"open","merged":false,"body":"desc","node_id":"n1","user":{"login":"owner"},"author_association":"OWNER","head":{"sha":%q,"ref":"feat/branch","repo":{"fork":false,"full_name":"owner/repo"}},"base":{"repo":{"full_name":"owner/repo"}}}`, headSHA)
+			_, err := w.Write([]byte(payload))
+			assert.NoError(t, err)
+		case r.Method == http.MethodPatch:
+			if onPatch != nil {
+				onPatch()
+			}
+			w.WriteHeader(http.StatusOK)
+		case r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/graphql"):
+			if onAutomerge != nil {
+				onAutomerge()
+			}
+			w.WriteHeader(http.StatusOK)
+			_, err := w.Write([]byte(`{"data":{"enablePullRequestAutoMerge":{}}}`))
+			assert.NoError(t, err)
+		default:
+			w.WriteHeader(http.StatusOK)
+		}
+	}))
+}
+
 func TestFlow_EnsureOpenedPRAutoMerge(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
@@ -1228,29 +1260,7 @@ func TestFlow_EnsureOpenedPRAutoMerge(t *testing.T) {
 			t.Parallel()
 			var patched bool
 			var automerged bool
-			api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				if tc.apiError {
-					w.WriteHeader(http.StatusInternalServerError)
-					_, _ = w.Write([]byte(`{}`))
-					return
-				}
-				switch {
-				case r.Method == http.MethodGet:
-					w.WriteHeader(http.StatusOK)
-					_, err := w.Write([]byte(`{"state":"open","merged":false,"body":"desc","node_id":"n1","user":{"login":"owner"},"author_association":"OWNER","head":{"sha":"abc","ref":"feat/branch","repo":{"fork":false,"full_name":"owner/repo"}},"base":{"repo":{"full_name":"owner/repo"}}}`))
-					assert.NoError(t, err)
-				case r.Method == http.MethodPatch:
-					patched = true
-					w.WriteHeader(http.StatusOK)
-				case r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/graphql"):
-					automerged = true
-					w.WriteHeader(http.StatusOK)
-					_, err := w.Write([]byte(`{"data":{"enablePullRequestAutoMerge":{}}}`))
-					assert.NoError(t, err)
-				default:
-					w.WriteHeader(http.StatusOK)
-				}
-			}))
+			api := newAutoMergeServer(t, "abc", tc.apiError, func() { patched = true }, func() { automerged = true })
 			defer api.Close()
 
 			chunks := []model.VanadisChunk{{ID: "c1", Repo: "owner/repo"}}
@@ -1265,4 +1275,31 @@ func TestFlow_EnsureOpenedPRAutoMerge(t *testing.T) {
 			assert.Equal(t, tc.wantAutomerge, automerged)
 		})
 	}
+}
+
+func TestFlow_HandlePREventType_SynchronizeAutoMerge(t *testing.T) {
+	t.Parallel()
+	var patched bool
+	var automerged bool
+	api := newAutoMergeServer(t, "sha-new", false, func() { patched = true }, func() { automerged = true })
+	defer api.Close()
+
+	chunks := []model.VanadisChunk{{ID: "c1", Repo: "owner/repo"}}
+	spy := &checkStatusSpyStore{chunks: chunks}
+	eri := &eritest.Client{}
+	exec := executor.NewExecutor(t.TempDir(), eri, nil, "token", "example-owner", api.Client())
+	exec.GitHubAPIURL = api.URL
+
+	f := NewFlow(spy, exec)
+	ev := pubsub.PRLifecycleEvent{
+		Event:    "synchronize",
+		Repo:     "owner/repo",
+		PRNumber: 10,
+		HeadSHA:  "sha-new",
+	}
+	err := f.HandlePREventType(context.Background(), "b1", "c1", "synchronize", ev)
+	assert.NoError(t, err)
+	assert.True(t, patched)
+	assert.True(t, automerged)
+	assert.Contains(t, spy.resets, "c1:sha-new:")
 }
