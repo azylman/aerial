@@ -12,6 +12,7 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -177,6 +178,34 @@ func scanPolicy(ctx context.Context, cfg *config.Config, owner, repo, pat string
 		Owner:          owner,
 		Repo:           repo,
 	}
+}
+
+func allowedSecretValues(cfg *config.Config, owner, repo, rest string) []string {
+	if strings.ContainsAny(owner, "?#%") || strings.ContainsAny(repo, "?#%") || strings.ContainsAny(rest, "?#%") {
+		return nil
+	}
+	names := cfg.Current().PushScan.SecretNamesFor(owner, repo, rest)
+	if len(names) == 0 {
+		return nil
+	}
+	shared := config.LoadSharedSecrets(config.SharedSecretsPath)
+	var out []string
+	for _, name := range names {
+		val, ok := shared[name]
+		if !ok {
+			for k, v := range shared {
+				if strings.EqualFold(k, name) {
+					val = v
+					ok = true
+					break
+				}
+			}
+		}
+		if ok && val != "" && !slices.Contains(out, val) {
+			out = append(out, val)
+		}
+	}
+	return out
 }
 
 // gitRepoFromPath extracts owner/repo from "owner/repo(.git)/git-receive-pack".
@@ -352,6 +381,8 @@ func scanAPIWrite(w http.ResponseWriter, r *http.Request, cfg *config.Config, pa
 		}
 		if filePath, payload, ok := apiPayloads(rest, decoded); ok {
 			violations = append(violations, guard.ScanPayload(payload, filePath, policy)...)
+		} else {
+			policy.AllowedSecretValues = allowedSecretValues(cfg, parts[1], parts[2], rest)
 		}
 		violations = append(violations, guard.ScanPayload(decoded, "", policy)...)
 	} else {

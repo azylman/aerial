@@ -62,9 +62,10 @@ var PrivateIPv4Pattern = PatternRule{
 // Registered secret values are matched on every repository; regex rules run
 // only when PublicRepo is set, minus hits under a RegexAllowlist path prefix.
 type PushScanPolicy struct {
-	PublicRepo     bool
-	RegexAllowlist []string
-	BlockMainPush  bool
+	PublicRepo          bool
+	RegexAllowlist      []string
+	AllowedSecretValues []string
+	BlockMainPush       bool
 	// Owner and Repo identify the destination repository for ObjectFetcher lookups.
 	Owner string
 	Repo  string
@@ -490,7 +491,11 @@ func maskRegexSample(category, raw string) string {
 }
 
 func valueHits(obj int, data []byte) []pushHit {
-	samples := sanitizer.MatchSensitiveTokens(string(data))
+	return valueHitsExcept(obj, data, nil)
+}
+
+func valueHitsExcept(obj int, data []byte, allowed []string) []pushHit {
+	samples := sanitizer.MatchSensitiveTokensExcept(string(data), allowed)
 	hits := make([]pushHit, 0, len(samples))
 	for _, sample := range samples {
 		hits = append(hits, pushHit{obj: obj, category: categoryRegisteredSecret, pattern: patternRegisteredSecret, sample: sample})
@@ -990,7 +995,12 @@ func ScanPayload(data []byte, filePath string, policy PushScanPolicy) []Violatio
 	if label == "" {
 		label = "request body"
 	}
-	hits := valueHits(0, data)
+	var hits []pushHit
+	if filePath == "" && len(policy.AllowedSecretValues) > 0 {
+		hits = valueHitsExcept(0, data, policy.AllowedSecretValues)
+	} else {
+		hits = valueHits(0, data)
+	}
 	allowlisted := filePath != "" && pathAllowlisted(filePath, policy.RegexAllowlist)
 	if policy.PublicRepo && !allowlisted && !isBinary(data) {
 		hits = append(hits, regexHits(0, string(data), PushScanRules())...)

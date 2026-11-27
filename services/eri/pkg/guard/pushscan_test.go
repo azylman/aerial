@@ -449,7 +449,7 @@ func TestParseReceivePackRequest(t *testing.T) {
 
 func TestScanPayload(t *testing.T) {
 	sanitizer.ResetSensitiveTokensForTest()
-	sanitizer.RegisterSensitiveTokens("dummy-payload-secret")
+	sanitizer.RegisterSensitiveTokens("dummy-payload-secret", "dummy-payload-samet")
 	t.Cleanup(sanitizer.ResetSensitiveTokensForTest)
 
 	public := PushScanPolicy{PublicRepo: true, RegexAllowlist: []string{"testdata/"}}
@@ -465,6 +465,10 @@ func TestScanPayload(t *testing.T) {
 		{name: "regex ignored on private repo", data: "ssh 10.4.4.4", filePath: "docs/a.md"},
 		{name: "allowlisted file path drops regex", data: "ssh 10.4.4.4", filePath: "testdata/x.txt", policy: public},
 		{name: "allowlist never drops value hit", data: "dummy-payload-secret", filePath: "testdata/x.txt", policy: public, want: []Violation{{Category: "InfisicalSecret", File: "testdata/x.txt", LineNum: 1, Sample: "du***et"}}},
+		{name: "allowed secret value drops value hit on request body", data: `{"body":"dummy-payload-secret"}`, policy: PushScanPolicy{AllowedSecretValues: []string{"dummy-payload-secret"}}},
+		{name: "same mask secret retains value hit on request body", data: `{"body":"dummy-payload-samet"}`, policy: PushScanPolicy{AllowedSecretValues: []string{"dummy-payload-secret"}}, want: []Violation{{Category: "InfisicalSecret", File: "request body", LineNum: 1, Sample: "du***et"}}},
+		{name: "allowed secret value never drops value hit for file payload", data: "dummy-payload-secret", filePath: "docs/key.md", policy: PushScanPolicy{AllowedSecretValues: []string{"dummy-payload-secret"}}, want: []Violation{{Category: "InfisicalSecret", File: "docs/key.md", LineNum: 1, Sample: "du***et"}}},
+		{name: "non-matching allowed secret value retains value hit on request body", data: `{"body":"dummy-payload-secret"}`, policy: PushScanPolicy{AllowedSecretValues: []string{"other-secret-value"}}, want: []Violation{{Category: "InfisicalSecret", File: "request body", LineNum: 1, Sample: "du***et"}}},
 		{name: "binary payload skips regex", data: "\x00 10.4.4.4", filePath: "img.bin", policy: public},
 	}
 	for _, tc := range tests {
