@@ -15,9 +15,11 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/bwmarrin/discordgo"
 	restate "github.com/restatedev/sdk-go"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -29,6 +31,7 @@ import (
 	"github.com/azylman/aerial/services/eri/pkg/bootstrap"
 	"github.com/azylman/aerial/services/eri/pkg/config"
 	"github.com/azylman/aerial/services/eri/pkg/db"
+	"github.com/azylman/aerial/services/eri/pkg/discord"
 	"github.com/azylman/aerial/services/eri/pkg/env"
 	"github.com/azylman/aerial/services/eri/pkg/metrics"
 	"github.com/azylman/aerial/services/eri/pkg/queue"
@@ -58,6 +61,12 @@ func WithLLMFunc(fn runner.LLMFunc) AppOption {
 func WithAppConfig(cfg *config.Config) AppOption {
 	return func(o *appOptions) {
 		o.appConfig = cfg
+	}
+}
+
+func WithDiscordSessionHydrator(fn func(context.Context, *discordgo.Session, discord.HydrateOptions) func()) AppOption {
+	return func(o *appOptions) {
+		o.discordSessionHydrator = fn
 	}
 }
 
@@ -485,6 +494,9 @@ func TestRunApp_CanceledContext(t *testing.T) {
 		WithStore(fakeStore, nil),
 		WithAppConfig(appCfgWithTokens),
 		WithDaemonSpawner(&dummySpawner{}),
+		WithDiscordSessionHydrator(func(context.Context, *discordgo.Session, discord.HydrateOptions) func() {
+			return func() {}
+		}),
 	)
 	assert.NoError(t, err)
 
@@ -851,21 +863,46 @@ func TestWireOutboundIntegrations(t *testing.T) {
 		name        string
 		cur         *config.ConfigData
 		wantSession bool
+		wantClose   bool
+		wantHydrate bool
 	}{
-		{name: "token and nats url", cur: &config.ConfigData{DiscordToken: "token-1", NATSURL: "nats://127.0.0.1:65530"}, wantSession: true},
+		{name: "token and unreachable nats url", cur: &config.ConfigData{DiscordToken: "token-1", NATSURL: "nats://127.0.0.1:65530"}, wantSession: true, wantClose: true, wantHydrate: true},
+		{name: "token only", cur: &config.ConfigData{DiscordToken: "token-2"}, wantSession: true, wantClose: true, wantHydrate: true},
 		{name: "no token and no nats url", cur: &config.ConfigData{}},
+		{name: "nil config data", cur: nil},
 		{name: "malformed nats url skips event bus", cur: &config.ConfigData{NATSURL: "nats://bad\x7fhost:4222"}},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			pool := queue.New(nil, queue.WorkerPoolConfig{})
-			dg, closeFn := wireOutboundIntegrations(context.Background(), tc.cur, pool)
+			var hydrateCalls, stopCalls atomic.Int32
+			var gotOnGuildSet bool
+			hydrator := func(_ context.Context, _ *discordgo.Session, opts discord.HydrateOptions) func() {
+				hydrateCalls.Add(1)
+				gotOnGuildSet = opts.OnGuild != nil
+				return func() { stopCalls.Add(1) }
+			}
+			dg, closeFn := wireOutboundIntegrations(context.Background(), tc.cur, pool, hydrator)
 			assert.Equal(t, tc.wantSession, dg != nil)
 			assert.Same(t, dg, pool.DiscordSession())
-			assert.Equal(t, closeFn != nil, pool.EventBus() != nil)
+			assert.Equal(t, tc.wantClose, closeFn != nil)
+			if tc.wantSession {
+				require.NotNil(t, dg.Client)
+				assert.Equal(t, 20*time.Second, dg.Client.Timeout)
+				assert.NotNil(t, dg.Client.Transport)
+			}
+			if tc.wantHydrate {
+				assert.Equal(t, int32(1), hydrateCalls.Load())
+				assert.False(t, gotOnGuildSet, "eri-restate must not register slash commands via OnGuild")
+			} else {
+				assert.Equal(t, int32(0), hydrateCalls.Load())
+			}
 			if closeFn != nil {
 				closeFn()
+				if tc.wantHydrate {
+					assert.Equal(t, int32(1), stopCalls.Load())
+				}
 			}
 		})
 	}

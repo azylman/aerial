@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -645,6 +646,7 @@ func TestResolveBotRoleIDsSuite(t *testing.T) {
 	tests := []resolveBotRoleIDsCase{
 		{name: "NilSessionAndStateResolution", guildID: "guild-suite-1", botID: "bot-suite-1", checkNilSession: true, addGuild: true, guildRoles: []*discordgo.Role{{ID: "role-aerial-managed", Name: "Aerial", Managed: true}, {ID: "role-gundam-alt", Name: "Gundam"}, {ID: "role-unrelated", Name: "Member"}}, guildMembers: []*discordgo.Member{{User: &discordgo.User{ID: "bot-suite-1"}, Roles: []string{"role-assigned-1"}}}, calls: 1, wantRoles: []string{"role-aerial-managed", "role-assigned-1", "role-gundam-alt"}},
 		{name: "RESTFallbackAndCaching", guildID: "guild-suite-rest", botID: "bot-suite-rest", addGuild: true, guildRoles: []*discordgo.Role{{ID: "role-aerial-managed", Name: "Aerial", Managed: true}}, fetchRoles: []string{"mock-role-robot-123"}, calls: 2, wantRoles: []string{"mock-role-robot-123", "role-aerial-managed"}, wantFetchCalls: 1},
+		{name: "RESTFallbackUncachedGuildPersistsMember", guildID: "guild-suite-uncached-ok", botID: "bot-suite-uncached-ok", addGuild: false, fetchRoles: []string{"mock-role-robot-456"}, calls: 2, wantRoles: []string{"mock-role-robot-456"}, wantFetchCalls: 1},
 		{name: "SingleflightDeduplication", guildID: "guild-suite-sf", botID: "bot-suite-sf", addGuild: true, fetchRoles: []string{"mock-role-robot-123"}, concurrentCallers: 10, wantRoles: []string{"mock-role-robot-123"}, wantFetchCalls: 1},
 		{name: "CooldownAndUncachedGuild", guildID: "guild-suite-uncached", botID: "bot-suite-cd", fetchErr: errors.New("simulated 429 rate limit"), calls: 2, testCooldownPruning: true, wantFetchCalls: 1},
 	}
@@ -652,6 +654,140 @@ func TestResolveBotRoleIDsSuite(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			runResolveBotRoleIDsCase(t, tc)
 		})
+	}
+}
+
+func TestResolveBotUserID(t *testing.T) {
+	origUserFetcher := botUserFetcher
+	defer func() { botUserFetcher = origUserFetcher }()
+	if _, err := origUserFetcher(nil); err == nil {
+		t.Errorf("expected error from origUserFetcher(nil)")
+	}
+	if _, err := origUserFetcher(&discordgo.Session{}); err == nil {
+		t.Errorf("expected error from origUserFetcher(empty)")
+	}
+
+	if got := ResolveBotUserID(nil); got != "" {
+		t.Fatalf("ResolveBotUserID(nil) = %q, want empty", got)
+	}
+	if got := ResolveBotUserID(&discordgo.Session{}); got != "" {
+		t.Fatalf("ResolveBotUserID(nil state) = %q, want empty", got)
+	}
+
+	// Already cached in State.User.
+	sCached := &discordgo.Session{State: discordgo.NewState()}
+	sCached.State.User = &discordgo.User{ID: "bot-cached-1", Username: "Aerial"}
+	if got := ResolveBotUserID(sCached); got != "bot-cached-1" {
+		t.Fatalf("ResolveBotUserID(cached) = %q, want bot-cached-1", got)
+	}
+
+	// Missing Token or Client short-circuits without calling REST.
+	sNoRest := &discordgo.Session{State: discordgo.NewState(), Token: "Bot tok"}
+	if got := ResolveBotUserID(sNoRest); got != "" {
+		t.Fatalf("ResolveBotUserID(nil client) = %q, want empty", got)
+	}
+
+	// Lazy REST fetch populates State.User and avoids repeat calls.
+	var fetchCalls atomic.Int32
+	botUserFetcher = func(sess *discordgo.Session) (*discordgo.User, error) {
+		fetchCalls.Add(1)
+		return &discordgo.User{ID: "bot-lazy-1", Username: "Aerial"}, nil
+	}
+	mockClient := &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+		return nil, errors.New("unexpected network call")
+	})}
+	sLazy := &discordgo.Session{State: discordgo.NewState(), Token: "Bot tok", Client: mockClient}
+	if got := ResolveBotUserID(sLazy); got != "bot-lazy-1" {
+		t.Fatalf("ResolveBotUserID(lazy) = %q, want bot-lazy-1", got)
+	}
+	if got := ResolveBotUserID(sLazy); got != "bot-lazy-1" {
+		t.Fatalf("ResolveBotUserID(second call) = %q, want bot-lazy-1", got)
+	}
+	if got := fetchCalls.Load(); got != 1 {
+		t.Fatalf("fetchCalls = %d, want 1", got)
+	}
+
+	// Error sets cooldown and returns empty.
+	botUserFetcher = func(sess *discordgo.Session) (*discordgo.User, error) {
+		fetchCalls.Add(1)
+		return nil, errors.New("simulated 500")
+	}
+	sErr := &discordgo.Session{State: discordgo.NewState(), Token: "Bot tok", Client: mockClient}
+	t.Cleanup(func() {
+		sfKey := fmt.Sprintf("bot_user:%p", sErr)
+		restCooldownMu.Lock()
+		delete(restCooldown, sfKey)
+		restCooldownMu.Unlock()
+	})
+	if got := ResolveBotUserID(sErr); got != "" {
+		t.Fatalf("ResolveBotUserID(err) = %q, want empty", got)
+	}
+	if got := ResolveBotUserID(sErr); got != "" {
+		t.Fatalf("ResolveBotUserID(cooldown) = %q, want empty", got)
+	}
+	if got := fetchCalls.Load(); got != 2 {
+		t.Fatalf("fetchCalls after error+cooldown = %d, want 2", got)
+	}
+}
+
+func TestResolveBotIdentity_UnhydratedSessionRoleMentionWake(t *testing.T) {
+	origUserFetcher := botUserFetcher
+	origMemberFetcher := guildMemberFetcher
+	defer func() {
+		botUserFetcher = origUserFetcher
+		guildMemberFetcher = origMemberFetcher
+	}()
+
+	botUserFetcher = func(sess *discordgo.Session) (*discordgo.User, error) {
+		return &discordgo.User{ID: "bot-unhydrated-1", Username: "Aerial"}, nil
+	}
+	guildMemberFetcher = func(sess *discordgo.Session, guildID, userID string) (*discordgo.Member, error) {
+		return &discordgo.Member{
+			GuildID: guildID,
+			User:    &discordgo.User{ID: userID, Username: "Aerial"},
+			Roles:   []string{"role-robot-999"},
+		}, nil
+	}
+
+	s := &discordgo.Session{State: discordgo.NewState(), Token: "Bot tok", Client: &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+		return nil, errors.New("unexpected network call")
+	})}}
+	t.Cleanup(func() {
+		restCooldownMu.Lock()
+		delete(restCooldown, fmt.Sprintf("bot_user:%p", s))
+		delete(restCooldown, "bot_member:guild-unhydrated-1:bot-unhydrated-1")
+		restCooldownMu.Unlock()
+	})
+
+	pool := New(nil, WorkerPoolConfig{})
+	pool.SetDiscordSession(s)
+
+	// Empty burst guard does not panic.
+	teEmpty := &turnExecution{pool: pool}
+	gotID, gotRoles := teEmpty.resolveBotIdentity()
+	if gotID != "bot-unhydrated-1" || len(gotRoles) != 0 {
+		t.Fatalf("resolveBotIdentity(empty burst) = (%q, %v), want (bot-unhydrated-1, [])", gotID, gotRoles)
+	}
+
+	te := &turnExecution{
+		pool: pool,
+		burst: []db.Message{{
+			ID:             "msg-role-wake-1",
+			GuildID:        "guild-unhydrated-1",
+			AuthorID:       "user-1",
+			Content:        "hey <@&role-robot-999>",
+			MentionRoleIDs: []string{"role-robot-999"},
+		}},
+	}
+	botID, roleIDs := te.resolveBotIdentity()
+	if botID != "bot-unhydrated-1" {
+		t.Fatalf("botID = %q, want bot-unhydrated-1", botID)
+	}
+	if !slices.Contains(roleIDs, "role-robot-999") {
+		t.Fatalf("roleIDs = %v, want role-robot-999", roleIDs)
+	}
+	if !isTier1Wake(te.burst[0], botID, roleIDs) {
+		t.Fatal("expected role-mention message to trigger Tier-1 wake on unhydrated session")
 	}
 }
 

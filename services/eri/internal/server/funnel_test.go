@@ -11,7 +11,6 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
-	"sync/atomic"
 	"testing"
 	"time"
 
@@ -850,100 +849,6 @@ func TestHydrateDiscordSessionREST(t *testing.T) {
 			assertHydrateDiscordSessionCase(t, tc)
 		})
 	}
-
-	hydrateGuildState(nil, nil, "bot-1")
-	errSess := newMockDiscordSession(t, nil)
-	hydrateGuildRoles(errSess, "g1")
-	hydrateGuildChannels(errSess, "g1")
-	hydrateGuildThreads(errSess, "g1")
-
-	// REST returns roles, channels and threads for a guild the session state has
-	// never seen: state inserts fail, but channels still reach the shared cache.
-	queue.InvalidateChannelCache("ch-hydrated-1")
-	queue.InvalidateChannelCache("th-hydrated-1")
-	unknownGuildSess := newMockDiscordSession(t, func(req *http.Request) (*http.Response, error) {
-		return runHydrateSessionRoundTrip(req, hydrateDiscordSessionCase{})
-	})
-	hydrateGuildRoles(unknownGuildSess, "g-unknown")
-	hydrateGuildChannels(unknownGuildSess, "g-unknown")
-	hydrateGuildThreads(unknownGuildSess, "g-unknown")
-	for _, id := range []string{"ch-hydrated-1", "th-hydrated-1"} {
-		if _, ok := queue.GetCachedChannel(id); !ok {
-			t.Errorf("expected %s in channel cache despite state insert failure", id)
-		}
-		if _, err := unknownGuildSess.State.Channel(id); err == nil {
-			t.Errorf("expected %s to be absent from session state for unknown guild", id)
-		}
-	}
-	if _, err := unknownGuildSess.State.Role("g-unknown", "role-hydrated-1"); err == nil {
-		t.Error("expected role to be absent from session state for unknown guild")
-	}
-}
-
-func TestSyncBotMemberRoles(t *testing.T) {
-	origFetcher := funnelMemberFetcher
-	defer func() { funnelMemberFetcher = origFetcher }()
-
-	var fetchCalls int32
-	shouldFail := false
-	funnelMemberFetcher = func(s *discordgo.Session, guildID, userID string) (*discordgo.Member, error) {
-		atomic.AddInt32(&fetchCalls, 1)
-		if shouldFail {
-			return nil, errors.New("simulated fetch failure")
-		}
-		return &discordgo.Member{
-			GuildID: "",
-			User:    &discordgo.User{ID: userID},
-			Roles:   []string{"mock-role-robot-123"},
-		}, nil
-	}
-
-	s := newMockDiscordSession(t, nil)
-	s.State.User = &discordgo.User{ID: "bot-1"}
-	if err := s.State.GuildAdd(&discordgo.Guild{ID: "guild-1"}); err != nil {
-		t.Fatalf("failed to add guild: %v", err)
-	}
-
-	syncBotMemberRoles(context.Background(), nil, "guild-1", "bot-1")
-	syncBotMemberRoles(context.Background(), s, "", "bot-1")
-	syncBotMemberRoles(context.Background(), s, "guild-1", "")
-	if atomic.LoadInt32(&fetchCalls) != 0 {
-		t.Fatalf("expected 0 calls for invalid args, got %d", fetchCalls)
-	}
-
-	canceledCtx, cancel := context.WithCancel(context.Background())
-	cancel()
-	syncBotMemberRoles(canceledCtx, s, "guild-1", "bot-1")
-	if atomic.LoadInt32(&fetchCalls) != 0 {
-		t.Fatalf("expected 0 calls for canceled context, got %d", fetchCalls)
-	}
-
-	shouldFail = true
-	syncBotMemberRoles(context.Background(), s, "guild-1", "bot-1")
-	if atomic.LoadInt32(&fetchCalls) != 1 {
-		t.Fatalf("expected 1 call on failure, got %d", fetchCalls)
-	}
-	shouldFail = false
-
-	syncBotMemberRoles(context.Background(), s, "guild-1", "bot-1")
-	if atomic.LoadInt32(&fetchCalls) != 2 {
-		t.Fatalf("expected 2 calls total, got %d", fetchCalls)
-	}
-
-	m, err := s.State.Member("guild-1", "bot-1")
-	if err != nil || len(m.Roles) != 1 || m.Roles[0] != "mock-role-robot-123" {
-		t.Fatalf("expected cached member with role, got %v (err: %v)", m, err)
-	}
-	if m.GuildID != "guild-1" {
-		t.Fatalf("expected guildID populated, got %s", m.GuildID)
-	}
-
-	syncBotMemberRoles(context.Background(), s, "guild-1", "bot-1")
-	if atomic.LoadInt32(&fetchCalls) != 2 {
-		t.Fatalf("expected fetchCalls to stay 2, got %d", fetchCalls)
-	}
-
-	syncBotMemberRoles(context.Background(), s, "guild-not-in-state", "bot-1")
 }
 
 type populateDiscordMessageCase struct {
