@@ -254,7 +254,7 @@ kubectl create secret generic aerial-bootstrap-secrets \\
           'Authenticate the agent execution engine inside the worker container and verify Kubernetes pod readiness and GitOps sync state.',
         paragraphs: [
           'Platform workloads deploy through Flux CD after secret configuration. The final step authenticates the execution engine inside the agent worker container and verifies rollout health.',
-          'Aerial supports multiple execution engines including Google Antigravity, Claude Code, and Codex. Start the interactive authentication flow in the worker container. Then inspect pod readiness and Flux synchronization to confirm a healthy cluster.',
+          'Aerial supports multiple execution engines including Google Antigravity, Claude Code, Codex, and Muse Code. Start the interactive authentication flow in the worker container. Then inspect pod readiness and Flux synchronization to confirm a healthy cluster.',
         ],
         bullets: [
           'Execution Engine Authentication: Authenticate your selected agent CLI inside the agent worker container.',
@@ -523,7 +523,7 @@ scripts/aerial-build.sh status <build-id>`,
         id: 'multi-engine-cli',
         title: 'Multi-Engine CLI Orchestration & Hot-Swapping',
         lead:
-          'Hot-swap between Google Antigravity, Claude Code, Codex, and other CLI engines with identical memory and tool interfaces.',
+          'Hot-swap between Google Antigravity, Claude Code, Codex, Muse Code, and other CLI engines with identical memory and tool interfaces.',
         paragraphs: [
           'Aerial prevents lock-in to specific model providers or proprietary agent harnesses. The execution runtime abstracts CLI agents through a unified runner interface. Supported engines receive identical tools, skills, rules, and memory context.',
           'Configuration files declare the default reasoning engine and models. Channel policies configure wake triggers, reasoning effort levels, and ambient classification thresholds.',

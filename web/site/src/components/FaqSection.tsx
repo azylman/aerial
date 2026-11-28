@@ -34,7 +34,7 @@ export const FAQ_ITEMS: readonly FaqItem[] = [
     category: 'AI Engines',
     question: 'Which coding CLI engines and LLM providers work with Aerial?',
     answer:
-      'Aerial runs pluggable agent CLI execution engines including Claude Code, Codex CLI, and Google Antigravity. The platform routes model calls to Anthropic, OpenAI, and Google Cloud providers. You can configure preferred models and per-channel reasoning tiers in your user configuration repository. Local ONNX and GGUF inference run speech processing and ambient triage tasks on premises.',
+      'Aerial runs pluggable agent CLI execution engines including Claude Code, Codex CLI, Google Antigravity, and Muse Code. The platform routes model calls to Anthropic, OpenAI, and Google Cloud providers. You can configure preferred models and per-channel reasoning tiers in your user configuration repository. Local ONNX and GGUF inference run speech processing and ambient triage tasks on premises.',
   },
   {
     id: 'self-healing-safety',
