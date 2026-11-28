@@ -46,10 +46,12 @@ if [ "$FORCE_ALL" = "true" ]; then CAND_OCI=("${OCI_SVCS[@]}"); else
     for f in "${CHANGED_FILES[@]}"; do
         is_test_file "$f" && continue
         case "$f" in
-            images/BUILD.bazel|build/BUILD.bazel|build/oci.bzl|MODULE.bazel*|BUILD.bazel|go.mod|go.sum) chk_all="true" ;;
+            images/BUILD.bazel|build/BUILD.bazel|build/oci.bzl|MODULE.bazel*|BUILD.bazel|go.mod|go.sum|scripts/bazel-select-images.sh) chk_all="true" ;;
             scripts/*|rules/*|.agents/*) b_pkgs+=("//:all") ;;
             services/docs-service/*) [ -f "$REPO_ROOT/services/docs-service/BUILD.bazel" ] && b_pkgs+=("//services/docs-service:all") ;;
-            services/eri/pkg/db/migrations/*) [ -f "$REPO_ROOT/services/eri/pkg/db/BUILD.bazel" ] && b_pkgs+=("//services/eri/pkg/db:all") ;;
+            services/eri/pkg/db/migrations/*)
+                [ -f "$REPO_ROOT/services/eri/pkg/db/migrations/BUILD.bazel" ] && b_pkgs+=("//services/eri/pkg/db/migrations:all")
+                [ -f "$REPO_ROOT/services/eri/pkg/db/BUILD.bazel" ] && b_pkgs+=("//services/eri/pkg/db:all") ;;
             services/*|mcp/*|pkg/*)
                 d=$(dirname "$f"); pkg=""
                 while [ -n "$d" ] && [ "$d" != "." ] && [ "$d" != "/" ]; do [ -f "$REPO_ROOT/$d/BUILD.bazel" ] && { pkg="$d"; break; }; d=$(dirname "$d"); done
