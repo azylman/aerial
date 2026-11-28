@@ -23,7 +23,7 @@ export const PILLAR_CARDS: readonly PillarCard[] = [
     { id: 'auto-recovery', capability: 'Auto-Recovery', tech: 'GitHub Actions', detail: 'Proactive wakes on failing checks' },
   ] },
   { id: 'agent', title: 'AI Agent', description: 'Always-on chat, room voice, and phone operator with browser tools and long-term memory.', specs: [
-    { id: 'agent-harnesses', capability: 'Agent Harnesses', tech: 'Claude • GPT • Gemini', detail: 'Claude Code, Codex & Antigravity' },
+    { id: 'agent-harnesses', capability: 'Agent Harnesses', tech: 'Claude • GPT • Gemini', detail: 'Claude Code, Codex, Antigravity & Muse Code' },
     { id: 'voice-chat', capability: 'Voice & Chat', tech: 'Discord + Voice', detail: 'Threads, room audio & phone calls' },
     { id: 'tools-memory', capability: 'Tools & Memory', tech: 'CDP • Cron • ACT-R', detail: 'Browser, timers, memory & skills' },
   ] },
