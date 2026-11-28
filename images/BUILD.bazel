@@ -237,7 +237,7 @@ pkg_tar(
     name = "migrator_layer",
     srcs = ["//services/eri/pkg/db/migrations"],
     package_dir = "/migrations",
-    strip_prefix = "services/eri/pkg/db/migrations",
+    strip_prefix = "/services/eri/pkg/db/migrations",
 )
 
 oci_image(
