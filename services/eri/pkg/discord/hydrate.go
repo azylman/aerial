@@ -18,15 +18,8 @@ type HydrateOptions struct {
 	LogPrefix     string
 }
 
-func withOptionalContext(ctx context.Context) []discordgo.RequestOption {
-	if ctx == nil {
-		return nil
-	}
-	return []discordgo.RequestOption{discordgo.WithContext(ctx)}
-}
-
 func hydrateGuildRoles(ctx context.Context, dg *discordgo.Session, guildID, prefix string) {
-	roles, err := dg.GuildRoles(guildID, withOptionalContext(ctx)...)
+	roles, err := dg.GuildRoles(guildID, discordgo.WithContext(ctx))
 	if err != nil {
 		return
 	}
@@ -41,7 +34,7 @@ func hydrateGuildRoles(ctx context.Context, dg *discordgo.Session, guildID, pref
 }
 
 func hydrateGuildChannels(ctx context.Context, dg *discordgo.Session, guildID string, onChannel func(*discordgo.Channel), prefix string) {
-	channels, err := dg.GuildChannels(guildID, withOptionalContext(ctx)...)
+	channels, err := dg.GuildChannels(guildID, discordgo.WithContext(ctx))
 	if err != nil {
 		return
 	}
@@ -60,7 +53,7 @@ func hydrateGuildChannels(ctx context.Context, dg *discordgo.Session, guildID st
 }
 
 func hydrateGuildThreads(ctx context.Context, dg *discordgo.Session, guildID string, onChannel func(*discordgo.Channel), prefix string) {
-	activeThreads, err := dg.GuildThreadsActive(guildID, withOptionalContext(ctx)...)
+	activeThreads, err := dg.GuildThreadsActive(guildID, discordgo.WithContext(ctx))
 	if err != nil || activeThreads == nil {
 		return
 	}
@@ -81,7 +74,7 @@ func hydrateGuildThreads(ctx context.Context, dg *discordgo.Session, guildID str
 // SyncBotMemberRoles fetches and caches the bot's guild member roles into dg.State
 // if they are not already present.
 func SyncBotMemberRoles(ctx context.Context, dg *discordgo.Session, guildID, botID string, opts HydrateOptions) {
-	if dg == nil || dg.State == nil || guildID == "" || botID == "" || (ctx != nil && ctx.Err() != nil) {
+	if dg == nil || dg.State == nil || guildID == "" || botID == "" || ctx.Err() != nil {
 		return
 	}
 	if m, err := dg.State.Member(guildID, botID); err == nil && m != nil {
@@ -92,7 +85,7 @@ func SyncBotMemberRoles(ctx context.Context, dg *discordgo.Session, guildID, bot
 	if opts.MemberFetcher != nil {
 		m, err = opts.MemberFetcher(dg, guildID, botID)
 	} else {
-		m, err = dg.GuildMember(guildID, botID, withOptionalContext(ctx)...)
+		m, err = dg.GuildMember(guildID, botID, discordgo.WithContext(ctx))
 	}
 	if err != nil || m == nil {
 		log.Printf("%sWarning: failed to fetch bot member roles for guild %s: %v", opts.LogPrefix, guildID, err)
@@ -115,12 +108,10 @@ func HydrateSessionREST(ctx context.Context, dg *discordgo.Session, opts Hydrate
 	if dg == nil || dg.Token == "" {
 		return nil
 	}
-	if ctx != nil {
-		if err := ctx.Err(); err != nil {
-			return err
-		}
+	if err := ctx.Err(); err != nil {
+		return err
 	}
-	u, err := dg.User("@me", withOptionalContext(ctx)...)
+	u, err := dg.User("@me", discordgo.WithContext(ctx))
 	if err != nil {
 		return err
 	}
@@ -131,16 +122,14 @@ func HydrateSessionREST(ctx context.Context, dg *discordgo.Session, opts Hydrate
 	dg.State.User = u
 	dg.State.Unlock()
 
-	userGuilds, err := dg.UserGuilds(100, "", "", false, withOptionalContext(ctx)...)
+	userGuilds, err := dg.UserGuilds(100, "", "", false, discordgo.WithContext(ctx))
 	if err != nil {
 		return err
 	}
 
 	for _, ug := range userGuilds {
-		if ctx != nil {
-			if err := ctx.Err(); err != nil {
-				return err
-			}
+		if err := ctx.Err(); err != nil {
+			return err
 		}
 		if ug == nil || ug.ID == "" {
 			continue
@@ -163,7 +152,7 @@ func HydrateSessionREST(ctx context.Context, dg *discordgo.Session, opts Hydrate
 // until hydration succeeds or ctx is canceled. The returned stop func cancels the retry loop
 // and blocks until the background goroutine exits.
 func OpenSessionWithRetry(ctx context.Context, dg *discordgo.Session, opts HydrateOptions) (stop func()) {
-	if ctx == nil || ctx.Err() != nil || dg == nil {
+	if ctx.Err() != nil || dg == nil {
 		return func() {}
 	}
 	hydrateFn := opts.HydrateFunc

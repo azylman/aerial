@@ -869,7 +869,6 @@ func TestWireOutboundIntegrations(t *testing.T) {
 		{name: "token and unreachable nats url", cur: &config.ConfigData{DiscordToken: "token-1", NATSURL: "nats://127.0.0.1:65530"}, wantSession: true, wantClose: true, wantHydrate: true},
 		{name: "token only", cur: &config.ConfigData{DiscordToken: "token-2"}, wantSession: true, wantClose: true, wantHydrate: true},
 		{name: "no token and no nats url", cur: &config.ConfigData{}},
-		{name: "nil config data", cur: nil},
 		{name: "malformed nats url skips event bus", cur: &config.ConfigData{NATSURL: "nats://bad\x7fhost:4222"}},
 	}
 	for _, tc := range tests {

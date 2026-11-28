@@ -216,20 +216,6 @@ func TestHydrateSessionREST_UnknownGuildStateErrorsAndNilContext(t *testing.T) {
 	if chCount != 2 {
 		t.Errorf("expected 2 OnChannel calls even when state insert fails, got %d", chCount)
 	}
-
-	// Verify nil context defaults to context.Background() cleanly.
-	sEmpty, err := discordgo.New("Bot mock-token")
-	if err != nil {
-		t.Fatalf("discordgo.New() error = %v", err)
-	}
-	sEmpty.Client = &http.Client{
-		Transport: roundTripperFunc(func(req *http.Request) (*http.Response, error) {
-			return runHydrateRoundTrip(req, hydrateRESTCase{guildsStatus: http.StatusOK, guildsBody: `[]`})
-		}),
-	}
-	if err := HydrateSessionREST(nil, sEmpty, HydrateOptions{}); err != nil {
-		t.Fatalf("HydrateSessionREST(nil, ...) error = %v", err)
-	}
 }
 
 func TestHydrateSessionREST_CancelMidGuildLoop(t *testing.T) {
@@ -327,7 +313,7 @@ func TestSyncBotMemberRoles(t *testing.T) {
 			return jsonHTTPResponse(http.StatusOK, `{"user":{"id":"bot-rest"},"roles":["role-rest-1"]}`), nil
 		}),
 	}
-	SyncBotMemberRoles(nil, restSess, "guild-rest", "bot-rest", HydrateOptions{})
+	SyncBotMemberRoles(context.Background(), restSess, "guild-rest", "bot-rest", HydrateOptions{})
 	if rm, rErr := restSess.State.Member("guild-rest", "bot-rest"); rErr != nil || !slices.Equal(rm.Roles, []string{"role-rest-1"}) {
 		t.Fatalf("expected REST-fetched member in state, got %+v (err=%v)", rm, rErr)
 	}
@@ -348,7 +334,6 @@ func TestOpenSessionWithRetry_ShortCircuits(t *testing.T) {
 		},
 	}
 
-	OpenSessionWithRetry(nil, s, opts)()
 	OpenSessionWithRetry(canceledCtx, s, opts)()
 	OpenSessionWithRetry(context.Background(), nil, opts)()
 	if got := called.Load(); got != 0 {

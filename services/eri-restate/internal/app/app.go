@@ -382,30 +382,26 @@ func wireOutboundIntegrations(
 	}
 	var dg *discordgo.Session
 	var stopHydrate func()
-	if cur != nil {
-		if token := strings.TrimSpace(cur.DiscordToken); token != "" {
-			if s, err := discordgo.New("Bot " + token); err == nil {
-				dg = s
-				dg.Client = tracing.ExternalClient(dg.Client)
-				workerPool.SetDiscordSession(dg)
-				stopHydrate = hydrateFn(ctx, dg, discord.HydrateOptions{
-					OnChannel: queue.CacheDiscordChannel,
-					LogPrefix: "[eri-restate] ",
-				})
-			}
+	if token := strings.TrimSpace(cur.DiscordToken); token != "" {
+		if s, err := discordgo.New("Bot " + token); err == nil {
+			dg = s
+			dg.Client = tracing.ExternalClient(dg.Client)
+			workerPool.SetDiscordSession(dg)
+			stopHydrate = hydrateFn(ctx, dg, discord.HydrateOptions{
+				OnChannel: queue.CacheDiscordChannel,
+				LogPrefix: "[eri-restate] ",
+			})
 		}
 	}
 
 	var bus *pubsub.JetStreamBus
-	if cur != nil {
-		if natsURL := strings.TrimSpace(cur.NATSURL); natsURL != "" {
-			b, err := pubsub.NewJetStreamBus(ctx, natsURL)
-			if err != nil {
-				log.Printf("[eri-restate] Warning connecting to NATS event bus: %v", err)
-			} else {
-				bus = b
-				workerPool.SetEventBus(bus)
-			}
+	if natsURL := strings.TrimSpace(cur.NATSURL); natsURL != "" {
+		b, err := pubsub.NewJetStreamBus(ctx, natsURL)
+		if err != nil {
+			log.Printf("[eri-restate] Warning connecting to NATS event bus: %v", err)
+		} else {
+			bus = b
+			workerPool.SetEventBus(bus)
 		}
 	}
 

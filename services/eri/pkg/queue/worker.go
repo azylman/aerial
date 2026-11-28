@@ -541,11 +541,7 @@ func (te *turnExecution) resolveBotIdentity() (string, []string) {
 		return "", nil
 	}
 	botUserID := ResolveBotUserID(sess)
-	guildID := ""
-	if len(te.burst) > 0 {
-		guildID = te.burst[0].GuildID
-	}
-	botRoleIDs := ResolveBotRoleIDs(sess, guildID, botUserID)
+	botRoleIDs := ResolveBotRoleIDs(sess, te.burst[0].GuildID, botUserID)
 	return botUserID, botRoleIDs
 }
 

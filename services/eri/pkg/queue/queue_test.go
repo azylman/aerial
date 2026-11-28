@@ -660,12 +660,6 @@ func TestResolveBotRoleIDsSuite(t *testing.T) {
 func TestResolveBotUserID(t *testing.T) {
 	origUserFetcher := botUserFetcher
 	defer func() { botUserFetcher = origUserFetcher }()
-	if _, err := origUserFetcher(nil); err == nil {
-		t.Errorf("expected error from origUserFetcher(nil)")
-	}
-	if _, err := origUserFetcher(&discordgo.Session{}); err == nil {
-		t.Errorf("expected error from origUserFetcher(empty)")
-	}
 
 	if got := ResolveBotUserID(nil); got != "" {
 		t.Fatalf("ResolveBotUserID(nil) = %q, want empty", got)
@@ -762,13 +756,6 @@ func TestResolveBotIdentity_UnhydratedSessionRoleMentionWake(t *testing.T) {
 	pool := New(nil, WorkerPoolConfig{})
 	pool.SetDiscordSession(s)
 
-	// Empty burst guard does not panic.
-	teEmpty := &turnExecution{pool: pool}
-	gotID, gotRoles := teEmpty.resolveBotIdentity()
-	if gotID != "bot-unhydrated-1" || len(gotRoles) != 0 {
-		t.Fatalf("resolveBotIdentity(empty burst) = (%q, %v), want (bot-unhydrated-1, [])", gotID, gotRoles)
-	}
-
 	te := &turnExecution{
 		pool: pool,
 		burst: []db.Message{{
@@ -788,6 +775,39 @@ func TestResolveBotIdentity_UnhydratedSessionRoleMentionWake(t *testing.T) {
 	}
 	if !isTier1Wake(te.burst[0], botID, roleIDs) {
 		t.Fatal("expected role-mention message to trigger Tier-1 wake on unhydrated session")
+	}
+}
+
+func TestResolveBotRoleIDs_UncachedGuildDoesNotSkipOnOtherCachedGuild(t *testing.T) {
+	origMemberFetcher := guildMemberFetcher
+	defer func() { guildMemberFetcher = origMemberFetcher }()
+
+	var fetchCalls atomic.Int32
+	guildMemberFetcher = func(_ *discordgo.Session, guildID, userID string) (*discordgo.Member, error) {
+		fetchCalls.Add(1)
+		if guildID == "guild-B" {
+			return &discordgo.Member{
+				GuildID: guildID,
+				User:    &discordgo.User{ID: userID},
+				Roles:   []string{"role-B-robot"},
+			}, nil
+		}
+		return nil, errors.New("unexpected guild fetch")
+	}
+
+	s := &discordgo.Session{State: discordgo.NewState()}
+	s.State.User = &discordgo.User{ID: "bot-multi-1", Username: "Aerial"}
+	require.NoError(t, s.State.GuildAdd(&discordgo.Guild{
+		ID:      "guild-A",
+		Members: []*discordgo.Member{{User: &discordgo.User{ID: "bot-multi-1"}, Roles: []string{"role-A-robot"}}},
+	}))
+
+	rolesB := ResolveBotRoleIDs(s, "guild-B", "bot-multi-1")
+	if !slices.Equal(rolesB, []string{"role-B-robot"}) {
+		t.Fatalf("ResolveBotRoleIDs(guild-B) = %v, want [role-B-robot]", rolesB)
+	}
+	if got := fetchCalls.Load(); got != 1 {
+		t.Fatalf("fetchCalls = %d, want 1", got)
 	}
 }
 
