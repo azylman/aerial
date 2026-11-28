@@ -129,7 +129,7 @@ func sabotageName(kind, table, event string) string {
 }
 
 // renameColumnSQL renames a column the store's SELECTs read but its claim/write statements never
-// touch, so reads fail with SQLSTATE 42703 (terminal) after earlier writes succeeded.
+// touch, so reads fail with SQLSTATE 42703 (retryable across schema migrations) after earlier writes succeeded.
 func renameColumnSQL(table string) string {
 	return fmt.Sprintf("ALTER TABLE %s RENAME COLUMN response_text TO response_text_sabotaged", table)
 }
@@ -171,7 +171,7 @@ func TestRecordBurstStarted(t *testing.T) {
 		wantTerminal  bool
 	}{
 		{name: "ClaimErrorRetryable", rows: []db.Message{stepMsg("a", db.StatusPending, 0, 0)}, ids: []string{"a"}, sabotageSQL: failTriggerSQL("messages", "UPDATE", "40001"), wantErr: true, wantRows: map[string]rowWant{"a": {status: db.StatusPending}}},
-		{name: "ReadIntegrityErrorTerminal", rows: []db.Message{stepMsg("a", db.StatusPending, 0, 0)}, ids: []string{"a"}, sabotageSQL: renameColumnSQL("messages"), wantErr: true, wantTerminal: true},
+		{name: "ReadColumnDriftRetryable", rows: []db.Message{stepMsg("a", db.StatusPending, 0, 0)}, ids: []string{"a"}, sabotageSQL: renameColumnSQL("messages"), wantErr: true},
 		{name: "NoStoreTerminal", ids: []string{"a"}, noStore: true, wantErr: true, wantTerminal: true},
 		{
 			name:    "AllPendingClaimed",
@@ -237,7 +237,7 @@ func TestRecordDispatchStarted(t *testing.T) {
 	}{
 		{name: "BlankIDNoop", dispatchID: " "},
 		{name: "ClaimErrorRetryable", status: db.StatusPending, seed: true, sabotageSQL: failTriggerSQL("dispatches", "UPDATE", "40001"), wantErr: true, wantStatus: db.StatusPending},
-		{name: "ReadErrorTerminal", status: db.StatusPending, seed: true, sabotageSQL: renameColumnSQL("dispatches"), wantErr: true, wantTerm: true, wantStatus: db.StatusProcessing},
+		{name: "ReadColumnDriftRetryable", status: db.StatusPending, seed: true, sabotageSQL: renameColumnSQL("dispatches"), wantErr: true, wantStatus: db.StatusProcessing},
 		{name: "NoStoreTerminal", noStore: true, wantErr: true, wantTerm: true},
 		{name: "PendingClaimed", status: db.StatusPending, retry: 1, seed: true, wantIDs: []string{"d1"}, wantBase: 1, wantStatus: db.StatusProcessing},
 		{name: "ProcessingAdopted", status: db.StatusProcessing, seed: true, wantIDs: []string{"d1"}, wantStatus: db.StatusProcessing},
@@ -527,7 +527,7 @@ func TestPrepareDispatchTurn(t *testing.T) {
 	}{
 		{name: "SessionLeaseUnavailableFinished", status: db.StatusProcessing, sessionID: "sess-1", seed: true, noAgent: true, wantDecision: TurnDecisionFinished, wantStatus: db.StatusFailed},
 		{name: "SessionLeaseErrorDeferredToAttemptRunner", status: db.StatusProcessing, sessionID: "sess-1", seed: true, failLease: true, wantDecision: TurnDecisionRun, wantPromptSub: "do the thing", wantStatus: db.StatusProcessing},
-		{name: "ReadErrorTerminal", status: db.StatusProcessing, seed: true, sabotageSQL: renameColumnSQL("dispatches"), wantErr: true, wantTerminal: true, wantStatus: db.StatusProcessing},
+		{name: "ReadColumnDriftRetryable", status: db.StatusProcessing, seed: true, sabotageSQL: renameColumnSQL("dispatches"), wantErr: true, wantStatus: db.StatusProcessing},
 		{name: "NoStoreTerminal", noStore: true, wantErr: true, wantTerminal: true},
 		{name: "EphemeralBuildsPrompt", status: db.StatusProcessing, seed: true, wantDecision: TurnDecisionRun, wantPromptSub: "do the thing"},
 		{name: "SessionBuildsPrompt", status: db.StatusProcessing, sessionID: "sess-1", seed: true, wantDecision: TurnDecisionRun, wantPromptSub: "do the thing"},

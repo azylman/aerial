@@ -146,14 +146,20 @@ func deriveTurnID(key, invocationID string) string {
 }
 
 // classifyStoreError tags deterministic Postgres errors terminal (code 500) and
-// leaves everything else retryable.
+// leaves everything else retryable, including undefined_column (42703) and
+// undefined_table (42P01) which can surface transiently when a service rolls
+// out ahead of an in-flight Atlas schema migration.
 func classifyStoreError(err error) error {
 	if err == nil {
 		return nil
 	}
 	var pgErr *pgconn.PgError
 	if errors.As(err, &pgErr) && len(pgErr.Code) >= 2 {
-		switch strings.ToUpper(pgErr.Code[:2]) {
+		code := strings.ToUpper(pgErr.Code)
+		if code == "42703" || code == "42P01" {
+			return err
+		}
+		switch code[:2] {
 		case "22", "23", "42", "0A", "2B", "2D", "25":
 			return restate.ToTerminalError(err, restate.WithErrorCode(500))
 		}
