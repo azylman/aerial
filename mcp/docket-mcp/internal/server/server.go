@@ -32,7 +32,44 @@ const (
 	errMsgInvalidID   = "parameter 'id' must be a positive integer"
 	relKindParenttask = "parenttask"
 	relKindBlocking   = "blocking"
+
+	HeaderAerialAgent  = "X-Aerial-Agent"
+	HeaderAerialTurnID = "X-Aerial-Turn-Id"
 )
+
+type contextKey string
+
+const (
+	agentContextKey  contextKey = "aerial_agent"
+	turnIDContextKey contextKey = "aerial_turn_id"
+)
+
+// WithAgentAndTurnID attaches agent and turn_id identifiers to ctx.
+func WithAgentAndTurnID(ctx context.Context, agent, turnID string) context.Context {
+	if agent != "" {
+		ctx = context.WithValue(ctx, agentContextKey, agent)
+	}
+	if turnID != "" {
+		ctx = context.WithValue(ctx, turnIDContextKey, turnID)
+	}
+	return ctx
+}
+
+// AgentFromContext extracts the agent identifier from ctx.
+func AgentFromContext(ctx context.Context) string {
+	if v, ok := ctx.Value(agentContextKey).(string); ok {
+		return v
+	}
+	return ""
+}
+
+// TurnIDFromContext extracts the turn ID from ctx.
+func TurnIDFromContext(ctx context.Context) string {
+	if v, ok := ctx.Value(turnIDContextKey).(string); ok {
+		return v
+	}
+	return ""
+}
 
 // Server encapsulates HTTP routes, Vikunja client, and SQL task store for docket-mcp.
 type Server struct {
@@ -69,6 +106,10 @@ func NewServer(cfg *config.Config, vikunja *store.VikunjaClient, taskStore store
 
 // HandleMCPStreamable serves MCP over streamable HTTP, accepting legacy docket_-prefixed tool names.
 func (s *Server) HandleMCPStreamable(w http.ResponseWriter, r *http.Request) {
+	agent := r.Header.Get(HeaderAerialAgent)
+	turnID := r.Header.Get(HeaderAerialTurnID)
+	ctx := WithAgentAndTurnID(r.Context(), agent, turnID)
+	r = r.WithContext(ctx)
 	httpkit.ServeMCPStream(w, r, s.streamHandler, "docket-mcp ready\n", "docket_", "")
 }
 
@@ -131,6 +172,16 @@ func (s *Server) registerTools(srv *mcp.Server) {
 		Description: "Close a task with resolution 'completed' or 'wont_do' and a required reason. Validates no open blockers/subtasks for completed, cascades for wont_do.",
 		InputSchema: closeSchema,
 	}, s.toolClose)
+	mcpkit.AddTextTool(srv, &mcp.Tool{
+		Name:        "claim",
+		Description: "Claim an open top-level task atomically for an agent and turn ID. Rejects if subtask, already claimed, or closed.",
+		InputSchema: mcpkit.InputSchema[ClaimArgs](),
+	}, s.toolClaim)
+	mcpkit.AddTextTool(srv, &mcp.Tool{
+		Name:        "unclaim",
+		Description: "Release a claimed task atomically, making it available to other agents.",
+		InputSchema: mcpkit.InputSchema[UnclaimArgs](),
+	}, s.toolUnclaim)
 }
 
 func setEnum(schema *jsonschema.Schema, prop, defaultJSON string, values ...any) {
@@ -159,15 +210,16 @@ func (s *Server) loadGraphMapsFromSource(ctx context.Context, src *vikunjaNodeSo
 		taskIDs = append(taskIDs, t.ID)
 	}
 
-	resMap, err := s.store.FetchTaskResolutions(ctx, taskIDs)
+	metaMap, err := s.store.FetchTaskMeta(ctx, taskIDs)
 	if err != nil {
-		resMap = make(map[int64]string)
+		metaMap = make(map[int64]config.TaskMeta)
 	}
 
 	nodes := make(map[int64]config.TaskNode, len(src.tasksByDisplay))
 	byGlobal := make(map[int64]config.VikunjaTask, len(src.tasksByDisplay))
 	for dID, t := range src.tasksByDisplay {
-		node := config.TaskToNode(t, resMap[t.ID])
+		meta := metaMap[t.ID]
+		node := config.TaskToNode(t, meta.Resolution, meta)
 		nodes[dID] = node
 		src.cache[dID] = node
 		byGlobal[t.ID] = t
@@ -272,11 +324,11 @@ func (src *vikunjaNodeSource) Node(ctx context.Context, id int64) (config.TaskNo
 	if task.ProjectID != src.projectID {
 		return config.TaskNode{}, false, nil
 	}
-	var resolution string
-	if resMap, err := src.store.FetchTaskResolutions(ctx, []int64{task.ID}); err == nil {
-		resolution = resMap[task.ID]
+	var meta config.TaskMeta
+	if metaMap, err := src.store.FetchTaskMeta(ctx, []int64{task.ID}); err == nil {
+		meta = metaMap[task.ID]
 	}
-	node := config.TaskToNode(*task, resolution)
+	node := config.TaskToNode(*task, meta.Resolution, meta)
 	src.cache[id] = node
 	return node, true, nil
 }
@@ -332,10 +384,11 @@ var ErrTaskNotFound = errors.New("not found in project graph")
 type ListArgs struct {
 	Status   string `json:"status,omitempty"    jsonschema:"Status filter: 'open', 'completed', 'wont_do', 'all'"`
 	ParentID *int64 `json:"parent_id,omitempty" jsonschema:"Optional parent task ID to filter by."`
+	Claimed  *bool  `json:"claimed,omitempty"   jsonschema:"Optional filter for task claimed status (true for claimed, false for unclaimed)."`
 }
 
 func (s *Server) toolList(ctx context.Context, args ListArgs) (string, bool) {
-	summaries, err := s.listTasks(ctx, args.Status, args.ParentID)
+	summaries, err := s.listTasks(ctx, args.Status, args.ParentID, args.Claimed)
 	if err != nil {
 		return err.Error(), true
 	}
@@ -351,19 +404,25 @@ func marshalToolResult(v any, what string) (string, bool) {
 	return string(data), false
 }
 
-func (s *Server) listTasks(ctx context.Context, status string, parentID *int64) ([]config.TaskSummary, error) {
+func (s *Server) listTasks(ctx context.Context, status string, parentID *int64, claimed *bool) ([]config.TaskSummary, error) {
 	nodes, err := s.loadGraph(ctx)
 	if err != nil {
 		return nil, err
 	}
 
-	var summaries []config.TaskSummary
+	summaries := []config.TaskSummary{}
 	for _, node := range nodes {
 		if status != config.TaskStatusAll && node.Status != status {
 			continue
 		}
 		if parentID != nil {
 			if node.ParentID == nil || *node.ParentID != *parentID {
+				continue
+			}
+		}
+		if claimed != nil {
+			isClaimed := node.ClaimedByAgent != "" || node.ClaimedByTurnID != ""
+			if isClaimed != *claimed {
 				continue
 			}
 		}
@@ -473,12 +532,12 @@ func (s *Server) showTask(ctx context.Context, id int64) (config.HydratedTask, e
 		}
 	}
 
-	var resolution string
-	if resolutions, err := s.store.FetchTaskResolutions(ctx, []int64{task.ID}); err == nil {
-		resolution = resolutions[task.ID]
+	var meta config.TaskMeta
+	if metaMap, err := s.store.FetchTaskMeta(ctx, []int64{task.ID}); err == nil {
+		meta = metaMap[task.ID]
 	}
 
-	return config.HydrateTask(*task, config.ResolveTaskStatus(task.Done, resolution), comments, neighbors), nil
+	return config.HydrateTask(*task, config.ResolveTaskStatus(task.Done, meta.Resolution), comments, neighbors, meta), nil
 }
 
 func validateCreateRelations(ctx context.Context, src config.NodeSource, parentID *int64, blocks, blockedBy, related []int64) error {
@@ -646,18 +705,21 @@ func (s *Server) toolUpdate(ctx context.Context, args UpdateArgs) (string, bool)
 		}
 	}
 
-	var res string
-	resMap, err := s.store.FetchTaskResolutions(ctx, []int64{task.ID})
+	var meta config.TaskMeta
+	metaMap, err := s.store.FetchTaskMeta(ctx, []int64{task.ID})
 	if err != nil {
-		slog.ErrorContext(ctx, "[docket-mcp] fetch resolution for update error", "task_id", task.ID, "error", err)
+		slog.ErrorContext(ctx, "[docket-mcp] fetch meta for update error", "task_id", task.ID, "error", err)
 	} else {
-		res = resMap[task.ID]
+		meta = metaMap[task.ID]
 	}
 
 	summary := config.TaskSummary{
-		ID:     updated.DisplayID(),
-		Title:  updated.Title,
-		Status: config.ResolveTaskStatus(updated.Done, res),
+		ID:              updated.DisplayID(),
+		Title:           updated.Title,
+		Status:          config.ResolveTaskStatus(updated.Done, meta.Resolution),
+		ClaimedByAgent:  meta.ClaimedByAgent,
+		ClaimedByTurnID: meta.ClaimedByTurnID,
+		ClaimedAt:       meta.ClaimedAt,
 	}
 	return marshalToolResult(summary, "summary")
 }
@@ -855,11 +917,16 @@ func (s *Server) toolClose(ctx context.Context, args CloseArgs) (string, bool) {
 
 	nodesAfter := maps.Clone(nodesBefore)
 	for _, cid := range closedIDs {
-		if n, ok := nodesAfter[cid]; ok {
-			n.Status = args.Resolution
-			n.Done = true
-			nodesAfter[cid] = n
+		n, ok := nodesAfter[cid]
+		if !ok {
+			continue
 		}
+		n.Status = args.Resolution
+		n.Done = true
+		n.ClaimedByAgent = ""
+		n.ClaimedByTurnID = ""
+		n.ClaimedAt = nil
+		nodesAfter[cid] = n
 	}
 
 	unblocked := config.ComputeUnblockedIDs(nodesBefore, nodesAfter, closedIDs)
@@ -874,6 +941,135 @@ func (s *Server) toolClose(ctx context.Context, args CloseArgs) (string, bool) {
 	return marshalToolResult(res, "close result")
 }
 
+// ClaimArgs are the claim tool arguments.
+type ClaimArgs struct {
+	ID     int64  `json:"id"                jsonschema:"Task ID to claim."`
+	Agent  string `json:"agent,omitempty"   jsonschema:"Agent identifier (optional if passed via X-Aerial-Agent header)."`
+	TurnID string `json:"turn_id,omitempty" jsonschema:"Turn ID (optional if passed via X-Aerial-Turn-Id header)."`
+}
+
+func findTopParentID(ctx context.Context, src config.NodeSource, nodeID int64, parentID *int64) int64 {
+	if parentID == nil {
+		return nodeID
+	}
+	topParentID := *parentID
+	visited := map[int64]bool{nodeID: true, topParentID: true}
+	curr := parentID
+	for curr != nil {
+		pNode, pOk, pErr := src.Node(ctx, *curr)
+		if pErr != nil || !pOk || pNode.ParentID == nil || visited[*pNode.ParentID] {
+			topParentID = *curr
+			break
+		}
+		visited[*pNode.ParentID] = true
+		topParentID = *pNode.ParentID
+		curr = pNode.ParentID
+	}
+	return topParentID
+}
+
+func (s *Server) toolClaim(ctx context.Context, args ClaimArgs) (string, bool) {
+	if args.ID <= 0 {
+		return errMsgInvalidID, true
+	}
+
+	agent := AgentFromContext(ctx)
+	if agent == "" {
+		agent = strings.TrimSpace(args.Agent)
+	}
+	turnID := TurnIDFromContext(ctx)
+	if turnID == "" {
+		turnID = strings.TrimSpace(args.TurnID)
+	}
+	if agent == "" && turnID == "" {
+		return "either agent or turn_id must be provided via headers or arguments", true
+	}
+
+	src, err := s.newNodeSource(ctx)
+	if err != nil {
+		return err.Error(), true
+	}
+
+	node, ok, err := src.Node(ctx, args.ID)
+	if err != nil {
+		return err.Error(), true
+	}
+	if !ok {
+		return fmt.Sprintf("task %d not found in project graph", args.ID), true
+	}
+	if node.Status != config.TaskStatusOpen {
+		return fmt.Sprintf("cannot claim task %d: task is %s (must be open)", args.ID, node.Status), true
+	}
+
+	if node.ParentID != nil {
+		topParentID := findTopParentID(ctx, src, node.ID, node.ParentID)
+		return fmt.Sprintf("cannot claim task %d: task is a subtask (top-level parent is task %d; only top-level tasks can be claimed)", args.ID, topParentID), true
+	}
+
+	if node.ClaimedByAgent != "" || node.ClaimedByTurnID != "" {
+		return fmt.Sprintf("cannot claim task %d: already claimed by agent %q (turn %q)", args.ID, node.ClaimedByAgent, node.ClaimedByTurnID), true
+	}
+
+	globalID, err := src.ResolveGlobalID(ctx, args.ID)
+	if err != nil {
+		return fmt.Sprintf("failed to resolve task %d: %v", args.ID, err), true
+	}
+
+	now := time.Now().UTC()
+	claimed, err := s.store.ClaimTask(ctx, globalID, agent, turnID, now)
+	if err != nil {
+		return fmt.Sprintf("failed to claim task %d: %v", args.ID, err), true
+	}
+	if !claimed {
+		return fmt.Sprintf("cannot claim task %d: already claimed or closed", args.ID), true
+	}
+
+	node.ClaimedByAgent = agent
+	node.ClaimedByTurnID = turnID
+	node.ClaimedAt = &now
+	summary := config.SummarizeNode(node)
+	return marshalToolResult(summary, "claim result")
+}
+
+// UnclaimArgs are the unclaim tool arguments.
+type UnclaimArgs struct {
+	ID int64 `json:"id" jsonschema:"Task ID to unclaim."`
+}
+
+func (s *Server) toolUnclaim(ctx context.Context, args UnclaimArgs) (string, bool) {
+	if args.ID <= 0 {
+		return errMsgInvalidID, true
+	}
+
+	src, err := s.newNodeSource(ctx)
+	if err != nil {
+		return err.Error(), true
+	}
+
+	node, ok, err := src.Node(ctx, args.ID)
+	if err != nil {
+		return err.Error(), true
+	}
+	if !ok {
+		return fmt.Sprintf("task %d not found in project graph", args.ID), true
+	}
+
+	globalID, err := src.ResolveGlobalID(ctx, args.ID)
+	if err != nil {
+		return fmt.Sprintf("failed to resolve task %d: %v", args.ID, err), true
+	}
+
+	if err := s.store.UnclaimTask(ctx, globalID); err != nil {
+		return fmt.Sprintf("failed to unclaim task %d: %v", args.ID, err), true
+	}
+
+	node.ClaimedByAgent = ""
+	node.ClaimedByTurnID = ""
+	node.ClaimedAt = nil
+	summary := config.SummarizeNode(node)
+	return marshalToolResult(summary, "unclaim result")
+}
+
 // HandleTasks serves GET /api/tasks?status=... as a JSON task list.
 func (s *Server) HandleTasks(w http.ResponseWriter, r *http.Request) {
 	if !requireGET(w, r) {
@@ -884,7 +1080,7 @@ func (s *Server) HandleTasks(w http.ResponseWriter, r *http.Request) {
 		writeRESTError(w, http.StatusBadRequest, err)
 		return
 	}
-	tasks, err := s.listTasks(r.Context(), q.Status, nil)
+	tasks, err := s.listTasks(r.Context(), q.Status, nil, nil)
 	if err != nil {
 		writeRESTError(w, restErrorStatus(err), err)
 		return

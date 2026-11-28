@@ -11,6 +11,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/azylman/aerial/mcp/docket-mcp/internal/config"
 )
@@ -42,9 +43,10 @@ type sqlCall struct {
 // testConn is a declarative database/sql driver connection: Exec fails with
 // execErr, Query returns rows or queryErr, and every statement is recorded.
 type testConn struct {
-	execErr  error
-	queryErr error
-	rows     *testRows
+	execErr      error
+	queryErr     error
+	rows         *testRows
+	rowsAffected *int64
 
 	mu    sync.Mutex
 	calls []sqlCall
@@ -100,7 +102,11 @@ func (c *testConn) ExecContext(ctx context.Context, query string, args []driver.
 	if c.execErr != nil {
 		return nil, c.execErr
 	}
-	return driver.RowsAffected(1), nil
+	ra := int64(1)
+	if c.rowsAffected != nil {
+		ra = *c.rowsAffected
+	}
+	return driver.RowsAffected(ra), nil
 }
 
 type testRows struct {
@@ -167,8 +173,11 @@ const (
 	sqlEmbeddingUpdate  = "UPDATE tasks SET embedding = $1 WHERE id = $2;"
 	sqlEmbeddingAndRes  = "UPDATE tasks SET embedding = $1, resolution = $2 WHERE id = $3;"
 	sqlResolutionUpdate = "UPDATE tasks SET resolution = $1 WHERE id = $2;"
-	sqlResolutionBatch  = "UPDATE tasks SET resolution = $1 WHERE id = ANY($2);"
+	sqlResolutionBatch  = "UPDATE tasks SET resolution = $1, claimed_by_agent = '', claimed_by_turn_id = '', claimed_at = NULL WHERE id = ANY($2);"
 	sqlFetchResolutions = "SELECT id, COALESCE(resolution, '') FROM tasks WHERE id = ANY($1);"
+	sqlFetchMeta        = "SELECT id, COALESCE(resolution, ''), COALESCE(claimed_by_agent, ''), COALESCE(claimed_by_turn_id, ''), claimed_at FROM tasks WHERE id = ANY($1);"
+	sqlClaim            = "UPDATE tasks SET claimed_by_agent = $2, claimed_by_turn_id = $3, claimed_at = $4 WHERE id = $1 AND done = false AND COALESCE(claimed_by_agent, '') = '' AND COALESCE(claimed_by_turn_id, '') = '';"
+	sqlUnclaim          = "UPDATE tasks SET claimed_by_agent = '', claimed_by_turn_id = '', claimed_at = NULL WHERE id = $1;"
 )
 
 func errText(err error) string {
@@ -268,7 +277,7 @@ func TestSQLTaskStore_UpdateTaskResolutionBatch(t *testing.T) {
 func TestSQLTaskStore_FetchTaskResolutions(t *testing.T) {
 	t.Parallel()
 
-	idRes := []string{"id", "resolution"}
+	metaCols := []string{"id", "resolution", "claimed_by_agent", "claimed_by_turn_id", "claimed_at"}
 	tests := []struct {
 		name      string
 		taskIDs   []int64
@@ -279,9 +288,9 @@ func TestSQLTaskStore_FetchTaskResolutions(t *testing.T) {
 		wantErr   string
 	}{
 		{name: "empty IDs returns empty map", want: map[int64]string{}},
-		{name: "successful fetch of resolutions", taskIDs: []int64{1, 2}, rows: sqlRows(idRes, []driver.Value{int64(1), "completed"}, []driver.Value{int64(2), "wont_do"}), want: map[int64]string{1: "completed", 2: "wont_do"}, wantQuery: sqlFetchResolutions},
-		{name: "query error returned", taskIDs: []int64{3}, queryErr: errors.New("query error"), wantQuery: sqlFetchResolutions, wantErr: "failed to fetch task resolutions: query error"},
-		{name: "scan error on wrong columns", taskIDs: []int64{4}, rows: sqlRows([]string{"id"}, []driver.Value{int64(4)}), wantQuery: sqlFetchResolutions, wantErr: "failed to scan task resolution: sql: expected 1 destination arguments in Scan, not 2"},
+		{name: "successful fetch of resolutions", taskIDs: []int64{1, 2}, rows: sqlRows(metaCols, []driver.Value{int64(1), "completed", "", "", nil}, []driver.Value{int64(2), "wont_do", "", "", nil}), want: map[int64]string{1: "completed", 2: "wont_do"}, wantQuery: sqlFetchMeta},
+		{name: "query error returned", taskIDs: []int64{3}, queryErr: errors.New("query error"), wantQuery: sqlFetchMeta, wantErr: "failed to fetch task resolutions: failed to fetch task meta: query error"},
+		{name: "scan error on wrong columns", taskIDs: []int64{4}, rows: sqlRows([]string{"id"}, []driver.Value{int64(4)}), wantQuery: sqlFetchMeta, wantErr: "failed to fetch task resolutions: failed to scan task meta: sql: expected 1 destination arguments in Scan, not 5"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -296,10 +305,115 @@ func TestSQLTaskStore_FetchTaskResolutions(t *testing.T) {
 	}
 }
 
+func TestSQLTaskStore_FetchTaskMeta(t *testing.T) {
+	t.Parallel()
+
+	metaCols := []string{"id", "resolution", "claimed_by_agent", "claimed_by_turn_id", "claimed_at"}
+	now := time.Date(2026, 11, 27, 10, 0, 0, 0, time.UTC)
+	tests := []struct {
+		name      string
+		taskIDs   []int64
+		rows      *testRows
+		queryErr  error
+		want      map[int64]config.TaskMeta
+		wantQuery string
+		wantErr   string
+	}{
+		{name: "empty IDs returns empty map", want: map[int64]config.TaskMeta{}},
+		{
+			name:    "successful fetch of meta",
+			taskIDs: []int64{1, 2},
+			rows: sqlRows(metaCols,
+				[]driver.Value{int64(1), "completed", "", "", nil},
+				[]driver.Value{int64(2), "", "eri", "turn-123", now},
+			),
+			want: map[int64]config.TaskMeta{
+				1: {Resolution: "completed"},
+				2: {ClaimedByAgent: "eri", ClaimedByTurnID: "turn-123", ClaimedAt: &now},
+			},
+			wantQuery: sqlFetchMeta,
+		},
+		{name: "query error returned", taskIDs: []int64{3}, queryErr: errors.New("meta query error"), wantQuery: sqlFetchMeta, wantErr: "failed to fetch task meta: meta query error"},
+		{name: "scan error on wrong columns", taskIDs: []int64{4}, rows: sqlRows([]string{"id"}, []driver.Value{int64(4)}), wantQuery: sqlFetchMeta, wantErr: "failed to scan task meta: sql: expected 1 destination arguments in Scan, not 5"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			store, conn := newQueryStore(t, tc.rows, tc.queryErr)
+			got, err := store.FetchTaskMeta(context.Background(), tc.taskIDs)
+			if errText(err) != tc.wantErr || !reflect.DeepEqual(got, tc.want) {
+				t.Fatalf("FetchTaskMeta = %+v, %q; want %+v, %q", got, errText(err), tc.want, tc.wantErr)
+			}
+			checkSQLCalls(t, conn, tc.wantQuery, 1)
+		})
+	}
+}
+
+func TestSQLTaskStore_ClaimTask(t *testing.T) {
+	t.Parallel()
+
+	now := time.Date(2026, 11, 27, 10, 0, 0, 0, time.UTC)
+	zeroRows := int64(0)
+	tests := []struct {
+		name         string
+		taskID       int64
+		agent        string
+		turnID       string
+		claimedAt    time.Time
+		rowsAffected *int64
+		execErr      error
+		want         bool
+		wantErr      string
+	}{
+		{name: "successful claim", taskID: 1, agent: "eri", turnID: "turn-1", claimedAt: now, want: true},
+		{name: "already claimed or done", taskID: 2, agent: "eri", turnID: "turn-1", claimedAt: now, rowsAffected: &zeroRows, want: false},
+		{name: "exec error returned", taskID: 3, agent: "eri", turnID: "turn-1", claimedAt: now, execErr: errors.New("exec error"), wantErr: "failed to claim task: exec error"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			store, conn := newExecStore(t, tc.execErr)
+			if tc.rowsAffected != nil {
+				conn.rowsAffected = tc.rowsAffected
+			}
+			got, err := store.ClaimTask(context.Background(), tc.taskID, tc.agent, tc.turnID, tc.claimedAt)
+			if errText(err) != tc.wantErr || got != tc.want {
+				t.Fatalf("ClaimTask = %v, %q; want %v, %q", got, errText(err), tc.want, tc.wantErr)
+			}
+			checkSQLCalls(t, conn, sqlClaim, 4)
+		})
+	}
+}
+
+func TestSQLTaskStore_UnclaimTask(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name    string
+		taskID  int64
+		execErr error
+		wantErr string
+	}{
+		{name: "successful unclaim", taskID: 1},
+		{name: "exec error returned", taskID: 2, execErr: errors.New("unclaim failure"), wantErr: "failed to unclaim task: unclaim failure"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			store, conn := newExecStore(t, tc.execErr)
+			err := store.UnclaimTask(context.Background(), tc.taskID)
+			if errText(err) != tc.wantErr {
+				t.Fatalf("UnclaimTask = %q; want %q", errText(err), tc.wantErr)
+			}
+			checkSQLCalls(t, conn, sqlUnclaim, 1)
+		})
+	}
+}
+
 func TestSQLTaskStore_SearchTasksRRF(t *testing.T) {
 	t.Parallel()
 
-	scored := []string{"id", "title", "done", "resolution", "score"}
+	scored := []string{"id", "title", "done", "resolution", "score", "claimed_by_agent", "claimed_by_turn_id", "claimed_at"}
 	emb := make([]float32, 384)
 	tests := []struct {
 		name      string
@@ -315,13 +429,16 @@ func TestSQLTaskStore_SearchTasksRRF(t *testing.T) {
 	}{
 		{
 			name: "successful search with rows", embedding: emb, queryText: "fix bug", status: "open", limit: 5,
-			rows:     sqlRows(scored, []driver.Value{int64(1), "Fix bug", false, "", 0.95}, []driver.Value{int64(2), "Closed task", true, "completed", 0.70}),
+			rows: sqlRows(scored,
+				[]driver.Value{int64(1), "Fix bug", false, "", 0.95, "", "", nil},
+				[]driver.Value{int64(2), "Closed task", true, "completed", 0.70, "", "", nil},
+			),
 			want:     []config.ScoredTaskSummary{{ID: 1, Title: "Fix bug", Status: "open", Score: 0.95}, {ID: 2, Title: "Closed task", Status: "completed", Score: 0.70}},
 			wantArgs: []driver.Value{5, "fix bug", "open", true},
 		},
 		{name: "empty embedding uses default vector and vector gate false", queryText: "search term", rows: sqlRows(scored), wantArgs: []driver.Value{10, "search term", "open", false}},
 		{name: "query error handled", embedding: emb, queryText: "query", queryErr: errors.New("db timeout"), wantArgs: []driver.Value{10, "query", "open", true}, wantErr: "hybrid rrf search failed: db timeout"},
-		{name: "scan error handled", embedding: emb, queryText: "query", rows: sqlRows([]string{"id"}, []driver.Value{int64(1)}), wantArgs: []driver.Value{10, "query", "open", true}, wantErr: "failed to scan scored task row: sql: expected 1 destination arguments in Scan, not 5"},
+		{name: "scan error handled", embedding: emb, queryText: "query", rows: sqlRows([]string{"id"}, []driver.Value{int64(1)}), wantArgs: []driver.Value{10, "query", "open", true}, wantErr: "failed to scan scored task row: sql: expected 1 destination arguments in Scan, not 8"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
