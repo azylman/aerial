@@ -226,12 +226,14 @@ func TestHydrateTask(t *testing.T) {
 		30: {ID: 30, Title: "Blocker", Status: "completed", ParentID: &parentOfRoot, Blocks: []int64{10}},
 	}
 
+	claimedAt := time.Date(2026, 11, 27, 10, 0, 0, 0, time.UTC)
 	tests := []struct {
 		name      string
 		task      VikunjaTask
 		status    string
 		comments  []VikunjaComment
 		neighbors map[int64]TaskNode
+		meta      *TaskMeta
 		want      HydratedTask
 	}{
 		{
@@ -248,6 +250,41 @@ func TestHydrateTask(t *testing.T) {
 				BlockedBy: []TaskSummary{{ID: 30, Title: "Blocker", Status: "completed", ParentID: &parentOfRoot, Blocks: []int64{10}}},
 				Related:   []TaskSummary{{ID: 40, Title: "Rel", Status: "open"}},
 				Comments:  []TaskComment{{ID: 7, Author: "aerial", Comment: "hi", CreatedAt: created}},
+			},
+		},
+		{
+			name:   "task with meta populates claim fields",
+			task:   full,
+			status: "open",
+			meta:   &TaskMeta{ClaimedByAgent: "eri", ClaimedByTurnID: "turn-abc", ClaimedAt: &claimedAt},
+			want: HydratedTask{
+				ID: 10, Title: "Root", Status: "open", Description: "desc", CreatedAt: created, UpdatedAt: doneAt, ClosedAt: &doneAt,
+				ClaimedByAgent:  "eri",
+				ClaimedByTurnID: "turn-abc",
+				ClaimedAt:       &claimedAt,
+				Parent:          &TaskSummary{ID: 1, Title: "Parent", Status: "open"},
+				Subtasks:        []TaskSummary{{ID: 12, Title: "Sub B", Status: "completed"}, {ID: 11, Title: "Sub A", Status: "open"}},
+				Blocks:          []TaskSummary{{ID: 20, Title: "Blocked", Status: "open"}},
+				BlockedBy:       []TaskSummary{{ID: 30, Title: "Blocker", Status: "completed"}},
+				Related:         []TaskSummary{{ID: 40, Title: "Rel", Status: "open"}},
+			},
+		},
+		{
+			name:   "task without meta hydrates claim from neighbor node",
+			task:   full,
+			status: "open",
+			neighbors: map[int64]TaskNode{
+				10: {ID: 10, ClaimedByAgent: "eri-neighbor", ClaimedByTurnID: "turn-neigh"},
+			},
+			want: HydratedTask{
+				ID: 10, Title: "Root", Status: "open", Description: "desc", CreatedAt: created, UpdatedAt: doneAt, ClosedAt: &doneAt,
+				ClaimedByAgent:  "eri-neighbor",
+				ClaimedByTurnID: "turn-neigh",
+				Parent:          &TaskSummary{ID: 1, Title: "Parent", Status: "open"},
+				Subtasks:        []TaskSummary{{ID: 12, Title: "Sub B", Status: "completed"}, {ID: 11, Title: "Sub A", Status: "open"}},
+				Blocks:          []TaskSummary{{ID: 20, Title: "Blocked", Status: "open"}},
+				BlockedBy:       []TaskSummary{{ID: 30, Title: "Blocker", Status: "completed"}},
+				Related:         []TaskSummary{{ID: 40, Title: "Rel", Status: "open"}},
 			},
 		},
 		{
@@ -289,7 +326,11 @@ func TestHydrateTask(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			got := HydrateTask(tc.task, tc.status, tc.comments, tc.neighbors)
+			var metas []TaskMeta
+			if tc.meta != nil {
+				metas = append(metas, *tc.meta)
+			}
+			got := HydrateTask(tc.task, tc.status, tc.comments, tc.neighbors, metas...)
 			if !reflect.DeepEqual(got, tc.want) {
 				t.Fatalf("HydrateTask() = %+v, want %+v", got, tc.want)
 			}
@@ -341,6 +382,10 @@ func TestBuildReadyTree(t *testing.T) {
 		10: {ID: 10, Title: "Done Subtask 10", Status: "completed", ParentID: int64Ptr(1)},
 		12: {ID: 12, Title: "Top WontDo Blocker 12", Status: "wont_do"},
 		13: {ID: 13, Title: "Top Blocked by WontDo 13", Status: "open", BlockedBy: []int64{12}},
+		14: {ID: 14, Title: "Top Claimed 14", Status: "open", ClaimedByAgent: "eri", ClaimedByTurnID: "turn-1", SubtaskIDs: []int64{15}},
+		15: {ID: 15, Title: "Subtask of Claimed 15", Status: "open", ParentID: int64Ptr(14)},
+		16: {ID: 16, Title: "Cycle A 16", Status: "open", ParentID: int64Ptr(17)},
+		17: {ID: 17, Title: "Cycle B 17", Status: "open", ParentID: int64Ptr(16)},
 	}
 
 	tests := []struct {
@@ -351,6 +396,7 @@ func TestBuildReadyTree(t *testing.T) {
 		{"top level ready tree", nil, "1(2(9) 11) 4 7 8"},
 		{"scoped parent 1 ready tree", int64Ptr(1), "2(9) 11"},
 		{"scoped parent with no ready subtasks", int64Ptr(7), ""},
+		{"scoped parent claimed returns empty", int64Ptr(14), ""},
 	}
 
 	for _, tc := range tests {
@@ -519,6 +565,13 @@ func cfgWith(layers ...Config) *Config {
 		cfg.Ollama.Model = cmp.Or(l.Ollama.Model, cfg.Ollama.Model)
 	}
 	return cfg
+}
+
+func TestResolveConfigPath(t *testing.T) {
+	t.Setenv("CONFIG_PATH", "/tmp/test-config.yaml")
+	if got := ResolveConfigPath(); got != "/tmp/test-config.yaml" {
+		t.Fatalf("ResolveConfigPath = %q, want /tmp/test-config.yaml", got)
+	}
 }
 
 func TestLoadConfig(t *testing.T) {
@@ -790,5 +843,25 @@ func TestTaskToNode_And_SummarizeNode(t *testing.T) {
 	}
 	if !slices.Equal(summary.BlockedBy, []int64{4}) {
 		t.Fatalf("summary.BlockedBy = %v, want [4]", summary.BlockedBy)
+	}
+}
+
+func TestTaskToNode_ClaimMeta(t *testing.T) {
+	t.Parallel()
+
+	vt := VikunjaTask{ID: 1, Title: "Test", Description: "Desc", Done: false}
+	claimedAt := time.Date(2026, 11, 27, 10, 0, 0, 0, time.UTC)
+	meta := TaskMeta{
+		ClaimedByAgent:  "eri",
+		ClaimedByTurnID: "turn-xyz",
+		ClaimedAt:       &claimedAt,
+	}
+	claimedNode := TaskToNode(vt, "open", meta)
+	if claimedNode.ClaimedByAgent != "eri" || claimedNode.ClaimedByTurnID != "turn-xyz" || claimedNode.ClaimedAt == nil || !claimedNode.ClaimedAt.Equal(claimedAt) {
+		t.Fatalf("claimedNode = %+v", claimedNode)
+	}
+	claimedSummary := SummarizeNode(claimedNode)
+	if claimedSummary.ClaimedByAgent != "eri" || claimedSummary.ClaimedByTurnID != "turn-xyz" || claimedSummary.ClaimedAt == nil || !claimedSummary.ClaimedAt.Equal(claimedAt) {
+		t.Fatalf("claimedSummary = %+v", claimedSummary)
 	}
 }

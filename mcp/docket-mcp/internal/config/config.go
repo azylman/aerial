@@ -173,17 +173,28 @@ func applyEnvOverrides(cfg *Config, getenv func(string) string) {
 
 // TaskNode represents a task graph node with relations.
 type TaskNode struct {
-	ID          int64   `json:"id"`
-	Title       string  `json:"title"`
-	Description string  `json:"description,omitempty"`
-	Done        bool    `json:"done"`
-	Resolution  string  `json:"resolution,omitempty"`
-	Status      string  `json:"status"`
-	ParentID    *int64  `json:"parent_id,omitempty"`
-	SubtaskIDs  []int64 `json:"subtask_ids,omitempty"`
-	BlockedBy   []int64 `json:"blocked_by,omitempty"`
-	Blocks      []int64 `json:"blocks,omitempty"`
-	Related     []int64 `json:"related,omitempty"`
+	ID              int64      `json:"id"`
+	Title           string     `json:"title"`
+	Description     string     `json:"description,omitempty"`
+	Done            bool       `json:"done"`
+	Resolution      string     `json:"resolution,omitempty"`
+	Status          string     `json:"status"`
+	ParentID        *int64     `json:"parent_id,omitempty"`
+	SubtaskIDs      []int64    `json:"subtask_ids,omitempty"`
+	BlockedBy       []int64    `json:"blocked_by,omitempty"`
+	Blocks          []int64    `json:"blocks,omitempty"`
+	Related         []int64    `json:"related,omitempty"`
+	ClaimedByAgent  string     `json:"claimed_by_agent,omitempty"`
+	ClaimedByTurnID string     `json:"claimed_by_turn_id,omitempty"`
+	ClaimedAt       *time.Time `json:"claimed_at,omitempty"`
+}
+
+// TaskMeta contains metadata persisted alongside Vikunja tasks.
+type TaskMeta struct {
+	Resolution      string     `json:"resolution,omitempty"`
+	ClaimedByAgent  string     `json:"claimed_by_agent,omitempty"`
+	ClaimedByTurnID string     `json:"claimed_by_turn_id,omitempty"`
+	ClaimedAt       *time.Time `json:"claimed_at,omitempty"`
 }
 
 // TaskSummary is a compact task representation.
@@ -302,7 +313,7 @@ type NodeSource interface {
 }
 
 // TaskToNode converts a Vikunja task and its stored resolution into a graph node.
-func TaskToNode(t VikunjaTask, resolution string) TaskNode {
+func TaskToNode(t VikunjaTask, resolution string, meta ...TaskMeta) TaskNode {
 	node := TaskNode{
 		ID:          t.DisplayID(),
 		Title:       t.Title,
@@ -310,6 +321,15 @@ func TaskToNode(t VikunjaTask, resolution string) TaskNode {
 		Done:        t.Done,
 		Resolution:  resolution,
 		Status:      ResolveTaskStatus(t.Done, resolution),
+	}
+	if len(meta) > 0 {
+		node.ClaimedByAgent = meta[0].ClaimedByAgent
+		node.ClaimedByTurnID = meta[0].ClaimedByTurnID
+		node.ClaimedAt = meta[0].ClaimedAt
+		if resolution == "" && meta[0].Resolution != "" {
+			node.Resolution = meta[0].Resolution
+			node.Status = ResolveTaskStatus(t.Done, meta[0].Resolution)
+		}
 	}
 	isSameProject := func(other VikunjaTask) bool {
 		return other.ProjectID == 0 || other.ProjectID == t.ProjectID
@@ -345,7 +365,7 @@ func TaskToNode(t VikunjaTask, resolution string) TaskNode {
 // comments, and the graph nodes of its neighbors. Neighbor order follows
 // Vikunja's embedded related tasks; a neighbor missing from neighbors (deleted
 // or outside the project) falls back to its embedded id, title, and status.
-func HydrateTask(task VikunjaTask, status string, comments []VikunjaComment, neighbors map[int64]TaskNode) HydratedTask {
+func HydrateTask(task VikunjaTask, status string, comments []VikunjaComment, neighbors map[int64]TaskNode, meta ...TaskMeta) HydratedTask {
 	summarize := func(t VikunjaTask) TaskSummary {
 		if t.ProjectID == 0 || t.ProjectID == task.ProjectID {
 			if node, ok := neighbors[t.ID]; ok {
@@ -379,6 +399,15 @@ func HydrateTask(task VikunjaTask, status string, comments []VikunjaComment, nei
 		Blocks:      summarizeAll("blocking"),
 		BlockedBy:   summarizeAll("blocked"),
 		Related:     summarizeAll("related"),
+	}
+	if len(meta) > 0 {
+		hydrated.ClaimedByAgent = meta[0].ClaimedByAgent
+		hydrated.ClaimedByTurnID = meta[0].ClaimedByTurnID
+		hydrated.ClaimedAt = meta[0].ClaimedAt
+	} else if self, ok := neighbors[task.DisplayID()]; ok {
+		hydrated.ClaimedByAgent = self.ClaimedByAgent
+		hydrated.ClaimedByTurnID = self.ClaimedByTurnID
+		hydrated.ClaimedAt = self.ClaimedAt
 	}
 	if parents := task.RelatedTasks["parenttask"]; len(parents) > 0 {
 		p := summarize(parents[0])
@@ -587,6 +616,22 @@ func isTaskReady(node TaskNode, nodes map[int64]TaskNode) bool {
 	if node.Status != TaskStatusOpen {
 		return false
 	}
+	if node.ClaimedByAgent != "" || node.ClaimedByTurnID != "" {
+		return false
+	}
+	visited := map[int64]bool{node.ID: true}
+	curr := node.ParentID
+	for curr != nil && !visited[*curr] {
+		visited[*curr] = true
+		pNode, exists := nodes[*curr]
+		if !exists {
+			break
+		}
+		if pNode.ClaimedByAgent != "" || pNode.ClaimedByTurnID != "" {
+			return false
+		}
+		curr = pNode.ParentID
+	}
 	for _, bid := range node.BlockedBy {
 		if bNode, exists := nodes[bid]; exists && bNode.Status != TaskStatusCompleted {
 			return false
@@ -772,11 +817,14 @@ func ComputeUnblockedIDs(before, after map[int64]TaskNode, closedIDs []int64) []
 // SummarizeNode projects a graph node onto its compact summary.
 func SummarizeNode(node TaskNode) TaskSummary {
 	return TaskSummary{
-		ID:        node.ID,
-		Title:     node.Title,
-		Status:    node.Status,
-		ParentID:  node.ParentID,
-		BlockedBy: node.BlockedBy,
-		Blocks:    node.Blocks,
+		ID:              node.ID,
+		Title:           node.Title,
+		Status:          node.Status,
+		ParentID:        node.ParentID,
+		BlockedBy:       node.BlockedBy,
+		Blocks:          node.Blocks,
+		ClaimedByAgent:  node.ClaimedByAgent,
+		ClaimedByTurnID: node.ClaimedByTurnID,
+		ClaimedAt:       node.ClaimedAt,
 	}
 }

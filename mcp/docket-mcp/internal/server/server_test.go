@@ -29,11 +29,20 @@ import (
 type memoryTaskStore struct {
 	mu                       sync.Mutex
 	resolutions              map[int64]string
+	claims                   map[int64]taskClaimRecord
 	searchHits               []config.ScoredTaskSummary
 	searchErr                error
 	fetchErr                 error
 	updateErr                error
+	claimErr                 error
+	unclaimErr               error
 	embeddingResolutionCalls int
+}
+
+type taskClaimRecord struct {
+	agent     string
+	turnID    string
+	claimedAt time.Time
 }
 
 func newMemoryTaskStore() *memoryTaskStore {
@@ -41,6 +50,7 @@ func newMemoryTaskStore() *memoryTaskStore {
 		resolutions: map[int64]string{
 			5: "completed",
 		},
+		claims: make(map[int64]taskClaimRecord),
 		searchHits: []config.ScoredTaskSummary{
 			{ID: 1, Title: "Top Task 1", Status: "open", Score: 0.95},
 			{ID: 2, Title: "Subtask 2", Status: "open", Score: 0.85},
@@ -77,6 +87,7 @@ func (m *memoryTaskStore) UpdateTaskResolutionBatch(ctx context.Context, taskIDs
 	}
 	for _, id := range taskIDs {
 		m.resolutions[id] = resolution
+		delete(m.claims, id)
 	}
 	return nil
 }
@@ -92,6 +103,54 @@ func (m *memoryTaskStore) FetchTaskResolutions(ctx context.Context, taskIDs []in
 		res[id] = m.resolutions[id]
 	}
 	return res, nil
+}
+
+func (m *memoryTaskStore) FetchTaskMeta(ctx context.Context, taskIDs []int64) (map[int64]config.TaskMeta, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.fetchErr != nil {
+		return nil, m.fetchErr
+	}
+	res := make(map[int64]config.TaskMeta, len(taskIDs))
+	for _, id := range taskIDs {
+		meta := config.TaskMeta{
+			Resolution: m.resolutions[id],
+		}
+		if claim, ok := m.claims[id]; ok {
+			meta.ClaimedByAgent = claim.agent
+			meta.ClaimedByTurnID = claim.turnID
+			meta.ClaimedAt = &claim.claimedAt
+		}
+		res[id] = meta
+	}
+	return res, nil
+}
+
+func (m *memoryTaskStore) ClaimTask(ctx context.Context, taskID int64, agent, turnID string, claimedAt time.Time) (bool, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.claimErr != nil {
+		return false, m.claimErr
+	}
+	if existing, ok := m.claims[taskID]; ok && (existing.agent != "" || existing.turnID != "") {
+		return false, nil
+	}
+	m.claims[taskID] = taskClaimRecord{
+		agent:     agent,
+		turnID:    turnID,
+		claimedAt: claimedAt,
+	}
+	return true, nil
+}
+
+func (m *memoryTaskStore) UnclaimTask(ctx context.Context, taskID int64) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.unclaimErr != nil {
+		return m.unclaimErr
+	}
+	delete(m.claims, taskID)
+	return nil
 }
 
 func (m *memoryTaskStore) SearchTasksRRF(ctx context.Context, embedding []float32, queryText string, statusFilter string, limit int) ([]config.ScoredTaskSummary, error) {
@@ -165,6 +224,13 @@ func fixtureTasks() []config.VikunjaTask {
 			ID: 7, Title: "Subtask 7", Description: "Child of 6", Done: false, ProjectID: 1,
 			RelatedTasks: map[string][]config.VikunjaTask{
 				"parenttask": rel(6),
+				"subtask":    rel(8),
+			},
+		},
+		{
+			ID: 8, Title: "Subtask 8", Description: "Child of 7", Done: false, ProjectID: 1,
+			RelatedTasks: map[string][]config.VikunjaTask{
+				"parenttask": rel(7),
 			},
 		},
 		{
@@ -540,9 +606,17 @@ func TestServer_RESTUpstreamErrorsTable(t *testing.T) {
 
 func postMCP(t *testing.T, handler http.Handler, path, body string) *httptest.ResponseRecorder {
 	t.Helper()
+	return postMCPWithHeaders(t, handler, path, body, nil)
+}
+
+func postMCPWithHeaders(t *testing.T, handler http.Handler, path, body string, headers map[string]string) *httptest.ResponseRecorder {
+	t.Helper()
 	req := httptest.NewRequest(http.MethodPost, path, strings.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Accept", "application/json, text/event-stream")
+	for k, v := range headers {
+		req.Header.Set(k, v)
+	}
 	rec := httptest.NewRecorder()
 	handler.ServeHTTP(rec, req)
 	return rec
@@ -561,8 +635,13 @@ type toolCallResponse struct {
 
 func callTool(t *testing.T, handler http.Handler, name, args string) toolCallResponse {
 	t.Helper()
+	return callToolWithHeaders(t, handler, name, args, nil)
+}
+
+func callToolWithHeaders(t *testing.T, handler http.Handler, name, args string, headers map[string]string) toolCallResponse {
+	t.Helper()
 	body := `{"jsonrpc":"2.0","id":100,"method":"tools/call","params":{"name":` + strconv.Quote(name) + `,"arguments":` + args + `}}`
-	w := postMCP(t, handler, "/mcp", body)
+	w := postMCPWithHeaders(t, handler, "/mcp", body, headers)
 	var resp toolCallResponse
 	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
 		t.Fatalf("unexpected response %q (status %d, err %v)", w.Body.String(), w.Code, err)
@@ -647,8 +726,8 @@ func TestServer_ToolsListSchema(t *testing.T) {
 			}
 		}
 	}
-	if len(resp.Result.Tools) != 9 {
-		t.Fatalf("tools/list returned %d tools, want 9", len(resp.Result.Tools))
+	if len(resp.Result.Tools) != 11 {
+		t.Fatalf("tools/list returned %d tools, want 11", len(resp.Result.Tools))
 	}
 	wantEnums := map[string]string{
 		"list.status":      "open,completed,wont_do,all",
@@ -743,6 +822,7 @@ func TestServer_ToolsExecutionTable(t *testing.T) {
 		{name: "link create error", toolName: "link", args: `{"id":4,"target_id":888,"type":"related"}`, wantSubstr: "failed to create relation", wantError: true},
 		{name: "link remove error", toolName: "link", args: `{"id":4,"target_id":888,"type":"blocks","remove":true}`, wantSubstr: "failed to remove relation", wantError: true},
 		{name: "link invalid id error", toolName: "link", args: `{"id":0,"target_id":2,"type":"blocks"}`, wantSubstr: "must be positive integers", wantError: true},
+		{name: "link invalid relation type error", toolName: "link", args: `{"id":4,"target_id":2,"type":"invalid"}`, wantSubstr: "does not equal any of: [parent blocks related]", wantError: true},
 		{name: "link tasks parent success", toolName: "link", args: `{"id":4,"target_id":1,"type":"parent"}`, wantSubstr: "created", wantRelations: []rel{{4, 1, "parenttask"}}},
 		{name: "link tasks related success", toolName: "link", args: `{"id":4,"target_id":2,"type":"related"}`, wantSubstr: "created", wantRelations: []rel{{4, 2, "related"}}},
 		{name: "link self-link rejected", toolName: "link", args: `{"id":1,"target_id":1,"type":"parent"}`, wantSubstr: "self-link cycle", wantError: true},
@@ -801,6 +881,118 @@ func TestServer_ToolsExecutionTable(t *testing.T) {
 				t.Fatalf("recorded relations = %+v, want %+v", state.recordedRelations, tc.wantRelations)
 			}
 		})
+	}
+}
+
+func TestServer_ClaimAndFilterTable(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name        string
+		toolName    string
+		args        string
+		wantSubstr  string
+		wantError   bool
+		vikunjaDown bool
+	}{
+		{name: "claim upstream failure", toolName: "claim", args: `{"id":4,"agent":"eri"}`, wantSubstr: "failed to get default project: vikunja API returned status 500", wantError: true, vikunjaDown: true},
+		{name: "unclaim upstream failure", toolName: "unclaim", args: `{"id":4}`, wantSubstr: "failed to get default project: vikunja API returned status 500", wantError: true, vikunjaDown: true},
+		{name: "claim fetch failure", toolName: "claim", args: `{"id":888,"agent":"eri"}`, wantSubstr: "failed to fetch task 888", wantError: true},
+		{name: "unclaim fetch failure", toolName: "unclaim", args: `{"id":888}`, wantSubstr: "failed to fetch task 888", wantError: true},
+		{name: "claim with turn_id only", toolName: "claim", args: `{"id":4,"turn_id":"turn-only"}`, wantSubstr: `{"id":4,"title":"Independent Task 4"`},
+		{name: "claim deep subtask rejected", toolName: "claim", args: `{"id":8,"agent":"eri"}`, wantSubstr: "task is a subtask (top-level parent is task 6; only top-level tasks can be claimed)", wantError: true},
+		{name: "claim top level task", toolName: "claim", args: `{"id":4,"agent":"eri","turn_id":"turn-1"}`, wantSubstr: `{"id":4,"title":"Independent Task 4","status":"open"`},
+		{name: "claim subtask rejected", toolName: "claim", args: `{"id":2,"agent":"eri","turn_id":"turn-1"}`, wantSubstr: "task is a subtask (top-level parent is task 1; only top-level tasks can be claimed)", wantError: true},
+		{name: "claim closed task rejected", toolName: "claim", args: `{"id":5,"agent":"eri","turn_id":"turn-1"}`, wantSubstr: "cannot claim task 5: task is completed (must be open)", wantError: true},
+		{name: "claim missing agent and turn_id rejected", toolName: "claim", args: `{"id":4}`, wantSubstr: "either agent or turn_id must be provided", wantError: true},
+		{name: "claim invalid id error", toolName: "claim", args: `{"id":0,"agent":"eri"}`, wantSubstr: "must be a positive integer", wantError: true},
+		{name: "claim nonexistent task rejected", toolName: "claim", args: `{"id":999,"agent":"eri"}`, wantSubstr: "task 999 not found", wantError: true},
+		{name: "claim task in another project rejected", toolName: "claim", args: `{"id":60,"agent":"eri"}`, wantSubstr: "task 60 not found in project graph", wantError: true},
+		{name: "unclaim task", toolName: "unclaim", args: `{"id":4}`, wantSubstr: `{"id":4,"title":"Independent Task 4","status":"open"`},
+		{name: "unclaim invalid id error", toolName: "unclaim", args: `{"id":-1}`, wantSubstr: "must be a positive integer", wantError: true},
+		{name: "unclaim nonexistent task rejected", toolName: "unclaim", args: `{"id":999}`, wantSubstr: "task 999 not found", wantError: true},
+		{name: "list claimed false filter", toolName: "list", args: `{"claimed":false}`, wantSubstr: `"id":1`},
+		{name: "list claimed true filter empty", toolName: "list", args: `{"claimed":true}`, wantSubstr: `[]`},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			var mux http.Handler
+			if tc.vikunjaDown {
+				mux = setupErrorEnvironment(t)
+			} else {
+				env := setupTestEnvironment(t)
+				mux = env.mux
+			}
+			resp := callTool(t, mux, tc.toolName, tc.args)
+			if resp.Error != nil || len(resp.Result.Content) != 1 {
+				t.Fatalf("unexpected response %+v", resp)
+			}
+			text := resp.Result.Content[0].Text
+			if !strings.Contains(text, tc.wantSubstr) {
+				t.Fatalf("result = %q, want substring %q", text, tc.wantSubstr)
+			}
+			if resp.Result.IsError != tc.wantError {
+				t.Fatalf("isError = %v, want %v (result %q)", resp.Result.IsError, tc.wantError, text)
+			}
+		})
+	}
+}
+
+func TestServer_ClaimWithHeaders(t *testing.T) {
+	t.Parallel()
+
+	env := setupTestEnvironment(t)
+	headers := map[string]string{
+		"X-Aerial-Agent":   "eri-runner",
+		"X-Aerial-Turn-Id": "turn-test-456",
+	}
+	resp := callToolWithHeaders(t, env.mux, "claim", `{"id":4}`, headers)
+	if resp.Result.IsError || len(resp.Result.Content) != 1 {
+		t.Fatalf("unexpected error response: %+v", resp)
+	}
+	text := resp.Result.Content[0].Text
+	if !strings.Contains(text, `"claimed_by_agent":"eri-runner"`) || !strings.Contains(text, `"claimed_by_turn_id":"turn-test-456"`) {
+		t.Fatalf("claim response missing header values: %s", text)
+	}
+	taskStore, ok := env.srv.store.(*memoryTaskStore)
+	if !ok {
+		t.Fatalf("srv.store = %T, want *memoryTaskStore", env.srv.store)
+	}
+	taskStore.mu.Lock()
+	claim := taskStore.claims[4]
+	taskStore.mu.Unlock()
+	if claim.agent != "eri-runner" || claim.turnID != "turn-test-456" {
+		t.Fatalf("store claim = %+v, want agent eri-runner, turn turn-test-456", claim)
+	}
+}
+
+func TestServer_ClaimAlreadyClaimed(t *testing.T) {
+	t.Parallel()
+
+	env := setupTestEnvironment(t)
+	resp1 := callTool(t, env.mux, "claim", `{"id":4,"agent":"eri-1","turn_id":"turn-1"}`)
+	if resp1.Result.IsError {
+		t.Fatalf("first claim failed: %+v", resp1)
+	}
+
+	resp2 := callTool(t, env.mux, "claim", `{"id":4,"agent":"eri-2","turn_id":"turn-2"}`)
+	if !resp2.Result.IsError {
+		t.Fatalf("second claim succeeded, want error: %+v", resp2)
+	}
+	if !strings.Contains(resp2.Result.Content[0].Text, "already claimed") {
+		t.Fatalf("unexpected error text: %s", resp2.Result.Content[0].Text)
+	}
+
+	respUnclaim := callTool(t, env.mux, "unclaim", `{"id":4}`)
+	if respUnclaim.Result.IsError {
+		t.Fatalf("unclaim failed: %+v", respUnclaim)
+	}
+
+	resp3 := callTool(t, env.mux, "claim", `{"id":4,"agent":"eri-2","turn_id":"turn-2"}`)
+	if resp3.Result.IsError {
+		t.Fatalf("third claim after unclaim failed: %+v", resp3)
 	}
 }
 
@@ -1009,6 +1201,88 @@ func TestServer_CreateEmbeddingFailureLogged(t *testing.T) {
 	taskStore.mu.Unlock()
 	if calls != 1 {
 		t.Fatalf("UpdateTaskEmbeddingAndResolution calls = %d, want 1 (embedding path reached)", calls)
+	}
+}
+
+func TestFindTopParentID(t *testing.T) {
+	t.Parallel()
+	env := setupTestEnvironment(t)
+	src, err := env.srv.newNodeSource(context.Background())
+	if err != nil {
+		t.Fatalf("newNodeSource: %v", err)
+	}
+	if got := findTopParentID(context.Background(), src, 1, nil); got != 1 {
+		t.Fatalf("findTopParentID(nil) = %d, want 1", got)
+	}
+}
+
+func TestVikunjaNodeSource_Methods(t *testing.T) {
+	t.Parallel()
+	env := setupTestEnvironment(t)
+	src, err := env.srv.newNodeSource(context.Background())
+	if err != nil {
+		t.Fatalf("newNodeSource: %v", err)
+	}
+
+	_, err = src.ResolveGlobalID(context.Background(), 60)
+	if err == nil || !strings.Contains(err.Error(), "not found") {
+		t.Fatalf("ResolveGlobalID(60) = %v, want not found", err)
+	}
+
+	_, err = src.ResolveGlobalID(context.Background(), 888)
+	if err == nil {
+		t.Fatalf("ResolveGlobalID(888) expected error, got nil")
+	}
+
+	_, err = src.GetTask(context.Background(), 888)
+	if err == nil {
+		t.Fatalf("GetTask(888) expected error, got nil")
+	}
+
+	task60, err := src.GetTask(context.Background(), 60)
+	if err != nil || task60.ID != 60 {
+		t.Fatalf("GetTask(60) = %+v, %v", task60, err)
+	}
+
+	// GetTask via globalToDisplay mapping
+	task317, err := src.GetTask(context.Background(), 1000349)
+	if err != nil || task317.ID != 1000349 {
+		t.Fatalf("GetTask(1000349) = %+v, %v", task317, err)
+	}
+
+	// ResolveGlobalID when not in displayToGlobal cache
+	delete(src.displayToGlobal, 75)
+	global75, err := src.ResolveGlobalID(context.Background(), 75)
+	if err != nil || global75 != 75 {
+		t.Fatalf("ResolveGlobalID(75) = %d, %v, want 75", global75, err)
+	}
+}
+
+func TestServer_ClaimStoreError(t *testing.T) {
+	t.Parallel()
+	env := setupTestEnvironment(t)
+	taskStore, ok := env.srv.store.(*memoryTaskStore)
+	if !ok {
+		t.Fatalf("srv.store = %T, want *memoryTaskStore", env.srv.store)
+	}
+	taskStore.claimErr = errors.New("db claim error")
+	resp := callTool(t, env.mux, "claim", `{"id":4,"agent":"eri"}`)
+	if !resp.Result.IsError || !strings.Contains(resp.Result.Content[0].Text, "db claim error") {
+		t.Fatalf("expected claim db error, got %+v", resp)
+	}
+}
+
+func TestServer_UnclaimStoreError(t *testing.T) {
+	t.Parallel()
+	env := setupTestEnvironment(t)
+	taskStore, ok := env.srv.store.(*memoryTaskStore)
+	if !ok {
+		t.Fatalf("srv.store = %T, want *memoryTaskStore", env.srv.store)
+	}
+	taskStore.unclaimErr = errors.New("db unclaim error")
+	resp := callTool(t, env.mux, "unclaim", `{"id":4}`)
+	if !resp.Result.IsError || !strings.Contains(resp.Result.Content[0].Text, "db unclaim error") {
+		t.Fatalf("expected unclaim db error, got %+v", resp)
 	}
 }
 
