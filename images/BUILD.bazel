@@ -111,7 +111,7 @@ pkg_tar(
     name = "console_static_layer",
     srcs = ["//services/console/static"],
     package_dir = "/app/static",
-    strip_prefix = "services/console/static",
+    strip_prefix = "/services/console/static",
 )
 
 # Bundles Console React Vite assets into static dist tarball.
@@ -195,7 +195,7 @@ pkg_tar(
     name = "docs_app_layer",
     srcs = ["//services/docs-service:app"],
     package_dir = "/usr/share/nginx/html",
-    strip_prefix = "services/docs-service/app",
+    strip_prefix = "/services/docs-service/app",
 )
 
 pkg_tar(
