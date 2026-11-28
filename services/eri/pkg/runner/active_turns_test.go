@@ -106,3 +106,52 @@ func assertActiveTurnRegistry(t *testing.T, r *ActiveTurnRegistry, tc activeTurn
 		}
 	}
 }
+
+func TestActiveTurnRegistry_NoOpTracer(t *testing.T) {
+	t.Parallel()
+	r := NewActiveTurnRegistry()
+
+	// Empty turn without TurnID/Agent/Span is ignored.
+	r.Set(ActiveTurn{DaemonID: "d-empty", Target: "discord"}, trace.SpanContext{})
+	if _, _, ok := r.Turn("d-empty"); ok {
+		t.Errorf("expected d-empty to be ignored")
+	}
+
+	// Turn with Agent or TurnID is stored even with invalid SpanContext.
+	t1 := ActiveTurn{
+		DaemonID:       "d-noop",
+		Target:         "discord",
+		ConversationID: "conv-noop",
+		Agent:          "eri",
+		TurnID:         "turn-123",
+	}
+	r.Set(t1, trace.SpanContext{})
+
+	// Get returns false because SpanContext is not valid.
+	if sc, ok := r.Get("d-noop"); ok || sc.IsValid() {
+		t.Errorf("Get(d-noop) = %v, %v; want false", sc, ok)
+	}
+
+	// Turn returns the turn info and ok=true even though sc is invalid.
+	gotTurn, gotSC, ok := r.Turn("d-noop")
+	if !ok {
+		t.Fatalf("Turn(d-noop) ok = false, want true")
+	}
+	if gotTurn.Agent != "eri" || gotTurn.TurnID != "turn-123" || gotTurn.ConversationID != "conv-noop" {
+		t.Errorf("Turn(d-noop) = %+v, want %+v", gotTurn, t1)
+	}
+	if gotSC.IsValid() {
+		t.Errorf("Turn(d-noop) sc.IsValid() = true, want false")
+	}
+
+	// Target, SoleDaemonInTarget, DaemonByConversation all resolve.
+	if target, ok := r.Target("d-noop"); !ok || target != "discord" {
+		t.Errorf("Target(d-noop) = %q, %v; want discord, true", target, ok)
+	}
+	if sole, ok := r.SoleDaemonInTarget("discord"); !ok || sole != "d-noop" {
+		t.Errorf("SoleDaemonInTarget(discord) = %q, %v; want d-noop, true", sole, ok)
+	}
+	if daemonID, target, ok := r.DaemonByConversation("conv-noop"); !ok || daemonID != "d-noop" || target != "discord" {
+		t.Errorf("DaemonByConversation(conv-noop) = %q, %q, %v; want d-noop, discord, true", daemonID, target, ok)
+	}
+}

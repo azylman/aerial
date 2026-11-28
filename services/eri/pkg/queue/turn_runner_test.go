@@ -46,10 +46,11 @@ type fakeTurnSteps struct {
 	panics   map[string]bool
 	max      int
 
-	calls    []string
-	inputs   []AttemptInput
-	prompts  []string
-	attemptN int
+	calls             []string
+	inputs            []AttemptInput
+	prompts           []string
+	attemptN          int
+	lastStartedTurnID string
 }
 
 func (f *fakeTurnSteps) call(method, detail string) error {
@@ -90,7 +91,12 @@ func (f *fakeTurnSteps) attempt(in AttemptInput) (AttemptResult, error) {
 	return a.res, a.err
 }
 
-func (f *fakeTurnSteps) RecordBurstStarted(context.Context, string, []string) (StartedTurn, error) {
+func (f *fakeTurnSteps) RecordBurstStarted(_ context.Context, _ string, _ []string, turnID ...string) (StartedTurn, error) {
+	f.mu.Lock()
+	if len(turnID) > 0 {
+		f.lastStartedTurnID = turnID[0]
+	}
+	f.mu.Unlock()
 	return f.started, f.call("started", "")
 }
 
@@ -122,7 +128,12 @@ func (f *fakeTurnSteps) FailBurstTurn(_ context.Context, _ string, ids []string,
 	return f.call("fail", strings.Join(ids, ",")+" "+reason)
 }
 
-func (f *fakeTurnSteps) RecordDispatchStarted(context.Context, string, string) (StartedTurn, error) {
+func (f *fakeTurnSteps) RecordDispatchStarted(_ context.Context, _, _ string, turnID ...string) (StartedTurn, error) {
+	f.mu.Lock()
+	if len(turnID) > 0 {
+		f.lastStartedTurnID = turnID[0]
+	}
+	f.mu.Unlock()
 	return f.started, f.call("started", "")
 }
 
@@ -548,6 +559,7 @@ func TestTurnRunnerRunBurst(t *testing.T) {
 			assert.Equal(t, TurnRunResult{TurnID: "turn-1", Outcome: tc.wantOutcome}, res)
 			assert.Equal(t, tc.wantCmds, j.log())
 			assert.Equal(t, tc.wantCalls, steps.callLog())
+			assert.Equal(t, "turn-1", steps.lastStartedTurnID)
 			if tc.name == "DrainedIDsCarriedAcrossRetryAndReportedInOnTurnDone" {
 				require.Len(t, steps.inputs, 2)
 				assert.Equal(t, []string{"m1", "m2"}, steps.inputs[0].IDs)
@@ -636,6 +648,7 @@ func TestTurnRunnerRunDispatch(t *testing.T) {
 			assert.Equal(t, TurnRunResult{TurnID: "turn-1", Outcome: tc.wantOutcome}, res)
 			assert.Equal(t, tc.wantCmds, j.log())
 			assert.Equal(t, tc.wantCalls, steps.callLog())
+			assert.Equal(t, "turn-1", steps.lastStartedTurnID)
 		})
 	}
 }

@@ -76,6 +76,7 @@ func turnSpan(n byte) trace.SpanContext {
 // seenRequest is what the upstream MCP server observed.
 type seenRequest struct {
 	traceparent, daemonHeader, auth, path, body string
+	agentHeader, turnIDHeader                   string
 }
 
 func newUpstream(t *testing.T) (*httptest.Server, <-chan seenRequest) {
@@ -90,6 +91,7 @@ func newUpstream(t *testing.T) (*httptest.Server, <-chan seenRequest) {
 		seen <- seenRequest{
 			traceparent: r.Header.Get("Traceparent"), daemonHeader: r.Header.Get("X-Eri-Daemon"),
 			auth: r.Header.Get("Authorization"), path: r.URL.RequestURI(), body: buf.String(),
+			agentHeader: r.Header.Get("X-Aerial-Agent"), turnIDHeader: r.Header.Get("X-Aerial-Turn-Id"),
 		}
 		w.Header().Set("Mcp-Session-Id", "sess-42")
 		w.WriteHeader(http.StatusAccepted)
@@ -113,6 +115,7 @@ func (m toolSpans) ClaimToolSpan(_ context.Context, server, tool, callID string)
 
 type activeTurn struct {
 	daemon, target, conversation string
+	agent, turnID                string
 	span                         byte
 	tools                        toolSpans // attached tool span source; nil = none
 }
@@ -121,8 +124,12 @@ type proxyCall struct {
 	daemonHeader string
 	body         string
 	traceparent  string // inbound traceparent header the MCP client sends; "" = none
+	inAgent      string // inbound X-Aerial-Agent header (for anti-spoofing tests)
+	inTurnID     string // inbound X-Aerial-Turn-Id header (for anti-spoofing tests)
 	wantParent   byte   // 0 = no span, inbound traceparent forwarded unchanged
 	wantCallID   string // gen_ai.tool.call.id on the client span; "" = absent
+	wantAgent    string // expected outbound X-Aerial-Agent header upstream saw
+	wantTurnID   string // expected outbound X-Aerial-Turn-Id header upstream saw
 }
 
 func toolsCall(tool string) string {
@@ -268,6 +275,25 @@ func TestTraceProxy(t *testing.T) {
 			turns: []activeTurn{{daemon: "p1/discord-1", target: "discord", span: 1, tools: toolSpans{"docket//": 9}}},
 			calls: []proxyCall{{daemonHeader: "p1/discord-1", body: toolsList, wantParent: 1}},
 		},
+		{
+			name:  "agent and turn ID headers propagated to upstream MCP server",
+			turns: []activeTurn{{daemon: "p1/discord-1", target: "discord", agent: "eri-worker", turnID: "turn-xyz-123", span: 1}},
+			calls: []proxyCall{{daemonHeader: "p1/discord-1", body: toolsCall("create"), wantParent: 1, wantAgent: "eri-worker", wantTurnID: "turn-xyz-123"}},
+		},
+		{
+			name:  "inbound agent and turn ID headers stripped (anti-spoofing)",
+			turns: []activeTurn{{daemon: "p1/discord-1", target: "discord", agent: "eri-worker", turnID: "turn-legit", span: 1}},
+			calls: []proxyCall{{daemonHeader: "p1/discord-1", body: toolsCall("create"), inAgent: "spoofed-agent", inTurnID: "spoofed-turn", wantParent: 1, wantAgent: "eri-worker", wantTurnID: "turn-legit"}},
+		},
+		{
+			name:  "unattributed request strips inbound agent and turn ID headers",
+			calls: []proxyCall{{body: toolsCall("create"), inAgent: "spoofed-agent", inTurnID: "spoofed-turn", wantParent: 0, wantAgent: "", wantTurnID: ""}},
+		},
+		{
+			name:  "active turn with no-op tracer still propagates agent and turn ID",
+			turns: []activeTurn{{daemon: "p1/discord-1", target: "discord", agent: "eri-worker", turnID: "turn-noop", span: 0}},
+			calls: []proxyCall{{daemonHeader: "p1/discord-1", body: toolsCall("create"), wantParent: 0, wantAgent: "eri-worker", wantTurnID: "turn-noop"}},
+		},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -282,7 +308,17 @@ func runTraceProxyCase(t *testing.T, tc traceProxyCase) {
 	upstream, seen := newUpstream(t)
 	registry := runner.NewActiveTurnRegistry()
 	for _, at := range tc.turns {
-		registry.Set(runner.ActiveTurn{DaemonID: at.daemon, Target: at.target, ConversationID: at.conversation}, turnSpan(at.span))
+		var sc trace.SpanContext
+		if at.span != 0 {
+			sc = turnSpan(at.span)
+		}
+		registry.Set(runner.ActiveTurn{
+			DaemonID:       at.daemon,
+			Target:         at.target,
+			ConversationID: at.conversation,
+			Agent:          at.agent,
+			TurnID:         at.turnID,
+		}, sc)
 		if at.tools != nil {
 			registry.SetToolSpans(at.daemon, at.tools)
 		}
@@ -331,6 +367,12 @@ func assertTraceProxyCall(t *testing.T, srv *httptest.Server, rec endedSpans, se
 	if call.traceparent != "" {
 		req.Header.Set("Traceparent", call.traceparent)
 	}
+	if call.inAgent != "" {
+		req.Header.Set("X-Aerial-Agent", call.inAgent)
+	}
+	if call.inTurnID != "" {
+		req.Header.Set("X-Aerial-Turn-Id", call.inTurnID)
+	}
 	resp, err := srv.Client().Do(req)
 	if err != nil {
 		t.Fatalf("call %d: %v", i, err)
@@ -342,6 +384,9 @@ func assertTraceProxyCall(t *testing.T, srv *httptest.Server, rec endedSpans, se
 	got := <-seen
 	if got.auth != "Bearer upstream-token" || got.daemonHeader != "" || got.path != "/mcp?team=1" || got.body != call.body {
 		t.Errorf("call %d: upstream saw %+v", i, got)
+	}
+	if got.agentHeader != call.wantAgent || got.turnIDHeader != call.wantTurnID {
+		t.Errorf("call %d: upstream saw agent=%q turnID=%q, want agent=%q turnID=%q", i, got.agentHeader, got.turnIDHeader, call.wantAgent, call.wantTurnID)
 	}
 	if call.wantParent == 0 {
 		if got.traceparent != call.traceparent || len(rec.ch) != 0 {

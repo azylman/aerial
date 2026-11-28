@@ -342,7 +342,7 @@ func beginAttemptRows(ctx context.Context, s db.Store, te *turnExecution, subj a
 		return AttemptResult{}, false, nil
 	}
 	te.logCtxf(ctx, "[TurnRunner] Turn %s hit the crash loop cap (%d restarts); failing it", in.TurnID, CrashLoopCap)
-	summary := AttemptSummary{Outcome: OutcomeFailed, Reason: crashLoopReason, NoticePrefix: "execution failed"}
+	summary := AttemptSummary{TurnID: in.TurnID, Outcome: OutcomeFailed, Reason: crashLoopReason, NoticePrefix: "execution failed"}
 	if err := subj.recordFailure(ctx, s, te, ids, summary); err != nil {
 		return AttemptResult{}, true, err
 	}
@@ -459,7 +459,7 @@ func (p *WorkerPool) executeAttempt(ctx context.Context, s db.Store, te *turnExe
 	case classResume:
 		return te.resumeAttempt(st, base, model), nil
 	default:
-		f := attemptFailure{class: class, ordinal: in.Ordinal, maxAttempts: maxAttempts, errDetail: st.errDetail, stderr: st.stderr, model: model, cfg: cfg}
+		f := attemptFailure{class: class, in: in, ordinal: in.Ordinal, maxAttempts: maxAttempts, errDetail: st.errDetail, stderr: st.stderr, model: model, cfg: cfg}
 		if class == classTimeout {
 			f.timeoutReason = timeoutReason(classIn)
 		}
@@ -543,7 +543,7 @@ func (p *WorkerPool) succeedAttempt(ctx context.Context, s db.Store, te *turnExe
 	}
 	ok, emptyErr := te.deliverSuccessAndFinalize(st.resp, in.Usage, model, in.Ordinal, maxAttempts)
 	if !ok {
-		return p.failAttempt(ctx, s, te, subj, attemptFailure{class: classTerminal, ordinal: in.Ordinal, maxAttempts: maxAttempts, errDetail: emptyErr, stderr: st.stderr, model: model, cfg: te.resolveAttemptConfig(ctx, 0)}, ids, base)
+		return p.failAttempt(ctx, s, te, subj, attemptFailure{class: classTerminal, in: in, ordinal: in.Ordinal, maxAttempts: maxAttempts, errDetail: emptyErr, stderr: st.stderr, model: model, cfg: te.resolveAttemptConfig(ctx, 0)}, ids, base)
 	}
 	if err := subj.ensureCompleted(ctx, s, te, ids); err != nil {
 		return AttemptResult{}, err
@@ -576,6 +576,7 @@ func (te *turnExecution) resumeAttempt(st attemptOutcomeState, base AttemptResul
 // attemptFailure carries a failed attempt's class and details to failAttempt.
 type attemptFailure struct {
 	class                attemptClass
+	in                   AttemptInput
 	ordinal, maxAttempts int
 	errDetail, stderr    string
 	model                string
@@ -638,11 +639,11 @@ func (p *WorkerPool) failAttempt(ctx context.Context, s db.Store, te *turnExecut
 func attemptFailureSummary(f attemptFailure) (AttemptSummary, string) {
 	switch f.class {
 	case classTimeout:
-		return AttemptSummary{Outcome: OutcomeTimeout, Reason: attemptTimeoutReason, Stderr: f.stderr}, AttemptKindTimeout
+		return AttemptSummary{TurnID: f.in.TurnID, Outcome: OutcomeTimeout, Reason: attemptTimeoutReason, Stderr: f.stderr}, AttemptKindTimeout
 	case classExhausted:
-		return AttemptSummary{Outcome: OutcomeFailed, Reason: f.errDetail, Stderr: f.stderr, NoticePrefix: fmt.Sprintf("execution failed after exhausting %d attempts", f.maxAttempts)}, AttemptKindTerminal
+		return AttemptSummary{TurnID: f.in.TurnID, Outcome: OutcomeFailed, Reason: f.errDetail, Stderr: f.stderr, NoticePrefix: fmt.Sprintf("execution failed after exhausting %d attempts", f.maxAttempts)}, AttemptKindTerminal
 	default:
-		return AttemptSummary{Outcome: OutcomeFailed, Reason: f.errDetail, Stderr: f.stderr, NoticePrefix: "execution failed with non-transient error"}, AttemptKindTerminal
+		return AttemptSummary{TurnID: f.in.TurnID, Outcome: OutcomeFailed, Reason: f.errDetail, Stderr: f.stderr, NoticePrefix: "execution failed with non-transient error"}, AttemptKindTerminal
 	}
 }
 

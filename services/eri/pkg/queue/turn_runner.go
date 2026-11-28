@@ -41,7 +41,7 @@ const (
 
 // turnSteps is the narrow set of WorkerPool step functions the TurnRunner journals.
 type turnSteps interface {
-	RecordBurstStarted(ctx context.Context, threadID string, ids []string) (StartedTurn, error)
+	RecordBurstStarted(ctx context.Context, threadID string, ids []string, turnID ...string) (StartedTurn, error)
 	PrepareBurstTurn(ctx context.Context, threadID, turnID string, ids []string) (TurnPrep, error)
 	RunBurstAttempt(ctx context.Context, in AttemptInput) (AttemptResult, error)
 	RecordBurstOutcome(ctx context.Context, ids []string, summary AttemptSummary) error
@@ -50,7 +50,7 @@ type turnSteps interface {
 	StopBurstTurn(ctx context.Context, turnID string, ids []string) error
 	FailBurstTurn(ctx context.Context, turnID string, ids []string, reason string, hookMetadata ...map[string]string) error
 
-	RecordDispatchStarted(ctx context.Context, sessionKey, dispatchID string) (StartedTurn, error)
+	RecordDispatchStarted(ctx context.Context, sessionKey, dispatchID string, turnID ...string) (StartedTurn, error)
 	PrepareDispatchTurn(ctx context.Context, sessionKey, turnID, dispatchID string) (TurnPrep, error)
 	RunDispatchAttempt(ctx context.Context, in AttemptInput) (AttemptResult, error)
 	RecordDispatchOutcome(ctx context.Context, ids []string, summary AttemptSummary) error
@@ -113,7 +113,7 @@ func (s *TurnRunnerService) RunDispatch(ctx restate.Context, req DispatchTurnReq
 // inside one restate.Run closure and receives only its RunContext.
 type runnerSubject interface {
 	inputIDs() []string
-	recordStarted(ctx context.Context) (StartedTurn, error)
+	recordStarted(ctx context.Context, turnID string) (StartedTurn, error)
 	prep(ctx context.Context, turnID string, ids []string) (TurnPrep, error)
 	attemptInput(turnID string, ids []string, prep TurnPrep, ordinal int) AttemptInput
 	attempt(ctx context.Context, in AttemptInput) (AttemptResult, error)
@@ -132,6 +132,7 @@ type namedStep struct {
 
 // turnProgress is what the handler knows about the turn so far.
 type turnProgress struct {
+	turnID       string
 	ids          []string
 	attempted    bool
 	outcome      TurnOutcome
@@ -149,8 +150,8 @@ type burstRunner struct {
 
 func (b burstRunner) inputIDs() []string { return b.ids }
 
-func (b burstRunner) recordStarted(ctx context.Context) (StartedTurn, error) {
-	return b.steps.RecordBurstStarted(ctx, b.threadID, b.ids)
+func (b burstRunner) recordStarted(ctx context.Context, turnID string) (StartedTurn, error) {
+	return b.steps.RecordBurstStarted(ctx, b.threadID, b.ids, turnID)
 }
 
 func (b burstRunner) prep(ctx context.Context, turnID string, ids []string) (TurnPrep, error) {
@@ -201,8 +202,8 @@ type dispatchRunner struct {
 
 func (d dispatchRunner) inputIDs() []string { return d.ids }
 
-func (d dispatchRunner) recordStarted(ctx context.Context) (StartedTurn, error) {
-	return d.steps.RecordDispatchStarted(ctx, d.sessionKey, d.dispatchID)
+func (d dispatchRunner) recordStarted(ctx context.Context, turnID string) (StartedTurn, error) {
+	return d.steps.RecordDispatchStarted(ctx, d.sessionKey, d.dispatchID, turnID)
 }
 
 func (d dispatchRunner) prep(ctx context.Context, turnID string, _ []string) (TurnPrep, error) {
@@ -261,7 +262,8 @@ func (s *TurnRunnerService) drive(ctx restate.Context, subj runnerSubject, coord
 // executeTurn runs record-started through the post-outcome steps. Any error it returns is
 // terminal: retryable step errors never surface here, Restate retries them.
 func (s *TurnRunnerService) executeTurn(ctx restate.Context, subj runnerSubject, turnID string, t *turnProgress) error {
-	started, err := runStep(ctx, StepRecordStarted, func(rc context.Context) (StartedTurn, error) { return subj.recordStarted(rc) })
+	t.turnID = turnID
+	started, err := runStep(ctx, StepRecordStarted, func(rc context.Context) (StartedTurn, error) { return subj.recordStarted(rc, turnID) })
 	if err != nil {
 		return err
 	}
@@ -443,6 +445,7 @@ func (s *TurnRunnerService) runAttempts(ctx restate.Context, subj runnerSubject,
 // outcomeSummary is the record-outcome input for the turn so far.
 func outcomeSummary(t turnProgress) AttemptSummary {
 	summary := AttemptSummary{
+		TurnID:     t.turnID,
 		Outcome:    t.outcome,
 		Stderr:     t.last.Stderr,
 		DurationMs: t.last.Telemetry.DurationMs,
