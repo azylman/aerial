@@ -137,7 +137,21 @@ func assertMessageEmptyIDGuards(ctx context.Context, t *testing.T, store Store) 
 func assertMessageUpdatesAndTelemetry(ctx context.Context, t *testing.T, store Store) {
 	t.Helper()
 	mustOK(t, store.UpdateMessageStatus(ctx, "msg-1", StatusProcessing, "working"), "UpdateMessageStatus")
+	gotWorking, err := store.GetMessage(ctx, "msg-1")
+	mustOK(t, err, "GetMessage msg-1 working")
+	if gotWorking.TurnID != "turn-msg-1" {
+		t.Errorf("UpdateMessageStatus wiped TurnID: %q", gotWorking.TurnID)
+	}
+
+	mustOK(t, store.UpdateMessageStatus(ctx, "msg-1", StatusProcessing, "working", TurnTelemetry{DurationMs: 50}), "UpdateMessageStatus empty turn_id telemetry")
+	gotWorking2, err := store.GetMessage(ctx, "msg-1")
+	mustOK(t, err, "GetMessage msg-1 working2")
+	if gotWorking2.TurnID != "turn-msg-1" {
+		t.Errorf("UpdateMessageStatus empty TurnID wiped TurnID: %q", gotWorking2.TurnID)
+	}
+
 	mustOK(t, store.UpdateMessageCompleted(ctx, "msg-1", "Task complete", "conv-msg-1", TurnTelemetry{
+		TurnID:          "turn-msg-completed",
 		DurationMs:      1200,
 		InputTokens:     100,
 		OutputTokens:    50,
@@ -147,7 +161,7 @@ func assertMessageUpdatesAndTelemetry(ctx context.Context, t *testing.T, store S
 	}), "UpdateMessageCompleted")
 	got, err := store.GetMessage(ctx, "msg-1")
 	mustOK(t, err, "GetMessage msg-1")
-	if got.Status != StatusCompleted || got.ResponseText != "Task complete" || got.ConversationID != "conv-msg-1" || got.DurationMs != 1200 || got.TotalTokens != 165 {
+	if got.Status != StatusCompleted || got.ResponseText != "Task complete" || got.ConversationID != "conv-msg-1" || got.DurationMs != 1200 || got.TotalTokens != 165 || got.TurnID != "turn-msg-completed" {
 		t.Errorf("completed mismatch: %+v", got)
 	}
 }
@@ -171,19 +185,42 @@ func TestMessageLifecycle(t *testing.T) {
 		t.Fatalf("GetMessage unexpected: %+v", got)
 	}
 
-	if exists, err := store.MessageExists(ctx, "msg-1"); err != nil || !exists {
-		t.Errorf("MessageExists(msg-1) = %v, %v, want true", exists, err)
+	exists, existsErr := store.MessageExists(ctx, "msg-1")
+	if existsErr != nil || !exists {
+		t.Errorf("MessageExists(msg-1) = %v, %v, want true", exists, existsErr)
 	}
-	if exists, err := store.MessageExists(ctx, "msg-none"); err != nil || exists {
-		t.Errorf("MessageExists(msg-none) = %v, %v, want false", exists, err)
+	existsNone, existsNoneErr := store.MessageExists(ctx, "msg-none")
+	if existsNoneErr != nil || existsNone {
+		t.Errorf("MessageExists(msg-none) = %v, %v, want false", existsNone, existsNoneErr)
 	}
 
-	if claimed, err := store.ClaimPendingMessage(ctx, "msg-1"); err != nil || !claimed {
-		t.Fatalf("ClaimPendingMessage failed: %v, claimed=%v", err, claimed)
+	claimed1, claimErr1 := store.ClaimPendingMessage(ctx, "msg-1", "turn-msg-1")
+	if claimErr1 != nil || !claimed1 {
+		t.Fatalf("ClaimPendingMessage failed: %v, claimed=%v", claimErr1, claimed1)
 	}
-	if claimed, err := store.ClaimPendingMessage(ctx, "msg-1"); err != nil || claimed {
-		t.Errorf("ClaimPendingMessage already claimed = %v, err = %v, want false and nil", claimed, err)
+	gotClaimed, err := store.GetMessage(ctx, "msg-1")
+	mustOK(t, err, "GetMessage msg-1 claimed")
+	if gotClaimed.TurnID != "turn-msg-1" {
+		t.Errorf("GetMessage TurnID = %q, want turn-msg-1", gotClaimed.TurnID)
 	}
+
+	claimed2, claimErr2 := store.ClaimPendingMessage(ctx, "msg-1", "turn-msg-2")
+	if claimErr2 != nil || claimed2 {
+		t.Errorf("ClaimPendingMessage already claimed = %v, err = %v, want false and nil", claimed2, claimErr2)
+	}
+
+	// Verify crash-replay backfill: if row is already PROCESSING with empty turn_id, ClaimPendingMessage with non-empty turnID backfills turn_id without reporting a new claim.
+	mustOK(t, store.InsertMessage(ctx, Message{ID: "msg-replay", ThreadID: "th-replay", Content: "Crash test", Status: StatusProcessing}), "InsertMessage msg-replay")
+	claimedReplay, claimReplayErr := store.ClaimPendingMessage(ctx, "msg-replay", "turn-backfill")
+	if claimReplayErr != nil || claimedReplay {
+		t.Errorf("ClaimPendingMessage on processing row = %v, %v, want false, nil", claimedReplay, claimReplayErr)
+	}
+	gotReplay, err := store.GetMessage(ctx, "msg-replay")
+	mustOK(t, err, "GetMessage msg-replay")
+	if gotReplay.TurnID != "turn-backfill" {
+		t.Errorf("GetMessage TurnID = %q, want turn-backfill", gotReplay.TurnID)
+	}
+	mustOK(t, store.UpdateMessageCompleted(ctx, "msg-replay", "Done replay", "conv-replay"), "UpdateMessageCompleted msg-replay")
 
 	assertMessageUpdatesAndTelemetry(ctx, t, store)
 	assertMessageQueries(ctx, t, store)
@@ -354,7 +391,7 @@ func TestCloseWarn(t *testing.T) {
 // activeTaskWant is the observable projection of one ActiveTask row.
 type activeTaskWant struct {
 	ID, ThreadID, SessionID, PreviousSessionID, ThreadSummary string
-	Summary, ResponseText, TriggerType                        string
+	Summary, ResponseText, TriggerType, TurnID                string
 	DurationMs                                                int64
 	TotalTokens                                               int
 }
@@ -379,18 +416,18 @@ var (
 )
 
 var unionMessages = []Message{
-	{ID: "msg-live-1", ThreadID: "123456", Content: "Discord user prompt", Status: StatusPending, DurationMs: 1500, InputTokens: 120, OutputTokens: 60, ThinkingTokens: 15, CacheReadTokens: 10, TotalTokens: 205, CreatedAt: taskBase.Add(-2 * time.Minute), UpdatedAt: taskBase.Add(-2 * time.Minute)},
+	{ID: "msg-live-1", ThreadID: "123456", Content: "Discord user prompt", Status: StatusPending, TurnID: "turn-live-1", DurationMs: 1500, InputTokens: 120, OutputTokens: 60, ThinkingTokens: 15, CacheReadTokens: 10, TotalTokens: 205, CreatedAt: taskBase.Add(-2 * time.Minute), UpdatedAt: taskBase.Add(-2 * time.Minute)},
 }
 
 var unionDispatches = []Dispatch{
-	{ID: "disp-live-stateful", Source: "heartbeat", SessionID: "heartbeat-hb-1", Prompt: "Heartbeat prompt", Status: StatusPending, DurationMs: 3000, InputTokens: 250, OutputTokens: 100, ThinkingTokens: 30, CacheReadTokens: 20, TotalTokens: 400, CreatedAt: taskBase.Add(-1 * time.Minute), UpdatedAt: taskBase.Add(-1 * time.Minute)},
+	{ID: "disp-live-stateful", Source: "heartbeat", SessionID: "heartbeat-hb-1", Prompt: "Heartbeat prompt", Status: StatusPending, TurnID: "turn-live-2", DurationMs: 3000, InputTokens: 250, OutputTokens: 100, ThinkingTokens: 30, CacheReadTokens: 20, TotalTokens: 400, CreatedAt: taskBase.Add(-1 * time.Minute), UpdatedAt: taskBase.Add(-1 * time.Minute)},
 	{ID: "disp-live-ephem", Source: "webhook", Prompt: "Webhook prompt", Status: StatusPending, CreatedAt: taskBase, UpdatedAt: taskBase},
 	{ID: "disp-live-done", Source: "webhook", Prompt: "Finished prompt", Status: StatusCompleted, CreatedAt: taskBase, UpdatedAt: taskBase},
 }
 
 var (
-	taskLiveMsg      = activeTaskWant{ID: "msg-live-1", ThreadID: "123456", Summary: "Discord user prompt", TriggerType: "discord", DurationMs: 1500, TotalTokens: 205}
-	taskLiveStateful = activeTaskWant{ID: "disp-live-stateful", ThreadID: "heartbeat-hb-1", Summary: "Heartbeat prompt", TriggerType: "heartbeat", DurationMs: 3000, TotalTokens: 400}
+	taskLiveMsg      = activeTaskWant{ID: "msg-live-1", ThreadID: "123456", Summary: "Discord user prompt", TriggerType: "discord", TurnID: "turn-live-1", DurationMs: 1500, TotalTokens: 205}
+	taskLiveStateful = activeTaskWant{ID: "disp-live-stateful", ThreadID: "heartbeat-hb-1", Summary: "Heartbeat prompt", TriggerType: "heartbeat", TurnID: "turn-live-2", DurationMs: 3000, TotalTokens: 400}
 	taskLiveEphem    = activeTaskWant{ID: "disp-live-ephem", ThreadID: "dispatch-disp-live-ephem", Summary: "Webhook prompt", TriggerType: "webhook"}
 )
 
@@ -458,7 +495,7 @@ func TestGetActiveTasks(t *testing.T) {
 			for _, task := range tasks {
 				got = append(got, activeTaskWant{
 					ID: task.ID, ThreadID: task.ThreadID, SessionID: task.SessionID, PreviousSessionID: task.PreviousSessionID, ThreadSummary: task.ThreadSummary,
-					Summary: task.Summary, ResponseText: task.ResponseText, TriggerType: task.TriggerType, DurationMs: task.DurationMs, TotalTokens: task.TotalTokens,
+					Summary: task.Summary, ResponseText: task.ResponseText, TriggerType: task.TriggerType, TurnID: task.TurnID, DurationMs: task.DurationMs, TotalTokens: task.TotalTokens,
 				})
 			}
 			if !slices.Equal(got, tc.want) {
@@ -556,12 +593,18 @@ func assertDispatchValidationGuards(ctx context.Context, t *testing.T, store Sto
 
 func assertDispatchClaim(ctx context.Context, t *testing.T, store Store) {
 	t.Helper()
-	claimed, err := store.ClaimPendingDispatch(ctx, "disp-1")
+	claimed, err := store.ClaimPendingDispatch(ctx, "disp-1", "turn-disp-1")
 	mustOK(t, err, "ClaimPendingDispatch disp-1")
 	if !claimed {
 		t.Errorf("expected claimed=true")
 	}
-	claimedAgain, err := store.ClaimPendingDispatch(ctx, "disp-1")
+	gotClaimed, err := store.GetDispatch(ctx, "disp-1")
+	mustOK(t, err, "GetDispatch disp-1 claimed")
+	if gotClaimed.TurnID != "turn-disp-1" {
+		t.Errorf("GetDispatch TurnID = %q, want turn-disp-1", gotClaimed.TurnID)
+	}
+
+	claimedAgain, err := store.ClaimPendingDispatch(ctx, "disp-1", "turn-disp-2")
 	mustOK(t, err, "ClaimPendingDispatch again")
 	if claimedAgain {
 		t.Errorf("expected claimed=false for already processing dispatch")
@@ -570,9 +613,30 @@ func assertDispatchClaim(ctx context.Context, t *testing.T, store Store) {
 	mustOK(t, store.UpdateDispatchStatus(ctx, "disp-1", "PROCESSING", "in flight"), "UpdateDispatchStatus")
 	got, err := store.GetDispatch(ctx, "disp-1")
 	mustOK(t, err, "GetDispatch disp-1")
-	if got.Status != StatusProcessing || got.ErrorMessage != "in flight" {
+	if got.Status != StatusProcessing || got.ErrorMessage != "in flight" || got.TurnID != "turn-disp-1" {
 		t.Errorf("unexpected processing state: %+v", got)
 	}
+
+	mustOK(t, store.UpdateDispatchStatus(ctx, "disp-1", "PROCESSING", "in flight", TurnTelemetry{DurationMs: 100}), "UpdateDispatchStatus telemetry without TurnID")
+	got, err = store.GetDispatch(ctx, "disp-1")
+	mustOK(t, err, "GetDispatch disp-1 after empty telemetry TurnID")
+	if got.TurnID != "turn-disp-1" {
+		t.Errorf("expected TurnID preserved, got %q", got.TurnID)
+	}
+
+	// Crash-replay backfill test for dispatches:
+	mustInsertDispatch(ctx, t, store, Dispatch{ID: "disp-replay", Source: "test", Status: StatusProcessing}, "InsertDispatch disp-replay")
+	claimedReplay, err := store.ClaimPendingDispatch(ctx, "disp-replay", "turn-disp-backfill")
+	mustOK(t, err, "ClaimPendingDispatch disp-replay")
+	if claimedReplay {
+		t.Errorf("expected claimed=false for already processing dispatch")
+	}
+	gotReplay, err := store.GetDispatch(ctx, "disp-replay")
+	mustOK(t, err, "GetDispatch disp-replay")
+	if gotReplay.TurnID != "turn-disp-backfill" {
+		t.Errorf("expected backfilled turn_id, got %q", gotReplay.TurnID)
+	}
+	mustOK(t, store.UpdateDispatchCompleted(ctx, "disp-replay", "Done replay", "conv-replay"), "UpdateDispatchCompleted disp-replay")
 }
 
 func assertDispatchStoreLifecycleTransitions(ctx context.Context, t *testing.T, store Store) {
@@ -594,11 +658,11 @@ func assertDispatchStoreLifecycleTransitions(ctx context.Context, t *testing.T, 
 
 	assertDispatchClaim(ctx, t, store)
 
-	dispTel := TurnTelemetry{DurationMs: 2500, InputTokens: 200, OutputTokens: 80, ThinkingTokens: 20, CacheReadTokens: 10, TotalTokens: 310}
+	dispTel := TurnTelemetry{TurnID: "turn-disp-done", DurationMs: 2500, InputTokens: 200, OutputTokens: 80, ThinkingTokens: 20, CacheReadTokens: 10, TotalTokens: 310}
 	mustOK(t, store.UpdateDispatchCompleted(ctx, "disp-1", "Result text", "conv-uuid-123", dispTel), "UpdateDispatchCompleted")
 	got, err = store.GetDispatch(ctx, "disp-1")
 	mustOK(t, err, "GetDispatch disp-1")
-	if got.Status != StatusCompleted || got.ResponseText != "Result text" || got.ConversationID != "conv-uuid-123" {
+	if got.Status != StatusCompleted || got.ResponseText != "Result text" || got.ConversationID != "conv-uuid-123" || got.TurnID != "turn-disp-done" {
 		t.Errorf("unexpected completed state: %+v", got)
 	}
 	if got.DurationMs != 2500 || got.InputTokens != 200 || got.OutputTokens != 80 || got.ThinkingTokens != 20 || got.CacheReadTokens != 10 || got.TotalTokens != 310 {

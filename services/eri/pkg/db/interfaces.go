@@ -18,12 +18,13 @@ var ErrMessageAlreadyClaimed = errors.New("message already claimed")
 
 // TurnTelemetry encapsulates execution timing and token breakdown for messages and dispatches.
 type TurnTelemetry struct {
-	DurationMs      int64 `json:"duration_ms,omitempty"`
-	InputTokens     int   `json:"input_tokens,omitempty"`
-	OutputTokens    int   `json:"output_tokens,omitempty"`
-	ThinkingTokens  int   `json:"thinking_tokens,omitempty"`
-	CacheReadTokens int   `json:"cache_read_tokens,omitempty"`
-	TotalTokens     int   `json:"total_tokens,omitempty"`
+	TurnID          string `json:"turn_id,omitempty"`
+	DurationMs      int64  `json:"duration_ms,omitempty"`
+	InputTokens     int    `json:"input_tokens,omitempty"`
+	OutputTokens    int    `json:"output_tokens,omitempty"`
+	ThinkingTokens  int    `json:"thinking_tokens,omitempty"`
+	CacheReadTokens int    `json:"cache_read_tokens,omitempty"`
+	TotalTokens     int    `json:"total_tokens,omitempty"`
 }
 
 // AttemptStart reports the result of BeginMessageAttempt / BeginDispatchAttempt.
@@ -45,7 +46,7 @@ type MessageStore interface {
 	UpdateMessageCompleted(ctx context.Context, id, responseText, conversationID string, telemetry ...TurnTelemetry) error
 	GetMessage(ctx context.Context, id string) (*Message, error)
 	MessageExists(ctx context.Context, id string) (bool, error)
-	ClaimPendingMessage(ctx context.Context, id string) (bool, error)
+	ClaimPendingMessage(ctx context.Context, id string, turnID ...string) (bool, error)
 	GetRecentThreadMessages(ctx context.Context, threadID string, limit int) ([]Message, error)
 	GetActiveTasks(ctx context.Context, filter ...TasksFilter) ([]ActiveTask, error)
 	GetMessagesByID(ctx context.Context, ids []string) ([]Message, error)
@@ -60,7 +61,7 @@ type MessageStore interface {
 type DispatchStore interface {
 	InsertDispatch(ctx context.Context, d Dispatch) (bool, error)
 	GetDispatch(ctx context.Context, id string) (*Dispatch, error)
-	ClaimPendingDispatch(ctx context.Context, id string) (bool, error)
+	ClaimPendingDispatch(ctx context.Context, id string, turnID ...string) (bool, error)
 	UpdateDispatchStatus(ctx context.Context, id, status, errorMsg string, telemetry ...TurnTelemetry) error
 	UpdateDispatchCompleted(ctx context.Context, id, responseText, conversationID string, telemetry ...TurnTelemetry) error
 	GetRecentSessionDispatches(ctx context.Context, sessionID string, limit int) ([]Dispatch, error)

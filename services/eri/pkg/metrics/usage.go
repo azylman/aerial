@@ -14,6 +14,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
@@ -480,23 +481,33 @@ func newExecUsageRunner(bin, defaultBin, homeDir string, baseEnv []string, args 
 	return func(ctx context.Context) ([]byte, error) {
 		runCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
 		defer cancel()
-		cmd := exec.CommandContext(runCtx, resolved, args...)
-		cmd.Env = env
-		configureUsageCmd(cmd)
-		var stderr strings.Builder
-		cmd.Stderr = &stderr
-		out, err := cmd.Output()
-		if err != nil {
-			// Surface the CLI's own stderr (e.g. credential_rejected) so the
-			// UsagePoller warning names the failure instead of logging a bare
-			// exit status. Only the trimmed, length-bounded stderr text is
-			// included: never env, tokens, or auth file contents.
-			if trimmed := truncateUsageDiagnostic(stderr.String()); trimmed != "" {
-				return nil, fmt.Errorf("usage command %q failed: %w (stderr: %s)", resolved, err, trimmed)
+		for attempt := 0; ; attempt++ {
+			cmd := exec.CommandContext(runCtx, resolved, args...)
+			cmd.Env = env
+			configureUsageCmd(cmd)
+			var stderr strings.Builder
+			cmd.Stderr = &stderr
+			out, err := cmd.Output()
+			if err != nil && (errors.Is(err, syscall.ETXTBSY) || strings.Contains(err.Error(), "text file busy")) && attempt < 5 {
+				select {
+				case <-runCtx.Done():
+					return nil, runCtx.Err()
+				case <-time.After(20 * time.Millisecond):
+				}
+				continue
 			}
-			return nil, fmt.Errorf("usage command %q failed: %w", resolved, err)
+			if err != nil {
+				// Surface the CLI's own stderr (e.g. credential_rejected) so the
+				// UsagePoller warning names the failure instead of logging a bare
+				// exit status. Only the trimmed, length-bounded stderr text is
+				// included: never env, tokens, or auth file contents.
+				if trimmed := truncateUsageDiagnostic(stderr.String()); trimmed != "" {
+					return nil, fmt.Errorf("usage command %q failed: %w (stderr: %s)", resolved, err, trimmed)
+				}
+				return nil, fmt.Errorf("usage command %q failed: %w", resolved, err)
+			}
+			return out, nil
 		}
-		return out, nil
 	}
 }
 

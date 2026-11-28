@@ -197,7 +197,7 @@ func (s *SQLStore) SkipDispatchesIfActive(ctx context.Context, ids []string, rea
 // RequeueProcessingMessages moves PROCESSING messages back to PENDING, counting the deferral in
 // retry_count (restart_count untouched), and returns the IDs changed; a replay changes nothing.
 func (s *SQLStore) RequeueProcessingMessages(ctx context.Context, ids []string, reason string) ([]string, error) {
-	return s.updateRecordsByID(ctx, messagesTable, "status = 'PENDING', retry_count = retry_count + 1, error_message = $1, updated_at = $2", "('PROCESSING')", ids, reason, time.Now().UTC())
+	return s.updateRecordsByID(ctx, messagesTable, "status = 'PENDING', turn_id = '', retry_count = retry_count + 1, error_message = $1, updated_at = $2", "('PROCESSING')", ids, reason, time.Now().UTC())
 }
 
 // BeginMessageAttempt records the start of attempt ordinal for a message (see beginAttempt).

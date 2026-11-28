@@ -39,6 +39,7 @@ CREATE TABLE IF NOT EXISTS messages (
     thinking_tokens INTEGER NOT NULL DEFAULT 0,
     cache_read_tokens INTEGER NOT NULL DEFAULT 0,
     total_tokens INTEGER NOT NULL DEFAULT 0,
+    turn_id TEXT NOT NULL DEFAULT '',
     traceparent TEXT NOT NULL DEFAULT '',
     created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
@@ -51,6 +52,7 @@ CREATE INDEX IF NOT EXISTS idx_messages_agent_thread_row_id ON messages(agent, t
 CREATE INDEX IF NOT EXISTS idx_messages_agent_row_id ON messages(agent, row_id);
 CREATE INDEX IF NOT EXISTS idx_messages_thread_status ON messages(thread_id, status);
 CREATE INDEX IF NOT EXISTS idx_messages_admin_completed ON messages(status, is_admin, updated_at);
+CREATE INDEX IF NOT EXISTS idx_messages_agent_turn_id ON messages (agent, turn_id) WHERE turn_id <> '';
 
 -- Sessions Table
 CREATE TABLE IF NOT EXISTS sessions (
@@ -91,6 +93,7 @@ CREATE TABLE IF NOT EXISTS dispatches (
     thinking_tokens INTEGER NOT NULL DEFAULT 0,
     cache_read_tokens INTEGER NOT NULL DEFAULT 0,
     total_tokens INTEGER NOT NULL DEFAULT 0,
+    turn_id TEXT NOT NULL DEFAULT '',
     traceparent TEXT NOT NULL DEFAULT '',
     created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
@@ -100,6 +103,7 @@ CREATE TABLE IF NOT EXISTS dispatches (
 CREATE INDEX IF NOT EXISTS idx_dispatches_agent_status_created_at ON dispatches(agent, status, created_at ASC);
 CREATE INDEX IF NOT EXISTS idx_dispatches_session_status ON dispatches(session_id, status);
 CREATE INDEX IF NOT EXISTS idx_dispatches_agent_session_row_id ON dispatches(agent, session_id, row_id);
+CREATE INDEX IF NOT EXISTS idx_dispatches_agent_turn_id ON dispatches (agent, turn_id) WHERE turn_id <> '';
 
 -- Extraction Watermarks Table
 CREATE TABLE IF NOT EXISTS extraction_watermarks (

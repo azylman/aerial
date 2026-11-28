@@ -54,6 +54,7 @@ type Message struct {
 	ThinkingTokens    int      `json:"thinking_tokens,omitempty"`
 	CacheReadTokens   int      `json:"cache_read_tokens,omitempty"`
 	TotalTokens       int      `json:"total_tokens,omitempty"`
+	TurnID            string   `json:"turn_id,omitempty"`
 	// Traceparent is the W3C trace context of the ingress request that queued this turn.
 	Traceparent string    `json:"traceparent,omitempty"`
 	CreatedAt   time.Time `json:"created_at"`
@@ -109,7 +110,7 @@ func (m Message) BodyText() string {
 	return m.Content
 }
 
-const messageSelectCols = "agent, id, COALESCE(row_id, 0) AS row_id, thread_id, guild_id, author_id, author_name, content, COALESCE(summary, '') AS summary, status, retry_count, COALESCE(restart_count, 0) AS restart_count, COALESCE(effort, '') AS effort, COALESCE(error_message, '') AS error_message, COALESCE(response_text, '') AS response_text, COALESCE(conversation_id, '') AS conversation_id, COALESCE(channel_id, '') AS channel_id, COALESCE(channel_name, '') AS channel_name, COALESCE(thread_name, '') AS thread_name, COALESCE(author_global_name, '') AS author_global_name, COALESCE(author_bot, false) AS author_bot, COALESCE(is_admin, false) AS is_admin, mentions, mention_user_ids, mention_role_ids, COALESCE(replying_to_author, '') AS replying_to_author, COALESCE(replying_to_content, '') AS replying_to_content, attachments, COALESCE(model, '') AS model, COALESCE(duration_ms, 0) AS duration_ms, COALESCE(input_tokens, 0) AS input_tokens, COALESCE(output_tokens, 0) AS output_tokens, COALESCE(thinking_tokens, 0) AS thinking_tokens, COALESCE(cache_read_tokens, 0) AS cache_read_tokens, COALESCE(total_tokens, 0) AS total_tokens, COALESCE(traceparent, '') AS traceparent, created_at, updated_at"
+const messageSelectCols = "agent, id, COALESCE(row_id, 0) AS row_id, thread_id, guild_id, author_id, author_name, content, COALESCE(summary, '') AS summary, status, retry_count, COALESCE(restart_count, 0) AS restart_count, COALESCE(effort, '') AS effort, COALESCE(error_message, '') AS error_message, COALESCE(response_text, '') AS response_text, COALESCE(conversation_id, '') AS conversation_id, COALESCE(channel_id, '') AS channel_id, COALESCE(channel_name, '') AS channel_name, COALESCE(thread_name, '') AS thread_name, COALESCE(author_global_name, '') AS author_global_name, COALESCE(author_bot, false) AS author_bot, COALESCE(is_admin, false) AS is_admin, mentions, mention_user_ids, mention_role_ids, COALESCE(replying_to_author, '') AS replying_to_author, COALESCE(replying_to_content, '') AS replying_to_content, attachments, COALESCE(model, '') AS model, COALESCE(duration_ms, 0) AS duration_ms, COALESCE(input_tokens, 0) AS input_tokens, COALESCE(output_tokens, 0) AS output_tokens, COALESCE(thinking_tokens, 0) AS thinking_tokens, COALESCE(cache_read_tokens, 0) AS cache_read_tokens, COALESCE(total_tokens, 0) AS total_tokens, COALESCE(turn_id, '') AS turn_id, COALESCE(traceparent, '') AS traceparent, created_at, updated_at"
 
 // InsertMessage stores a new message in the database.
 func (s *SQLStore) InsertMessage(ctx context.Context, msg Message) (err error) {
@@ -146,7 +147,7 @@ func (s *SQLStore) InsertMessage(ctx context.Context, msg Message) (err error) {
 		author_bot, is_admin, mentions, mention_user_ids,
 		mention_role_ids, replying_to_author, replying_to_content, attachments,
 		model, duration_ms, input_tokens, output_tokens,
-		thinking_tokens, cache_read_tokens, total_tokens, traceparent,
+		thinking_tokens, cache_read_tokens, total_tokens, turn_id, traceparent,
 		created_at, updated_at
 	) VALUES (
 		$1, $2, $3, $4, $5, $6,
@@ -156,8 +157,8 @@ func (s *SQLStore) InsertMessage(ctx context.Context, msg Message) (err error) {
 		$20, $21, $22, $23,
 		$24, $25, $26, $27,
 		$28, $29, $30, $31,
-		$32, $33, $34, $35,
-		$36, $37
+		$32, $33, $34, $35, $36,
+		$37, $38
 	) ON CONFLICT (agent, id) DO NOTHING;`,
 		msg.Agent, msg.ID, msg.ThreadID, msg.GuildID, msg.AuthorID, msg.AuthorName,
 		msg.Content, msg.Summary, msg.Status, msg.RetryCount, msg.RestartCount,
@@ -166,7 +167,7 @@ func (s *SQLStore) InsertMessage(ctx context.Context, msg Message) (err error) {
 		msg.AuthorBot, msg.IsAdmin, pgutil.FormatPGTextArray(msg.Mentions), pgutil.FormatPGTextArray(msg.MentionUserIDs),
 		pgutil.FormatPGTextArray(msg.MentionRoleIDs), msg.ReplyingToAuthor, msg.ReplyingToContent, pgutil.FormatPGTextArray(msg.Attachments),
 		msg.Model, msg.DurationMs, msg.InputTokens, msg.OutputTokens,
-		msg.ThinkingTokens, msg.CacheReadTokens, msg.TotalTokens, msg.Traceparent,
+		msg.ThinkingTokens, msg.CacheReadTokens, msg.TotalTokens, msg.TurnID, msg.Traceparent,
 		msg.CreatedAt, msg.UpdatedAt,
 	)
 	return err
@@ -187,6 +188,7 @@ func scanMessage(scanner interface{ Scan(dest ...any) error }, autoCleanSummary 
 		&pgutil.PGStringSlice{Dest: &m.Attachments},
 		&m.Model,
 		&m.DurationMs, &m.InputTokens, &m.OutputTokens, &m.ThinkingTokens, &m.CacheReadTokens, &m.TotalTokens,
+		&m.TurnID,
 		&m.Traceparent,
 		&m.CreatedAt, &m.UpdatedAt,
 	); err != nil {
@@ -225,13 +227,22 @@ func (s *SQLStore) execMessageUpdate(ctx context.Context, id, query string, args
 	return s.execWithTimeout(ctx, query, args...)
 }
 
+func firstNonEmpty(vals []string) string {
+	for _, v := range vals {
+		if trimmed := strings.TrimSpace(v); trimmed != "" {
+			return trimmed
+		}
+	}
+	return ""
+}
+
 func (s *SQLStore) UpdateMessageStatus(ctx context.Context, id, status, errorMsg string, telemetry ...TurnTelemetry) error {
 	agent := s.effectiveAgent()
 	now := time.Now().UTC()
 	if len(telemetry) > 0 {
 		t := telemetry[0]
-		return s.execMessageUpdate(ctx, id, `UPDATE messages SET status = $1, error_message = $2, duration_ms = $3, input_tokens = $4, output_tokens = $5, thinking_tokens = $6, cache_read_tokens = $7, total_tokens = $8, updated_at = $9 WHERE agent = $10 AND id = $11`,
-			status, errorMsg, t.DurationMs, t.InputTokens, t.OutputTokens, t.ThinkingTokens, t.CacheReadTokens, t.TotalTokens, now, agent, id)
+		return s.execMessageUpdate(ctx, id, `UPDATE messages SET status = $1, error_message = $2, duration_ms = $3, input_tokens = $4, output_tokens = $5, thinking_tokens = $6, cache_read_tokens = $7, total_tokens = $8, turn_id = CASE WHEN $9 <> '' THEN $9 ELSE turn_id END, updated_at = $10 WHERE agent = $11 AND id = $12`,
+			status, errorMsg, t.DurationMs, t.InputTokens, t.OutputTokens, t.ThinkingTokens, t.CacheReadTokens, t.TotalTokens, t.TurnID, now, agent, id)
 	}
 	return s.execMessageUpdate(ctx, id, `UPDATE messages SET status = $1, error_message = $2, updated_at = $3 WHERE agent = $4 AND id = $5`, status, errorMsg, now, agent, id)
 }
@@ -244,11 +255,11 @@ func (s *SQLStore) UpdateMessageCompleted(ctx context.Context, id, responseText,
 		t = telemetry[0]
 	}
 	if strings.TrimSpace(conversationID) != "" {
-		return s.execMessageUpdate(ctx, id, `UPDATE messages SET status = $1, response_text = $2, error_message = '', conversation_id = $3, duration_ms = $4, input_tokens = $5, output_tokens = $6, thinking_tokens = $7, cache_read_tokens = $8, total_tokens = $9, updated_at = $10 WHERE agent = $11 AND id = $12`,
-			StatusCompleted, responseText, strings.TrimSpace(conversationID), t.DurationMs, t.InputTokens, t.OutputTokens, t.ThinkingTokens, t.CacheReadTokens, t.TotalTokens, now, agent, id)
+		return s.execMessageUpdate(ctx, id, `UPDATE messages SET status = $1, response_text = $2, error_message = '', conversation_id = $3, duration_ms = $4, input_tokens = $5, output_tokens = $6, thinking_tokens = $7, cache_read_tokens = $8, total_tokens = $9, turn_id = CASE WHEN $10 <> '' THEN $10 ELSE turn_id END, updated_at = $11 WHERE agent = $12 AND id = $13`,
+			StatusCompleted, responseText, strings.TrimSpace(conversationID), t.DurationMs, t.InputTokens, t.OutputTokens, t.ThinkingTokens, t.CacheReadTokens, t.TotalTokens, t.TurnID, now, agent, id)
 	}
-	return s.execMessageUpdate(ctx, id, `UPDATE messages SET status = $1, response_text = $2, error_message = '', duration_ms = $3, input_tokens = $4, output_tokens = $5, thinking_tokens = $6, cache_read_tokens = $7, total_tokens = $8, updated_at = $9 WHERE agent = $10 AND id = $11`,
-		StatusCompleted, responseText, t.DurationMs, t.InputTokens, t.OutputTokens, t.ThinkingTokens, t.CacheReadTokens, t.TotalTokens, now, agent, id)
+	return s.execMessageUpdate(ctx, id, `UPDATE messages SET status = $1, response_text = $2, error_message = '', duration_ms = $3, input_tokens = $4, output_tokens = $5, thinking_tokens = $6, cache_read_tokens = $7, total_tokens = $8, turn_id = CASE WHEN $9 <> '' THEN $9 ELSE turn_id END, updated_at = $10 WHERE agent = $11 AND id = $12`,
+		StatusCompleted, responseText, t.DurationMs, t.InputTokens, t.OutputTokens, t.ThinkingTokens, t.CacheReadTokens, t.TotalTokens, t.TurnID, now, agent, id)
 }
 
 func (s *SQLStore) GetMessage(ctx context.Context, id string) (*Message, error) {
@@ -278,22 +289,29 @@ func (s *SQLStore) MessageExists(ctx context.Context, id string) (bool, error) {
 	return err == nil, err
 }
 
-func (s *SQLStore) ClaimPendingMessage(ctx context.Context, id string) (claimed bool, err error) {
+func (s *SQLStore) ClaimPendingMessage(ctx context.Context, id string, turnID ...string) (claimed bool, err error) {
 	defer recordTranscriptQuery("claim_message", time.Now(), &err)
 	if err = s.checkDB(); err != nil || id == "" {
 		return false, err
 	}
 	queryCtx, cancel := withTimeout(ctx, 5*time.Second)
 	defer cancel()
+	tid := firstNonEmpty(turnID)
 	var claimedID string
-	err = s.db.QueryRowContext(queryCtx, `UPDATE messages SET status = 'PROCESSING', updated_at = $1 WHERE agent = $2 AND id = $3 AND status = 'PENDING' RETURNING id;`, time.Now().UTC(), s.effectiveAgent(), id).Scan(&claimedID)
-	if errors.Is(err, sql.ErrNoRows) {
-		return false, nil
+	err = s.db.QueryRowContext(queryCtx, `UPDATE messages SET status = 'PROCESSING', turn_id = CASE WHEN $3 <> '' THEN $3 ELSE turn_id END, updated_at = CURRENT_TIMESTAMP WHERE agent = $1 AND id = $2 AND status = 'PENDING' RETURNING id;`, s.effectiveAgent(), id, tid).Scan(&claimedID)
+	if err == nil {
+		return true, nil
 	}
-	if err != nil {
+	if !errors.Is(err, sql.ErrNoRows) {
 		return false, fmt.Errorf("failed claiming pending message %s: %w", id, err)
 	}
-	return true, nil
+	if tid != "" {
+		_, backfillErr := s.db.ExecContext(queryCtx, `UPDATE messages SET turn_id = $3, updated_at = CURRENT_TIMESTAMP WHERE agent = $1 AND id = $2 AND status = 'PROCESSING' AND (turn_id = '' OR turn_id IS NULL);`, s.effectiveAgent(), id, tid)
+		if backfillErr != nil {
+			return false, fmt.Errorf("failed backfilling turn_id for processing message %s: %w", id, backfillErr)
+		}
+	}
+	return false, nil
 }
 
 func (s *SQLStore) GetRecentThreadMessages(ctx context.Context, threadID string, limit int) (msgs []Message, err error) {

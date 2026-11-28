@@ -289,6 +289,28 @@ func TestRequeueProcessingMessages(t *testing.T) {
 		},
 		{name: "update failure surfaces", ids: []string{mProc}, sabotageSQL: failTriggerSQL("messages", "UPDATE", "40001"), wantErr: "failed updating messages by id"},
 	})
+
+	s := newRecordStore(t, "", false)
+	ctx := context.Background()
+	mustOK(t, s.UpdateMessageStatus(ctx, mProc, StatusProcessing, "", TurnTelemetry{TurnID: "turn-to-clear"}), "UpdateMessageStatus set turn_id")
+	gotBefore, err := s.GetMessage(ctx, mProc)
+	mustOK(t, err, "GetMessage before requeue")
+	if gotBefore.TurnID != "turn-to-clear" {
+		t.Fatalf("TurnID before requeue = %q, want turn-to-clear", gotBefore.TurnID)
+	}
+	changed, err := s.RequeueProcessingMessages(ctx, []string{mProc}, "requeued")
+	mustOK(t, err, "RequeueProcessingMessages")
+	if len(changed) != 1 || changed[0] != mProc {
+		t.Fatalf("RequeueProcessingMessages changed = %v, want [%s]", changed, mProc)
+	}
+	gotAfter, err := s.GetMessage(ctx, mProc)
+	mustOK(t, err, "GetMessage after requeue")
+	if gotAfter.Status != StatusPending {
+		t.Errorf("Status after requeue = %q, want PENDING", gotAfter.Status)
+	}
+	if gotAfter.TurnID != "" {
+		t.Errorf("TurnID after requeue = %q, want empty string", gotAfter.TurnID)
+	}
 }
 
 // beginAttemptCase is one row of a BeginMessageAttempt/BeginDispatchAttempt

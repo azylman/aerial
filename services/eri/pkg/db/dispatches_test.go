@@ -10,6 +10,7 @@ type dispatchPersistenceCase struct {
 	dispatch           Dispatch
 	wantTargetID       string
 	wantVanadisChunkID string
+	wantTurnID         string
 }
 
 func runDispatchPersistenceCase(ctx context.Context, t *testing.T, store Store, tc dispatchPersistenceCase) {
@@ -31,6 +32,9 @@ func runDispatchPersistenceCase(ctx context.Context, t *testing.T, store Store, 
 	if got.VanadisChunkID != tc.wantVanadisChunkID {
 		t.Errorf("GetDispatch VanadisChunkID = %q, want %q", got.VanadisChunkID, tc.wantVanadisChunkID)
 	}
+	if got.TurnID != tc.wantTurnID {
+		t.Errorf("GetDispatch TurnID = %q, want %q", got.TurnID, tc.wantTurnID)
+	}
 }
 
 func TestDispatchPersistence_TargetAndChunkID(t *testing.T) {
@@ -38,18 +42,20 @@ func TestDispatchPersistence_TargetAndChunkID(t *testing.T) {
 
 	tests := []dispatchPersistenceCase{
 		{
-			name: "persists target_id and vanadis_chunk_id",
+			name: "persists target_id, vanadis_chunk_id, and turn_id",
 			dispatch: Dispatch{
 				ID:             "disp-target-chunk-1",
 				Source:         "vanadis",
 				SessionID:      "vanadis-build-1-chunk-1",
 				TargetID:       "123456789012345678",
 				VanadisChunkID: "build-1-chunk-1",
+				TurnID:         "turn-dispatch-test-1",
 				Prompt:         "Execute build chunk 1",
 				Status:         StatusPending,
 			},
 			wantTargetID:       "123456789012345678",
 			wantVanadisChunkID: "build-1-chunk-1",
+			wantTurnID:         "turn-dispatch-test-1",
 		},
 	}
 

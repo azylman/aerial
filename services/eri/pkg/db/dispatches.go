@@ -33,13 +33,14 @@ type Dispatch struct {
 	ThinkingTokens  int    `json:"thinking_tokens,omitempty"`
 	CacheReadTokens int    `json:"cache_read_tokens,omitempty"`
 	TotalTokens     int    `json:"total_tokens,omitempty"`
+	TurnID          string `json:"turn_id,omitempty"`
 	// Traceparent is the W3C trace context of the ingress request that queued this dispatch.
 	Traceparent string    `json:"traceparent,omitempty"`
 	CreatedAt   time.Time `json:"created_at"`
 	UpdatedAt   time.Time `json:"updated_at"`
 }
 
-const dispatchSelectCols = "agent, id, COALESCE(row_id, 0) AS row_id, source, session_id, conversation_id, COALESCE(target_id, '') AS target_id, COALESCE(vanadis_chunk_id, '') AS vanadis_chunk_id, prompt, COALESCE(summary, '') AS summary, COALESCE(effort, '') AS effort, COALESCE(model, '') AS model, status, retry_count, restart_count, COALESCE(error_message, '') AS error_message, COALESCE(response_text, '') AS response_text, COALESCE(duration_ms, 0) AS duration_ms, COALESCE(input_tokens, 0) AS input_tokens, COALESCE(output_tokens, 0) AS output_tokens, COALESCE(thinking_tokens, 0) AS thinking_tokens, COALESCE(cache_read_tokens, 0) AS cache_read_tokens, COALESCE(total_tokens, 0) AS total_tokens, COALESCE(traceparent, '') AS traceparent, created_at, updated_at"
+const dispatchSelectCols = "agent, id, COALESCE(row_id, 0) AS row_id, source, session_id, conversation_id, COALESCE(target_id, '') AS target_id, COALESCE(vanadis_chunk_id, '') AS vanadis_chunk_id, prompt, COALESCE(summary, '') AS summary, COALESCE(effort, '') AS effort, COALESCE(model, '') AS model, status, retry_count, restart_count, COALESCE(error_message, '') AS error_message, COALESCE(response_text, '') AS response_text, COALESCE(duration_ms, 0) AS duration_ms, COALESCE(input_tokens, 0) AS input_tokens, COALESCE(output_tokens, 0) AS output_tokens, COALESCE(thinking_tokens, 0) AS thinking_tokens, COALESCE(cache_read_tokens, 0) AS cache_read_tokens, COALESCE(total_tokens, 0) AS total_tokens, COALESCE(turn_id, '') AS turn_id, COALESCE(traceparent, '') AS traceparent, created_at, updated_at"
 
 func scanDispatch(scanner interface{ Scan(dest ...any) error }) (Dispatch, error) {
 	var d Dispatch
@@ -50,6 +51,7 @@ func scanDispatch(scanner interface{ Scan(dest ...any) error }) (Dispatch, error
 		&d.Prompt, &d.Summary, &d.Effort, &d.Model, &d.Status,
 		&d.RetryCount, &d.RestartCount, &errMsg, &respText,
 		&d.DurationMs, &d.InputTokens, &d.OutputTokens, &d.ThinkingTokens, &d.CacheReadTokens, &d.TotalTokens,
+		&d.TurnID,
 		&d.Traceparent,
 		&d.CreatedAt, &d.UpdatedAt,
 	); err != nil {
@@ -117,7 +119,7 @@ func (s *SQLStore) InsertDispatch(ctx context.Context, d Dispatch) (bool, error)
 		prompt, summary, effort, model, status,
 		retry_count, restart_count, error_message, response_text,
 		duration_ms, input_tokens, output_tokens,
-		thinking_tokens, cache_read_tokens, total_tokens, traceparent,
+		thinking_tokens, cache_read_tokens, total_tokens, turn_id, traceparent,
 		created_at, updated_at
 	) VALUES (
 		$1, $2, $3, $4, $5,
@@ -125,8 +127,8 @@ func (s *SQLStore) InsertDispatch(ctx context.Context, d Dispatch) (bool, error)
 		$8, $9, $10, $11, $12,
 		$13, $14, $15, $16,
 		$17, $18, $19,
-		$20, $21, $22, $23,
-		$24, $25
+		$20, $21, $22, $23, $24,
+		$25, $26
 	) ON CONFLICT (id) DO NOTHING;`
 
 	res, err := s.execResultWithTimeout(ctx, query,
@@ -135,7 +137,7 @@ func (s *SQLStore) InsertDispatch(ctx context.Context, d Dispatch) (bool, error)
 		d.Prompt, d.Summary, d.Effort, d.Model, d.Status,
 		d.RetryCount, d.RestartCount, d.ErrorMessage, d.ResponseText,
 		d.DurationMs, d.InputTokens, d.OutputTokens,
-		d.ThinkingTokens, d.CacheReadTokens, d.TotalTokens, d.Traceparent,
+		d.ThinkingTokens, d.CacheReadTokens, d.TotalTokens, d.TurnID, d.Traceparent,
 		d.CreatedAt, d.UpdatedAt,
 	)
 	if err != nil {
@@ -167,34 +169,39 @@ func (s *SQLStore) GetDispatch(ctx context.Context, id string) (*Dispatch, error
 	return &d, nil
 }
 
-func (s *SQLStore) ClaimPendingDispatch(ctx context.Context, id string) (bool, error) {
+func (s *SQLStore) ClaimPendingDispatch(ctx context.Context, id string, turnID ...string) (bool, error) {
 	if err := s.checkDB(); err != nil || strings.TrimSpace(id) == "" {
 		return false, err
 	}
 	queryCtx, cancel := withTimeout(ctx, 5*time.Second)
 	defer cancel()
 
-	query := `UPDATE dispatches SET status = 'PROCESSING', updated_at = $1 WHERE agent = $2 AND id = $3 AND status = 'PENDING' RETURNING id`
+	tid := firstNonEmpty(turnID)
+	query := `UPDATE dispatches SET status = 'PROCESSING', turn_id = CASE WHEN $3 <> '' THEN $3 ELSE turn_id END, updated_at = CURRENT_TIMESTAMP WHERE agent = $1 AND id = $2 AND status = 'PENDING' RETURNING id`
 	var claimedID string
-	err := s.db.QueryRowContext(queryCtx, query, time.Now().UTC(), s.effectiveAgent(), strings.TrimSpace(id)).Scan(&claimedID)
-	if errors.Is(err, sql.ErrNoRows) {
-		return false, nil
+	err := s.db.QueryRowContext(queryCtx, query, s.effectiveAgent(), strings.TrimSpace(id), tid).Scan(&claimedID)
+	if err == nil {
+		return claimedID != "", nil
 	}
-	if err != nil {
+	if !errors.Is(err, sql.ErrNoRows) {
 		return false, fmt.Errorf("failed to claim dispatch %s: %w", id, err)
 	}
-	return claimedID != "", nil
+	if tid != "" {
+		_, backfillErr := s.db.ExecContext(queryCtx, `UPDATE dispatches SET turn_id = $3, updated_at = CURRENT_TIMESTAMP WHERE agent = $1 AND id = $2 AND status = 'PROCESSING' AND (turn_id = '' OR turn_id IS NULL);`, s.effectiveAgent(), strings.TrimSpace(id), tid)
+		if backfillErr != nil {
+			return false, fmt.Errorf("failed backfilling turn_id for processing dispatch %s: %w", id, backfillErr)
+		}
+	}
+	return false, nil
 }
 
 func (s *SQLStore) UpdateDispatchStatus(ctx context.Context, id, status, errorMsg string, telemetry ...TurnTelemetry) error {
-	agent := s.effectiveAgent()
-	now := time.Now().UTC()
-	if len(telemetry) > 0 {
-		t := telemetry[0]
-		return s.execDispatchUpdate(ctx, id, `UPDATE dispatches SET status = $1, error_message = $2, duration_ms = $3, input_tokens = $4, output_tokens = $5, thinking_tokens = $6, cache_read_tokens = $7, total_tokens = $8, updated_at = $9 WHERE agent = $10 AND id = $11`,
-			status, errorMsg, t.DurationMs, t.InputTokens, t.OutputTokens, t.ThinkingTokens, t.CacheReadTokens, t.TotalTokens, now, agent, id)
+	if len(telemetry) == 0 {
+		return s.execDispatchUpdate(ctx, id, `UPDATE dispatches SET status = $1, error_message = $2, updated_at = $3 WHERE agent = $4 AND id = $5`, status, errorMsg, time.Now().UTC(), s.effectiveAgent(), id)
 	}
-	return s.execDispatchUpdate(ctx, id, `UPDATE dispatches SET status = $1, error_message = $2, updated_at = $3 WHERE agent = $4 AND id = $5`, status, errorMsg, now, agent, id)
+	t := telemetry[0]
+	const q = `UPDATE dispatches SET status = $1, error_message = $2, duration_ms = $3, input_tokens = $4, output_tokens = $5, thinking_tokens = $6, cache_read_tokens = $7, total_tokens = $8, turn_id = CASE WHEN $9 <> '' THEN $9 ELSE turn_id END, updated_at = $10 WHERE agent = $11 AND id = $12`
+	return s.execDispatchUpdate(ctx, id, q, status, errorMsg, t.DurationMs, t.InputTokens, t.OutputTokens, t.ThinkingTokens, t.CacheReadTokens, t.TotalTokens, t.TurnID, time.Now().UTC(), s.effectiveAgent(), id)
 }
 
 func (s *SQLStore) UpdateDispatchCompleted(ctx context.Context, id, responseText, conversationID string, telemetry ...TurnTelemetry) error {
@@ -205,11 +212,11 @@ func (s *SQLStore) UpdateDispatchCompleted(ctx context.Context, id, responseText
 		t = telemetry[0]
 	}
 	if strings.TrimSpace(conversationID) != "" {
-		return s.execDispatchUpdate(ctx, id, `UPDATE dispatches SET status = 'COMPLETED', response_text = $1, conversation_id = $2, error_message = '', duration_ms = $3, input_tokens = $4, output_tokens = $5, thinking_tokens = $6, cache_read_tokens = $7, total_tokens = $8, updated_at = $9 WHERE agent = $10 AND id = $11`,
-			responseText, strings.TrimSpace(conversationID), t.DurationMs, t.InputTokens, t.OutputTokens, t.ThinkingTokens, t.CacheReadTokens, t.TotalTokens, now, agent, id)
+		return s.execDispatchUpdate(ctx, id, `UPDATE dispatches SET status = 'COMPLETED', response_text = $1, conversation_id = $2, error_message = '', duration_ms = $3, input_tokens = $4, output_tokens = $5, thinking_tokens = $6, cache_read_tokens = $7, total_tokens = $8, turn_id = CASE WHEN $9 <> '' THEN $9 ELSE turn_id END, updated_at = $10 WHERE agent = $11 AND id = $12`,
+			responseText, strings.TrimSpace(conversationID), t.DurationMs, t.InputTokens, t.OutputTokens, t.ThinkingTokens, t.CacheReadTokens, t.TotalTokens, t.TurnID, now, agent, id)
 	}
-	return s.execDispatchUpdate(ctx, id, `UPDATE dispatches SET status = 'COMPLETED', response_text = $1, error_message = '', duration_ms = $2, input_tokens = $3, output_tokens = $4, thinking_tokens = $5, cache_read_tokens = $6, total_tokens = $7, updated_at = $8 WHERE agent = $9 AND id = $10`,
-		responseText, t.DurationMs, t.InputTokens, t.OutputTokens, t.ThinkingTokens, t.CacheReadTokens, t.TotalTokens, now, agent, id)
+	return s.execDispatchUpdate(ctx, id, `UPDATE dispatches SET status = 'COMPLETED', response_text = $1, error_message = '', duration_ms = $2, input_tokens = $3, output_tokens = $4, thinking_tokens = $5, cache_read_tokens = $6, total_tokens = $7, turn_id = CASE WHEN $8 <> '' THEN $8 ELSE turn_id END, updated_at = $9 WHERE agent = $10 AND id = $11`,
+		responseText, t.DurationMs, t.InputTokens, t.OutputTokens, t.ThinkingTokens, t.CacheReadTokens, t.TotalTokens, t.TurnID, now, agent, id)
 }
 
 func (s *SQLStore) GetRecentSessionDispatches(ctx context.Context, sessionID string, limit int) ([]Dispatch, error) {
