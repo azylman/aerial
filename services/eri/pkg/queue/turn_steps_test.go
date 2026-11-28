@@ -41,6 +41,7 @@ func doneMsg(id, status, errText, response string) db.Message {
 type rowWant struct {
 	status, errText string
 	retry, restart  int
+	turnID          string
 }
 
 func assertRows(t *testing.T, store db.Store, want map[string]rowWant) {
@@ -50,9 +51,9 @@ func assertRows(t *testing.T, store db.Store, want map[string]rowWant) {
 		if err != nil || m == nil {
 			t.Fatalf("GetMessage(%s) = %v, %v", id, m, err)
 		}
-		if m.Status != w.status || m.ErrorMessage != w.errText || m.RetryCount != w.retry || m.RestartCount != w.restart {
-			t.Errorf("row %s = {%s %q retry=%d restart=%d}, want {%s %q retry=%d restart=%d}",
-				id, m.Status, m.ErrorMessage, m.RetryCount, m.RestartCount, w.status, w.errText, w.retry, w.restart)
+		if m.Status != w.status || m.ErrorMessage != w.errText || m.RetryCount != w.retry || m.RestartCount != w.restart || (w.turnID != "" && m.TurnID != w.turnID) {
+			t.Errorf("row %s = {%s %q retry=%d restart=%d turn_id=%q}, want {%s %q retry=%d restart=%d turn_id=%q}",
+				id, m.Status, m.ErrorMessage, m.RetryCount, m.RestartCount, m.TurnID, w.status, w.errText, w.retry, w.restart, w.turnID)
 		}
 	}
 }
@@ -160,6 +161,7 @@ func TestRecordBurstStarted(t *testing.T) {
 		name          string
 		rows          []db.Message
 		ids           []string
+		turnID        string
 		wantIDs       []string
 		wantBaseRetry int
 		wantRows      map[string]rowWant
@@ -178,6 +180,7 @@ func TestRecordBurstStarted(t *testing.T) {
 			wantIDs: []string{"a", "b"}, wantBaseRetry: 1,
 			wantRows: map[string]rowWant{"a": {status: db.StatusProcessing}, "b": {status: db.StatusProcessing, retry: 1}},
 		},
+		{name: "PendingClaimedWithTurnID", rows: []db.Message{stepMsg("a", db.StatusPending, 0, 0)}, ids: []string{"a"}, turnID: "turn-burst-test", wantIDs: []string{"a"}, wantRows: map[string]rowWant{"a": {status: db.StatusProcessing, turnID: "turn-burst-test"}}},
 		{
 			name:     "RetryAfterPartialClaimAdoptsProcessing",
 			rows:     []db.Message{stepMsg("a", db.StatusProcessing, 0, 1), stepMsg("b", db.StatusProcessing, 0, 0), stepMsg("c", db.StatusPending, 0, 0)},
@@ -202,7 +205,11 @@ func TestRecordBurstStarted(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			pool, store := stepPool(t, stepFixture{noStore: tc.noStore, msgs: tc.rows, sabotageSQL: tc.sabotageSQL}, WorkerPoolConfig{})
-			got, err := pool.RecordBurstStarted(context.Background(), "thread-steps", tc.ids)
+			var turnIDs []string
+			if tc.turnID != "" {
+				turnIDs = []string{tc.turnID}
+			}
+			got, err := pool.RecordBurstStarted(context.Background(), "thread-steps", tc.ids, turnIDs...)
 			assertStepErr(t, err, tc.wantErr, tc.wantTerminal)
 			if strings.Join(got.IDs, ",") != strings.Join(tc.wantIDs, ",") || got.BaseRetry != tc.wantBaseRetry {
 				t.Errorf("got %+v, want ids=%v base=%d", got, tc.wantIDs, tc.wantBaseRetry)
@@ -262,6 +269,27 @@ func TestRecordDispatchStarted(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestRecordDispatchStarted_TurnID(t *testing.T) {
+	t.Parallel()
+	fx := stepFixture{disps: []db.Dispatch{{ID: "d1", Source: "test", SessionID: "sess-1", Prompt: "p", Status: db.StatusPending}}}
+	sdb := openStepDB(t, fx)
+	pool := NewWorkerPool(WorkerPoolConfig{Store: sdb.store})
+	got, err := pool.RecordDispatchStarted(context.Background(), "sess-1", "d1", "turn-disp-test")
+	if err != nil {
+		t.Fatalf("RecordDispatchStarted: %v", err)
+	}
+	if len(got.IDs) != 1 || got.IDs[0] != "d1" {
+		t.Fatalf("got ids = %v, want [d1]", got.IDs)
+	}
+	d, err := sdb.store.GetDispatch(context.Background(), "d1")
+	if err != nil || d == nil {
+		t.Fatalf("GetDispatch: %v", err)
+	}
+	if d.TurnID != "turn-disp-test" {
+		t.Errorf("dispatch turn_id = %q, want turn-disp-test", d.TurnID)
 	}
 }
 
@@ -1065,7 +1093,7 @@ type liveTurn struct {
 // post-turn steps. It runs without Restate and skips the backoff sleeps; a step error stops it.
 func runLiveTurn(ctx context.Context, subj runnerSubject, maxAttempts int, turnID string) liveTurn {
 	var lt liveTurn
-	if lt.started, lt.err = subj.recordStarted(ctx); lt.err != nil || len(lt.started.IDs) == 0 {
+	if lt.started, lt.err = subj.recordStarted(ctx, turnID); lt.err != nil || len(lt.started.IDs) == 0 {
 		lt.outcome = OutcomeEmpty
 		return lt
 	}

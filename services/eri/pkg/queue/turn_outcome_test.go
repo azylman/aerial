@@ -1229,3 +1229,37 @@ func TestTurnExecution_DeliverDiscordSuccess_Retries(t *testing.T) {
 		})
 	}
 }
+
+func TestAttemptSummary_TelemetryWithTurnID(t *testing.T) {
+	t.Parallel()
+	s := AttemptSummary{TurnID: "turn-abc"}
+	telem := s.telemetry()
+	if len(telem) != 1 {
+		t.Fatalf("expected 1 telemetry entry, got %d", len(telem))
+	}
+	if telem[0].TurnID != "turn-abc" {
+		t.Errorf("telemetry turn_id = %q, want turn-abc", telem[0].TurnID)
+	}
+
+	sZero := AttemptSummary{}
+	if got := sZero.telemetry(); got != nil {
+		t.Errorf("expected nil telemetry for empty summary, got %v", got)
+	}
+}
+
+func TestTurnExecution_TurnTelemetryWithTurnID(t *testing.T) {
+	t.Parallel()
+	te := &turnExecution{turnID: "turn-xyz"}
+	telem := te.turnTelemetry()
+	if len(telem) != 1 {
+		t.Fatalf("expected 1 telemetry entry, got %d", len(telem))
+	}
+	if telem[0].TurnID != "turn-xyz" {
+		t.Errorf("telemetry turn_id = %q, want turn-xyz", telem[0].TurnID)
+	}
+
+	teEmpty := &turnExecution{}
+	if got := teEmpty.turnTelemetry(); got != nil {
+		t.Errorf("expected nil telemetry for empty turnExecution, got %v", got)
+	}
+}

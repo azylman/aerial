@@ -256,6 +256,9 @@ func (p *WorkerPool) markVoiceTurnActive(lease runner.SessionLease, sc trace.Spa
 		return func() {}
 	}
 	turn := owner.ActiveTurn()
+	if p != nil {
+		turn.Agent = strings.TrimSpace(p.cfg.AgentName)
+	}
 	registry := p.ActiveTurns()
 	registry.Set(turn, sc)
 	registry.SetToolSpans(turn.DaemonID, tools)

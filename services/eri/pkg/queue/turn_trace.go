@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"strings"
 	"time"
 
 	"go.opentelemetry.io/otel"
@@ -263,11 +264,19 @@ func (p *WorkerPool) ActiveTurns() *runner.ActiveTurnRegistry {
 func (te *turnExecution) registerActiveTurn() {
 	te.clearActiveTurn()
 	owner, ok := te.lease.(runner.ActiveTurnOwner)
-	if !ok || te.turnSpan == nil {
+	if !ok {
 		return
 	}
 	turn := owner.ActiveTurn()
-	te.pool.ActiveTurns().Set(turn, te.turnSpan.SpanContext())
+	if te.pool != nil {
+		turn.Agent = strings.TrimSpace(te.pool.cfg.AgentName)
+	}
+	turn.TurnID = strings.TrimSpace(te.turnID)
+	var sc trace.SpanContext
+	if te.turnSpan != nil {
+		sc = te.turnSpan.SpanContext()
+	}
+	te.pool.ActiveTurns().Set(turn, sc)
 	te.activeTurnDaemon = turn.DaemonID
 }
 

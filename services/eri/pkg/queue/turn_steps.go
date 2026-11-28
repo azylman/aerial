@@ -66,6 +66,7 @@ type TurnPrep struct {
 
 // AttemptSummary is how a turn's attempts ended, as record-outcome needs it.
 type AttemptSummary struct {
+	TurnID  string      `json:"turn_id,omitempty"`
 	Outcome TurnOutcome `json:"outcome"`
 	// Reason is the row error for non-success outcomes.
 	Reason string `json:"reason,omitempty"`
@@ -77,10 +78,11 @@ type AttemptSummary struct {
 }
 
 func (s AttemptSummary) telemetry() []db.TurnTelemetry {
-	if s.DurationMs == 0 && s.Usage == (runner.TokenUsage{}) {
+	if s.DurationMs == 0 && s.Usage == (runner.TokenUsage{}) && s.TurnID == "" {
 		return nil
 	}
 	return []db.TurnTelemetry{{
+		TurnID:          s.TurnID,
 		DurationMs:      s.DurationMs,
 		InputTokens:     s.Usage.InputTokens,
 		OutputTokens:    s.Usage.OutputTokens,
@@ -243,14 +245,14 @@ func messagesByIDOrdered(ctx context.Context, s db.Store, ids []string) ([]db.Me
 // RecordBurstStarted claims the burst's rows (record-started). A PENDING row is claimed; a row
 // already PROCESSING was claimed by an earlier try of this same step and is adopted; terminal or
 // missing rows are skipped. restart_count is never touched here.
-func (p *WorkerPool) RecordBurstStarted(ctx context.Context, threadID string, ids []string) (StartedTurn, error) {
+func (p *WorkerPool) RecordBurstStarted(ctx context.Context, threadID string, ids []string, turnID ...string) (StartedTurn, error) {
 	s, err := p.stepStore()
 	if err != nil {
 		return StartedTurn{}, err
 	}
 	ids = normalizeStepIDs(ids)
 	for _, id := range ids {
-		if _, claimErr := storeCall(ctx, func(c context.Context) (bool, error) { return s.ClaimPendingMessage(c, id) }); claimErr != nil {
+		if _, claimErr := storeCall(ctx, func(c context.Context) (bool, error) { return s.ClaimPendingMessage(c, id, turnID...) }); claimErr != nil {
 			return StartedTurn{}, claimErr
 		}
 	}
@@ -273,7 +275,7 @@ func (p *WorkerPool) RecordBurstStarted(ctx context.Context, threadID string, id
 }
 
 // RecordDispatchStarted claims the dispatch row (record-started) under the same claim rule.
-func (p *WorkerPool) RecordDispatchStarted(ctx context.Context, sessionKey, dispatchID string) (StartedTurn, error) {
+func (p *WorkerPool) RecordDispatchStarted(ctx context.Context, sessionKey, dispatchID string, turnID ...string) (StartedTurn, error) {
 	s, err := p.stepStore()
 	if err != nil {
 		return StartedTurn{}, err
@@ -282,7 +284,7 @@ func (p *WorkerPool) RecordDispatchStarted(ctx context.Context, sessionKey, disp
 	if dispatchID == "" {
 		return StartedTurn{}, nil
 	}
-	if _, claimErr := storeCall(ctx, func(c context.Context) (bool, error) { return s.ClaimPendingDispatch(c, dispatchID) }); claimErr != nil {
+	if _, claimErr := storeCall(ctx, func(c context.Context) (bool, error) { return s.ClaimPendingDispatch(c, dispatchID, turnID...) }); claimErr != nil {
 		return StartedTurn{}, claimErr
 	}
 	d, err := storeCall(ctx, func(c context.Context) (*db.Dispatch, error) { return s.GetDispatch(c, dispatchID) })
@@ -780,7 +782,7 @@ func (p *WorkerPool) StopBurstTurn(ctx context.Context, turnID string, ids []str
 		live.steerMu.Unlock()
 	}
 	p.turns.Stop(turnID, CancelledByOperatorReason)
-	_, err = p.failActiveBurstRows(ctx, s, normalizeStepIDs(ids), AttemptSummary{Outcome: OutcomeCancelled})
+	_, err = p.failActiveBurstRows(ctx, s, normalizeStepIDs(ids), AttemptSummary{TurnID: turnID, Outcome: OutcomeCancelled})
 	return err
 }
 
@@ -797,7 +799,7 @@ func (p *WorkerPool) StopDispatchTurn(ctx context.Context, turnID string, ids []
 		live.steerMu.Unlock()
 	}
 	p.turns.Stop(turnID, CancelledByOperatorReason)
-	return p.RecordDispatchOutcome(ctx, normalizeStepIDs(ids), AttemptSummary{Outcome: OutcomeCancelled})
+	return p.RecordDispatchOutcome(ctx, normalizeStepIDs(ids), AttemptSummary{TurnID: turnID, Outcome: OutcomeCancelled})
 }
 
 func anyAttempted(rows []db.Message) bool {
@@ -819,7 +821,7 @@ func (p *WorkerPool) FailBurstTurn(ctx context.Context, turnID string, ids []str
 	}
 	p.turns.Stop(turnID, reason)
 	ids = normalizeStepIDs(ids)
-	failed, err := p.failActiveBurstRows(ctx, s, ids, AttemptSummary{Outcome: OutcomeFailed, Reason: reason})
+	failed, err := p.failActiveBurstRows(ctx, s, ids, AttemptSummary{TurnID: turnID, Outcome: OutcomeFailed, Reason: reason})
 	if err != nil {
 		return err
 	}
@@ -854,7 +856,7 @@ func (p *WorkerPool) FailDispatchTurn(ctx context.Context, turnID string, ids []
 	}
 	p.turns.Stop(turnID, reason)
 	ids = normalizeStepIDs(ids)
-	if err := p.RecordDispatchOutcome(ctx, ids, AttemptSummary{Outcome: OutcomeFailed, Reason: reason}); err != nil {
+	if err := p.RecordDispatchOutcome(ctx, ids, AttemptSummary{TurnID: turnID, Outcome: OutcomeFailed, Reason: reason}); err != nil {
 		return err
 	}
 	for _, id := range ids {

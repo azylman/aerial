@@ -34,6 +34,11 @@ import (
 )
 
 const (
+	// HeaderAerialAgent propagates the agent executing the active turn to upstream MCP servers.
+	HeaderAerialAgent = "X-Aerial-Agent"
+	// HeaderAerialTurnID propagates the turn ID of the active turn to upstream MCP servers.
+	HeaderAerialTurnID = "X-Aerial-Turn-Id"
+
 	// AnnouncementTTL is how long an agy hook announcement can wait for its MCP request.
 	AnnouncementTTL = 30 * time.Second
 	// AnnouncementCap bounds the announcement store; the oldest entries are dropped past it.
@@ -374,15 +379,15 @@ func (*TraceProxy) shapeResponse(ctx context.Context, resp *http.Response, rpcMe
 	return nil
 }
 
-func (p *TraceProxy) clientSpanParent(ctx context.Context, target, server, method, tool string, headers http.Header, body []byte, attrs []attribute.KeyValue) (trace.SpanContext, []attribute.KeyValue, bool) {
+func (p *TraceProxy) clientSpanParent(ctx context.Context, server, daemonID string, turnSpan trace.SpanContext, hasOwner bool, method, tool string, headers http.Header, body []byte, attrs []attribute.KeyValue) (trace.SpanContext, []attribute.KeyValue, bool) {
 	if method == "" {
 		return trace.SpanContext{}, nil, false
 	}
-	parent, callID, ok := p.parentSpan(ctx, target, server, headers.Get(env.DaemonHeader), method, tool, body)
-	if !ok {
+	parent, callID, ok := p.parentSpan(ctx, server, daemonID, turnSpan, hasOwner, method, tool, body)
+	if !ok && !hasOwner {
 		parent, ok = inboundSpanContext(ctx, headers)
 	}
-	if !ok {
+	if !ok || !parent.IsValid() {
 		return trace.SpanContext{}, nil, false
 	}
 	attrs = append(attrs, attrMCPServer.String(server))
@@ -405,11 +410,19 @@ func handleBlockedTool(w http.ResponseWriter, body []byte, policy env.ServerPoli
 	return true
 }
 
-func (p *TraceProxy) rewriteRequest(pr *httputil.ProxyRequest, upstream *url.URL, policy env.ServerPolicy, span trace.Span) {
+func (p *TraceProxy) rewriteRequest(pr *httputil.ProxyRequest, upstream *url.URL, policy env.ServerPolicy, span trace.Span, turn runner.ActiveTurn) {
 	u := *upstream
 	pr.Out.URL = &u
 	pr.Out.Host = ""
 	pr.Out.Header.Del(env.DaemonHeader)
+	pr.Out.Header.Del(HeaderAerialAgent)
+	pr.Out.Header.Del(HeaderAerialTurnID)
+	if turn.Agent != "" {
+		pr.Out.Header.Set(HeaderAerialAgent, turn.Agent)
+	}
+	if turn.TurnID != "" {
+		pr.Out.Header.Set(HeaderAerialTurnID, turn.TurnID)
+	}
 	if hasActivePolicy(policy) {
 		pr.Out.Header.Del("Accept-Encoding")
 	}
@@ -470,9 +483,11 @@ func (p *TraceProxy) serveProxy(w http.ResponseWriter, r *http.Request) {
 	attrs := tracing.MCPRequestAttrs(body)
 	method, tool := mcpMethodAndTool(attrs)
 
+	daemonID, activeTurn, turnSpan, hasOwner := p.owner(target, server, r.Header.Get(env.DaemonHeader), method, tool)
+
 	ctx := r.Context()
 	var span trace.Span
-	if parent, spanAttrs, ok := p.clientSpanParent(ctx, target, server, method, tool, r.Header, body, attrs); ok {
+	if parent, spanAttrs, ok := p.clientSpanParent(ctx, server, daemonID, turnSpan, hasOwner, method, tool, r.Header, body, attrs); ok {
 		ctx, span = p.tracer.Start(trace.ContextWithSpanContext(ctx, parent), "mcp "+server+" "+method,
 			trace.WithSpanKind(trace.SpanKindClient), trace.WithAttributes(spanAttrs...))
 		defer span.End()
@@ -480,7 +495,7 @@ func (p *TraceProxy) serveProxy(w http.ResponseWriter, r *http.Request) {
 
 	rp := &httputil.ReverseProxy{
 		Rewrite: func(pr *httputil.ProxyRequest) { //nolint:contextcheck // pr.Out.Context() is the inbound request's context
-			p.rewriteRequest(pr, upstream, policy, span)
+			p.rewriteRequest(pr, upstream, policy, span, activeTurn)
 		},
 		Transport:     p.transport,
 		FlushInterval: -1,
@@ -504,19 +519,20 @@ func (p *TraceProxy) serveProxy(w http.ResponseWriter, r *http.Request) {
 // the execute_tool span of the tool call that made it (claimed from the owning daemon's turn,
 // waiting briefly when the engine has not announced the tool yet), otherwise or when no span
 // matches, the owning turn's root span. callID is Claude Code's tool_use ID, when sent.
-func (p *TraceProxy) parentSpan(ctx context.Context, target, server, daemonHeader, method, tool string, body []byte) (parent trace.SpanContext, callID string, ok bool) {
-	daemonID, turnSpan, ok := p.owner(target, server, daemonHeader, method, tool)
-	if !ok {
+func (p *TraceProxy) parentSpan(ctx context.Context, server, daemonID string, turnSpan trace.SpanContext, hasOwner bool, method, tool string, body []byte) (parent trace.SpanContext, callID string, ok bool) {
+	if !hasOwner {
 		return trace.SpanContext{}, "", false
 	}
 	if method != mcpMethodToolsCall {
-		return turnSpan, "", true
+		return turnSpan, "", turnSpan.IsValid()
 	}
 	callID = mcpToolCallID(body)
-	if sc, ok := p.turns.ToolSpan(ctx, daemonID, server, tool, callID); ok {
-		return sc, callID, true
+	if p.turns != nil {
+		if sc, ok := p.turns.ToolSpan(ctx, daemonID, server, tool, callID); ok && sc.IsValid() {
+			return sc, callID, true
+		}
 	}
-	return turnSpan, callID, true
+	return turnSpan, callID, turnSpan.IsValid()
 }
 
 // inboundSpanContext returns the valid W3C traceparent (with tracestate) an MCP client sent
@@ -527,27 +543,31 @@ func inboundSpanContext(ctx context.Context, h http.Header) (trace.SpanContext, 
 	return sc, sc.IsValid()
 }
 
-// owner resolves the daemon behind a proxied request and its turn span. Claude Code names its
+// owner resolves the daemon behind a proxied request and its active turn. Claude Code names its
 // daemon in X-Eri-Daemon. agy sends no identity, so a tools/call consumes the oldest
 // announcement its hook made for (target, server, tool); otherwise the request belongs to the
 // target's turn only when exactly one daemon in the target is executing one.
-func (p *TraceProxy) owner(target, server, daemonID, method, tool string) (string, trace.SpanContext, bool) {
-	if daemonID == "" && method == mcpMethodToolsCall && tool != "" {
+func (p *TraceProxy) owner(target, server, daemonID, method, tool string) (string, runner.ActiveTurn, trace.SpanContext, bool) {
+	if p == nil || p.turns == nil {
+		return "", runner.ActiveTurn{}, trace.SpanContext{}, false
+	}
+	if daemonID == "" && method == mcpMethodToolsCall && tool != "" && p.announcements != nil {
 		if announced, ok := p.announcements.Take(target, server, tool, p.now()); ok {
-			if sc, ok := p.turns.Get(announced); ok {
-				return announced, sc, true
-			}
+			daemonID = announced
 		}
 	}
 	if daemonID == "" {
 		sole, ok := p.turns.SoleDaemonInTarget(target)
 		if !ok {
-			return "", trace.SpanContext{}, false
+			return "", runner.ActiveTurn{}, trace.SpanContext{}, false
 		}
 		daemonID = sole
 	}
-	sc, ok := p.turns.Get(daemonID)
-	return daemonID, sc, ok
+	turn, sc, ok := p.turns.Turn(daemonID)
+	if !ok {
+		return "", runner.ActiveTurn{}, trace.SpanContext{}, false
+	}
+	return daemonID, turn, sc, true
 }
 
 // mcpToolCallID returns the tool_use ID Claude Code sends in a tools/call request's

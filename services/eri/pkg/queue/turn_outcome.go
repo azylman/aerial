@@ -554,10 +554,11 @@ func (te *turnExecution) turnTelemetry() []db.TurnTelemetry {
 	if te == nil {
 		return nil
 	}
-	if !te.turnAttempted && te.turnDurationMs == 0 && te.turnTokenUsage == (runner.TokenUsage{}) {
+	if !te.turnAttempted && te.turnDurationMs == 0 && te.turnTokenUsage == (runner.TokenUsage{}) && te.turnID == "" {
 		return nil
 	}
 	return []db.TurnTelemetry{{
+		TurnID:          te.turnID,
 		DurationMs:      te.turnDurationMs,
 		InputTokens:     te.turnTokenUsage.InputTokens,
 		OutputTokens:    te.turnTokenUsage.OutputTokens,

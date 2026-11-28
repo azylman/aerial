@@ -15,6 +15,10 @@ type ActiveTurn struct {
 	Target string
 	// ConversationID is the agy conversation / Claude session the daemon is serving, when known.
 	ConversationID string
+	// Agent is the agent name executing the turn (e.g. "eri").
+	Agent string
+	// TurnID is the unique identifier of the turn in flight.
+	TurnID string
 }
 
 // ActiveTurnOwner is implemented by session leases backed by a single daemon process. The
@@ -45,7 +49,7 @@ func NewActiveTurnRegistry() *ActiveTurnRegistry {
 // Set records that turn's daemon is executing the turn whose root span is sc. It replaces any
 // previous entry for the daemon, dropping its tool span source.
 func (r *ActiveTurnRegistry) Set(turn ActiveTurn, sc trace.SpanContext) {
-	if r == nil || turn.DaemonID == "" || !sc.IsValid() {
+	if r == nil || turn.DaemonID == "" || (!sc.IsValid() && turn.TurnID == "" && turn.Agent == "") {
 		return
 	}
 	r.mu.Lock()
@@ -111,7 +115,7 @@ func (r *ActiveTurnRegistry) Get(daemonID string) (trace.SpanContext, bool) {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 	e, ok := r.entries[daemonID]
-	return e.sc, ok
+	return e.sc, ok && e.sc.IsValid()
 }
 
 // Target returns the runtime target of daemonID's active turn.
