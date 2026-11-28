@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/pgvector/pgvector-go"
 
@@ -24,6 +25,9 @@ type TaskStore interface {
 	UpdateTaskEmbeddingAndResolution(ctx context.Context, taskID int64, embedding []float32, resolution string) error
 	UpdateTaskResolutionBatch(ctx context.Context, taskIDs []int64, resolution string) error
 	FetchTaskResolutions(ctx context.Context, taskIDs []int64) (map[int64]string, error)
+	FetchTaskMeta(ctx context.Context, taskIDs []int64) (map[int64]config.TaskMeta, error)
+	ClaimTask(ctx context.Context, taskID int64, agent, turnID string, claimedAt time.Time) (bool, error)
+	UnclaimTask(ctx context.Context, taskID int64) error
 	SearchTasksRRF(ctx context.Context, embedding []float32, queryText string, statusFilter string, limit int) ([]config.ScoredTaskSummary, error)
 }
 
@@ -71,13 +75,13 @@ func (s *SQLTaskStore) UpdateTaskEmbeddingAndResolution(ctx context.Context, tas
 	return nil
 }
 
-// UpdateTaskResolutionBatch updates the resolution for multiple task IDs in a single query.
+// UpdateTaskResolutionBatch updates the resolution for multiple task IDs in a single query and clears any claims.
 func (s *SQLTaskStore) UpdateTaskResolutionBatch(ctx context.Context, taskIDs []int64, resolution string) error {
 	if len(taskIDs) == 0 {
 		return nil
 	}
 	trimmedRes := strings.TrimSpace(resolution)
-	query := `UPDATE tasks SET resolution = $1 WHERE id = ANY($2);`
+	query := `UPDATE tasks SET resolution = $1, claimed_by_agent = '', claimed_by_turn_id = '', claimed_at = NULL WHERE id = ANY($2);`
 	_, err := s.db.ExecContext(ctx, query, trimmedRes, taskIDs)
 	if err != nil {
 		return fmt.Errorf("failed to batch update task resolutions: %w", err)
@@ -87,26 +91,69 @@ func (s *SQLTaskStore) UpdateTaskResolutionBatch(ctx context.Context, taskIDs []
 
 // FetchTaskResolutions retrieves resolution strings for the given task IDs.
 func (s *SQLTaskStore) FetchTaskResolutions(ctx context.Context, taskIDs []int64) (map[int64]string, error) {
-	result := make(map[int64]string, len(taskIDs))
+	meta, err := s.FetchTaskMeta(ctx, taskIDs)
+	if err != nil {
+		return nil, fmt.Errorf("failed to fetch task resolutions: %w", err)
+	}
+	result := make(map[int64]string, len(meta))
+	for id, m := range meta {
+		result[id] = m.Resolution
+	}
+	return result, nil
+}
+
+// FetchTaskMeta retrieves metadata (resolution and claims) for the given task IDs.
+func (s *SQLTaskStore) FetchTaskMeta(ctx context.Context, taskIDs []int64) (map[int64]config.TaskMeta, error) {
+	result := make(map[int64]config.TaskMeta, len(taskIDs))
 	if len(taskIDs) == 0 {
 		return result, nil
 	}
-	query := `SELECT id, COALESCE(resolution, '') FROM tasks WHERE id = ANY($1);`
+	query := `SELECT id, COALESCE(resolution, ''), COALESCE(claimed_by_agent, ''), COALESCE(claimed_by_turn_id, ''), claimed_at FROM tasks WHERE id = ANY($1);`
 	rows, err := s.db.QueryContext(ctx, query, taskIDs)
 	if err != nil {
-		return nil, fmt.Errorf("failed to fetch task resolutions: %w", err)
+		return nil, fmt.Errorf("failed to fetch task meta: %w", err)
 	}
 	defer rows.Close()
 
 	for rows.Next() {
 		var id int64
-		var res string
-		if err := rows.Scan(&id, &res); err != nil {
-			return nil, fmt.Errorf("failed to scan task resolution: %w", err)
+		var res, agent, turnID string
+		var claimedAt *time.Time
+		if err := rows.Scan(&id, &res, &agent, &turnID, &claimedAt); err != nil {
+			return nil, fmt.Errorf("failed to scan task meta: %w", err)
 		}
-		result[id] = res
+		result[id] = config.TaskMeta{
+			Resolution:      res,
+			ClaimedByAgent:  agent,
+			ClaimedByTurnID: turnID,
+			ClaimedAt:       claimedAt,
+		}
 	}
 	return result, rows.Err()
+}
+
+// ClaimTask atomically claims an open, unclaimed task for an agent and turn ID.
+func (s *SQLTaskStore) ClaimTask(ctx context.Context, taskID int64, agent, turnID string, claimedAt time.Time) (bool, error) {
+	query := `UPDATE tasks SET claimed_by_agent = $2, claimed_by_turn_id = $3, claimed_at = $4 WHERE id = $1 AND done = false AND COALESCE(claimed_by_agent, '') = '' AND COALESCE(claimed_by_turn_id, '') = '';`
+	res, err := s.db.ExecContext(ctx, query, taskID, agent, turnID, claimedAt)
+	if err != nil {
+		return false, fmt.Errorf("failed to claim task: %w", err)
+	}
+	tag, err := res.RowsAffected()
+	if err != nil {
+		return false, fmt.Errorf("failed to get rows affected: %w", err)
+	}
+	return tag > 0, nil
+}
+
+// UnclaimTask releases a task's claim.
+func (s *SQLTaskStore) UnclaimTask(ctx context.Context, taskID int64) error {
+	query := `UPDATE tasks SET claimed_by_agent = '', claimed_by_turn_id = '', claimed_at = NULL WHERE id = $1;`
+	_, err := s.db.ExecContext(ctx, query, taskID)
+	if err != nil {
+		return fmt.Errorf("failed to unclaim task: %w", err)
+	}
+	return nil
 }
 
 // SearchTasksRRF executes a 70/30 Hybrid Weighted RRF search over Vikunja's tasks table.
@@ -128,7 +175,8 @@ func (s *SQLTaskStore) SearchTasksRRF(ctx context.Context, embedding []float32, 
 	}
 
 	query := `WITH filtered_tasks AS (
-	SELECT id, title, done, resolution, embedding, fts_tokens
+	SELECT id, title, done, resolution, embedding, fts_tokens,
+	       claimed_by_agent, claimed_by_turn_id, claimed_at
 	FROM tasks
 	WHERE (
 		CASE
@@ -155,7 +203,8 @@ func (s *SQLTaskStore) SearchTasksRRF(ctx context.Context, embedding []float32, 
 	FROM vector_hits v
 	FULL OUTER JOIN text_hits t ON v.id = t.id
 )
-SELECT f.id, f.title, f.done, COALESCE(f.resolution, ''), r.score
+SELECT f.id, f.title, f.done, COALESCE(f.resolution, ''), r.score,
+       COALESCE(f.claimed_by_agent, ''), COALESCE(f.claimed_by_turn_id, ''), f.claimed_at
 FROM rrf r
 JOIN filtered_tasks f ON f.id = r.id
 ORDER BY r.score DESC
@@ -174,15 +223,21 @@ LIMIT $2;`
 		var done bool
 		var res string
 		var score float64
-		if err := rows.Scan(&id, &title, &done, &res, &score); err != nil {
+		var claimedByAgent string
+		var claimedByTurnID string
+		var claimedAt *time.Time
+		if err := rows.Scan(&id, &title, &done, &res, &score, &claimedByAgent, &claimedByTurnID, &claimedAt); err != nil {
 			return nil, fmt.Errorf("failed to scan scored task row: %w", err)
 		}
 		status := config.ResolveTaskStatus(done, res)
 		results = append(results, config.ScoredTaskSummary{
-			ID:     id,
-			Title:  title,
-			Status: status,
-			Score:  score,
+			ID:              id,
+			Title:           title,
+			Status:          status,
+			Score:           score,
+			ClaimedByAgent:  claimedByAgent,
+			ClaimedByTurnID: claimedByTurnID,
+			ClaimedAt:       claimedAt,
 		})
 	}
 	return results, rows.Err()

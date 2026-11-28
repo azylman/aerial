@@ -135,6 +135,10 @@ data:
     ALTER TABLE tasks ADD COLUMN IF NOT EXISTS fts_tokens tsvector GENERATED ALWAYS AS (to_tsvector('simple', COALESCE(title, '') || ' ' || COALESCE(description, ''))) STORED;
     CREATE INDEX IF NOT EXISTS idx_tasks_embedding_hnsw ON tasks USING hnsw (embedding vector_cosine_ops);
     CREATE INDEX IF NOT EXISTS idx_tasks_fts_tokens ON tasks USING gin (fts_tokens);
+    ALTER TABLE tasks ADD COLUMN IF NOT EXISTS claimed_by_agent TEXT NOT NULL DEFAULT '';
+    ALTER TABLE tasks ADD COLUMN IF NOT EXISTS claimed_by_turn_id TEXT NOT NULL DEFAULT '';
+    ALTER TABLE tasks ADD COLUMN IF NOT EXISTS claimed_at TIMESTAMPTZ;
+    CREATE INDEX IF NOT EXISTS idx_tasks_claimed_by_agent ON tasks(claimed_by_agent) WHERE claimed_by_agent != '';
   infisical-mcp.yaml: |
     port: "8080"
     infisical_host_url: "http://infisical.aerial"
