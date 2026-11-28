@@ -27,6 +27,7 @@ import (
 	"github.com/azylman/aerial/services/eri/pkg/classifier"
 	"github.com/azylman/aerial/services/eri/pkg/config"
 	"github.com/azylman/aerial/services/eri/pkg/db"
+	"github.com/azylman/aerial/services/eri/pkg/discord"
 	"github.com/azylman/aerial/services/eri/pkg/egressscan"
 	"github.com/azylman/aerial/services/eri/pkg/env"
 	"github.com/azylman/aerial/services/eri/pkg/githubproxy"
@@ -225,11 +226,12 @@ func PrewarmAmbientResolver(ctx context.Context, resolver *ambient.Resolver) fun
 type AppOption func(*appOptions)
 
 type appOptions struct {
-	store          db.Store
-	txStore        db.TranscriptStore
-	processSpawner runner.DaemonSpawner
-	llmFn          runner.LLMFunc
-	appConfig      *config.Config
+	store                  db.Store
+	txStore                db.TranscriptStore
+	processSpawner         runner.DaemonSpawner
+	llmFn                  runner.LLMFunc
+	appConfig              *config.Config
+	discordSessionHydrator func(context.Context, *discordgo.Session, discord.HydrateOptions) func()
 }
 
 func startUsagePoller(ctx context.Context, cur *config.ConfigData, ephemeralHome, discordHome string, envVars []string) {
@@ -366,31 +368,56 @@ func initializeAgentPools(appCfg *config.Config, cur *config.ConfigData, cfg Con
 }
 
 // wireOutboundIntegrations attaches the Discord session (returned so config
-// reloads can alert the system channel; nil without a token) and the NATS event
-// bus (closed by the returned func; nil when unset or unreachable).
-func wireOutboundIntegrations(ctx context.Context, cur *config.ConfigData, workerPool *queue.WorkerPool) (*discordgo.Session, func()) {
+// reloads can alert the system channel; nil without a token), starts async
+// Discord REST hydration, and connects the NATS event bus. The returned close
+// func stops background hydration and closes the event bus when either is active.
+func wireOutboundIntegrations(
+	ctx context.Context,
+	cur *config.ConfigData,
+	workerPool *queue.WorkerPool,
+	hydrateFn func(context.Context, *discordgo.Session, discord.HydrateOptions) func(),
+) (*discordgo.Session, func()) {
+	if hydrateFn == nil {
+		hydrateFn = discord.OpenSessionWithRetry
+	}
 	var dg *discordgo.Session
+	var stopHydrate func()
 	if token := strings.TrimSpace(cur.DiscordToken); token != "" {
 		if s, err := discordgo.New("Bot " + token); err == nil {
 			dg = s
+			dg.Client = tracing.ExternalClient(dg.Client)
 			workerPool.SetDiscordSession(dg)
+			stopHydrate = hydrateFn(ctx, dg, discord.HydrateOptions{
+				OnChannel: queue.CacheDiscordChannel,
+				LogPrefix: "[eri-restate] ",
+			})
 		}
 	}
 
+	var bus *pubsub.JetStreamBus
 	if natsURL := strings.TrimSpace(cur.NATSURL); natsURL != "" {
-		bus, err := pubsub.NewJetStreamBus(ctx, natsURL)
+		b, err := pubsub.NewJetStreamBus(ctx, natsURL)
 		if err != nil {
 			log.Printf("[eri-restate] Warning connecting to NATS event bus: %v", err)
-			return dg, nil
+		} else {
+			bus = b
+			workerPool.SetEventBus(bus)
 		}
-		workerPool.SetEventBus(bus)
-		return dg, func() {
+	}
+
+	if stopHydrate == nil && bus == nil {
+		return dg, nil
+	}
+	return dg, func() {
+		if stopHydrate != nil {
+			stopHydrate()
+		}
+		if bus != nil {
 			if cErr := bus.Close(); cErr != nil {
 				log.Printf("[eri-restate] Warning closing event bus: %v", cErr)
 			}
 		}
 	}
-	return dg, nil
 }
 
 // RunApp runs both the Restate worker server and the health/metrics server.
@@ -492,9 +519,9 @@ func RunApp(ctx context.Context, cfg Config, opts ...AppOption) error {
 	defer stopAmbientPrewarm()
 	startUsagePoller(ctx, cur, pools.ephemeralHome, pools.discordHome, pools.poolEnv)
 
-	dgSession, closeBus := wireOutboundIntegrations(ctx, cur, workerPool)
-	if closeBus != nil {
-		defer closeBus()
+	dgSession, closeIntegrations := wireOutboundIntegrations(ctx, cur, workerPool, appOpts.discordSessionHydrator)
+	if closeIntegrations != nil {
+		defer closeIntegrations()
 	}
 
 	workerPool.Start()

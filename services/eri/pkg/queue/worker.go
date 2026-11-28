@@ -536,14 +536,12 @@ func (te *turnExecution) resolveWakeHookOverride(ctx context.Context) string {
 }
 
 func (te *turnExecution) resolveBotIdentity() (string, []string) {
-	botUserID := ""
-	var botRoleIDs []string
-	if sess := te.pool.getDiscordSession(); sess != nil && sess.State != nil {
-		if sess.State.User != nil {
-			botUserID = sess.State.User.ID
-		}
-		botRoleIDs = ResolveBotRoleIDs(sess, te.burst[0].GuildID, botUserID)
+	sess := te.pool.getDiscordSession()
+	if sess == nil || sess.State == nil {
+		return "", nil
 	}
+	botUserID := ResolveBotUserID(sess)
+	botRoleIDs := ResolveBotRoleIDs(sess, te.burst[0].GuildID, botUserID)
 	return botUserID, botRoleIDs
 }
 

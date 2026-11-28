@@ -160,6 +160,56 @@ var guildMemberFetcher = func(sess *discordgo.Session, guildID string, userID st
 	return sess.GuildMember(guildID, userID)
 }
 
+var botUserFetcher = func(sess *discordgo.Session) (*discordgo.User, error) {
+	return sess.User("@me")
+}
+
+// ResolveBotUserID returns the bot's Discord user ID from session state, lazily
+// fetching User("@me") via REST when state.User is nil and REST is configured.
+func ResolveBotUserID(sess *discordgo.Session) string {
+	if sess == nil || sess.State == nil {
+		return ""
+	}
+	sess.State.RLock()
+	u := sess.State.User
+	sess.State.RUnlock()
+	if u != nil {
+		return u.ID
+	}
+	if sess.Token == "" || sess.Client == nil {
+		return ""
+	}
+	sfKey := fmt.Sprintf("bot_user:%p", sess)
+	if isRESTInCooldown(sfKey) {
+		return ""
+	}
+	res, sfErr, _ := restSingleFlight.Do(sfKey, func() (any, error) {
+		fetched, err := botUserFetcher(sess)
+		if err != nil {
+			return nil, err
+		}
+		if fetched == nil {
+			return nil, fmt.Errorf("empty bot user response")
+		}
+		sess.State.Lock()
+		if sess.State.User == nil {
+			sess.State.User = fetched
+		} else {
+			fetched = sess.State.User
+		}
+		sess.State.Unlock()
+		return fetched.ID, nil
+	})
+	if sfErr != nil {
+		setRESTCooldown(sfKey, 30*time.Second)
+		return ""
+	}
+	if id, ok := res.(string); ok {
+		return id
+	}
+	return ""
+}
+
 func addNonEmptyRoles(roleSet map[string]bool, roles []string) {
 	for _, rID := range roles {
 		if rID != "" {
@@ -176,19 +226,63 @@ func isBotNamedRole(r *discordgo.Role, botUsername string) bool {
 		(botUsername != "" && strings.EqualFold(r.Name, botUsername))
 }
 
-func collectStateBotRoles(sess *discordgo.Session, guilds []*discordgo.Guild, botUserID, botUsername string, roleSet map[string]bool) bool {
-	foundMemberInState := false
-	for _, g := range guilds {
+type stateGuildSnapshot struct {
+	id          string
+	roles       []*discordgo.Role
+	memberRoles []string
+	hasMember   bool
+}
+
+func snapshotStateGuildsAndBotUsername(sess *discordgo.Session, guildID, botUserID string) ([]stateGuildSnapshot, string) {
+	sess.State.RLock()
+	defer sess.State.RUnlock()
+
+	botUsername := ""
+	if sess.State.User != nil {
+		botUsername = sess.State.User.Username
+	}
+	var sourceGuilds []*discordgo.Guild
+	if guildID != "" {
+		for _, g := range sess.State.Guilds {
+			if g != nil && g.ID == guildID {
+				sourceGuilds = []*discordgo.Guild{g}
+				break
+			}
+		}
+	} else {
+		sourceGuilds = sess.State.Guilds
+	}
+	snapshots := make([]stateGuildSnapshot, 0, len(sourceGuilds))
+	for _, g := range sourceGuilds {
 		if g == nil {
 			continue
 		}
+		snap := stateGuildSnapshot{
+			id:    g.ID,
+			roles: append([]*discordgo.Role(nil), g.Roles...),
+		}
 		if botUserID != "" {
-			if member, err := sess.State.Member(g.ID, botUserID); err == nil && member != nil {
-				foundMemberInState = true
-				addNonEmptyRoles(roleSet, member.Roles)
+			for _, m := range g.Members {
+				if m != nil && m.User != nil && m.User.ID == botUserID {
+					snap.hasMember = true
+					snap.memberRoles = append([]string(nil), m.Roles...)
+					break
+				}
 			}
 		}
-		for _, r := range g.Roles {
+		snapshots = append(snapshots, snap)
+	}
+	return snapshots, botUsername
+}
+
+func collectStateBotRoles(guilds []stateGuildSnapshot, botUsername string, roleSet map[string]bool) bool {
+	foundMemberInState := false
+	for _, g := range guilds {
+		if g.hasMember {
+			foundMemberInState = true
+			addNonEmptyRoles(roleSet, g.memberRoles)
+		}
+		for _, r := range g.roles {
 			if isBotNamedRole(r, botUsername) {
 				roleSet[r.ID] = true
 			}
@@ -213,13 +307,19 @@ func fetchAndCacheBotMemberRoles(sess *discordgo.Session, guildID, botUserID str
 		if m.GuildID == "" {
 			m.GuildID = guildID
 		}
-		if m.User != nil {
+		roles := append([]string(nil), m.Roles...)
+		if m.User != nil && sess.State != nil {
+			if _, gErr := sess.State.Guild(guildID); gErr != nil {
+				if addErr := sess.State.GuildAdd(&discordgo.Guild{ID: guildID}); addErr != nil {
+					_ = addErr
+				}
+			}
 			if err := sess.State.MemberAdd(m); err != nil {
 				// best effort state cache update
 				_ = err
 			}
 		}
-		return append([]string(nil), m.Roles...), nil
+		return roles, nil
 	})
 	if sfErr != nil {
 		setRESTCooldown(sfKey, 30*time.Second)
@@ -236,17 +336,8 @@ func ResolveBotRoleIDs(sess *discordgo.Session, guildID string, botUserID string
 		return nil
 	}
 	roleSet := make(map[string]bool)
-	guilds := sess.State.Guilds
-	if guildID != "" {
-		if g, err := sess.State.Guild(guildID); err == nil && g != nil {
-			guilds = []*discordgo.Guild{g}
-		}
-	}
-	botUsername := ""
-	if sess.State.User != nil {
-		botUsername = sess.State.User.Username
-	}
-	foundMemberInState := collectStateBotRoles(sess, guilds, botUserID, botUsername, roleSet)
+	guilds, botUsername := snapshotStateGuildsAndBotUsername(sess, guildID, botUserID)
+	foundMemberInState := collectStateBotRoles(guilds, botUsername, roleSet)
 	if !foundMemberInState {
 		fetchAndCacheBotMemberRoles(sess, guildID, botUserID, roleSet)
 	}

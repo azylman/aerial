@@ -62,28 +62,7 @@ type DiscordMessageIngressRequest struct {
 	Message   *discordgo.Message `json:"message"`
 }
 
-func syncBotMemberRoles(ctx context.Context, s *discordgo.Session, guildID, botID string) {
-	if s == nil || s.State == nil || guildID == "" || botID == "" || (ctx != nil && ctx.Err() != nil) {
-		return
-	}
-	if m, err := s.State.Member(guildID, botID); err == nil && m != nil {
-		return
-	}
-	m, err := funnelMemberFetcher(s, guildID, botID)
-	if err != nil || m == nil {
-		log.Printf("Warning: failed to fetch bot member roles for guild %s: %v", guildID, err)
-		return
-	}
-	if m.GuildID == "" {
-		m.GuildID = guildID
-	}
-	if m.User != nil {
-		if err := s.State.MemberAdd(m); err != nil {
-			log.Printf("[WARN] Failed to add bot member %s to session state: %v", botID, err)
-		}
-	}
-	log.Printf("Discord funnel cached %d bot role(s) for guild %s", len(m.Roles), guildID)
-}
+const funnelLogPrefix = "Discord funnel: "
 
 // SetFunnelConfig sets the active *config.Config for the Discord funnel.
 func SetFunnelConfig(cfg *config.Config) {
@@ -463,8 +442,13 @@ func isFunnelBotTargeted(s *discordgo.Session, m *discordgo.MessageCreate) bool 
 	if m == nil || m.Message == nil || m.Author == nil {
 		return false
 	}
-	if s != nil && s.State != nil && s.State.User != nil && m.Author.ID == s.State.User.ID {
-		return false
+	if s != nil && s.State != nil {
+		s.State.RLock()
+		u := s.State.User
+		s.State.RUnlock()
+		if u != nil && m.Author.ID == u.ID {
+			return false
+		}
 	}
 	policy, isThread := resolveEffectiveChannelPolicy(s, m.ChannelID)
 	if policy.IsIgnored() || (policy.IsBotIgnored() && m.Author.Bot) {
@@ -572,127 +556,29 @@ func processFunnelMessageIngress(ctx context.Context, s *discordgo.Session, m *d
 	return "enqueued", nil
 }
 
-// hydrateGuildRoles, hydrateGuildChannels and hydrateGuildThreads are only
-// called from hydrateGuildState, which receives a non-nil session from
-// hydrateDiscordSessionREST (it returns early on nil), so they take dg as non-nil.
-func hydrateGuildRoles(dg *discordgo.Session, guildID string) {
-	roles, err := dg.GuildRoles(guildID)
-	if err != nil {
-		return
-	}
-	for _, role := range roles {
-		if role != nil {
-			if err := dg.State.RoleAdd(guildID, role); err != nil {
-				log.Printf("[WARN] Failed to add role %s to session state: %v", role.ID, err)
-			}
-		}
-	}
-}
-
-func hydrateGuildChannels(dg *discordgo.Session, guildID string) {
-	channels, err := dg.GuildChannels(guildID)
-	if err != nil {
-		return
-	}
-	for _, ch := range channels {
-		if ch == nil {
-			continue
-		}
-		ch.GuildID = guildID
-		queue.CacheDiscordChannel(ch)
-		if err := dg.State.ChannelAdd(ch); err != nil {
-			log.Printf("[WARN] Failed to add channel %s to session state: %v", ch.ID, err)
-		}
-	}
-}
-
-func hydrateGuildThreads(dg *discordgo.Session, guildID string) {
-	activeThreads, err := dg.GuildThreadsActive(guildID)
-	if err != nil || activeThreads == nil {
-		return
-	}
-	for _, th := range activeThreads.Threads {
-		if th == nil {
-			continue
-		}
-		th.GuildID = guildID
-		queue.CacheDiscordChannel(th)
-		if err := dg.State.ChannelAdd(th); err != nil {
-			log.Printf("[WARN] Failed to add thread %s to session state: %v", th.ID, err)
-		}
-	}
-}
-
-func hydrateGuildState(dg *discordgo.Session, ug *discordgo.UserGuild, botUserID string) {
-	if ug == nil || ug.ID == "" {
-		return
-	}
-	if err := dg.State.GuildAdd(&discordgo.Guild{ID: ug.ID, Name: ug.Name}); err != nil {
-		log.Printf("[WARN] Failed to add guild %s to session state: %v", ug.ID, err)
-	}
-
-	hydrateGuildRoles(dg, ug.ID)
-	hydrateGuildChannels(dg, ug.ID)
-	hydrateGuildThreads(dg, ug.ID)
-
-	syncBotMemberRoles(context.Background(), dg, ug.ID, botUserID)
-	go func(appID, guildID string) {
-		if _, err := interactions.RegisterGuildCommandsOnce(dg, appID, guildID); err != nil {
-			log.Printf("[Interactions] Failed to register guild commands for guild %s: %v", guildID, err)
-		}
-	}(botUserID, ug.ID)
-}
-
 func hydrateDiscordSessionREST(dg *discordgo.Session) error {
-	if dg == nil || dg.Token == "" {
-		return nil
-	}
-	u, err := dg.User("@me")
-	if err != nil {
-		return err
-	}
-	if dg.State == nil {
-		dg.State = discordgo.NewState()
-	}
-	dg.State.Lock()
-	dg.State.User = u
-	dg.State.Unlock()
-
-	userGuilds, err := dg.UserGuilds(100, "", "", false)
-	if err != nil {
-		return err
-	}
-
-	for _, ug := range userGuilds {
-		hydrateGuildState(dg, ug, u.ID)
-	}
-	return nil
+	return discord.HydrateSessionREST(context.Background(), dg, discord.HydrateOptions{
+		OnChannel:     queue.CacheDiscordChannel,
+		MemberFetcher: funnelMemberFetcher,
+		LogPrefix:     funnelLogPrefix,
+		OnGuild: func(s *discordgo.Session, appID, guildID string) {
+			go func(appID, guildID string) {
+				if _, err := interactions.RegisterGuildCommandsOnce(s, appID, guildID); err != nil {
+					log.Printf("[Interactions] Failed to register guild commands for guild %s: %v", guildID, err)
+				}
+			}(appID, guildID)
+		},
+	})
 }
 
 func openDiscordSessionWithRetry(ctx context.Context, dg *discordgo.Session) {
-	if err := discordSessionOpener(dg); err != nil {
-		log.Printf("Warning: Discord funnel failed to open initial session: %v. Retrying in background...", err)
-		go func() {
-			backoff := funnelRetryBackoff
-			maxBackoff := 60 * time.Second
-			for {
-				select {
-				case <-ctx.Done():
-					return
-				case <-time.After(backoff):
-				}
-				if err := discordSessionOpener(dg); err != nil {
-					log.Printf("Discord funnel retry failed: %v. Retrying in %v...", err, backoff)
-					backoff = min(backoff*2, maxBackoff)
-					continue
-				}
-				log.Printf("Discord funnel worker started successfully inside Brain")
-				break
-			}
-		}()
-	} else {
-		log.Printf("Discord funnel worker connected successfully inside Brain")
-	}
+	discord.OpenSessionWithRetry(ctx, dg, discord.HydrateOptions{
+		HydrateFunc: func(_ context.Context, s *discordgo.Session) error {
+			return discordSessionOpener(s)
+		},
+		RetryBackoff: funnelRetryBackoff,
+		LogPrefix:    funnelLogPrefix,
+	})
 }
 
 func connectDiscordFunnel(ctx context.Context, store db.Store, pool *queue.WorkerPool, token string) *discordgo.Session {

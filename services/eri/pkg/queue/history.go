@@ -240,8 +240,12 @@ func DefaultHistoryFetcher(dg *discordgo.Session) HistoryFetcherFunc {
 
 func convertDiscordMessagesToHistory(dg *discordgo.Session, discordMsgs []*discordgo.Message) []HistoryMessage {
 	botUserID, botUsername := "", "aerial"
-	if dg != nil && dg.State != nil && dg.State.User != nil {
-		botUserID, botUsername = dg.State.User.ID, dg.State.User.Username
+	if dg != nil && dg.State != nil {
+		dg.State.RLock()
+		if dg.State.User != nil {
+			botUserID, botUsername = dg.State.User.ID, dg.State.User.Username
+		}
+		dg.State.RUnlock()
 	}
 	results := make([]HistoryMessage, 0, len(discordMsgs))
 	for _, dm := range discordMsgs {
