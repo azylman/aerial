@@ -94,12 +94,13 @@ func SyncBotMemberRoles(ctx context.Context, dg *discordgo.Session, guildID, bot
 	if m.GuildID == "" {
 		m.GuildID = guildID
 	}
+	roleCount := len(m.Roles)
 	if m.User != nil {
 		if err := dg.State.MemberAdd(m); err != nil {
 			log.Printf("%s[WARN] Failed to add bot member %s to session state: %v", opts.LogPrefix, botID, err)
 		}
 	}
-	log.Printf("%sCached %d bot role(s) for guild %s", opts.LogPrefix, len(m.Roles), guildID)
+	log.Printf("%sCached %d bot role(s) for guild %s", opts.LogPrefix, roleCount, guildID)
 }
 
 // HydrateSessionREST populates dg.State with the bot user, guilds, roles,

@@ -371,28 +371,66 @@ func TestOpenSessionWithRetry_RetriesAndStops(t *testing.T) {
 	}
 }
 
-func TestOpenSessionWithRetry_StopCancelsBackoff(t *testing.T) {
+func TestOpenSessionWithRetry_DefaultHydrator(t *testing.T) {
 	t.Parallel()
 
 	s, err := discordgo.New("Bot mock-token")
 	if err != nil {
 		t.Fatalf("discordgo.New() error = %v", err)
 	}
-	firstAttempt := make(chan struct{})
+	guildsRequested := make(chan struct{})
 	var once sync.Once
 	s.Client = &http.Client{
 		Transport: roundTripperFunc(func(req *http.Request) (*http.Response, error) {
-			once.Do(func() { close(firstAttempt) })
-			return jsonHTTPResponse(http.StatusInternalServerError, `{"message":"down"}`), nil
+			if strings.Contains(req.URL.Path, "/users/@me/guilds") {
+				once.Do(func() { close(guildsRequested) })
+				return jsonHTTPResponse(http.StatusOK, `[]`), nil
+			}
+			return jsonHTTPResponse(http.StatusOK, `{"id":"bot-default-1"}`), nil
 		}),
 	}
 
-	// Omit HydrateFunc and RetryBackoff to exercise defaults; stop() must cancel the 2s backoff immediately.
 	stop := OpenSessionWithRetry(context.Background(), s, HydrateOptions{})
+	defer stop()
+
+	select {
+	case <-guildsRequested:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for default hydrator")
+	}
+	stop()
+	if s.State == nil || s.State.User == nil || s.State.User.ID != "bot-default-1" {
+		t.Fatalf("expected default hydrator to populate State.User, got %+v", s.State)
+	}
+}
+
+func TestOpenSessionWithRetry_StopCancelsBackoff(t *testing.T) {
+	t.Parallel()
+
+	s := &discordgo.Session{}
+	firstAttempt := make(chan struct{})
+	var once sync.Once
+	stop := OpenSessionWithRetry(context.Background(), s, HydrateOptions{
+		RetryBackoff: 10 * time.Second,
+		HydrateFunc: func(context.Context, *discordgo.Session) error {
+			once.Do(func() { close(firstAttempt) })
+			return errors.New("simulated failure")
+		},
+	})
 	select {
 	case <-firstAttempt:
 	case <-time.After(2 * time.Second):
 		t.Fatal("timed out waiting for initial hydration attempt")
 	}
-	stop()
+
+	stopped := make(chan struct{})
+	go func() {
+		stop()
+		close(stopped)
+	}()
+	select {
+	case <-stopped:
+	case <-time.After(500 * time.Millisecond):
+		t.Fatal("stop() did not cancel 10s backoff promptly")
+	}
 }

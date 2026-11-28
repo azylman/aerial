@@ -307,6 +307,7 @@ func fetchAndCacheBotMemberRoles(sess *discordgo.Session, guildID, botUserID str
 		if m.GuildID == "" {
 			m.GuildID = guildID
 		}
+		roles := append([]string(nil), m.Roles...)
 		if m.User != nil && sess.State != nil {
 			if _, gErr := sess.State.Guild(guildID); gErr != nil {
 				if addErr := sess.State.GuildAdd(&discordgo.Guild{ID: guildID}); addErr != nil {
@@ -318,7 +319,7 @@ func fetchAndCacheBotMemberRoles(sess *discordgo.Session, guildID, botUserID str
 				_ = err
 			}
 		}
-		return append([]string(nil), m.Roles...), nil
+		return roles, nil
 	})
 	if sfErr != nil {
 		setRESTCooldown(sfKey, 30*time.Second)
